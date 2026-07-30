@@ -474,7 +474,6 @@ mod tests {
 
     #[test]
     fn already_reported_panic_skips_generic_task_log() {
-        // Setup: Capture task diagnostics and construct an already-reported unwind payload.
         let storage = TraceStorage::default();
         let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
         let panic = catch_unwind(AssertUnwindSafe(|| {
@@ -483,10 +482,9 @@ mod tests {
         .expect_err("reported infrastructure failure did not unwind");
         let (panicker, _panicked) = Panicker::new(true);
 
-        // Action: Route the payload through the ordinary spawned-task panic path.
+        // Route the payload through the ordinary spawned-task panic path.
         tracing::subscriber::with_default(subscriber, || panicker.notify(panic));
 
-        // Assertion: The earlier infrastructure diagnostic is not duplicated.
         assert!(storage.is_empty());
     }
 

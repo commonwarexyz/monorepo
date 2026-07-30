@@ -624,7 +624,7 @@ mod ordinary {
         ];
 
         for (operation, inject, failing_operations) in cases {
-            // Setup: Let shard zero validate, then inject one validation failure on shard one.
+            // Let shard zero validate, then inject one validation failure on shard one.
             let controls = Arc::new(TestMutex::new(Vec::new()));
             let (panicker, _panicked) = Panicker::new(true);
             let result = initialize_shards::<FakeAlarm, _>(3, panicker, |index| {
@@ -636,16 +636,15 @@ mod ordinary {
                 Ok(alarm)
             });
 
-            // Action: Extract the synchronous error after initialization stops.
             let error = initialization_error(result);
             let controls = controls.lock();
 
-            // Assertion: Context identifies the failed validation and no later shard is built.
+            // Context identifies the failed validation and no later shard is built.
             assert_eq!(error.shard, 1);
             assert_eq!(error.operation, operation);
             assert_eq!(controls.len(), 2);
 
-            // Assertion: Both alarm owners are dropped with precisely the operations reached.
+            // Both alarm owners are dropped with precisely the operations reached.
             assert!(controls.iter().all(FakeAlarmControl::is_shutdown));
             assert_eq!(controls[0].operations(), validation);
             assert_eq!(controls[1].operations(), validation[..failing_operations]);
@@ -888,26 +887,25 @@ mod ordinary {
     #[test]
     fn batch_completion_and_drop_contain_every_panicking_waker_destructor() {
         {
-            // Setup: Retain two fired entries whose final waker releases each unwind.
+            // Retain two fired entries whose final waker releases each unwind.
             let (mut batch, drops) = panicking_waker_batch();
 
-            // Action: Explicit completion retains one panic while releasing the entire batch.
+            // Explicit completion retains one panic while releasing the entire batch.
             let panic = batch.complete(ENTRY_FIRED);
 
-            // Assertion: Both final waker owners are released despite their independent unwinds.
+            // Both final waker owners are released despite their independent unwinds.
             assert!(panic.is_some());
             assert_eq!(drops.load(AtomicOrdering::Acquire), 2);
             assert!(batch.entries.is_empty());
         }
 
         {
-            // Setup: Build the same panicking batch for implicit abortion cleanup.
+            // Build the same panicking batch for implicit abortion cleanup.
             let (batch, drops) = panicking_waker_batch();
 
-            // Action: Drop the unfinished batch.
             drop(batch);
 
-            // Assertion: Drop contains both unwinds and releases every final waker owner.
+            // Drop contains both unwinds and releases every final waker owner.
             assert_eq!(drops.load(AtomicOrdering::Acquire), 2);
         }
     }
@@ -979,7 +977,7 @@ mod ordinary {
 
     #[test]
     fn stop_quiesces_queued_sleeps_without_retaining_wakers_or_alarm() {
-        // Setup: Queue two sleeps, including one that has installed a task waker.
+        // Queue two sleeps, including one that has installed a task waker.
         let (shard, control) = fake_shard();
         let first = shard.register_after(Duration::from_nanos(10));
         let first_entry = Arc::clone(&first.entry);
@@ -993,10 +991,10 @@ mod ordinary {
         assert_eq!(first_entry.poll(&mut context), Poll::Pending);
         consume_signal(&shard);
 
-        // Action: Normal service stop drains every queued sleep without waking tasks.
+        // Normal service stop drains every queued sleep without waking tasks.
         shard.stop();
 
-        // Assertion: The first stop reaches the driver and quiesces all resident state.
+        // The first stop reaches the driver and quiesces all resident state.
         consume_signal(&shard);
         assert_eq!(shard.state.lock().entries.len(), 0);
         assert_eq!(
@@ -1010,16 +1008,15 @@ mod ordinary {
         assert_eq!(counter.wakes.load(AtomicOrdering::Relaxed), 0);
         assert!(first_entry.take_waker().is_none());
 
-        // Assertion: A later poll remains pending and cannot retain another task waker.
+        // A later poll remains pending and cannot retain another task waker.
         assert_eq!(first_entry.poll(&mut context), Poll::Pending);
         assert_eq!(second_entry.poll(&mut context), Poll::Pending);
         assert!(first_entry.take_waker().is_none());
         assert!(second_entry.take_waker().is_none());
 
-        // Action: Stop the already quiescent shard again.
         shard.stop();
 
-        // Assertion: Repeated stop is idempotent and does not renotify the driver.
+        // Repeated stop is idempotent and does not renotify the driver.
         assert_eq!(
             first_entry.state.load(AtomicOrdering::Acquire),
             ENTRY_STOPPED
@@ -1031,15 +1028,14 @@ mod ordinary {
         assert_eq!(shard.state.lock().entries.len(), 0);
         assert!(!shard.signal.is_notified());
 
-        // Assertion: Outliving sleeps hold weak cancellation owners and cannot retain the alarm.
+        // Outliving sleeps hold weak cancellation owners and cannot retain the alarm.
         drop(shard);
         assert!(control.is_shutdown());
 
-        // Action: Drop the stopped sleeps after shard destruction.
         drop(first);
         drop(second);
 
-        // Assertion: Their weak cancellation owners cannot revive the alarm.
+        // Their weak cancellation owners cannot revive the alarm.
         assert!(control.is_shutdown());
     }
 
@@ -1048,7 +1044,7 @@ mod ordinary {
         const CHILD_ENV: &str = "_COMMONWARE_RUNTIME_TIMER_CLEAN_SHUTDOWN_CHILD";
         const TEST_NAME: &str = "tokio::timer::service::tests::ordinary::clean_runtime_shutdown_does_not_report_pending_sleeps";
 
-        // Setup: Isolate the global tracing subscriber in a child test process.
+        // Isolate the global tracing subscriber in a child test process.
         if std::env::var_os(CHILD_ENV).is_none() {
             let output = std::process::Command::new(
                 std::env::current_exe().expect("current test executable must be available"),
@@ -1060,7 +1056,7 @@ mod ordinary {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
-            // Assertion: The isolated regression completed without a task panic.
+            // The isolated regression completed without a task panic.
             assert!(
                 output.status.success(),
                 "clean-shutdown child failed\nstdout:\n{}\nstderr:\n{}",
@@ -1087,7 +1083,7 @@ mod ordinary {
         let runner =
             crate::tokio::Runner::new(crate::tokio::Config::default().with_worker_threads(1));
 
-        // Action: Return the root while polled tasks retain only pending sleep futures.
+        // Return the root while polled tasks retain only pending sleep futures.
         runner.start(|context| async move {
             const TASKS: usize = 256;
             let started = Arc::new(AtomicUsize::new(0));
@@ -1109,7 +1105,7 @@ mod ordinary {
             }
         });
 
-        // Assertion: Orderly timer teardown emits no generic task-panic diagnostic.
+        // Orderly timer teardown emits no generic task-panic diagnostic.
         assert!(
             storage
                 .get_all()
@@ -1202,7 +1198,7 @@ mod ordinary {
 
     #[test]
     fn every_failed_shard_logs_when_root_notification_is_closed() {
-        // Setup: Close the shared interruption receiver and capture structured diagnostics.
+        // Close the shared interruption receiver and capture structured diagnostics.
         let (panicker, panicked) = Panicker::new(false);
         drop(panicked);
         let (first_alarm, _first_control) = FakeAlarm::controlled();
@@ -1215,7 +1211,7 @@ mod ordinary {
         let first_error_kind = format!("{:?}", Some(first_error.kind()));
         let first_raw_os_error = format!("{:?}", first_error.raw_os_error());
 
-        // Action: Fail two shards after neither can publish a root interruption.
+        // Fail two shards after neither can publish a root interruption.
         tracing::subscriber::with_default(subscriber, || {
             first.fail(DriverFailure::io("first injected operation", first_error));
             second.fail(DriverFailure::io(
@@ -1224,7 +1220,7 @@ mod ordinary {
             ));
         });
 
-        // Assertion: Each shard emits one independently actionable diagnostic.
+        // Each shard emits one independently actionable diagnostic.
         let events = storage.get_all();
         let diagnostics: Vec<_> = events
             .iter()
@@ -1300,7 +1296,7 @@ mod ordinary {
 
     #[tokio::test]
     async fn registration_clock_failure_preserves_a_committed_expiry_batch() {
-        // Setup: Commit two expired entries without invoking their callbacks.
+        // Commit two expired entries without invoking their callbacks.
         let (shard, control, panicked) = observed_fake_shard();
         control.set_now(at(10));
         let (first, _first_sleep) = register(&shard, at(10));
@@ -1308,11 +1304,11 @@ mod ordinary {
         let mut batch = Batch::new();
         assert!(!driver_ok(shard.take_expired(&mut batch)));
 
-        // Action: Fail a producer clock read before completing the committed batch.
+        // Fail a producer clock read before completing the committed batch.
         control.fail_next_now();
         let failed_registration = shard.register_after(Duration::from_nanos(1));
 
-        // Assertion: Failure covers the new entry but cannot overwrite committed expirations.
+        // Failure covers the new entry but cannot overwrite committed expirations.
         {
             let state = shard.state.lock();
             assert_eq!(state.lifecycle, ShardLifecycle::Failed);
@@ -1337,7 +1333,7 @@ mod ordinary {
         assert!(failed_poll_unwinds(&failed_registration.entry));
         assert!(batch.complete(ENTRY_FIRED).is_none());
 
-        // Assertion: Fatal propagation still preserves the operation that failed.
+        // Fatal propagation still preserves the operation that failed.
         let message = fatal_message(panicked).await;
         assert!(message.contains("read monotonic clock during registration"));
     }
@@ -1387,23 +1383,23 @@ mod ordinary {
         ];
 
         for (inject, expected_diagnostics) in cases {
-            // Setup: Queue one sleep and consume its producer notification.
+            // Queue one sleep and consume its producer notification.
             let (shard, control, panicked) = observed_fake_shard();
             let registered = shard.register_after(Duration::from_nanos(10));
             let entry = Arc::clone(&registered.entry);
             consume_signal(&shard);
             inject(&control);
 
-            // Action: Run the driver through the injected wait error or panic.
+            // Run the driver through the injected wait error or panic.
             run_driver(Arc::clone(&shard)).await;
 
-            // Assertion: Containment fails the resident sleep and clears the shard.
+            // Containment fails the resident sleep and clears the shard.
             assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Failed);
             assert_eq!(shard.state.lock().entries.len(), 0);
             assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
             assert!(failed_poll_unwinds(&entry));
 
-            // Assertion: Fatal propagation retains each path's precise classification.
+            // Fatal propagation retains each path's precise classification.
             let message = fatal_message(panicked).await;
             for expected in expected_diagnostics {
                 assert!(
@@ -1508,7 +1504,6 @@ mod ordinary {
 
     #[test]
     fn deadline_add_saturates_at_platform_limit() {
-        // Set up one addition that crosses the alarm limit and one that does not.
         let limit = Deadline::from_duration(Duration::from_secs(10));
         let saturated = Deadline::from_duration(Duration::from_secs(9))
             .saturating_add(Duration::from_secs(2), limit);
@@ -1522,7 +1517,6 @@ mod ordinary {
 
     #[test]
     fn rearm_tolerance_is_one_sided() {
-        // Compare exact, slightly earlier, too-early, later, and empty desired states.
         let armed = Some(at(100));
 
         // Only equal or no more than 50 ns earlier deadlines are covered.
@@ -1536,14 +1530,14 @@ mod ordinary {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ready_sleep_loop_cooperates_with_other_tasks() {
-        // Setup: Queue a peer behind a task that repeatedly awaits immediate sleeps.
+        // Queue a peer behind a task that repeatedly awaits immediate sleeps.
         let peer_ran = Arc::new(AtomicBool::new(false));
         let peer_flag = Arc::clone(&peer_ran);
         let peer = tokio::spawn(async move {
             peer_flag.store(true, AtomicOrdering::Release);
         });
 
-        // Action: Await more immediate sleeps than one Tokio cooperative budget.
+        // Await more immediate sleeps than one Tokio cooperative budget.
         for _ in 0..1_024 {
             Sleep::ready().await;
             if peer_ran.load(AtomicOrdering::Acquire) {
@@ -1551,14 +1545,14 @@ mod ordinary {
             }
         }
 
-        // Assertion: Budget exhaustion yields to the already-runnable peer.
+        // Budget exhaustion yields to the already-runnable peer.
         assert!(peer_ran.load(AtomicOrdering::Acquire));
         peer.await.unwrap();
     }
 
     #[test]
     fn entry_poll_replaces_waker_and_reports_terminal_outcomes() {
-        // Setup: Poll repeatedly with one task waker, then migrate polling to another task.
+        // Poll repeatedly with one task waker, then migrate polling to another task.
         let entry = Entry::new();
         let first = Arc::new(CountingWaker {
             wakes: AtomicUsize::new(0),
@@ -1575,23 +1569,22 @@ mod ordinary {
         let mut second_context = Context::from_waker(&second_waker);
         assert_eq!(entry.poll(&mut second_context), Poll::Pending);
 
-        // Action: Fire once and invoke the single waker retained by the entry.
+        // Fire once and invoke the single waker retained by the entry.
         assert!(entry.transition(ENTRY_FIRED));
         entry.take_waker().unwrap().wake();
 
-        // Assertion: Repeated polls do not duplicate callbacks, replacement targets
+        // Repeated polls do not duplicate callbacks, replacement targets
         // only the latest task, and a fired entry completes.
         assert_eq!(first.wakes.load(AtomicOrdering::Relaxed), 0);
         assert_eq!(second.wakes.load(AtomicOrdering::Relaxed), 1);
         assert_eq!(entry.poll(&mut second_context), Poll::Ready(()));
 
-        // Setup: Prepare the other externally visible terminal outcome.
+        // Prepare the other externally visible terminal outcome.
         let failed = Entry::new();
 
-        // Action: Fail the entry before polling it.
         assert!(failed.transition(ENTRY_FAILED));
 
-        // Assertion: A failed entry unwinds instead of hanging.
+        // A failed entry unwinds instead of hanging.
         assert!(failed_poll_unwinds(&failed));
     }
 
@@ -1626,17 +1619,17 @@ mod ordinary {
 
     #[test]
     fn affinity_distributes_worker_and_fallback_claims() {
-        // Setup: Create independent four-shard allocators for worker and fallback claims.
+        // Create independent four-shard allocators for worker and fallback claims.
         let workers = Arc::new(affinity(4));
         let fallbacks = Arc::new(affinity(4));
 
-        // Action: Concurrently claim every worker index once and two fallback rounds.
+        // Concurrently claim every worker index once and two fallback rounds.
         let mut worker_indices = claim_affinity_indices(&workers, 4, true);
         let mut fallback_indices = claim_affinity_indices(&fallbacks, 8, false);
         worker_indices.sort_unstable();
         fallback_indices.sort_unstable();
 
-        // Assertion: Workers are distinct and fallback claims balance round-robin.
+        // Workers are distinct and fallback claims balance round-robin.
         assert_eq!(worker_indices, vec![0, 1, 2, 3]);
         assert_eq!(fallback_indices, vec![0, 0, 1, 1, 2, 2, 3, 3]);
         assert_eq!(workers.next_worker.load(AtomicOrdering::Relaxed), 4);
@@ -1710,7 +1703,7 @@ mod ordinary {
     fn block_in_place_replacement_worker_retains_runtime_progress() {
         const REPETITIONS: usize = 4;
 
-        // Setup: Start a one-worker Tokio runtime and let its original worker
+        // Start a one-worker Tokio runtime and let its original worker
         // consume the sole unique affinity claim before any blocking handoff.
         let setup = super::super::Setup::new(1);
         let affinity = Arc::clone(&setup.affinity);
@@ -1727,7 +1720,7 @@ mod ordinary {
             thread::yield_now();
         }
 
-        // Action: Repeatedly block the original worker while its replacement
+        // Repeatedly block the original worker while its replacement
         // services another task and reaches the production park callback.
         runtime.block_on(async {
             for iteration in 0..REPETITIONS {
@@ -1792,7 +1785,7 @@ mod ordinary {
             }
         });
 
-        // Assertion: Every handoff completed, all selections stayed in range, and
+        // Every handoff completed, all selections stayed in range, and
         // temporary replacement threads never consumed another worker identity.
         assert_eq!(affinity.next_worker.load(AtomicOrdering::Relaxed), 1);
         assert!((1..=REPETITIONS).contains(&affinity.next_fallback.load(AtomicOrdering::Relaxed)));
@@ -2129,12 +2122,12 @@ mod loom_tests {
     #[test]
     fn production_registered_sleep_drop_races_driver_completion() {
         model(|| {
-            // Setup: Register one immediately expired sleep through the production shard.
+            // Register one immediately expired sleep through the production shard.
             let (shard, _alarm) = model_shard();
             let sleep = shard.register_after(Duration::ZERO);
             let entry = LoomArc::clone(&sleep.entry);
 
-            // Action: Race RegisteredSleep::drop against the driver's production
+            // Race RegisteredSleep::drop against the driver's production
             // heap-pop and batch-completion sequence.
             let dropper = thread::spawn(move || drop(sleep));
             let driver = {
@@ -2148,7 +2141,7 @@ mod loom_tests {
             dropper.join().unwrap();
             driver.join().unwrap();
 
-            // Assertion: Either legal terminal winner leaves no resident entry
+            // Either legal terminal winner leaves no resident entry
             // and publishes the nonresident heap index.
             assert!(matches!(
                 entry.state.load(Ordering::Acquire),

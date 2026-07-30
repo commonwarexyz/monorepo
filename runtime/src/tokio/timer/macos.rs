@@ -486,21 +486,21 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
     async fn critical_absolute_timer_is_ready_and_consumed() {
-        // Setup: Create two alarms as the service does for separate shards.
+        // Create two alarms as the service does for separate shards.
         let alarm = NativeAlarm::new(0).unwrap();
         let other = NativeAlarm::new(1).unwrap();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();
 
-        // Assertion: Each alarm owns a distinct kqueue rather than sharing kernel state.
+        // Each alarm owns a distinct kqueue rather than sharing kernel state.
         assert_ne!(descriptor, other.descriptor.get_ref().as_raw_fd());
 
-        // Assertion: Initialization makes the primary descriptor close-on-exec.
+        // Initialization makes the primary descriptor close-on-exec.
         // SAFETY: `descriptor` is live and F_GETFD uses no variadic argument.
         let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
         assert!(flags >= 0);
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
 
-        // Action: Arm NOTE_CRITICAL at an absolute future Mach deadline.
+        // Arm NOTE_CRITICAL at an absolute future Mach deadline.
         let started = Instant::now();
         let now = alarm.now().unwrap();
         let deadline = now.saturating_add(Duration::from_millis(20), alarm.max_deadline());

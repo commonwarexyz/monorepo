@@ -281,15 +281,15 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri does not support timerfd readiness")]
     async fn descriptor_flags_and_absolute_readiness() {
-        // Setup: Create two adapters as the service does for separate shards.
+        // Create two adapters as the service does for separate shards.
         let alarm = NativeAlarm::new(0).unwrap();
         let other = NativeAlarm::new(1).unwrap();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();
 
-        // Assertion: Each alarm owns a distinct timerfd rather than sharing kernel state.
+        // Each alarm owns a distinct timerfd rather than sharing kernel state.
         assert_ne!(descriptor, other.descriptor.get_ref().as_raw_fd());
 
-        // Assertion: Initialization installs the required descriptor flags.
+        // Initialization installs the required descriptor flags.
         // SAFETY: `descriptor` is live and F_GETFD does not use a variadic argument.
         let descriptor_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
         assert!(descriptor_flags >= 0);
@@ -299,7 +299,7 @@ mod tests {
         assert!(status_flags >= 0);
         assert_ne!(status_flags & libc::O_NONBLOCK, 0);
 
-        // Action: Exercise the maximum arm and disarm pair used during shard startup.
+        // Exercise the maximum arm and disarm pair used during shard startup.
         alarm.arm(alarm.max_deadline()).unwrap();
         alarm.disarm().unwrap();
 

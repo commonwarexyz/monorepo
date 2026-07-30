@@ -329,7 +329,6 @@ pub(super) async fn run_cancellation_batch(
 
 /// Registers, partitions, and then cancels one producer's timers.
 fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResult> {
-    // Setup: Enter the shared reactor and register this producer's partition.
     // Dedicated threads give Commonware deterministic round-robin shard claims.
     let _guard = input.runtime.enter();
     let mut sleeps = Vec::with_capacity(input.timers);
@@ -347,7 +346,6 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
     shuffle(&mut sleeps, input.seed);
     let survivors = sleeps.split_off(input.canceled);
 
-    // Action: Wait for every producer, then drain the selected cancellations.
     if input.gate.arrive_and_wait() == ProducerRelease::Cancel {
         return None;
     }

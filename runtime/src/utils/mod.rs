@@ -148,7 +148,6 @@ mod tests {
 
     #[test]
     fn panic_message_extraction_handles_supported_payloads() {
-        // Setup: Construct borrowed, owned, opaque, and already-reported panic payloads.
         let borrowed: Box<dyn Any + Send> = Box::new("borrowed panic");
         let owned: Box<dyn Any + Send> = Box::new("owned panic".to_string());
         let opaque: Box<dyn Any + Send> = Box::new(7_u64);
@@ -157,7 +156,6 @@ mod tests {
         }))
         .expect_err("reported panic did not unwind");
 
-        // Action: Extract one diagnostic message from each payload.
         let messages = [
             extract_panic_message(&*borrowed),
             extract_panic_message(&*owned),
@@ -165,7 +163,7 @@ mod tests {
             extract_panic_message(&*reported),
         ];
 
-        // Assertion: Strings remain intact and opaque payloads use stable classifications.
+        // Strings remain intact and opaque payloads use stable classifications.
         assert_eq!(
             messages,
             [

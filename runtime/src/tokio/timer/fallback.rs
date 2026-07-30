@@ -126,7 +126,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn immediate_sleep_loop_cooperates_with_other_tasks() {
-        // Setup: Queue a peer behind a task that repeatedly awaits immediate sleeps.
+        // Queue a peer behind a task that repeatedly awaits immediate sleeps.
         let timer = timer();
         let peer_ran = Arc::new(AtomicBool::new(false));
         let peer_flag = Arc::clone(&peer_ran);
@@ -134,7 +134,7 @@ mod tests {
             peer_flag.store(true, Ordering::Release);
         });
 
-        // Action: Await more immediate sleeps than one Tokio cooperative budget.
+        // Await more immediate sleeps than one Tokio cooperative budget.
         for _ in 0..1_024 {
             timer.sleep(Duration::ZERO).await;
             if peer_ran.load(Ordering::Acquire) {
@@ -142,14 +142,14 @@ mod tests {
             }
         }
 
-        // Assertion: Budget exhaustion yields to the already-runnable peer.
+        // Budget exhaustion yields to the already-runnable peer.
         assert!(peer_ran.load(Ordering::Acquire));
         peer.await.unwrap();
     }
 
     #[tokio::test]
     async fn relative_and_wall_sleeps_start_at_construction() {
-        // Setup: Construct relative and wall-clock sleeps without polling either.
+        // Construct relative and wall-clock sleeps without polling either.
         let timer = timer();
         let duration = Duration::from_millis(20);
         let wall_deadline = SystemTime::now()
@@ -160,10 +160,10 @@ mod tests {
         assert_send_static(&relative);
         assert_send_static(&wall);
 
-        // Action: Let both eagerly created deadlines elapse through another timer.
+        // Let both eagerly created deadlines elapse through another timer.
         tokio::time::sleep(duration.saturating_mul(3)).await;
 
-        // Assertion: Their first polls observe the construction-time deadlines.
+        // Their first polls observe the construction-time deadlines.
         let mut relative = std::pin::pin!(relative);
         let mut wall = std::pin::pin!(wall);
         assert_eq!(poll_once(relative.as_mut()), Poll::Ready(()));

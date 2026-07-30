@@ -23,18 +23,17 @@ use std::{
 
 #[test]
 fn deadline_pair_preserves_each_backend_measurement_contract() {
-    // Setup: Construct both backend deadline pairs from the same target.
     let target = Duration::from_millis(50);
     let commonware = backend::DeadlinePair::new(Backend::Commonware, target).unwrap();
     let tokio = backend::DeadlinePair::new(Backend::Tokio, target).unwrap();
 
-    // Action: Derive Commonware's monotonic clock-pair uncertainty.
+    // Derive Commonware's monotonic clock-pair uncertainty.
     let span = commonware
         .tokio
         .into_std()
         .saturating_duration_since(commonware.measurement_deadline);
 
-    // Assertion: Tokio is exact; Commonware retains its conservative bound.
+    // Tokio is exact; Commonware retains its conservative bound.
     assert_eq!(tokio.measurement_deadline, tokio.tokio.into_std());
     assert_eq!(
         tokio
@@ -54,17 +53,16 @@ fn deadline_pair_preserves_each_backend_measurement_contract() {
 
 #[test]
 fn callback_boundaries_preserve_dispatch_lateness_and_suspended_peer_gap() {
-    // Setup: Let the peer run once before callbacks start.
+    // Let the peer run once before callbacks start.
     let start = Instant::now();
     let before_callbacks = start + Duration::from_micros(5);
     let mut gap = peer_gap::PeerGap::new(start);
     let target = Duration::from_micros(10);
 
-    // Action: Complete callbacks after a 20-microsecond scheduling gap.
     assert!(!gap.observe(before_callbacks, false, false));
     assert!(gap.observe(before_callbacks + Duration::from_micros(20), true, true));
 
-    // Assertion: Only the active window counts, and early dispatch is invalid.
+    // Only the active window counts, and early dispatch is invalid.
     assert_eq!(gap.maximum(), Duration::from_micros(20));
     assert_eq!(
         peer_gap::dispatch_lateness(Duration::from_micros(9), target)
@@ -80,7 +78,7 @@ fn callback_boundaries_preserve_dispatch_lateness_and_suspended_peer_gap() {
 
 #[test]
 fn latency_statistics_preserve_percentiles_and_drain_boundary() {
-    // Setup: Use unsorted samples and out-of-order producer completions.
+    // Use unsorted samples and out-of-order producer completions.
     let samples = [
         Duration::from_nanos(3),
         Duration::from_nanos(1),
@@ -93,11 +91,10 @@ fn latency_statistics_preserve_percentiles_and_drain_boundary() {
         start + Duration::from_micros(6),
     ];
 
-    // Action: Summarize latency and measure through the last completion.
     let distribution = report::Distribution::new(&samples).unwrap();
     let drain = report::elapsed_through_last(start, completions).unwrap();
 
-    // Assertion: Percentiles use nearest rank and drain ignores join order.
+    // Percentiles use nearest rank and drain ignores join order.
     assert_eq!(distribution.p50, Duration::from_nanos(2));
     assert_eq!(distribution.p99, Duration::from_nanos(3));
     assert_eq!(distribution.max, Duration::from_nanos(3));
@@ -106,11 +103,9 @@ fn latency_statistics_preserve_percentiles_and_drain_boundary() {
 
 #[test]
 fn cancellation_orchestration_handles_each_backend_and_producer_topology() {
-    // Setup: Start the production runtime with two workers.
     let runner =
         commonware_tokio::Runner::new(commonware_tokio::Config::default().with_worker_threads(2));
 
-    // Action: Exercise both backends and one- and multiple-producer topologies.
     runner.start(|context| async move {
         let clock = Arc::new(context);
         let configurations = [
@@ -123,7 +118,7 @@ fn cancellation_orchestration_handles_each_backend_and_producer_topology() {
             configurations.into_iter().enumerate()
         {
             let batch = u64::try_from(batch).expect("configuration count fits u64");
-            // Assertion: Successful completion exercises setup, coordination,
+            // Successful completion exercises setup, coordination,
             // concurrent cancellation, and cleanup without deadlock or early expiry.
             worst_case::run_cancellation_batch(
                 Arc::clone(&clock),
@@ -141,25 +136,22 @@ fn cancellation_orchestration_handles_each_backend_and_producer_topology() {
 
 #[test]
 fn recorder_timestamps_first_and_final_callbacks() {
-    // Setup: Create multiple- and single-callback recorders.
     let multiple = worst_case::Recorder::new(Instant::now(), 3);
     let single = worst_case::Recorder::new(Instant::now(), 1);
 
-    // Action: Record the first and interior callbacks.
     multiple.record();
     let first = multiple.first_ns.load(Ordering::Acquire);
     multiple.record();
 
-    // Assertion: Only the first boundary has been timestamped.
+    // Only the first boundary has been timestamped.
     assert_ne!(first, 0);
     assert_eq!(multiple.first_ns.load(Ordering::Acquire), first);
     assert_eq!(multiple.last_ns.load(Ordering::Acquire), 0);
 
-    // Action: Record the final and sole callbacks.
     multiple.record();
     single.record();
 
-    // Assertion: Final and target-one callbacks publish both boundaries.
+    // Final and target-one callbacks publish both boundaries.
     assert_eq!(multiple.completed.load(Ordering::Relaxed), 3);
     assert!(multiple.last_ns.load(Ordering::Acquire) >= first);
     let single_first = single.first_ns.load(Ordering::Acquire);

@@ -882,16 +882,15 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn test_timer_timeout_winner_restores_exact_heap_occupancy() {
-        // Setup: Start one real runtime with an initially empty timer shard.
         let runner = Runner::new(Config::default().with_worker_threads(1));
         runner.start(|context| async move {
-            // Action: Let the user future win so the losing timeout is dropped.
+            // Let the user future win so the losing timeout is dropped.
             let output = context
                 .timeout(Duration::from_secs(60), async { 7 })
                 .await
                 .expect("ready future should win its timeout");
 
-            // Assertion: Timeout cleanup removes its timer before returning.
+            // Timeout cleanup removes its timer before returning.
             assert_eq!(output, 7);
             assert_eq!(context.executor.timer.heap_lengths(), vec![0]);
         });
