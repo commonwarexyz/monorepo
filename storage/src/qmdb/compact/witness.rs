@@ -19,7 +19,10 @@ use crate::{
     merkle::{
         self, Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, compact,
     },
-    qmdb::{self, Error, sync::compact::Target},
+    qmdb::{
+        self, Error,
+        sync::{Response, ServeError, compact::Target},
+    },
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
@@ -163,6 +166,41 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Read the cached witness without exposing the underlying lock to db code.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&VerifiedWitness<F, D>) -> R) -> R {
         f(&self.tip_witness.read())
+    }
+
+    /// Return the compact-sync state for `target`, or a stale-target error if the current
+    /// witness no longer matches.
+    ///
+    /// The target is compared without further validation: the witness holds exactly one
+    /// servable state, so any non-matching target is stale by definition.
+    pub(crate) fn compact_state<Op: Read>(
+        &self,
+        cfg: &Op::Cfg,
+        target: Target<F, D>,
+    ) -> Result<Response<F, Op, D>, ServeError<F, D>> {
+        // Hold the witness lock only long enough to verify the requested target and snapshot the
+        // entry; decode outside it so concurrent readers do not contend.
+        let entry = self.with(|w| {
+            if target.root != w.root || target.leaf_count != w.leaf_count() {
+                return Err(ServeError::StaleTarget {
+                    requested: target.clone(),
+                    current: w.target(),
+                });
+            }
+            Ok(w.witness.clone())
+        })?;
+        let Witness {
+            op_bytes,
+            proof: last_commit_proof,
+            pinned_nodes,
+        } = entry;
+        let op = Op::decode_cfg(op_bytes.as_ref(), cfg)
+            .map_err(|_| ServeError::Database(Error::DataCorrupted("invalid commit operation")))?;
+        Ok(Response {
+            proof: last_commit_proof,
+            operations: vec![op],
+            pinned_nodes: Some(pinned_nodes),
+        })
     }
 
     /// Replace the cached witness after the matching compact Merkle state is persisted or loaded.

@@ -80,7 +80,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{Response, Source, Validity};
+use commonware_storage::qmdb::sync::{Response, Source, ValidityTx};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -198,7 +198,7 @@ where
     async fn serve(
         &self,
         request: Req,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         self.0.serve(request).await
     }
 }

@@ -1,6 +1,6 @@
 //! Manages outstanding fetch requests with monotonically increasing request IDs.
 //!
-//! Each request is assigned a unique ID and remembers the tree size it was issued
+//! Each request is assigned a unique ID and remembers the merkle structure size it was issued
 //! against, letting the engine reject replies that do not match the requested
 //! historical view. Removing a request aborts its future.
 

@@ -1,11 +1,18 @@
 use crate::{
     Context,
+    journal::{authenticated, contiguous::Contiguous},
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
-    qmdb::{self, operation::Key, sync::ServeError},
+    qmdb::{
+        self,
+        operation::{Floored, Key},
+        sync::ServeError,
+    },
     translator::Translator,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadRangeExt as _, Write};
+use commonware_codec::{
+    EncodeShared, EncodeSize, Error as CodecError, Read, ReadRangeExt as _, Write,
+};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -16,7 +23,7 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// A request for operations from a source's log.
 pub struct Request<F: Family> {
-    /// Prove against the root the tree had at this many operations.
+    /// Prove against the root the merkle structure had at this many operations.
     pub size: Location<F>,
     /// First operation to return.
     pub start: Location<F>,
@@ -27,24 +34,6 @@ pub struct Request<F: Family> {
     /// When set, the response also carries the pins at that boundary. The proof in the same
     /// response authenticates them, so there is no way to request them on their own.
     pub retain_from: Option<Location<F>>,
-}
-
-impl<F: Family> Request<F> {
-    /// Request operations at `start`, proven against the tree at `size`.
-    pub const fn new(size: Location<F>, start: Location<F>, max_ops: NonZeroU64) -> Self {
-        Self {
-            size,
-            start,
-            max_ops,
-            retain_from: None,
-        }
-    }
-
-    /// Also return the pins at `boundary`, the lowest location the client will retain.
-    pub const fn retaining_from(mut self, boundary: Location<F>) -> Self {
-        self.retain_from = Some(boundary);
-        self
-    }
 }
 
 impl<F: Family> Clone for Request<F> {
@@ -77,21 +66,6 @@ pub struct Response<F: Family, Op, D: Digest> {
     pub operations: Vec<Op>,
     /// Pins at the requested boundary, if the request asked for them.
     pub pinned_nodes: Option<Vec<D>>,
-}
-
-impl<F: Family, Op, D: Digest> Response<F, Op, D> {
-    /// Create a response.
-    pub const fn new(
-        proof: Proof<F, D>,
-        operations: Vec<Op>,
-        pinned_nodes: Option<Vec<D>>,
-    ) -> Self {
-        Self {
-            proof,
-            operations,
-            pinned_nodes,
-        }
-    }
 }
 
 impl<F: Family, Op: Clone, D: Digest> Clone for Response<F, Op, D> {
@@ -150,7 +124,7 @@ where
 }
 
 /// Where to report whether a fetched response verified, so a remote peer can be scored.
-pub type Validity = Option<oneshot::Sender<bool>>;
+pub type ValidityTx = Option<oneshot::Sender<bool>>;
 
 /// A source for proofs and operations.
 pub trait Source<Req: Send + 'static>: Send + Sync {
@@ -172,7 +146,7 @@ pub trait Source<Req: Send + 'static>: Send + Sync {
         &'a self,
         request: Req,
     ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>,
+        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>,
     > + Send
     + 'a;
 }
@@ -191,7 +165,7 @@ where
         &'a self,
         request: Req,
     ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>,
+        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>,
     > + Send
     + 'a {
         T::serve(self, request)
@@ -212,7 +186,7 @@ where
     async fn serve(
         &self,
         request: Req,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
         Ok(source.serve(request).await?)
     }
@@ -233,7 +207,7 @@ macro_rules! impl_locked_source {
             async fn serve(
                 &self,
                 request: Req,
-            ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>
+            ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>
             {
                 self.read().await.serve(request).await
             }
@@ -244,31 +218,56 @@ macro_rules! impl_locked_source {
 impl_locked_source!(AsyncRwLock);
 impl_locked_source!(TracedAsyncRwLock);
 
-macro_rules! serve_request {
-    () => {
-        async fn serve(
-            &self,
-            request: $crate::qmdb::sync::source::Request<F>,
-        ) -> Result<
-            (
-                $crate::qmdb::sync::source::Response<F, Self::Op, H::Digest>,
-                $crate::qmdb::sync::source::Validity,
-            ),
-            $crate::qmdb::Error<F>,
-        > {
-            let (proof, operations) = self
-                .historical_proof(request.size, request.start, request.max_ops)
-                .await?;
-            let pinned_nodes = match request.retain_from {
-                Some(boundary) => Some(self.pinned_nodes_at(boundary).await?),
-                None => None,
-            };
-            Ok((
-                $crate::qmdb::sync::source::Response::new(proof, operations, pinned_nodes),
-                None,
-            ))
+impl<F, E, C, H, S> Source<Request<F>> for authenticated::Journal<F, E, C, H, S>
+where
+    F: Family,
+    E: Context,
+    C: Contiguous<Item: EncodeShared + Floored<F>>,
+    H: Hasher,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = C::Item;
+    type Error = qmdb::Error<F>;
+
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.sync.serve",
+        level = "info",
+        skip_all,
+        fields(
+            size = *request.size,
+            start = *request.start,
+            max_ops = request.max_ops.get(),
+        ),
+    )]
+    async fn serve(
+        &self,
+        request: Request<F>,
+    ) -> Result<(Response<F, C::Item, H::Digest>, ValidityTx), qmdb::Error<F>> {
+        // Reject before the floor lookup so the error carries the requested size and the
+        // floor read never touches out-of-range locations.
+        if request.size > self.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(request.size).into());
         }
-    };
+        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(self, request.size).await?;
+        let (proof, operations) = self
+            .historical_proof(request.size, request.start, request.max_ops, inactive_peaks)
+            .await?;
+        let pinned_nodes = match request.retain_from {
+            Some(boundary) => Some(self.merkle.pinned_nodes_at(boundary).await?),
+            None => None,
+        };
+        Ok((
+            Response {
+                proof,
+                operations,
+                pinned_nodes,
+            },
+            None,
+        ))
+    }
 }
 
 impl<F, E, U, C, I, H, const N: usize, S> Source<Request<F>>
@@ -276,21 +275,24 @@ impl<F, E, U, C, I, H, const N: usize, S> Source<Request<F>>
 where
     F: Family,
     E: Context,
-    U: crate::qmdb::any::operation::update::Update + Send + Sync + 'static,
-    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::any::operation::Operation<F, U>>
-        + Send
-        + Sync,
+    U: crate::qmdb::any::operation::update::Update,
+    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::any::operation::Operation<F, U>>,
     I: crate::index::Unordered<Value = Location<F>> + Send + Sync,
     H: Hasher,
     S: Strategy,
-    crate::qmdb::any::operation::Operation<F, U>: commonware_codec::Codec + Send,
+    crate::qmdb::any::operation::Operation<F, U>: commonware_codec::Codec,
 {
     type Family = F;
     type Digest = H::Digest;
     type Op = crate::qmdb::any::operation::Operation<F, U>;
     type Error = qmdb::Error<F>;
 
-    serve_request!();
+    async fn serve(
+        &self,
+        request: Request<F>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
+        self.log.serve(request).await
+    }
 }
 impl<F, E, K, V, C, H, T, S> Source<Request<F>>
     for crate::qmdb::immutable::Immutable<F, E, K, V, C, H, T, S>
@@ -299,10 +301,8 @@ where
     E: Context,
     K: Key,
     V: crate::qmdb::any::value::ValueEncoding,
-    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::immutable::Operation<F, K, V>>
-        + Send
-        + Sync,
-    C::Item: commonware_codec::EncodeShared + Send,
+    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::immutable::Operation<F, K, V>>,
+    C::Item: commonware_codec::EncodeShared,
     H: Hasher,
     T: Translator + Send + Sync,
     T::Key: Send + Sync,
@@ -313,7 +313,12 @@ where
     type Op = crate::qmdb::immutable::Operation<F, K, V>;
     type Error = qmdb::Error<F>;
 
-    serve_request!();
+    async fn serve(
+        &self,
+        request: Request<F>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
+        self.journal.serve(request).await
+    }
 }
 
 impl<F, E, V, C, H, S> Source<Request<F>> for crate::qmdb::keyless::Keyless<F, E, V, C, H, S>
@@ -321,19 +326,22 @@ where
     F: Family,
     E: Context,
     V: crate::qmdb::any::value::ValueEncoding,
-    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::keyless::Operation<F, V>>
-        + Send
-        + Sync,
+    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::keyless::Operation<F, V>>,
     H: Hasher,
     S: Strategy,
-    crate::qmdb::keyless::Operation<F, V>: commonware_codec::EncodeShared + Send,
+    crate::qmdb::keyless::Operation<F, V>: commonware_codec::EncodeShared,
 {
     type Family = F;
     type Digest = H::Digest;
     type Op = crate::qmdb::keyless::Operation<F, V>;
     type Error = qmdb::Error<F>;
 
-    serve_request!();
+    async fn serve(
+        &self,
+        request: Request<F>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
+        self.journal.serve(request).await
+    }
 }
 
 #[cfg(test)]
@@ -383,7 +391,7 @@ pub(crate) mod tests {
         async fn serve(
             &self,
             _request: Request<F>,
-        ) -> Result<(Response<F, Op, D>, Validity), qmdb::Error<F>> {
+        ) -> Result<(Response<F, Op, D>, ValidityTx), qmdb::Error<F>> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }
@@ -527,7 +535,12 @@ pub(crate) mod tests {
         deterministic::Runner::default().start(|_context| async move {
             let lock = AsyncRwLock::new(FailSource::<mmr::Family, u8, ShaDigest>::new());
 
-            let request = Request::new(Location::new(1), Location::new(0), NZU64!(1));
+            let request = Request {
+                size: Location::new(1),
+                start: Location::new(0),
+                max_ops: NZU64!(1),
+                retain_from: None,
+            };
             let result = lock.serve(request).await;
             assert!(matches!(result, Err(crate::qmdb::Error::KeyNotFound)));
         });

@@ -35,10 +35,10 @@ use crate::{
             batch as compact_batch,
             witness::{self, VerifiedWitness, Witness},
         },
-        sync::compact as compact_sync,
+        sync::{Response, ServeError, Source, ValidityTx, compact as compact_sync},
     },
 };
-use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
+use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -94,11 +94,6 @@ where
             .finish_non_exhaustive()
     }
 }
-
-type CompactStateResult<F, V, D> = Result<
-    crate::qmdb::sync::source::Response<F, Operation<F, V>, D>,
-    crate::qmdb::sync::ServeError<F, D>,
->;
 
 /// A speculative batch for a compact keyless db.
 #[allow(clippy::type_complexity)]
@@ -415,44 +410,6 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// Return the compact-sync state for `target`, or a stale-target error if the source's
-    /// current witness no longer matches.
-    pub(crate) fn compact_state(
-        &self,
-        target: compact_sync::Target<F, H::Digest>,
-    ) -> CompactStateResult<F, V, H::Digest>
-    where
-        Operation<F, V>: Read<Cfg = C>,
-    {
-        // Hold the witness lock only long enough to verify the requested target and snapshot the
-        // entry; decode outside it so concurrent readers do not contend.
-        let entry = self.witness.with(|w| {
-            if target.root != w.root || target.leaf_count != w.leaf_count() {
-                return Err(crate::qmdb::sync::ServeError::StaleTarget {
-                    requested: target.clone(),
-                    current: w.target(),
-                });
-            }
-            Ok(w.witness.clone())
-        })?;
-        let Witness {
-            op_bytes,
-            proof: last_commit_proof,
-            pinned_nodes,
-        } = entry;
-        let op = Operation::<F, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
-            .map_err(|_| {
-                crate::qmdb::sync::ServeError::Database(Error::DataCorrupted(
-                    "invalid commit operation",
-                ))
-            })?;
-        Ok(crate::qmdb::sync::source::Response::new(
-            last_commit_proof,
-            vec![op],
-            Some(pinned_nodes),
-        ))
-    }
-
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, V, S> {
         let committed_size = *self.last_commit_loc + 1;
@@ -612,6 +569,33 @@ where
     pub async fn destroy(self) -> Result<(), Error<F>> {
         self.witness.destroy().await?;
         Ok(())
+    }
+}
+
+impl<F, E, V, H, C, S> Source<compact_sync::Target<F, H::Digest>> for Db<F, E, V, H, C, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, V>: EncodeShared + Read<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, V>;
+    type Error = ServeError<F, H::Digest>;
+
+    async fn serve(
+        &self,
+        target: compact_sync::Target<F, H::Digest>,
+    ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), Self::Error> {
+        Ok((
+            self.witness
+                .compact_state(&self.commit_codec_config, target)?,
+            None,
+        ))
     }
 }
 

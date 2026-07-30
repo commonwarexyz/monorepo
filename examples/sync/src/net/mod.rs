@@ -201,15 +201,15 @@ mod tests {
         let digest_c = sha256::Digest::from([10; 32]);
         let message = wire::Message::GetCompactStateResponse(wire::GetCompactStateResponse {
             request_id,
-            response: Response::new(
-                commonware_storage::mmr::Proof {
+            response: Response {
+                proof: commonware_storage::mmr::Proof {
                     leaves: Location::new(11),
                     inactive_peaks: 0,
                     digests: vec![digest_c],
                 },
-                vec![keyless_compact::Operation::Commit(None, Location::new(0))],
-                Some(vec![digest_a, digest_b]),
-            ),
+                operations: vec![keyless_compact::Operation::Commit(None, Location::new(0))],
+                pinned_nodes: Some(vec![digest_a, digest_b]),
+            },
         });
 
         let encoded = message.encode().to_vec();

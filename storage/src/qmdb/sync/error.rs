@@ -13,7 +13,7 @@ use commonware_cryptography::Digest;
 ///
 /// Serving reads local storage, so these describe the source's own state, not a bad request from
 /// a peer. A peer that sends something unusable is scored through
-/// [`Validity`](crate::qmdb::sync::source::Validity) instead.
+/// [`ValidityTx`](crate::qmdb::sync::source::ValidityTx) instead.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError<F: Family, D: Digest> {
     /// The source database failed while building the response.

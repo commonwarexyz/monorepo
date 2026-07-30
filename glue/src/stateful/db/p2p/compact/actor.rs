@@ -493,15 +493,15 @@ mod tests {
             let (pending_tx, _pending_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![pending_tx]);
 
-            let bad_state = Response::<mmr::Family, TestOp, sha256::Digest>::new(
-                Proof {
+            let bad_state = Response::<mmr::Family, TestOp, sha256::Digest> {
+                proof: Proof {
                     leaves: mmr::Location::new(1),
                     inactive_peaks: 0,
                     digests: Vec::new(),
                 },
-                vec![TestOp::Commit(None, mmr::Location::new(0))],
-                Some(Vec::new()),
-            );
+                operations: vec![TestOp::Commit(None, mmr::Location::new(0))],
+                pinned_nodes: Some(Vec::new()),
+            };
 
             let (valid_tx, valid_rx) = oneshot::channel();
             actor

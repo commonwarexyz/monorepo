@@ -8,7 +8,7 @@ use crate::{
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
-            source::{Request, Response, Source, Validity},
+            source::{Request, Response, Source, ValidityTx},
             target::validate_update,
         },
     },
@@ -65,7 +65,7 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
     /// Unique ID assigned when the request was scheduled.
     pub id: RequestId,
     /// The result of the fetch operation.
-    pub result: Result<(Response<F, Op, D>, Validity), E>,
+    pub result: Result<(Response<F, Op, D>, ValidityTx), E>,
 }
 
 /// Wait for the next synchronization event.
@@ -161,9 +161,9 @@ where
     /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
-    /// Historical roots from superseded sync targets, keyed by tree size
+    /// Historical roots from superseded sync targets, keyed by merkle structure size
     /// (target.range.end()). Keys strictly increase across target updates
-    /// (enforced by validate_update), so each tree size maps to a unique
+    /// (enforced by validate_update), so each merkle structure size maps to a unique
     /// root and the smallest key is the oldest. Eviction drops it first.
     /// When a retained request completes, proof.leaves identifies which
     /// historical root to verify against.
@@ -313,7 +313,12 @@ where
                 .contains(&self.target.range.start())
         {
             let start_loc = self.target.range.start();
-            let request = Request::new(target_size, start_loc, NZU64!(1)).retaining_from(start_loc);
+            let request = Request {
+                size: target_size,
+                start: start_loc,
+                max_ops: NZU64!(1),
+                retain_from: Some(start_loc),
+            };
             let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
@@ -354,7 +359,12 @@ where
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
-            let request = Request::new(target_size, gap_range.start, batch_size);
+            let request = Request {
+                size: target_size,
+                start: gap_range.start,
+                max_ops: batch_size,
+                retain_from: None,
+            };
             let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
@@ -875,18 +885,18 @@ mod tests {
         async fn serve(
             &self,
             _request: Request<MmrFamily>,
-        ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>
+        ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>
         {
             Ok((
-                Response::new(
-                    Proof {
+                Response {
+                    proof: Proof {
                         leaves: Location::new(0),
                         inactive_peaks: 0,
                         digests: vec![],
                     },
-                    vec![],
-                    None,
-                ),
+                    operations: vec![],
+                    pinned_nodes: None,
+                },
                 None,
             ))
         }
@@ -947,15 +957,15 @@ mod tests {
         IndexedFetchResult {
             id,
             result: Ok((
-                Response::new(
-                    Proof {
+                Response {
+                    proof: Proof {
                         leaves: Location::new(0),
                         inactive_peaks: 0,
                         digests: vec![],
                     },
-                    vec![],
-                    None,
-                ),
+                    operations: vec![],
+                    pinned_nodes: None,
+                },
                 None,
             )),
         }

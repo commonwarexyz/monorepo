@@ -308,11 +308,11 @@ where
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
                 .send(Ok((
-                    Response::new(
-                        decoded.proof.clone(),
-                        decoded.operations.clone(),
-                        decoded.pinned_nodes.clone(),
-                    ),
+                    Response {
+                        proof: decoded.proof.clone(),
+                        operations: decoded.operations.clone(),
+                        pinned_nodes: decoded.pinned_nodes.clone(),
+                    },
                     Some(success_tx),
                 )))
                 .is_err()
@@ -358,12 +358,14 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let mut request = Request::new(key.op_count, key.start_loc, key.max_ops);
-        if key.include_pinned_nodes {
-            // The wire format only carries a flag, and a peer's retention floor is always the
-            // start of the range it asked for.
-            request = request.retaining_from(key.start_loc);
-        }
+        // The wire format only carries a flag, and a peer's retention floor is always the
+        // start of the range it asked for.
+        let request = Request {
+            size: key.op_count,
+            start: key.start_loc,
+            max_ops: key.max_ops,
+            retain_from: key.include_pinned_nodes.then_some(key.start_loc),
+        };
         let result = database.serve(request).await;
 
         let Ok((response, _validity_tx)) = result else {
@@ -481,7 +483,7 @@ mod tests {
         Result<
             (
                 Response<mmr::Family, TestOp, sha256::Digest>,
-                commonware_storage::qmdb::sync::Validity,
+                commonware_storage::qmdb::sync::ValidityTx,
             ),
             mailbox::ResponseDropped,
         >,

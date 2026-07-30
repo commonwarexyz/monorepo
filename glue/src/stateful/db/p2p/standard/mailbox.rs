@@ -7,7 +7,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{Request, Response, Source, Validity},
+    qmdb::sync::{Request, Response, Source, ValidityTx},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
@@ -20,7 +20,7 @@ pub struct ResponseDropped;
 /// Where the actor delivers a fetched response, along with the channel the caller reports
 /// peer validity on.
 pub(super) type ResponseTx<F, Op, D> =
-    oneshot::Sender<Result<(Response<F, Op, D>, Validity), ResponseDropped>>;
+    oneshot::Sender<Result<(Response<F, Op, D>, ValidityTx), ResponseDropped>>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
@@ -144,7 +144,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         let request = handler::Request {
             op_count: request.size,
             start_loc: request.start,
@@ -199,7 +199,12 @@ mod tests {
 
             // Poll once so the request is enqueued, then abandon the fetch.
             {
-                let get = mailbox.serve(Request::new(op_count, start_loc, max_ops));
+                let get = mailbox.serve(Request {
+                    size: op_count,
+                    start: start_loc,
+                    max_ops,
+                    retain_from: None,
+                });
                 futures::pin_mut!(get);
                 assert!(futures::poll!(get.as_mut()).is_pending());
             }
@@ -234,11 +239,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
-            let get = mailbox.serve(Request::new(
-                mmr::Location::new(10),
-                mmr::Location::new(3),
-                NZU64!(2),
-            ));
+            let get = mailbox.serve(Request {
+                size: mmr::Location::new(10),
+                start: mmr::Location::new(3),
+                max_ops: NZU64!(2),
+                retain_from: None,
+            });
             let observe = async move {
                 let Message::GetOperations { response, .. } =
                     receiver.recv().await.expect("request should be queued")

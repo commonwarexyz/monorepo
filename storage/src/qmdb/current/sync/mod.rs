@@ -62,7 +62,7 @@ use crate::{
             },
         },
         metrics::Metrics as AnyMetrics,
-        operation::{Committable, Key, Operation as _},
+        operation::{Committable, Key},
         sync::{Database, DatabaseConfig as Config},
     },
     translator::Translator,
@@ -317,12 +317,8 @@ macro_rules! impl_current_sync_database {
 
                 // The inactivity floor is carried by the last commit operation rather than
                 // being the target range's start.
-                let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
-                    journal,
-                    target.range.end(),
-                    |op| op.has_floor(),
-                )
-                .await?;
+                let inactivity_floor =
+                    qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
 
                 qmdb::sync::local_pinned_nodes::<F, _, H, S>(
                     context,
@@ -396,7 +392,7 @@ where
     ) -> Result<
         (
             crate::qmdb::sync::source::Response<F, Self::Op, H::Digest>,
-            crate::qmdb::sync::source::Validity,
+            crate::qmdb::sync::source::ValidityTx,
         ),
         qmdb::Error<F>,
     > {

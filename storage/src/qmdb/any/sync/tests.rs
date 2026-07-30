@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            source::{self, Request, Response, Source, Validity},
+            source::{self, Request, Response, Source, ValidityTx},
         },
     },
 };
@@ -1794,7 +1794,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         let (mut response, validity_tx) = self.inner.serve(request).await?;
         // Corrupt pinned nodes only on the first request that includes them.
         if response.pinned_nodes.is_some()
@@ -1888,7 +1888,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         if request.size == self.historical_target_size {
             if request.retain_from.is_some() {
                 // Never answers. The engine abandons this request when the target moves,
@@ -1907,8 +1907,12 @@ where
             if attempt == 0 {
                 // Answer the boundary request against the historical size and without pins,
                 // so the engine has to retry it.
-                let historical =
-                    Request::new(self.historical_target_size, request.start, request.max_ops);
+                let historical = Request {
+                    size: self.historical_target_size,
+                    start: request.start,
+                    max_ops: request.max_ops,
+                    retain_from: None,
+                };
                 let (mut response, validity_tx) = self.inner.serve(historical).await?;
                 response.pinned_nodes = None;
                 return Ok((response, validity_tx));

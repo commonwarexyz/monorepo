@@ -435,7 +435,7 @@ mod tests {
         ) -> Result<
             (
                 sync::Response<Self::Family, Self::Op, Self::Digest>,
-                sync::Validity,
+                sync::ValidityTx,
             ),
             Self::Error,
         > {

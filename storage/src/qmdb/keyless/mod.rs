@@ -108,7 +108,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Authenticated journal of operations.
-    journal: authenticated::Journal<F, E, C, H, S>,
+    pub(crate) journal: authenticated::Journal<F, E, C, H, S>,
 
     /// Cached canonical operations root.
     root: H::Digest,
@@ -361,8 +361,7 @@ where
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count, |op| op.has_floor())
-                .await?;
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
 
         Ok(self
             .journal

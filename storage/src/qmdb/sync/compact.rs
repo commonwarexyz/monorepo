@@ -43,24 +43,17 @@
 //! with `DataCorrupted` rather than silently serving or restoring mismatched state.
 
 use crate::{
+    journal::contiguous::Mutable,
     merkle::{Family, Location, Proof},
     qmdb::{
         self,
-        any::{FixedValue, VariableValue, value::ValueEncoding},
-        immutable::{
-            CompactDb as ImmutableCompactDb, Operation as ImmutableOp,
-            fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
-            variable::{Db as ImmutableVariableDb, Operation as ImmutableVariableOp},
-        },
-        keyless::{
-            CompactDb as KeylessCompactDb, Operation as KeylessOp,
-            fixed::{Db as KeylessFixedDb, Operation as KeylessFixedOp},
-            variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
-        },
-        operation::Key,
+        any::value::ValueEncoding,
+        immutable::{Immutable, Operation as ImmutableOp},
+        keyless::{Keyless, Operation as KeylessOp},
+        operation::{Floored, Key},
         sync::{
             EngineError, Error, ServeError,
-            source::{Request, Response, Source, Validity},
+            source::{Request, Response, Source, ValidityTx},
         },
         verify_proof,
     },
@@ -71,7 +64,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor, reschedule};
-use commonware_utils::{Array, NZU64, channel::mpsc};
+use commonware_utils::{NZU64, channel::mpsc};
 use futures::future::{Either, pending};
 use std::future::Future;
 
@@ -204,7 +197,7 @@ where
 /// Database types that can be initialized directly from compact state.
 pub trait Database: Sized + Send {
     type Family: Family;
-    type Op: Encode + Send;
+    type Op: Encode + Floored<Self::Family> + Send;
     type Config: Clone;
     type Digest: Digest;
     type Context: Storage + Clock + Metrics;
@@ -221,9 +214,6 @@ pub trait Database: Sized + Send {
         config: Self::Config,
         state: ValidatedState<Self::Family, Self::Op, Self::Digest>,
     ) -> impl Future<Output = Result<Self, qmdb::Error<Self::Family>>> + Send;
-
-    /// Return the inactivity floor if the operation is a commit.
-    fn inactivity_floor(op: &Self::Op) -> Option<Location<Self::Family>>;
 
     /// Get the root digest for final verification.
     fn root(&self) -> Self::Digest;
@@ -444,7 +434,7 @@ pub(crate) fn validate_compact_state<DB>(
 where
     DB: Database,
 {
-    // Compact state is exactly one operation: the final commit. The tree size comes from the
+    // Compact state is exactly one operation: the final commit. The merkle structure size comes from the
     // proof, so there is no separately transmitted count that could disagree with it.
     let Response {
         proof: last_commit_proof,
@@ -495,7 +485,7 @@ where
     // The final commit is the only operation carried in compact state. Its floor determines which
     // peaks are inactive when authenticating the compact frontier root.
     let last_commit_loc = Location::new(*leaf_count - 1);
-    let Some(inactivity_floor_loc) = DB::inactivity_floor(&last_commit_op) else {
+    let Some(inactivity_floor_loc) = last_commit_op.has_floor() else {
         return Err(EngineError::InvalidProof);
     };
     if inactivity_floor_loc > last_commit_loc {
@@ -559,126 +549,71 @@ where
 
     let leaf_count = target.leaf_count;
     let last_commit_loc = Location::new(*leaf_count - 1);
-    let request = Request::new(leaf_count, last_commit_loc, NZU64!(1)).retaining_from(leaf_count);
+    let request = Request {
+        size: leaf_count,
+        start: last_commit_loc,
+        max_ops: NZU64!(1),
+        retain_from: Some(leaf_count),
+    };
     let (response, _validity_tx) = source.serve(request).await?;
 
     Ok(response)
 }
 
-/// A `full` database has no persisted witness, so its compact state is synthesized on demand
-/// from the current tip commit plus the frontier pins at the requested tree size; a `compact`
-/// database reads its witness directly.
-macro_rules! impl_compact_source {
-    (full $db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
-        impl<F, E, K, V, H, T, S> Source<Target<F, H::Digest>> for $db<F, E, K, V, H, T, S>
-        where
-            F: Family,
-            E: crate::Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
+impl<F, E, K, V, C, H, T, S> Source<Target<F, H::Digest>> for Immutable<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: crate::Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = ImmutableOp<F, K, V>>,
+    C::Item: commonware_codec::EncodeShared,
+    H: Hasher,
+    T: Translator + Send + Sync,
+    T::Key: Send + Sync,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = ImmutableOp<F, K, V>;
+    type Error = ServeError<F, H::Digest>;
 
-            async fn serve(
-                &self,
-                target: Target<F, H::Digest>,
-            ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
-                let current = Target::new(self.root(), self.bounds().end);
-                Ok((compact_state_from_log(self, current, target).await?, None))
-            }
-        }
-    };
-    (full keyless $db:ident, $op:ident, $val_bound:ident) => {
-        impl<F, E, V, H, S> Source<Target<F, H::Digest>> for $db<F, E, V, H, S>
-        where
-            F: Family,
-            E: crate::Context,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn serve(
-                &self,
-                target: Target<F, H::Digest>,
-            ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
-                let current = Target::new(self.root(), self.bounds().end);
-                Ok((compact_state_from_log(self, current, target).await?, None))
-            }
-        }
-    };
-    (compact $db:ident, $op:ident) => {
-        impl<F, E, K, V, H, C, S> Source<Target<F, H::Digest>> for $db<F, E, K, V, H, C, S>
-        where
-            F: Family,
-            E: crate::Context,
-            K: Key,
-            V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
-            $op<F, K, V>: Encode + Read<Cfg = C>,
-            C: Clone + Send + Sync + 'static,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn serve(
-                &self,
-                target: Target<F, H::Digest>,
-            ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
-                Ok((self.compact_state(target)?, None))
-            }
-        }
-    };
-    (compact keyless $db:ident, $op:ident) => {
-        impl<F, E, V, H, C, S> Source<Target<F, H::Digest>> for $db<F, E, V, H, C, S>
-        where
-            F: Family,
-            E: crate::Context,
-            V: ValueEncoding + Send + Sync + 'static,
-            H: Hasher,
-            $op<F, V>: Encode + Read<Cfg = C>,
-            C: Clone + Send + Sync + 'static,
-            S: Strategy,
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn serve(
-                &self,
-                target: Target<F, H::Digest>,
-            ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
-                Ok((self.compact_state(target)?, None))
-            }
-        }
-    };
+    async fn serve(
+        &self,
+        target: Target<F, H::Digest>,
+    ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), Self::Error> {
+        let current = Target::new(self.root(), self.bounds().end);
+        Ok((compact_state_from_log(self, current, target).await?, None))
+    }
 }
 
-impl_compact_source!(compact keyless KeylessCompactDb, KeylessOp);
-impl_compact_source!(compact ImmutableCompactDb, ImmutableOp);
-impl_compact_source!(full keyless KeylessFixedDb, KeylessFixedOp, FixedValue);
-impl_compact_source!(full keyless KeylessVariableDb, KeylessVariableOp, VariableValue);
-impl_compact_source!(full ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
-impl_compact_source!(full ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
+impl<F, E, V, C, H, S> Source<Target<F, H::Digest>> for Keyless<F, E, V, C, H, S>
+where
+    F: Family,
+    E: crate::Context,
+    V: ValueEncoding,
+    C: Mutable<Item = KeylessOp<F, V>>,
+    KeylessOp<F, V>: commonware_codec::EncodeShared,
+    H: Hasher,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = KeylessOp<F, V>;
+    type Error = ServeError<F, H::Digest>;
+
+    async fn serve(
+        &self,
+        target: Target<F, H::Digest>,
+    ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), Self::Error> {
+        let current = Target::new(self.root(), self.bounds().end);
+        Ok((compact_state_from_log(self, current, target).await?, None))
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Database, Response, Source, Target, Validity};
+    use super::{Config, Database, Response, Source, Target, ValidityTx};
     use crate::{
         merkle::{Location, mmr},
         qmdb,
@@ -709,6 +644,12 @@ mod tests {
 
     fn assert_serves<S: Source<Target<mmr::Family, Digest>>>() {}
 
+    impl<F: crate::merkle::Family> crate::qmdb::operation::Floored<F> for u8 {
+        fn has_floor(&self) -> Option<Location<F>> {
+            Some(Location::new(0))
+        }
+    }
+
     struct TestDb {
         root: Digest,
     }
@@ -730,10 +671,6 @@ mod tests {
             Ok(Self { root })
         }
 
-        fn inactivity_floor(_op: &Self::Op) -> Option<Location<Self::Family>> {
-            Some(Location::new(0))
-        }
-
         fn root(&self) -> Self::Digest {
             self.root
         }
@@ -743,7 +680,7 @@ mod tests {
         }
     }
 
-    type CompactResponse = (Response<mmr::Family, u8, Digest>, Validity);
+    type CompactResponse = (Response<mmr::Family, u8, Digest>, ValidityTx);
 
     /// Serves a canned sequence of responses, one per call, so tests can drive the retry loop.
     struct SequenceSource {
@@ -790,7 +727,11 @@ mod tests {
             .collect::<Vec<_>>();
         let proof = merkle.proof(&hasher, Location::new(1), 0).unwrap();
         (
-            Response::new(proof, vec![op], Some(pinned_nodes)),
+            Response {
+                proof,
+                operations: vec![op],
+                pinned_nodes: Some(pinned_nodes),
+            },
             Target::<mmr::Family, Digest> { root, leaf_count },
         )
     }

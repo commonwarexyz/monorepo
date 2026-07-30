@@ -25,7 +25,7 @@ use crate::{
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
-        operation::Operation as _,
+        operation::Floored as _,
     },
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};

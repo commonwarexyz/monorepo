@@ -1302,7 +1302,7 @@ mod compact_variable_mmr {
             immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>,
             sha256::Digest,
         >,
-        sync::source::Validity,
+        sync::source::ValidityTx,
     );
 
     impl sync::source::Source<sync::compact::Target<mmr::Family, sha256::Digest>> for SequenceSource {
@@ -1329,7 +1329,7 @@ mod compact_variable_mmr {
     ) -> Result<
         (
             sync::source::Response<mmr::Family, R::Op, sha256::Digest>,
-            sync::source::Validity,
+            sync::source::ValidityTx,
         ),
         R::Error,
     >
@@ -2076,7 +2076,7 @@ mod compact_variable_mmb {
             immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>,
             sha256::Digest,
         >,
-        sync::source::Validity,
+        sync::source::ValidityTx,
     );
 
     impl sync::source::Source<sync::compact::Target<mmb::Family, sha256::Digest>> for SequenceSource {
@@ -2103,7 +2103,7 @@ mod compact_variable_mmb {
     ) -> Result<
         (
             sync::source::Response<mmb::Family, R::Op, sha256::Digest>,
-            sync::source::Validity,
+            sync::source::ValidityTx,
         ),
         R::Error,
     >

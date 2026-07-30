@@ -149,7 +149,7 @@ where
     ) -> Result<
         (
             sync::Response<Self::Family, Self::Op, Self::Digest>,
-            sync::Validity,
+            sync::ValidityTx,
         ),
         Self::Error,
     > {
@@ -175,7 +175,11 @@ where
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
             wire::Message::GetOperationsResponse(r) => Ok((
-                sync::Response::new(r.proof, r.operations, r.pinned_nodes),
+                sync::Response {
+                    proof: r.proof,
+                    operations: r.operations,
+                    pinned_nodes: r.pinned_nodes,
+                },
                 None,
             )),
             wire::Message::Error(err) => Err(crate::Error::Server {
@@ -204,7 +208,7 @@ where
     ) -> Result<
         (
             sync::Response<Self::Family, Self::Op, Self::Digest>,
-            sync::Validity,
+            sync::ValidityTx,
         ),
         Self::Error,
     > {

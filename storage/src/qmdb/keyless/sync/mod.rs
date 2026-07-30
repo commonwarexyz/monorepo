@@ -91,10 +91,7 @@ where
                     bounds.end,
                 )))?;
             let floor =
-                qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end), |op| {
-                    op.has_floor()
-                })
-                .await?;
+                qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end)).await?;
             (Location::new(loc), floor)
         };
         let inactive_peaks = F::inactive_peaks(
@@ -131,10 +128,7 @@ where
         // The inactivity floor is carried by the last commit operation rather than being
         // the target range's start.
         let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end(), |op| {
-                op.has_floor()
-            })
-            .await?;
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
 
         sync::local_pinned_nodes::<F, _, H, S>(
             context,
@@ -180,10 +174,6 @@ where
             )
             .await?;
         Self::init_from_validated_state(config.strategy, journal, config.commit_codec_config, state)
-    }
-
-    fn inactivity_floor(op: &Self::Op) -> Option<Location<Self::Family>> {
-        op.has_floor()
     }
 
     fn root(&self) -> Self::Digest {

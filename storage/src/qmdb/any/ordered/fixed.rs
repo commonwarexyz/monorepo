@@ -861,10 +861,7 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_bitmap_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            use crate::{
-                journal::contiguous::Contiguous as _,
-                qmdb::{SnapshotBuild as _, operation::Operation as _},
-            };
+            use crate::{journal::contiguous::Contiguous as _, qmdb::SnapshotBuild as _};
             use std::sync::Arc;
 
             type BitmapDb<S> =
@@ -893,7 +890,6 @@ pub(crate) mod test {
                     let floor = crate::qmdb::find_inactivity_floor_at::<mmr::Family, _>(
                         &log,
                         Location::new(log.bounds().end),
-                        |op| op.has_floor(),
                     )
                     .await
                     .unwrap();
