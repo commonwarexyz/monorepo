@@ -6050,8 +6050,9 @@ mod tests {
     /// Same split as that test, but roles are assigned so `lone` leads view
     /// 11. The group cannot verify `lone`'s parent-3 proposal (Notarization(3)
     /// is not certified on their side), so they fetch the parent certificate
-    /// directly from `lone`. They certify it and verify the same proposal, so
-    /// view 11 finalizes without another leader turn.
+    /// directly from `lone`. They certify it, allowing the batcher to assemble
+    /// a finalization for the recovered parent at view 3 before view 11
+    /// completes. The split therefore heals without another leader turn.
     fn certified_split_heals_when_lone_holder_leads_first<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -6307,8 +6308,9 @@ mod tests {
                 join_all(finalizers).await;
             }
 
-            // The group resolves Notarization(3) from `lone` and finalizes
-            // the triggering proposal in view 11.
+            // The group resolves Notarization(3) from `lone`. Once certified,
+            // the recovered proposal finalizes before the triggering proposal
+            // at view 11 completes.
             for (idx, reporter) in honest_reporters.iter() {
                 let first = {
                     let finalizations = reporter.finalizations.lock();
@@ -6320,9 +6322,8 @@ mod tests {
                         .expect("no finalization past the preload")
                 };
                 assert_eq!(
-                    first,
-                    View::new(11),
-                    "reporter {idx} did not finalize the triggering lone-led view"
+                    first, view_3,
+                    "reporter {idx} did not finalize the recovered parent view"
                 );
             }
 

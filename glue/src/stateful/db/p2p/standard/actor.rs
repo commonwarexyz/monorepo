@@ -261,7 +261,7 @@ where
     /// Returns `true` if a request should be cancelled.
     fn should_cancel_request(&mut self, request: &handler::Request<F>) -> bool {
         let Some(subscribers) = self.pending.get_mut(request) else {
-            return false;
+            return true;
         };
         subscribers.retain(|subscriber| !subscriber.is_closed());
         if !subscribers.is_empty() {
@@ -354,14 +354,12 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let (_cancel_tx, cancel_rx) = oneshot::channel();
         let result = database
             .get_operations(
                 key.op_count,
                 key.start_loc,
                 key.max_ops,
                 key.include_pinned_nodes,
-                cancel_rx,
             )
             .await;
 
@@ -710,6 +708,20 @@ mod tests {
             let pending = actor.pending.get(&request).unwrap();
             assert_eq!(pending.len(), 1);
             assert!(!pending[0].is_closed());
+        });
+    }
+
+    #[test]
+    fn cancel_operations_cancels_pruned_request() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = test_request_at(Location::new(1));
+
+            let action = actor.handle_mailbox_message(mailbox::Message::CancelOperations {
+                request: request.clone(),
+            });
+
+            assert!(matches!(action, MailboxAction::Cancel(ref key) if key == &request));
         });
     }
 }

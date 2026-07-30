@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn test_sync_target_read_invalid_bounds() {
-        // Manually encode root + two Locations to bypass the Range write panic
+        // Manually encode root + two Locations with reversed bounds
         let mut buffer = Vec::new();
         sha256::Digest::from([42; 32]).write(&mut buffer);
         Location::<MmrFamily>::new(100).write(&mut buffer); // start
@@ -177,14 +177,15 @@ mod tests {
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(
             Target::<MmrFamily, sha256::Digest>::read(&mut cursor),
-            Err(CodecError::Invalid("Range", "start must be <= end"))
+            Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
         ));
 
         // Manually encode a target with an empty range (start == end)
         let root = sha256::Digest::from([42; 32]);
         let mut buffer = Vec::new();
         root.write(&mut buffer);
-        (Location::<MmrFamily>::new(100)..Location::<MmrFamily>::new(100)).write(&mut buffer);
+        Location::<MmrFamily>::new(100).write(&mut buffer);
+        Location::<MmrFamily>::new(100).write(&mut buffer);
 
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(

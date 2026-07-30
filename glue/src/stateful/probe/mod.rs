@@ -340,10 +340,11 @@ mod test {
     impl Verifier for MaybeEnumerableScheme {
         type Subject<'a, D: commonware_cryptography::Digest> =
             commonware_consensus::simplex::types::Subject<'a, D>;
+        type Faults = <Scheme as Verifier>::Faults;
         type PublicKey = ed25519::PublicKey;
         type Certificate = <Scheme as Verifier>::Certificate;
 
-        fn verify_certificate<R, D, M>(
+        fn verify_certificate<R, D>(
             &self,
             rng: &mut R,
             subject: Self::Subject<'_, D>,
@@ -353,13 +354,12 @@ mod test {
         where
             R: rand_core::CryptoRng,
             D: commonware_cryptography::Digest,
-            M: commonware_utils::Faults,
         {
             self.inner
-                .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
+                .verify_certificate(rng, subject, certificate, strategy)
         }
 
-        fn verify_certificates<'a, R, D, I, M>(
+        fn verify_certificates<'a, R, D, I>(
             &self,
             rng: &mut R,
             certificates: I,
@@ -369,10 +369,8 @@ mod test {
             R: rand_core::CryptoRng,
             D: commonware_cryptography::Digest,
             I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-            M: commonware_utils::Faults,
         {
-            self.inner
-                .verify_certificates::<_, D, _, M>(rng, certificates, strategy)
+            self.inner.verify_certificates(rng, certificates, strategy)
         }
 
         fn is_batchable() -> bool {
@@ -459,7 +457,7 @@ mod test {
             )
         }
 
-        fn assemble<I, M>(
+        fn assemble<I>(
             &self,
             attestations: I,
             strategy: &impl ParallelStrategy,
@@ -467,9 +465,8 @@ mod test {
         where
             I: IntoIterator<Item = Attestation<Self>>,
             I::IntoIter: Send,
-            M: commonware_utils::Faults,
         {
-            self.inner.assemble::<_, M>(
+            self.inner.assemble(
                 attestations.into_iter().map(Self::unwrap_attestation),
                 strategy,
             )

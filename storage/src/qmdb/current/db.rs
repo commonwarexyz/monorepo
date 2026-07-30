@@ -225,6 +225,15 @@ where
         self.any.bounds()
     }
 
+    /// Returns a read-only view of the activity bitmap.
+    ///
+    /// Pruning does not renumber the retained chunks. Only chunks at or after `pruned_chunks()`
+    /// that contain a bit below `len()` are readable. Calling `get_chunk()` or `get_bit()` for a
+    /// pruned or out-of-bounds location panics.
+    pub fn bitmap(&self) -> &impl bitmap::Readable<N> {
+        self.any.bitmap.as_ref()
+    }
+
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
@@ -250,10 +259,12 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Returns a virtual [grafting::Storage] over the grafted tree and ops tree. For positions at
-    /// or above the grafting height, returns the grafted node. For positions below the grafting
-    /// height, the ops tree is used.
-    fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
+    /// Returns a virtual [`crate::merkle::storage::Storage`] view over the grafted tree and ops
+    /// tree.
+    ///
+    /// Positions and `size()` use ops-tree coordinates. Positions at or above the grafting height
+    /// return bitmap-authenticated grafted nodes, while positions below it use the ops tree.
+    pub fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
