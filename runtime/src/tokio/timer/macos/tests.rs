@@ -84,20 +84,6 @@ fn timebase_rejects_unrepresentable_conversions() {
 }
 
 #[test]
-fn missing_timer_requires_absence_or_elapsed_deadline() {
-    // Model startup, a future installed deadline, and an elapsed deadline.
-    let future = 20;
-    let elapsed = 10;
-
-    // ENOENT is expected only when no timer was recorded or its deadline can
-    // already have caused one-shot deletion.
-    assert!(missing_timer_is_expected(NO_TIMER, 0));
-    assert!(!missing_timer_is_expected(future, future - 1));
-    assert!(missing_timer_is_expected(elapsed, elapsed));
-    assert!(missing_timer_is_expected(elapsed, elapsed + 1));
-}
-
-#[test]
 fn retrieved_event_validation() {
     // Build the successful event produced by the private timer.
     let event = timer_change(0, 0, 0);
@@ -186,6 +172,67 @@ async fn critical_absolute_timer_is_ready_and_consumed() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
+async fn rearm_after_unconsumed_expiry_replaces_stale_readiness() {
+    // Arm a short deadline and wait for Tokio to observe readability without
+    // retrieving the expired EV_ONESHOT event from the kqueue.
+    let alarm = NativeAlarm::new(0).unwrap();
+    let first = alarm
+        .now()
+        .unwrap()
+        .saturating_add(Duration::from_millis(10), alarm.max_deadline());
+    alarm.arm(first).unwrap();
+    let readiness = tokio::time::timeout(Duration::from_secs(2), alarm.descriptor.readable())
+        .await
+        .expect("first kqueue readiness timed out")
+        .unwrap();
+    drop(readiness);
+    assert!(alarm.now().unwrap() >= first);
+
+    // Rearm to a later deadline while the expired event and cached reactor
+    // readiness still describe the first arm.
+    let second = alarm
+        .now()
+        .unwrap()
+        .saturating_add(Duration::from_millis(50), alarm.max_deadline());
+    alarm.arm(second).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), alarm.wait())
+        .await
+        .expect("rearmed kqueue readiness timed out")
+        .unwrap();
+
+    // Updating the timer must invalidate the queued event, so stale readiness
+    // cannot complete the replacement arm before its own absolute deadline.
+    assert!(alarm.now().unwrap() >= second);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
+async fn disarm_removes_unconsumed_expired_event() {
+    // Arm a short deadline and observe descriptor readiness without retrieving
+    // the expired EV_ONESHOT event.
+    let alarm = NativeAlarm::new(0).unwrap();
+    let deadline = alarm
+        .now()
+        .unwrap()
+        .saturating_add(Duration::from_millis(10), alarm.max_deadline());
+    alarm.arm(deadline).unwrap();
+    let readiness = tokio::time::timeout(Duration::from_secs(2), alarm.descriptor.readable())
+        .await
+        .expect("kqueue readiness timed out")
+        .unwrap();
+    drop(readiness);
+    assert!(alarm.now().unwrap() >= deadline);
+
+    // EV_ONESHOT remains installed until retrieval, so disarm must delete both
+    // its registration and the queued event.
+    alarm.disarm().unwrap();
+    let error = consume(alarm.descriptor.get_ref().as_raw_fd())
+        .expect_err("disarmed expired event remained queued");
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
 async fn elapsed_rearm_and_disarm() {
     // Create one alarm and verify that a zero-timeout poll starts empty.
     let alarm = NativeAlarm::new(0).unwrap();
@@ -204,14 +251,15 @@ async fn elapsed_rearm_and_disarm() {
 
     // Replacing a later arm with an earlier one uses the new deadline.
     let now = alarm.now().unwrap();
-    let later = now.saturating_add(Duration::from_millis(200), alarm.max_deadline());
-    let earlier = now.saturating_add(Duration::from_millis(20), alarm.max_deadline());
+    let later = now.saturating_add(Duration::from_secs(5), alarm.max_deadline());
+    let earlier = now.saturating_add(Duration::from_millis(50), alarm.max_deadline());
     alarm.arm(later).unwrap();
     alarm.arm(earlier).unwrap();
     tokio::time::timeout(Duration::from_secs(2), alarm.wait())
         .await
-        .unwrap()
+        .expect("earlier kqueue rearm did not replace the later deadline")
         .unwrap();
+    assert!(alarm.now().unwrap() >= earlier);
 
     // Replacing an earlier arm with a later one must remove the stale earlier
     // schedule instead of reporting readiness for it.
@@ -240,11 +288,32 @@ async fn elapsed_rearm_and_disarm() {
     // Repeating the disarm exercises the proven absent ENOENT path.
     alarm.disarm().unwrap();
 
-    // Expiry may remove a one-shot before the driver consumes readiness.
-    // Disarming in that state must remain an idempotent operation.
+    // Retrieving an expired EV_ONESHOT removes its registration and updates
+    // bookkeeping. A later disarm must accept the resulting ENOENT.
     alarm.arm(alarm.now().unwrap()).unwrap();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(2), alarm.wait())
+        .await
+        .expect("elapsed kqueue readiness timed out")
+        .unwrap();
     alarm.disarm().unwrap();
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "Miri does not support kqueue descriptors")]
+async fn disarm_rejects_missing_recorded_timer() {
+    // Record a future timer in the adapter, then remove its kernel registration
+    // directly without updating the adapter's bookkeeping.
+    let alarm = NativeAlarm::new(0).unwrap();
+    alarm.arm(alarm.max_deadline()).unwrap();
+    let deletion = timer_change(libc::EV_DELETE, 0, 0);
+    submit_change(alarm.descriptor.get_ref().as_raw_fd(), &deletion).unwrap();
+
+    // Disarm must surface ENOENT while a timer remains recorded instead of
+    // treating deadline passage alone as proof of one-shot deletion.
+    let error = alarm
+        .disarm()
+        .expect_err("missing recorded timer must violate the adapter invariant");
+    assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
 }
 
 #[tokio::test]

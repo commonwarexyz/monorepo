@@ -39,14 +39,18 @@ fn timespec_validation() {
 }
 
 #[test]
-fn deadline_conversion_preserves_nanosecond_carry() {
-    // Construct the largest normalized subsecond value without carrying into
-    // the next second.
-    let value = deadline_timespec(Deadline::from_duration(Duration::new(7, 999_999_999))).unwrap();
+fn deadline_conversion_rejects_seconds_beyond_time_t() {
+    // Construct the first duration whose seconds cannot be represented by the
+    // signed timespec field.
+    let maximum = u64::try_from(libc::time_t::MAX).expect("time_t maximum must fit u64");
+    let unrepresentable = maximum
+        .checked_add(1)
+        .expect("Duration seconds must exceed time_t");
+    let deadline = Deadline::from_duration(Duration::from_secs(unrepresentable));
 
-    // Both fields must reach timerfd unchanged.
-    assert_eq!(value.tv_sec, 7);
-    assert_eq!(value.tv_nsec, 999_999_999);
+    // Conversion must reject the deadline instead of narrowing its seconds.
+    let error = deadline_timespec(deadline).expect_err("deadline must exceed time_t");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 }
 
 #[test]
@@ -136,6 +140,41 @@ async fn descriptor_flags_and_absolute_readiness() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore = "Miri does not support timerfd readiness")]
+async fn rearm_after_unconsumed_expiry_replaces_stale_readiness() {
+    // Arm a short deadline and wait for Tokio to observe readability without
+    // consuming the timerfd expiration count.
+    let alarm = NativeAlarm::new(0).unwrap();
+    let first = alarm
+        .now()
+        .unwrap()
+        .saturating_add(Duration::from_millis(10), alarm.max_deadline());
+    alarm.arm(first).unwrap();
+    let readiness = tokio::time::timeout(Duration::from_secs(2), alarm.descriptor.readable())
+        .await
+        .expect("first timerfd readiness timed out")
+        .unwrap();
+    drop(readiness);
+    assert!(alarm.now().unwrap() >= first);
+
+    // Rearm to a later deadline while both kernel and reactor readiness may
+    // still describe the first arm.
+    let second = alarm
+        .now()
+        .unwrap()
+        .saturating_add(Duration::from_millis(50), alarm.max_deadline());
+    alarm.arm(second).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), alarm.wait())
+        .await
+        .expect("rearmed timerfd readiness timed out")
+        .unwrap();
+
+    // Rearming resets the unread expiration, so stale readiness cannot make
+    // the replacement arm complete before its own absolute deadline.
+    assert!(alarm.now().unwrap() >= second);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "Miri does not support timerfd readiness")]
 async fn elapsed_arm_rearm_and_disarm() {
     // An already elapsed absolute deadline must become readable promptly.
     let alarm = NativeAlarm::new(0).unwrap();
@@ -149,14 +188,15 @@ async fn elapsed_arm_rearm_and_disarm() {
     // Replace a later arm with an earlier one and verify the earlier update
     // drives the next readiness event.
     let now = alarm.now().unwrap();
-    let later = now.saturating_add(Duration::from_millis(200), alarm.max_deadline());
-    let earlier = now.saturating_add(Duration::from_millis(20), alarm.max_deadline());
+    let later = now.saturating_add(Duration::from_secs(5), alarm.max_deadline());
+    let earlier = now.saturating_add(Duration::from_millis(50), alarm.max_deadline());
     alarm.arm(later).unwrap();
     alarm.arm(earlier).unwrap();
     tokio::time::timeout(Duration::from_secs(2), alarm.wait())
         .await
-        .unwrap()
+        .expect("earlier timerfd rearm did not replace the later deadline")
         .unwrap();
+    assert!(alarm.now().unwrap() >= earlier);
 
     // Replace an earlier arm with a later one. Readiness must follow the new
     // deadline rather than a stale kernel schedule.

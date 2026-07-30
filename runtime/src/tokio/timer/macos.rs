@@ -127,19 +127,13 @@ impl Alarm for NativeAlarm {
         let change = timer_change(libc::EV_DELETE, 0, 0);
         match submit_change(self.descriptor.get_ref().as_raw_fd(), &change) {
             Ok(()) => Ok(()),
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
-                // A timer can be absent before its readiness is consumed once
-                // its absolute deadline has elapsed. A future installed
-                // deadline disappearing remains an invariant violation.
-                // SAFETY: `mach_absolute_time` takes no arguments and cannot write memory.
-                #[allow(deprecated)]
-                let now = unsafe { libc::mach_absolute_time() };
-                if missing_timer_is_expected(installed, now) {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) && installed == NO_TIMER => {
+                // Startup, repeated disarm, and consumed EV_ONESHOT events have
+                // no recorded registration, so absence is expected.
+                Ok(())
             }
+            // ENOENT with a recorded timer means its registration disappeared
+            // before retrieval and remains an invariant violation.
             Err(error) => Err(error),
         }
     }
@@ -165,11 +159,6 @@ impl Alarm for NativeAlarm {
             }
         }
     }
-}
-
-/// Returns whether ENOENT is valid for the recorded timer state.
-const fn missing_timer_is_expected(installed: u64, now: u64) -> bool {
-    installed == NO_TIMER || now >= installed
 }
 
 /// Checked Mach tick and nanosecond conversion ratio.
