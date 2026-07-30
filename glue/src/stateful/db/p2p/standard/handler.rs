@@ -126,7 +126,7 @@ impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
 /// Carries the inclusion proof, the fetched operations, and
 /// optionally the pinned nodes at the requested start location.
 /// Encoded by the producing peer and decoded by the consuming peer;
-/// the actor converts this into a [`Response`](commonware_storage::qmdb::sync::source::Response)
+/// the actor converts this into a [`Response`](commonware_storage::qmdb::sync::Response)
 /// before handing it to subscribers.
 pub(super) struct Response<F: Family, Op, D: Digest> {
     pub(super) proof: Proof<F, D>,

@@ -529,8 +529,7 @@ where
         assert_eq!(H::db_root(&sync_db), root);
 
         H::destroy(sync_db).await;
-        let target_db =
-            Arc::try_unwrap(source).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+        let target_db = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
         H::destroy(target_db).await;
     });
 }

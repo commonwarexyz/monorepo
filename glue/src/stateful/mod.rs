@@ -22,7 +22,7 @@
 //!
 //! The [`db::p2p`] submodule provides P2P resolver actors (a
 //! [`db::p2p::standard`] resolver implementing
-//! [`commonware_storage::qmdb::sync::source::Source`] and a
+//! [`commonware_storage::qmdb::sync::Source`] and a
 //! [`db::p2p::compact`] resolver implementing
 //! [`commonware_storage::qmdb::sync::source::Source`] keyed by compact targets) over
 //! [`commonware-resolver`](commonware_resolver), enabling databases to fetch

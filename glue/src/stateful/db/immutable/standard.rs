@@ -27,10 +27,7 @@ use commonware_storage::{
             fixed, initial_root, variable,
         },
         operation::Key,
-        sync::{
-            self, Target as AnySyncTarget,
-            source::{Request, Source},
-        },
+        sync::{self, Request, Source, Target as AnySyncTarget},
     },
     translator::Translator,
 };
@@ -451,7 +448,7 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
@@ -460,7 +457,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         sync::sync(sync::engine::Config {
             context,
-            source: resolver,
+            source,
             target,
             max_outstanding_requests: sync_config.max_outstanding_requests,
             fetch_batch_size: sync_config.fetch_batch_size,
@@ -493,7 +490,7 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
@@ -502,7 +499,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         sync::sync(sync::engine::Config {
             context,
-            source: resolver,
+            source,
             target,
             max_outstanding_requests: sync_config.max_outstanding_requests,
             fetch_batch_size: sync_config.fetch_batch_size,

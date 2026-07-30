@@ -23,7 +23,7 @@ pub(crate) use database::{
 };
 
 pub mod source;
-pub(crate) use source::Source;
+pub use source::{Request, Response, Source, Validity};
 
 mod target;
 pub use target::Target;

@@ -11,10 +11,7 @@ use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{
-        compact,
-        source::{Response, ResponseConfig, Source},
-    },
+    qmdb::sync::{Response, Source, compact, source::ResponseConfig},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
@@ -262,28 +259,28 @@ where
         &mut self,
         key: compact::Target<F, H::Digest>,
         value: bytes::Bytes,
-        response: oneshot::Sender<bool>,
+        validity_tx: oneshot::Sender<bool>,
     ) {
         let Some(subscribers) = self.pending.remove(&key) else {
-            response.send_lossy(true);
+            validity_tx.send_lossy(true);
             return;
         };
 
-        let state = match Response::<F, DbOp<DB, F, H::Digest>, H::Digest>::decode_cfg(
+        let response = match Response::<F, DbOp<DB, F, H::Digest>, H::Digest>::decode_cfg(
             value,
             &COMPACT_RESPONSE_CFG,
         ) {
-            Ok(state) => state,
+            Ok(response) => response,
             Err(_) => {
                 self.pending.insert(key, subscribers);
-                response.send_lossy(false);
+                validity_tx.send_lossy(false);
                 return;
             }
         };
 
-        if !compact::admissible::<H, _, _>(&key, &state) {
+        if !compact::admissible::<H, _, _>(&key, &response) {
             self.pending.insert(key, subscribers);
-            response.send_lossy(false);
+            validity_tx.send_lossy(false);
             return;
         }
 
@@ -291,7 +288,7 @@ where
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok((state.clone(), Some(success_tx))))
+                .send(Ok((response.clone(), Some(success_tx))))
                 .is_err()
             {
                 continue;
@@ -300,7 +297,7 @@ where
         }
 
         if approvals.is_empty() {
-            response.send_lossy(true);
+            validity_tx.send_lossy(true);
             return;
         }
 
@@ -310,21 +307,21 @@ where
                 peer_valid &= approved;
             }
         }
-        response.send_lossy(peer_valid);
+        validity_tx.send_lossy(peer_valid);
     }
 
     async fn handle_produce(
         &mut self,
         key: compact::Target<F, H::Digest>,
-        response: oneshot::Sender<bytes::Bytes>,
+        response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             return;
         };
-        let Ok((state, _)) = database.serve(key).await else {
+        let Ok((response, _)) = database.serve(key).await else {
             return;
         };
-        response.send_lossy(state.encode());
+        response_tx.send_lossy(response.encode());
     }
 }
 

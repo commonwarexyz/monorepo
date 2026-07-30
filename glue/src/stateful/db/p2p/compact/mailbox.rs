@@ -5,10 +5,7 @@ use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{
-        compact,
-        source::{Response, Source, Validity},
-    },
+    qmdb::sync::{Response, Source, Validity, compact},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
