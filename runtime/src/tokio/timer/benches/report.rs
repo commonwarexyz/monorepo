@@ -129,32 +129,6 @@ pub(crate) fn print_effective_config(config: &Config) {
     );
 }
 
-/// Prints the fixed topology used by the cooperative fairness subrun.
-pub(crate) fn print_fairness_config(config: &Config) {
-    let accounting = format_sample_counts(
-        config.worst_batches,
-        &[("timers_per_batch", STORM_TIMERS)],
-        &[
-            ("first_dispatch", config.worst_batches),
-            ("full_drain", config.worst_batches),
-            ("peer_gap", config.worst_batches),
-        ],
-    );
-    println!(
-        "fairness_config requested_worker_threads={} worker_threads=1 shards={} \
-         {} storm_lead_us={} peer_lead_us={} fd_count={}",
-        config.worker_threads,
-        fairness_shards_label(),
-        accounting,
-        STORM_LEAD.as_micros(),
-        PEER_LEAD.as_micros(),
-        fd_count_label(),
-    );
-    println!(
-        "fairness_note one worker forces the timer driver and always-runnable peer to cooperate on the same executor"
-    );
-}
-
 /// Prints one duration distribution with common accounting fields.
 pub(crate) fn print_duration(
     name: &str,

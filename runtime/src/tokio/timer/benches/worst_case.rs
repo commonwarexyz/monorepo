@@ -50,7 +50,9 @@ pub(crate) fn run_fairness(config: &Config) -> io::Result<()> {
     let runtime =
         commonware_tokio::Runner::new(commonware_tokio::Config::default().with_worker_threads(1));
     runtime.start(|context| async move {
-        report::print_fairness_config(config);
+        println!(
+            "fairness_note one worker forces the timer driver and always-runnable peer to cooperate on the same executor"
+        );
         benchmark_expiry_storm(config, Arc::new(context)).await
     })
 }
