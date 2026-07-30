@@ -13,5 +13,19 @@ rust_2018_idioms = "deny"
 warnings = "deny"
 
 [dependencies]
+base64 = "0.22.1"
+commonware-cryptography = { path = "../../../cryptography" }
+commonware-math = { path = "../../../math" }
+commonware-p2p = { path = "../../../p2p" }
+commonware-runtime = { path = "../../../runtime" }
+commonware-stream = { path = "../../../stream" }
+commonware-utils = { path = "../../../utils" }
+commonware-websocket = { path = "../../../websocket" }
 ctutils = "0.4.2"
 getrandom = "0.4.3"
+http = "1.4.0"
+local-ip-address = "0.6.5"
+qrcode = { version = "0.14.1", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.49.0", features = ["io-util", "net", "signal", "sync", "time"] }

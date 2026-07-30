@@ -8,9 +8,11 @@
 //! either the handshake or a lookup attachment API.
 
 mod assets;
+mod invitation;
 mod pairing;
 
 pub use assets::{Asset, EmbeddedAssets};
+pub use invitation::PairingPayload;
 pub use pairing::{
     Capability, PairingError, PairingInvite, PairingReservation, PairingStore, PeerAdmission,
     PublicKeyBytes, SessionId,
