@@ -189,7 +189,6 @@ where
         });
         async move { receiver?.await.ok().map(|block| block.inner_shared()) }
     }
-
 }
 
 impl<S, B, C, H, P> DescendantProvider for Mailbox<S, Coding<B, C, H, P>>

@@ -853,9 +853,7 @@ where
                 response.send_lossy(self.stream.processed_height());
             }
             Message::GetDescendants {
-                request,
-                response,
-                ..
+                request, response, ..
             } => {
                 let page = self.resolve_descendants(request).await;
                 response.send_lossy(page);
@@ -2291,15 +2289,10 @@ where
     /// Resolves the next bounded page of a descendant walk.
     async fn resolve_descendants(
         &self,
-        request: DescendantRequest<
-            <V::Block as Digestible>::Digest,
-            DescendantCursor<V>,
-        >,
+        request: DescendantRequest<<V::Block as Digestible>::Digest, DescendantCursor<V>>,
     ) -> Option<DescendantPage<V::Block, DescendantCursor<V>>> {
         let cursor = match request {
-            DescendantRequest::Start { start, tip } => {
-                self.start_descendants(start, tip).await?
-            }
+            DescendantRequest::Start { start, tip } => self.start_descendants(start, tip).await?,
             DescendantRequest::Continue(cursor) => cursor,
         };
         self.continue_descendants(cursor).await
@@ -2343,9 +2336,7 @@ where
         let (start_height, located, next_candidate) = match start {
             BlockID::Height(height) => (height, None, 0),
             BlockID::Digest(digest) => {
-                if let Some(position) = candidates
-                    .iter()
-                    .position(|block| block.digest() == digest)
+                if let Some(position) = candidates.iter().position(|block| block.digest() == digest)
                 {
                     return Some(DescendantCursor {
                         tip,
@@ -2442,8 +2433,8 @@ where
         if blocks.is_empty() {
             return None;
         }
-        let has_more = cursor.next_finalized.is_some()
-            || cursor.next_candidate < cursor.candidates.len();
+        let has_more =
+            cursor.next_finalized.is_some() || cursor.next_candidate < cursor.candidates.len();
         Some(DescendantPage {
             blocks,
             tip: cursor.tip,

@@ -140,7 +140,6 @@ where
         });
         async move { receiver?.await.ok() }
     }
-
 }
 
 impl<S, B> DescendantProvider for Mailbox<S, Standard<B>>

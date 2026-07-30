@@ -113,7 +113,8 @@ impl<B: Block> Ancestry<B> for BoxedAncestry<B> {
     fn descendants(
         &self,
         start: BlockID<B::Digest>,
-    ) -> impl Future<Output = Option<impl Stream<Item = Arc<B>> + Send + Unpin + 'static>> + Send {
+    ) -> impl Future<Output = Option<impl Stream<Item = Arc<B>> + Send + Unpin + 'static>> + Send
+    {
         self.0.descendants_erased(start)
     }
 }
@@ -179,7 +180,8 @@ impl<B: Block> Ancestry<B> for BoundedAncestry<B> {
     fn descendants(
         &self,
         start: BlockID<B::Digest>,
-    ) -> impl Future<Output = Option<impl Stream<Item = Arc<B>> + Send + Unpin + 'static>> + Send {
+    ) -> impl Future<Output = Option<impl Stream<Item = Arc<B>> + Send + Unpin + 'static>> + Send
+    {
         // A bounded ancestry is fully in memory: serve the chain fixed at
         // construction from the start onward, in ascending height order.
         std::future::ready(chain_suffix(&self.chain, start).map(futures::stream::iter))
@@ -456,9 +458,8 @@ where
     fn descendants(
         &self,
         start: BlockID<<M::Block as Digestible>::Digest>,
-    ) -> impl Future<
-        Output = Option<impl Stream<Item = Arc<M::Block>> + Send + Unpin + 'static>,
-    > + Send {
+    ) -> impl Future<Output = Option<impl Stream<Item = Arc<M::Block>> + Send + Unpin + 'static>> + Send
+    {
         let chain = chain_suffix(&self.chain, start);
         let tip = self.tip;
         let marshal = self.marshal.clone();
@@ -805,7 +806,6 @@ mod test {
                     .map(Arc::new),
             )
         }
-
     }
 
     impl DescendantProvider for MockProvider {
@@ -814,7 +814,8 @@ mod test {
         fn get_descendants(
             &self,
             request: DescendantRequest<Sha256Digest, Self::Cursor>,
-        ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static {
+        ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static
+        {
             let result = (|| {
                 let DescendantRequest::Start { start, tip } = request else {
                     return None;
@@ -861,7 +862,6 @@ mod test {
         ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             std::future::ready(None)
         }
-
     }
 
     impl DescendantProvider for BulkProvider {
@@ -870,7 +870,8 @@ mod test {
         fn get_descendants(
             &self,
             request: DescendantRequest<Sha256Digest, Self::Cursor>,
-        ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static {
+        ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static
+        {
             self.bulk.fetch_add(1, Ordering::Relaxed);
             let chain = self.chain.clone();
             async move {
@@ -891,11 +892,7 @@ mod test {
                 };
                 let end = position.saturating_add(8).min(chain.len());
                 Some(DescendantPage {
-                    blocks: chain[position..end]
-                        .iter()
-                        .cloned()
-                        .map(Arc::new)
-                        .collect(),
+                    blocks: chain[position..end].iter().cloned().map(Arc::new).collect(),
                     tip: chain.last()?.digest(),
                     cursor: (end < chain.len()).then_some(end),
                 })
@@ -964,7 +961,6 @@ mod test {
             self.subscriptions.lock().push(subscription);
             parent.map(Result::ok)
         }
-
     }
 
     #[derive(Clone)]
@@ -1369,5 +1365,4 @@ mod test {
         }
         blocks
     }
-
 }

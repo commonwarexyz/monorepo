@@ -138,10 +138,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The span carried with this request.
         span: Span,
         /// A request to start or continue the walk.
-        request: DescendantRequest<
-            <V::Block as Digestible>::Digest,
-            DescendantCursor<V>,
-        >,
+        request: DescendantRequest<<V::Block as Digestible>::Digest, DescendantCursor<V>>,
         /// A channel to send the next page.
         response: oneshot::Sender<Option<DescendantPage<V::Block, DescendantCursor<V>>>>,
     },
@@ -838,10 +835,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Retrieves the next contiguous page of a descendant walk.
     pub(crate) fn resolve_descendants(
         &self,
-        request: DescendantRequest<
-            <V::Block as Digestible>::Digest,
-            DescendantCursor<V>,
-        >,
+        request: DescendantRequest<<V::Block as Digestible>::Digest, DescendantCursor<V>>,
     ) -> impl Future<Output = Option<DescendantPage<V::ApplicationBlock, DescendantCursor<V>>>>
     + Send
     + 'static {
@@ -855,11 +849,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             });
             let page = receiver.await.ok().flatten()?;
             Some(DescendantPage {
-                blocks: page
-                    .blocks
-                    .into_iter()
-                    .map(V::into_inner_shared)
-                    .collect(),
+                blocks: page.blocks.into_iter().map(V::into_inner_shared).collect(),
                 tip: page.tip,
                 cursor: page.cursor,
             })

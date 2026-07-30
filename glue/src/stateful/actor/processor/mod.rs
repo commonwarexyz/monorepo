@@ -477,11 +477,8 @@ where
 
         let verified = match await_or_cancel(
             &mut response,
-            self.app.verify(
-                (runtime_context, consensus_context),
-                ancestry,
-                batches,
-            ),
+            self.app
+                .verify((runtime_context, consensus_context), ancestry, batches),
         )
         .await
         {

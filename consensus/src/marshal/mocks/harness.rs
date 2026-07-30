@@ -5278,14 +5278,13 @@ where
         ));
 
         // Anchor an ancestry at each tip, as an application would hold them.
-        let fork_a_ancestry =
-            ancestry_at::<H>(
-                &handle,
-                &clock,
-                &fetch_duration,
-                H::digest(fork_a.last().unwrap()),
-            )
-            .await;
+        let fork_a_ancestry = ancestry_at::<H>(
+            &handle,
+            &clock,
+            &fetch_duration,
+            H::digest(fork_a.last().unwrap()),
+        )
+        .await;
         let fork_b_ancestry =
             ancestry_at::<H>(&handle, &clock, &fetch_duration, H::digest(&fork_b[1])).await;
         let finalized_ancestry =
