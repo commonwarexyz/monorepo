@@ -10,7 +10,7 @@ pub use request_id::RequestId;
 pub mod io;
 pub mod resolver;
 pub mod wire;
-pub use resolver::{CompactResolver, Resolver};
+pub use resolver::Resolver;
 
 /// A message that can be sent over the wire.
 pub(super) trait Message: Encode + DecodeExt<()> + Sized + Send + Sync + 'static {
@@ -117,13 +117,9 @@ impl Read for ErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        keyless_compact,
-        net::{ErrorCode, request_id::Generator, wire, wire::GetOperationsRequest},
-    };
+    use crate::net::{ErrorCode, request_id::Generator, wire::GetOperationsRequest};
     use commonware_codec::{DecodeExt as _, Encode as _};
-    use commonware_cryptography::sha256;
-    use commonware_storage::{mmr::Location, qmdb::sync::Response};
+    use commonware_storage::mmr::Location;
     use commonware_utils::NZU64;
     use rstest::rstest;
 
@@ -191,41 +187,5 @@ mod tests {
             request.validate(),
             Err(crate::Error::InvalidRequest(_))
         ));
-    }
-
-    #[test]
-    fn test_get_compact_state_response_roundtrip() {
-        let request_id = Generator::new().next();
-        let digest_a = sha256::Digest::from([7; 32]);
-        let digest_b = sha256::Digest::from([8; 32]);
-        let digest_c = sha256::Digest::from([10; 32]);
-        let message = wire::Message::GetCompactStateResponse(wire::GetCompactStateResponse {
-            request_id,
-            response: Response {
-                proof: commonware_storage::mmr::Proof {
-                    leaves: Location::new(11),
-                    inactive_peaks: 0,
-                    digests: vec![digest_c],
-                },
-                operations: vec![keyless_compact::Operation::Commit(None, Location::new(0))],
-                pinned_nodes: Some(vec![digest_a, digest_b]),
-            },
-        });
-
-        let encoded = message.encode().to_vec();
-        let decoded = wire::Message::<
-            keyless_compact::Operation,
-            commonware_cryptography::sha256::Digest,
-        >::decode(&encoded[..])
-        .expect("failed to decode compact response");
-
-        match decoded {
-            wire::Message::GetCompactStateResponse(message) => {
-                assert_eq!(message.request_id, request_id);
-                assert_eq!(message.response.proof.leaves, Location::new(11));
-                assert_eq!(message.response.pinned_nodes.unwrap().len(), 2);
-            }
-            other => panic!("unexpected message variant: {other:?}"),
-        }
     }
 }

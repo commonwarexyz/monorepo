@@ -29,9 +29,6 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Compact proof did not verify against the requested root.
     #[error("compact proof failed verification")]
     InvalidProof,
-    /// Compact target parameters were invalid.
-    #[error("invalid compact target: {0}")]
-    InvalidCompactTarget(&'static str),
     /// Invalid target parameters
     #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
     InvalidTarget {

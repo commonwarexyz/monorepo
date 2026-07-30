@@ -16,7 +16,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::Error as JournalError,
     merkle::Error as MerkleError,
-    mmr::{self, Location},
+    mmr,
     qmdb::{
         self,
         sync::{self, Source as _, Target},
@@ -30,7 +30,7 @@ use commonware_sync::{
     net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE, wire},
 };
 use commonware_utils::{
-    DurationExt, NZU64,
+    DurationExt,
     channel::mpsc,
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
@@ -349,11 +349,11 @@ where
     })
 }
 
-/// Handle a GetCompactStateRequest and return compact authenticated state.
-async fn handle_get_compact_state<DB>(
+/// Handle a GetOperationsRequest against a compact database's single retained state.
+async fn handle_get_compact_operations<DB>(
     state: &State<DB>,
-    request: wire::GetCompactStateRequest,
-) -> Result<wire::GetCompactStateResponse<DB::Operation, Key>, Error>
+    request: wire::GetOperationsRequest,
+) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
 where
     DB: CompactSyncable<Family = mmr::Family>,
     Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
@@ -364,16 +364,16 @@ where
         >,
 {
     state.request_counter.inc();
+    request.validate()?;
 
-    let leaf_count = request.leaf_count;
     let serve_request = sync::Request {
-        size: leaf_count,
-        start: Location::new(*leaf_count - 1),
-        max_ops: NZU64!(1),
-        retain_from: Some(leaf_count),
+        size: request.op_count,
+        start: request.start_loc,
+        max_ops: request.max_ops,
+        retain_from: request.include_pinned_nodes.then_some(request.start_loc),
     };
-    let (compact_state, _) = state.database.serve(serve_request).await.map_err(|err| {
-        warn!(?err, "failed to serve compact state");
+    let (response, _) = state.database.serve(serve_request).await.map_err(|err| {
+        warn!(?err, "failed to serve operations from compact state");
         match err {
             // A compact server retains only its latest committed state, so a request outside it
             // means the client's target is stale and it should fetch a fresh one.
@@ -386,9 +386,11 @@ where
         }
     })?;
 
-    Ok(wire::GetCompactStateResponse {
+    Ok(wire::GetOperationsResponse {
         request_id: request.request_id,
-        response: compact_state,
+        proof: response.proof,
+        operations: response.operations,
+        pinned_nodes: response.pinned_nodes,
     })
 }
 
@@ -446,11 +448,11 @@ where
     ) -> wire::Message<DB::Operation, Key> {
         let request_id = message.request_id();
         match message {
-            wire::Message::GetCompactStateRequest(request) => dispatch_message!(
+            wire::Message::GetOperationsRequest(request) => dispatch_message!(
                 state,
                 request_id,
-                wire::Message::GetCompactStateResponse,
-                handle_get_compact_state::<DB>(state, request)
+                wire::Message::GetOperationsResponse,
+                handle_get_compact_operations::<DB>(state, request)
             ),
             wire::Message::GetCompactTargetRequest(request) => dispatch_message!(
                 state,

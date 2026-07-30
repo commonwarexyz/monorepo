@@ -7,7 +7,7 @@ use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
     merkle::MAX_PINNED_NODES,
     mmr::{self, Location, Proof},
-    qmdb::sync::{Target, compact, source::Response},
+    qmdb::sync::{Target, compact},
 };
 use std::num::NonZeroU64;
 
@@ -68,26 +68,6 @@ where
     pub target: compact::Target<mmr::Family, D>,
 }
 
-/// Request for the compact authenticated state at a committed operation count.
-///
-/// The target root does not travel with the request; the client verifies the response against
-/// its own target.
-#[derive(Debug)]
-pub struct GetCompactStateRequest {
-    pub request_id: RequestId,
-    pub leaf_count: Location,
-}
-
-/// Response with compact authenticated state.
-#[derive(Debug)]
-pub struct GetCompactStateResponse<Op, D>
-where
-    D: Digest,
-{
-    pub request_id: RequestId,
-    pub response: Response<mmr::Family, Op, D>,
-}
-
 /// Messages that can be sent over the wire.
 #[derive(Debug)]
 pub enum Message<Op, D>
@@ -100,8 +80,6 @@ where
     GetSyncTargetResponse(GetSyncTargetResponse<D>),
     GetCompactTargetRequest(GetCompactTargetRequest),
     GetCompactTargetResponse(GetCompactTargetResponse<D>),
-    GetCompactStateRequest(GetCompactStateRequest),
-    GetCompactStateResponse(GetCompactStateResponse<Op, D>),
     Error(ErrorResponse),
 }
 
@@ -117,8 +95,6 @@ where
             Self::GetSyncTargetResponse(r) => r.request_id,
             Self::GetCompactTargetRequest(r) => r.request_id,
             Self::GetCompactTargetResponse(r) => r.request_id,
-            Self::GetCompactStateRequest(r) => r.request_id,
-            Self::GetCompactStateResponse(r) => r.request_id,
             Self::Error(e) => e.request_id,
         }
     }
@@ -166,16 +142,8 @@ where
                 5u8.write(buf);
                 resp.write(buf);
             }
-            Self::GetCompactStateRequest(req) => {
-                6u8.write(buf);
-                req.write(buf);
-            }
-            Self::GetCompactStateResponse(resp) => {
-                7u8.write(buf);
-                resp.write(buf);
-            }
             Self::Error(err) => {
-                8u8.write(buf);
+                6u8.write(buf);
                 err.write(buf);
             }
         }
@@ -195,8 +163,6 @@ where
             Self::GetSyncTargetResponse(resp) => resp.encode_size(),
             Self::GetCompactTargetRequest(req) => req.encode_size(),
             Self::GetCompactTargetResponse(resp) => resp.encode_size(),
-            Self::GetCompactStateRequest(req) => req.encode_size(),
-            Self::GetCompactStateResponse(resp) => resp.encode_size(),
             Self::Error(err) => err.encode_size(),
         }
     }
@@ -226,13 +192,7 @@ where
             5 => Ok(Self::GetCompactTargetResponse(
                 GetCompactTargetResponse::read(buf)?,
             )),
-            6 => Ok(Self::GetCompactStateRequest(GetCompactStateRequest::read(
-                buf,
-            )?)),
-            7 => Ok(Self::GetCompactStateResponse(
-                GetCompactStateResponse::read(buf)?,
-            )),
-            8 => Ok(Self::Error(ErrorResponse::read(buf)?)),
+            6 => Ok(Self::Error(ErrorResponse::read(buf)?)),
             d => Err(CodecError::InvalidEnum(d)),
         }
     }
@@ -413,37 +373,6 @@ where
     }
 }
 
-impl Write for GetCompactStateRequest {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.request_id.write(buf);
-        self.leaf_count.write(buf);
-    }
-}
-
-impl EncodeSize for GetCompactStateRequest {
-    fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.leaf_count.encode_size()
-    }
-}
-
-impl Read for GetCompactStateRequest {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let request_id = RequestId::read_cfg(buf, &())?;
-        let leaf_count = Location::read_cfg(buf, &())?;
-        if !leaf_count.is_valid() || leaf_count == 0 {
-            return Err(CodecError::Invalid(
-                "sync::GetCompactStateRequest",
-                "leaf_count must be in 1..=MAX_LEAVES",
-            ));
-        }
-        Ok(Self {
-            request_id,
-            leaf_count,
-        })
-    }
-}
-
 impl Write for GetCompactTargetRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
@@ -492,44 +421,5 @@ where
         let request_id = RequestId::read_cfg(buf, &())?;
         let target = compact::Target::<mmr::Family, D>::read_cfg(buf, &())?;
         Ok(Self { request_id, target })
-    }
-}
-
-impl<Op, D> Write for GetCompactStateResponse<Op, D>
-where
-    Op: Write,
-    D: Digest,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        self.request_id.write(buf);
-        self.response.write(buf);
-    }
-}
-
-impl<Op, D> EncodeSize for GetCompactStateResponse<Op, D>
-where
-    Op: EncodeSize,
-    D: Digest,
-{
-    fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.response.encode_size()
-    }
-}
-
-impl<Op, D> Read for GetCompactStateResponse<Op, D>
-where
-    Op: Read,
-    Op::Cfg: IsUnit,
-    D: Digest,
-{
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let request_id = RequestId::read_cfg(buf, &())?;
-        // Compact state is exactly one operation, the final commit.
-        let response = Response::<mmr::Family, Op, D>::read_cfg(buf, &(1, Op::Cfg::default()))?;
-        Ok(Self {
-            request_id,
-            response,
-        })
     }
 }

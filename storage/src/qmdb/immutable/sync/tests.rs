@@ -1207,6 +1207,39 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     });
 }
 
+/// Engine configuration for a compact sync: the one-operation range ending at the target.
+fn compact_engine_config<DB, S>(
+    context: DB::Context,
+    source: S,
+    target: sync::compact::Target<DB::Family, DB::Digest>,
+    db_config: DB::Config,
+) -> sync::engine::Config<DB, S>
+where
+    DB: sync::Database,
+    S: sync::SourceFor<DB>,
+    DB::Op: Encode,
+{
+    sync::engine::Config {
+        context,
+        db_config,
+        fetch_batch_size: NZU64!(1),
+        target: sync::Target {
+            root: target.root,
+            range: commonware_utils::non_empty_range!(
+                Location::new(*target.leaf_count - 1),
+                target.leaf_count
+            ),
+        },
+        source,
+        apply_batch_size: 1024,
+        max_outstanding_requests: 1,
+        update_rx: None,
+        finish_rx: None,
+        reached_target_tx: None,
+        max_retained_roots: 1,
+    }
+}
+
 mod compact_variable_mmr {
     use super::*;
     use crate::merkle::mmr;
@@ -1329,7 +1362,7 @@ mod compact_variable_mmr {
                 size: target.leaf_count,
                 start: Location::new(*target.leaf_count - 1),
                 max_ops: NZU64!(1),
-                retain_from: Some(target.leaf_count),
+                retain_from: Some(Location::new(*target.leaf_count - 1)),
             })
             .await
     }
@@ -1378,15 +1411,12 @@ mod compact_variable_mmr {
             };
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix, &context);
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: source.clone(),
-                target: target.clone(),
-                db_config: client_cfg.clone(),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                source.clone(),
+                target.clone(),
+                client_cfg.clone(),
+            ))
             .await
             .unwrap();
 
@@ -1436,20 +1466,17 @@ mod compact_variable_mmr {
             let mut bad_state = good_state.clone();
             bad_state.proof = crate::merkle::Proof::default();
 
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: SequenceSource {
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
                     ]))),
                 },
-                target: target.clone(),
-                db_config: client_config(&suffix, &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+                target.clone(),
+                client_config(&suffix, &context),
+            ))
             .await
             .unwrap();
             assert_eq!(client.root(), target.root);
@@ -1500,20 +1527,17 @@ mod compact_variable_mmr {
 
             let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: SequenceSource {
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, Some(bad_tx)),
                         (good_state, Some(good_tx)),
                     ]))),
                 },
-                target: target.clone(),
-                db_config: client_config(&suffix, &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+                target.clone(),
+                client_config(&suffix, &context),
+            ))
             .await
             .unwrap();
 
@@ -1559,20 +1583,17 @@ mod compact_variable_mmr {
             bad_state.pinned_nodes.as_mut().unwrap()[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix, &context);
-            let synced: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: SequenceSource {
+            let synced: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
                     ]))),
                 },
-                target: target.clone(),
-                db_config: client_cfg.clone(),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+                target.clone(),
+                client_cfg.clone(),
+            ))
             .await
             .unwrap();
             assert_eq!(synced.root(), target.root);
@@ -1619,20 +1640,17 @@ mod compact_variable_mmr {
             let mut bad_state = good_state.clone();
             bad_state.proof.leaves = Location::new(*bad_state.proof.leaves - 1);
 
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: SequenceSource {
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
                     ]))),
                 },
-                target: target.clone(),
-                db_config: client_config(&suffix, &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+                target.clone(),
+                client_config(&suffix, &context),
+            ))
             .await
             .unwrap();
             assert_eq!(client.root(), target.root);
@@ -1676,15 +1694,12 @@ mod compact_variable_mmr {
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: source.clone(),
-                target: stale_target.clone(),
-                db_config: client_config(&suffix, &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                source.clone(),
+                stale_target.clone(),
+                client_config(&suffix, &context),
+            ))
             .await
             .unwrap();
             assert_eq!(client.root(), stale_target.root);
@@ -1722,15 +1737,12 @@ mod compact_variable_mmr {
                 .unwrap();
             assert_eq!(source.target(), target1);
 
-            let served1: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve").with_attribute("index", 1),
-                source: Arc::new(source),
-                target: target1.clone(),
-                db_config: client_config(&format!("{suffix}-serve1"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let served1: ClientDb = sync::sync(compact_engine_config(
+                context.child("serve").with_attribute("index", 1),
+                Arc::new(source),
+                target1.clone(),
+                client_config(&format!("{suffix}-serve1"), &context),
+            ))
             .await
             .unwrap();
             assert_eq!(served1.root(), target1.root);
@@ -1756,15 +1768,12 @@ mod compact_variable_mmr {
             let source = source.rewind(target1.leaf_count).await.unwrap();
             assert_eq!(source.target(), target1);
 
-            let served2: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve").with_attribute("index", 2),
-                source: Arc::new(source),
-                target: target1.clone(),
-                db_config: client_config(&format!("{suffix}-serve2"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let served2: ClientDb = sync::sync(compact_engine_config(
+                context.child("serve").with_attribute("index", 2),
+                Arc::new(source),
+                target1.clone(),
+                client_config(&format!("{suffix}-serve2"), &context),
+            ))
             .await
             .unwrap();
             assert_eq!(served2.root(), target1.root);
@@ -1789,15 +1798,12 @@ mod compact_variable_mmr {
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
 
-            let served3: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve").with_attribute("index", 3),
-                source: Arc::new(source),
-                target: target3.clone(),
-                db_config: client_config(&format!("{suffix}-serve3"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let served3: ClientDb = sync::sync(compact_engine_config(
+                context.child("serve").with_attribute("index", 3),
+                Arc::new(source),
+                target3.clone(),
+                client_config(&format!("{suffix}-serve3"), &context),
+            ))
             .await
             .unwrap();
             assert_eq!(served3.root(), target3.root);
@@ -1810,15 +1816,12 @@ mod compact_variable_mmr {
                     .await
                     .unwrap(),
             );
-            let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.child("stale_client"),
-                source: source.clone(),
-                target: target2.clone(),
-                db_config: client_config(&format!("{suffix}-stale"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("stale_client"),
+                source.clone(),
+                target2.clone(),
+                client_config(&format!("{suffix}-stale"), &context),
+            ))
             .await;
             assert!(matches!(
                 stale_result,
@@ -1827,17 +1830,13 @@ mod compact_variable_mmr {
 
             // A target below the retained tip is refused outright: the witness prunes
             // everything before its latest commit.
-            let size_stale_result: Result<ClientDb, _> =
-                sync::compact::sync(sync::compact::Config {
-                    context: context.child("size_stale_client"),
-                    source: source.clone(),
-                    target: target1.clone(),
-                    db_config: client_config(&format!("{suffix}-size-stale"), &context),
-                    update_rx: None,
-                    finish_rx: None,
-                    reached_target_tx: None,
-                })
-                .await;
+            let size_stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("size_stale_client"),
+                source.clone(),
+                target1.clone(),
+                client_config(&format!("{suffix}-size-stale"), &context),
+            ))
+            .await;
             assert!(matches!(
                 size_stale_result,
                 Err(sync::Error::Source(qmdb::Error::Journal(
@@ -1903,15 +1902,12 @@ mod compact_variable_mmr {
                 leaf_count: bounds.end,
             };
 
-            let synced: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: Arc::new(source),
-                target: target.clone(),
-                db_config: client_cfg.clone(),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let synced: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                Arc::new(source),
+                target.clone(),
+                client_cfg.clone(),
+            ))
             .await
             .unwrap();
             assert_eq!(synced.root(), target.root);
@@ -1966,17 +1962,25 @@ mod compact_variable_mmr {
             };
             assert_ne!(target_b, target_a);
             let source = Arc::new(source);
-            let (response, _) = fetch_compact_state(&source, target_b.clone())
+            let (mut response, _) = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let validated =
-                sync::compact::validate_compact_state::<ClientDb>(&target_b, response).unwrap();
-            let imported = <ClientDb as sync::compact::Database>::from_validated_state(
+            let op = response.operations.pop().unwrap();
+            let pins = response.pinned_nodes.take().unwrap();
+            let journal = crate::journal::contiguous::variable::Journal::init(
                 context.child("import"),
-                client_cfg.clone(),
-                validated,
+                client_cfg.witness.clone(),
             )
             .await
+            .unwrap();
+            let imported = ClientDb::init_from_sync(
+                client_cfg.strategy.clone(),
+                journal,
+                client_cfg.commit_codec_config,
+                Location::new(*target_b.leaf_count - 1),
+                pins,
+                op,
+            )
             .unwrap();
             assert_eq!(imported.target(), target_b);
 
@@ -1985,17 +1989,25 @@ mod compact_variable_mmr {
             assert!(imported.rewind(target_b.leaf_count).await.is_err());
 
             // Prune is likewise rejected while the import is pending; rebuild the import.
-            let (response, _) = fetch_compact_state(&source, target_b.clone())
+            let (mut response, _) = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let validated =
-                sync::compact::validate_compact_state::<ClientDb>(&target_b, response).unwrap();
-            let imported = <ClientDb as sync::compact::Database>::from_validated_state(
+            let op = response.operations.pop().unwrap();
+            let pins = response.pinned_nodes.take().unwrap();
+            let journal = crate::journal::contiguous::variable::Journal::init(
                 context.child("import").with_attribute("index", 2),
-                client_cfg.clone(),
-                validated,
+                client_cfg.witness.clone(),
             )
             .await
+            .unwrap();
+            let imported = ClientDb::init_from_sync(
+                client_cfg.strategy.clone(),
+                journal,
+                client_cfg.commit_codec_config,
+                Location::new(*target_b.leaf_count - 1),
+                pins,
+                op,
+            )
             .unwrap();
             assert!(imported.prune(target_b.leaf_count).await.is_err());
 
@@ -2131,7 +2143,7 @@ mod compact_variable_mmb {
                 size: target.leaf_count,
                 start: Location::new(*target.leaf_count - 1),
                 max_ops: NZU64!(1),
-                retain_from: Some(target.leaf_count),
+                retain_from: Some(Location::new(*target.leaf_count - 1)),
             })
             .await
     }
@@ -2180,15 +2192,12 @@ mod compact_variable_mmb {
             };
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix, &context);
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: source.clone(),
-                target: target.clone(),
-                db_config: client_cfg.clone(),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                source.clone(),
+                target.clone(),
+                client_cfg.clone(),
+            ))
             .await
             .unwrap();
 
@@ -2238,20 +2247,17 @@ mod compact_variable_mmb {
             let mut bad_state = good_state.clone();
             bad_state.proof = crate::merkle::Proof::default();
 
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: SequenceSource {
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
                     ]))),
                 },
-                target: target.clone(),
-                db_config: client_config(&suffix, &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+                target.clone(),
+                client_config(&suffix, &context),
+            ))
             .await
             .unwrap();
             assert_eq!(client.root(), target.root);
@@ -2302,20 +2308,17 @@ mod compact_variable_mmb {
 
             let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: SequenceSource {
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, Some(bad_tx)),
                         (good_state, Some(good_tx)),
                     ]))),
                 },
-                target: target.clone(),
-                db_config: client_config(&suffix, &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+                target.clone(),
+                client_config(&suffix, &context),
+            ))
             .await
             .unwrap();
 
@@ -2361,20 +2364,17 @@ mod compact_variable_mmb {
             bad_state.pinned_nodes.as_mut().unwrap()[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix, &context);
-            let synced: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: SequenceSource {
+            let synced: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
                     ]))),
                 },
-                target: target.clone(),
-                db_config: client_cfg.clone(),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+                target.clone(),
+                client_cfg.clone(),
+            ))
             .await
             .unwrap();
             assert_eq!(synced.root(), target.root);
@@ -2424,20 +2424,17 @@ mod compact_variable_mmb {
             let mut bad_state = good_state.clone();
             bad_state.proof.leaves = Location::new(*bad_state.proof.leaves - 1);
 
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: SequenceSource {
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
                     ]))),
                 },
-                target: target.clone(),
-                db_config: client_config(&suffix, &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+                target.clone(),
+                client_config(&suffix, &context),
+            ))
             .await
             .unwrap();
             assert_eq!(client.root(), target.root);
@@ -2481,15 +2478,12 @@ mod compact_variable_mmb {
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                source: source.clone(),
-                target: stale_target.clone(),
-                db_config: client_config(&suffix, &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let client: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                source.clone(),
+                stale_target.clone(),
+                client_config(&suffix, &context),
+            ))
             .await
             .unwrap();
             assert_eq!(client.root(), stale_target.root);
@@ -2527,15 +2521,12 @@ mod compact_variable_mmb {
                 .unwrap();
             assert_eq!(source.target(), target1);
 
-            let served1: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve").with_attribute("index", 1),
-                source: Arc::new(source),
-                target: target1.clone(),
-                db_config: client_config(&format!("{suffix}-serve1"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let served1: ClientDb = sync::sync(compact_engine_config(
+                context.child("serve").with_attribute("index", 1),
+                Arc::new(source),
+                target1.clone(),
+                client_config(&format!("{suffix}-serve1"), &context),
+            ))
             .await
             .unwrap();
             assert_eq!(served1.root(), target1.root);
@@ -2561,15 +2552,12 @@ mod compact_variable_mmb {
             let source = source.rewind(target1.leaf_count).await.unwrap();
             assert_eq!(source.target(), target1);
 
-            let served2: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve").with_attribute("index", 2),
-                source: Arc::new(source),
-                target: target1.clone(),
-                db_config: client_config(&format!("{suffix}-serve2"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let served2: ClientDb = sync::sync(compact_engine_config(
+                context.child("serve").with_attribute("index", 2),
+                Arc::new(source),
+                target1.clone(),
+                client_config(&format!("{suffix}-serve2"), &context),
+            ))
             .await
             .unwrap();
             assert_eq!(served2.root(), target1.root);
@@ -2594,15 +2582,12 @@ mod compact_variable_mmb {
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
 
-            let served3: ClientDb = sync::compact::sync(sync::compact::Config {
-                context: context.child("serve").with_attribute("index", 3),
-                source: Arc::new(source),
-                target: target3.clone(),
-                db_config: client_config(&format!("{suffix}-serve3"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let served3: ClientDb = sync::sync(compact_engine_config(
+                context.child("serve").with_attribute("index", 3),
+                Arc::new(source),
+                target3.clone(),
+                client_config(&format!("{suffix}-serve3"), &context),
+            ))
             .await
             .unwrap();
             assert_eq!(served3.root(), target3.root);
@@ -2616,15 +2601,12 @@ mod compact_variable_mmb {
                     .unwrap(),
             );
             assert_eq!(source.target(), target3);
-            let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.child("stale_client"),
-                source: source.clone(),
-                target: target2.clone(),
-                db_config: client_config(&format!("{suffix}-stale"), &context),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
+            let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("stale_client"),
+                source.clone(),
+                target2.clone(),
+                client_config(&format!("{suffix}-stale"), &context),
+            ))
             .await;
             assert!(matches!(
                 stale_result,
@@ -2633,17 +2615,13 @@ mod compact_variable_mmb {
 
             // A target below the retained tip is refused outright: the witness prunes
             // everything before its latest commit.
-            let size_stale_result: Result<ClientDb, _> =
-                sync::compact::sync(sync::compact::Config {
-                    context: context.child("size_stale_client"),
-                    source: source.clone(),
-                    target: target1.clone(),
-                    db_config: client_config(&format!("{suffix}-size-stale"), &context),
-                    update_rx: None,
-                    finish_rx: None,
-                    reached_target_tx: None,
-                })
-                .await;
+            let size_stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("size_stale_client"),
+                source.clone(),
+                target1.clone(),
+                client_config(&format!("{suffix}-size-stale"), &context),
+            ))
+            .await;
             assert!(matches!(
                 size_stale_result,
                 Err(sync::Error::Source(qmdb::Error::Journal(

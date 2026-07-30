@@ -80,9 +80,13 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{Request, Response, Source, ValidityTx};
+use commonware_storage::{
+    merkle::Location,
+    qmdb::sync::{self, Request, Response, Source, ValidityTx},
+};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
+    non_empty_range,
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
 use futures::{
@@ -1454,6 +1458,87 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         }
         self.dbs[idx] = DbSyncState::Reached { generation };
     }
+}
+
+/// Run engine sync for a compact database: the sync range is the one operation ending at the
+/// target, and the target-update and reached channels are translated between the compact
+/// target and the engine's ranged target.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn sync_compact_db<E, DB, R>(
+    context: E,
+    config: DB::Config,
+    source: R,
+    target: sync::compact::Target<DB::Family, DB::Digest>,
+    mut tip_updates: mpsc::Receiver<sync::compact::Target<DB::Family, DB::Digest>>,
+    finish: Option<mpsc::Receiver<()>>,
+    reached_target: Option<mpsc::Sender<sync::compact::Target<DB::Family, DB::Digest>>>,
+    sync_config: SyncEngineConfig,
+) -> Result<DB, sync::Error<DB::Family, R::Error, DB::Digest>>
+where
+    E: Metrics + Spawner,
+    DB: sync::Database<Context = E>,
+    DB::Op: commonware_codec::Encode,
+    R: sync::SourceFor<DB>,
+{
+    fn engine_target<F: commonware_storage::merkle::Family, D: Digest>(
+        target: &sync::compact::Target<F, D>,
+    ) -> Result<sync::Target<F, D>, sync::EngineError<F, D>> {
+        let end = target.leaf_count;
+        let start = end.checked_sub(1).ok_or(sync::EngineError::InvalidTarget {
+            lower_bound_pos: Location::new(0),
+            upper_bound_pos: end,
+        })?;
+        Ok(sync::Target {
+            root: target.root,
+            range: non_empty_range!(start, end),
+        })
+    }
+
+    let initial = engine_target(&target).map_err(sync::Error::Engine)?;
+
+    let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
+    context.child("compact_updates").spawn(move |_| async move {
+        while let Some(update) = tip_updates.recv().await {
+            // A malformed update cannot supersede anything; skip it like a stale one.
+            let Ok(update) = engine_target(&update) else {
+                continue;
+            };
+            if update_tx.send(update).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let reached_target_tx = reached_target.map(|reached| {
+        let (tx, mut rx) = mpsc::channel::<sync::Target<DB::Family, DB::Digest>>(1);
+        context.child("compact_reached").spawn(move |_| async move {
+            while let Some(reached_engine_target) = rx.recv().await {
+                let target = sync::compact::Target {
+                    root: reached_engine_target.root,
+                    leaf_count: reached_engine_target.range.end(),
+                };
+                if reached.send(target).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tx
+    });
+
+    sync::sync(sync::engine::Config {
+        context,
+        source,
+        target: initial,
+        db_config: config,
+        fetch_batch_size: sync_config.fetch_batch_size,
+        apply_batch_size: sync_config.apply_batch_size,
+        max_outstanding_requests: sync_config.max_outstanding_requests,
+        max_retained_roots: sync_config.max_retained_roots,
+        update_rx: Some(update_rx),
+        finish_rx: finish,
+        reached_target_tx,
+    })
+    .await
 }
 
 #[tracing::instrument(name = "stateful.db.finalize_or_panic", level = "info", skip_all, fields(index = index))]

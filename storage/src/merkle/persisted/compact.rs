@@ -132,6 +132,21 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         Arc::make_mut(&mut *self.inner.write()).prune_all();
     }
 
+    /// Hash `element` and append it as a single leaf, mutating in place.
+    pub(crate) fn append_leaf(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        element: &[u8],
+    ) -> Result<(), Error<F>> {
+        let batch = {
+            let inner = self.inner.read();
+            UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
+                .add(hasher, element)
+                .merkleize(&inner, hasher)
+        };
+        Arc::make_mut(&mut *self.inner.write()).apply_batch(&batch)
+    }
+
     /// Return the root digest of the current state.
     pub fn root(
         &self,

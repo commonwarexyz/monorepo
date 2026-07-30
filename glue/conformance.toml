@@ -38,10 +38,6 @@ n_cases = 8192
 hash = "334bc977cfa11a849de1b135da67dd6b2103608838a8a5fa2093b401ea161a78"
 n_cases = 65536
 
-["commonware_glue::stateful::db::p2p::compact::handler::tests::conformance::CodecConformance<Request<mmr::Family>>"]
-hash = "d31c069274546f26c8f9b5b65dc984684a508a3c2cf56777b389e67fc54a3e97"
-n_cases = 65536
-
 ["commonware_glue::stateful::db::p2p::standard::handler::tests::conformance::CodecConformance<Request<mmr::Family>>"]
 hash = "44c363dc52376203a66269a71e13f7271c1a9beb1f8ee9dd9864a3ce7ae2c281"
 n_cases = 65536

@@ -98,38 +98,6 @@ where
             _ => Err(crate::Error::UnexpectedResponse { request_id }),
         }
     }
-
-    /// Returns the compact authenticated state at the given committed operation count.
-    pub async fn get_compact_state(
-        &self,
-        leaf_count: mmr::Location,
-    ) -> Result<sync::Response<mmr::Family, Op, D>, crate::Error> {
-        let request_id = self.request_id_generator.next();
-        let request = wire::Message::GetCompactStateRequest(wire::GetCompactStateRequest {
-            request_id,
-            leaf_count,
-        });
-        let (tx, rx) = oneshot::channel();
-        self.request_tx
-            .clone()
-            .send(io::Request {
-                request,
-                response_tx: tx,
-            })
-            .await
-            .map_err(|_| crate::Error::RequestChannelClosed)?;
-        let response = rx
-            .await
-            .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
-        match response {
-            wire::Message::GetCompactStateResponse(r) => Ok(r.response),
-            wire::Message::Error(err) => Err(crate::Error::Server {
-                code: err.error_code,
-                message: err.message,
-            }),
-            _ => Err(crate::Error::UnexpectedResponse { request_id }),
-        }
-    }
 }
 
 impl<Op, D> sync::Source for Resolver<Op, D>
@@ -188,41 +156,5 @@ where
             }),
             _ => Err(crate::Error::UnexpectedResponse { request_id }),
         }
-    }
-}
-
-/// A [`Resolver`] that fetches compact state.
-///
-/// A separate type from [`Resolver`] because the two fetch paths use different wire messages:
-/// a compact-mode server only answers compact state requests.
-#[derive(Clone)]
-pub struct CompactResolver<Op, D>(pub Resolver<Op, D>)
-where
-    Op: Read + EncodeShared + 'static,
-    Op::Cfg: IsUnit,
-    D: Digest;
-
-impl<Op, D> sync::Source for CompactResolver<Op, D>
-where
-    Op: Clone + Read + EncodeShared + 'static,
-    Op::Cfg: IsUnit,
-    D: Digest,
-{
-    type Family = mmr::Family;
-    type Digest = D;
-    type Op = Op;
-    type Error = crate::Error;
-
-    async fn serve(
-        &self,
-        request: sync::Request<mmr::Family>,
-    ) -> Result<
-        (
-            sync::Response<Self::Family, Self::Op, Self::Digest>,
-            sync::ValidityTx,
-        ),
-        Self::Error,
-    > {
-        Ok((self.0.get_compact_state(request.size).await?, None))
     }
 }

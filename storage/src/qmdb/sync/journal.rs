@@ -157,6 +157,72 @@ where
     }
 }
 
+/// An in-memory operation journal for databases without a persistent operation log.
+///
+/// Durability is an optimization for sync journals: a journal that loses its contents simply
+/// restarts sync from scratch. Databases whose sync range is a handful of operations (compact
+/// dbs sync exactly one) lose nothing by keeping the fetched operations in memory.
+pub struct Memory<F: Family, E, Op> {
+    start: Location<F>,
+    ops: Vec<Op>,
+    _context: std::marker::PhantomData<fn() -> E>,
+}
+
+impl<F: Family, E, Op> Memory<F, E, Op> {
+    /// The first location this journal holds, and the fetched operations from it.
+    pub(crate) fn into_parts(self) -> (Location<F>, Vec<Op>) {
+        (self.start, self.ops)
+    }
+}
+
+impl<F, E, Op> Journal<F> for Memory<F, E, Op>
+where
+    F: Family,
+    E: Send,
+    Op: Clone + Send + Sync,
+{
+    type Context = E;
+    type Config = ();
+    type Op = Op;
+    type Error = crate::qmdb::Error<F>;
+
+    async fn new(
+        _context: Self::Context,
+        _config: Self::Config,
+        range: NonEmptyRange<Location<F>>,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self {
+            start: range.start(),
+            ops: Vec::new(),
+            _context: std::marker::PhantomData,
+        })
+    }
+
+    async fn resize(mut self, start: Location<F>) -> Result<Self, Self::Error> {
+        if start < self.start || *start >= self.size() {
+            self.start = start;
+            self.ops.clear();
+        } else {
+            self.ops.drain(..(*start - *self.start) as usize);
+            self.start = start;
+        }
+        Ok(self)
+    }
+
+    async fn sync(self) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    fn size(&self) -> u64 {
+        *self.start + self.ops.len() as u64
+    }
+
+    async fn append(mut self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
+        self.ops.extend_from_slice(ops);
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

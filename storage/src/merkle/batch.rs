@@ -1288,6 +1288,55 @@ mod tests {
     fn mmb_multiple_forks() {
         multiple_forks::<crate::mmb::Family>();
     }
+
+    /// A structure rebuilt from the pins at `n - 1` plus the final element generates a
+    /// verifiable proof for that element against the root at `n`.
+    fn tip_proof_from_pins<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            for &n in &[1u64, 2, 3, 8, 100, 199] {
+                let reference = build_reference::<F>(&hasher, n);
+                let boundary = Location::new(n - 1);
+                let pin_map = reference.nodes_to_pin(boundary);
+                let pinned_nodes: Vec<D> =
+                    F::nodes_to_pin(boundary).map(|pos| pin_map[&pos]).collect();
+                let element = hasher.digest(&(n - 1).to_be_bytes());
+
+                let peaks = F::peaks(F::location_to_position(Location::new(n))).count();
+                for inactive_peaks in 0..=peaks.min(2) {
+                    let root = reference.root(&hasher, inactive_peaks).unwrap();
+
+                    let mut rebuilt = Mem::<F, D>::init(crate::merkle::mem::Config {
+                        nodes: Vec::new(),
+                        pruning_boundary: boundary,
+                        pinned_nodes: pinned_nodes.clone(),
+                    })
+                    .unwrap();
+                    let batch = rebuilt
+                        .new_batch()
+                        .add(&hasher, &element)
+                        .merkleize(&rebuilt, &hasher);
+                    rebuilt.apply_batch(&batch).unwrap();
+                    assert_eq!(rebuilt.root(&hasher, inactive_peaks).unwrap(), root);
+
+                    let proof = rebuilt.proof(&hasher, boundary, inactive_peaks).unwrap();
+                    assert!(proof.verify_range_inclusion(&hasher, &[element], boundary, &root));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn mmr_tip_proof_from_pins() {
+        tip_proof_from_pins::<crate::mmr::Family>();
+    }
+
+    #[test]
+    fn mmb_tip_proof_from_pins() {
+        tip_proof_from_pins::<crate::mmb::Family>();
+    }
+
     #[test]
     fn mmb_fork_of_fork_reads() {
         fork_of_fork_reads::<crate::mmb::Family>();

@@ -11,19 +11,20 @@ use commonware_runtime::{
     tokio as tokio_runtime,
 };
 use commonware_storage::{
+    merkle::Location,
     mmr,
-    qmdb::sync::{self, compact},
+    qmdb::sync::{self},
 };
 use commonware_sync::{
     Error, Key, any, crate_version, current,
     databases::{DatabaseType, SyncMode},
     immutable, immutable_compact, keyless, keyless_compact,
-    net::{CompactResolver, ErrorCode, Resolver},
+    net::{ErrorCode, Resolver},
 };
 use commonware_utils::{
-    DurationExt,
+    DurationExt, NZU64,
     channel::mpsc::{self, error::TrySendError},
-    sys_rng,
+    non_empty_range, sys_rng,
 };
 use rand_core::Rng;
 use std::{
@@ -346,8 +347,9 @@ async fn run_compact_sync<DB, Op, E, MakeConfig>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
-    DB: compact::Database<Family = mmr::Family, Context = E, Digest = Key, Op = Op>,
-    Op: Clone + Read + EncodeShared + 'static,
+    DB: sync::Database<Family = mmr::Family, Context = E, Digest = Key, Op = Op>,
+    DB::Config: Clone,
+    Op: Clone + Read + EncodeShared + Send + Sync + 'static,
     Op::Cfg: commonware_codec::IsUnit,
     MakeConfig: Fn(&E) -> DB::Config,
 {
@@ -356,16 +358,23 @@ where
     loop {
         let source = Resolver::<Op, Key>::connect(context.child("resolver"), config.server).await?;
         let target = source.get_compact_target().await?;
-        let sync_config = compact::Config::<DB, CompactResolver<Op, Key>> {
+        let sync_config = sync::engine::Config::<DB, Resolver<Op, Key>> {
             context: context.child("sync"),
-            source: CompactResolver(source),
-            target,
+            source,
+            target: sync::Target {
+                root: target.root,
+                range: non_empty_range!(Location::new(*target.leaf_count - 1), target.leaf_count),
+            },
             db_config: make_db_config(&context),
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: 1,
+            max_outstanding_requests: 1,
+            max_retained_roots: 1,
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
         };
-        let database: DB = match compact::sync(sync_config).await {
+        let database: DB = match sync::sync(sync_config).await {
             Ok(database) => database,
             Err(sync::Error::Source(Error::Server {
                 code: ErrorCode::StaleTarget,

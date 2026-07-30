@@ -168,7 +168,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
+impl<F, E, K, V, H, Cfg, S> sync::Database for CompactDb<F, E, K, V, H, Cfg, S>
 where
     F: Family,
     E: Context,
@@ -182,31 +182,60 @@ where
 {
     type Family = F;
     type Op = Operation<F, K, V>;
+    type Journal = sync::journal::Memory<F, E, Operation<F, K, V>>;
     type Config = immutable::CompactConfig<Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
 
-    async fn from_validated_state(
+    async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
-        state: sync::compact::ValidatedState<Self::Family, Self::Op, Self::Digest>,
+        log: Self::Journal,
+        pinned_nodes: Option<Vec<Self::Digest>>,
+        range: NonEmptyRange<Location<F>>,
+        _apply_batch_size: usize,
     ) -> Result<Self, Error<F>> {
+        // A compact db retains exactly its final commit, so the sync range is one operation.
+        let last_commit_loc = range.start();
+        let (start, ops) = log.into_parts();
+        if *range.end() - *last_commit_loc != 1 || start != last_commit_loc || ops.len() != 1 {
+            return Err(Error::UnexpectedData(last_commit_loc));
+        }
+        let op = ops.into_iter().next().expect("checked length");
+
         let journal: crate::qmdb::compact::witness::Journal<E, F, H::Digest> =
             crate::journal::contiguous::variable::Journal::init(
                 context.child("witness"),
                 config.witness,
             )
             .await?;
-        Self::init_from_validated_state(config.strategy, journal, config.commit_codec_config, state)
+        let db = Self::init_from_sync(
+            config.strategy,
+            journal,
+            config.commit_codec_config,
+            last_commit_loc,
+            pinned_nodes.unwrap_or_default(),
+            op,
+        )?;
+        // The engine verified the operation and pins against the target root before handing
+        // them over, so the rebuilt state is already authenticated and safe to persist.
+        db.sync().await
+    }
+
+    async fn local_pinned_nodes(
+        _context: Self::Context,
+        _config: &Self::Config,
+        _target: &sync::Target<F, Self::Digest>,
+        _journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        // The in-memory sync journal never resumes at the target, so this is unreachable in
+        // practice; fetching from peers is always correct.
+        Ok(None)
     }
 
     fn root(&self) -> Self::Digest {
         self.root()
-    }
-
-    async fn persist_compact_state(self) -> Result<Self, Error<F>> {
-        self.sync().await
     }
 }
 

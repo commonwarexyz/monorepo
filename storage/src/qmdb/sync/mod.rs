@@ -11,16 +11,15 @@ mod error;
 pub use error::{EngineError, Error, ServeError};
 
 mod gaps;
-mod journal;
+pub(crate) mod journal;
 pub(crate) use journal::Journal;
 
 mod metrics;
 pub use metrics::Metrics;
 
 mod database;
-pub(crate) use database::{
-    Config as DatabaseConfig, Database, journal_covers_range, local_pinned_nodes,
-};
+pub use database::Database;
+pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
 
 pub mod source;
 pub use source::{Request, Response, Source, ValidityTx};

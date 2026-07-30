@@ -9,7 +9,7 @@ use crate::{
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p::{compact as compact_resolver, standard as qmdb_resolver},
+            p2p::standard as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -604,29 +604,23 @@ impl EngineDefinition for MultiDbEngine {
             );
         qmdb_resolver_actor_a.start(qmdb_a_resolver_network);
 
-        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) = compact_resolver::Actor::<
-            _,
-            ed25519::PublicKey,
-            _,
-            _,
-            mmr::Family,
-            QmdbB<_>,
-            sha256::Digest,
-        >::new(
-            context.child("qmdb_resolver_b"),
-            compact_resolver::Config {
-                peer_provider: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
-                database: None,
-                mailbox_size: NZUsize!(100),
-                me: Some(public_key.clone()),
-                initial: Duration::from_secs(1),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-                priority_responses: false,
-            },
-        );
+        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) =
+            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbB<_>>::new(
+                context.child("qmdb_resolver_b"),
+                qmdb_resolver::Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    database: None,
+                    mailbox_size: NZUsize!(100),
+                    me: Some(public_key.clone()),
+                    initial: Duration::from_secs(1),
+                    timeout: Duration::from_secs(2),
+                    fetch_retry_timeout: Duration::from_millis(100),
+                    max_serve_ops: NZU64!(16),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
         // Stateful actor
