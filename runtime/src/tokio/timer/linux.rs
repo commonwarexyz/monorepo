@@ -19,22 +19,16 @@ impl Alarm for NativeAlarm {
     const PLATFORM: &'static str = "linux";
 
     fn new(_shard: usize) -> Result<Self, AlarmInitError> {
-        let raw = loop {
+        let raw = retry_interrupted(|| {
             // SAFETY: `timerfd_create` takes no pointers and returns a new descriptor.
-            let result = unsafe {
+            unsafe {
                 libc::timerfd_create(
                     libc::CLOCK_MONOTONIC,
                     libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
                 )
-            };
-            if result >= 0 {
-                break result;
             }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(AlarmInitError::new("create timerfd", error));
-            }
-        };
+        })
+        .map_err(|error| AlarmInitError::new("create timerfd", error))?;
         // SAFETY: `raw` is a fresh descriptor whose ownership has not moved.
         let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
         let descriptor = AsyncFd::with_interest(descriptor, Interest::READABLE)
@@ -78,6 +72,20 @@ impl Alarm for NativeAlarm {
     }
 }
 
+/// Retries one integer-returning syscall when interrupted.
+fn retry_interrupted(mut call: impl FnMut() -> libc::c_int) -> io::Result<libc::c_int> {
+    loop {
+        let result = call();
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 /// Returns the smaller of the timerfd ABI and kernel hrtimer limits.
 fn max_timerfd_duration() -> Duration {
     let time_t_seconds =
@@ -95,17 +103,11 @@ fn monotonic_now() -> io::Result<Deadline> {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    loop {
+    retry_interrupted(|| {
         // SAFETY: `value` points to writable storage for one timespec.
-        let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) };
-        if result == 0 {
-            return duration_from_timespec(value).map(Deadline::from_duration);
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) }
+    })?;
+    duration_from_timespec(value).map(Deadline::from_duration)
 }
 
 /// Converts a validated nonnegative timespec to a duration.
@@ -156,19 +158,13 @@ fn update_timerfd(descriptor: libc::c_int, deadline: Option<Deadline>) -> io::Re
     } else {
         0
     };
-    loop {
+    retry_interrupted(|| {
         // SAFETY: `descriptor` is an owned timerfd and `specification` is initialized.
-        let result = unsafe {
+        unsafe {
             libc::timerfd_settime(descriptor, flags, &specification, std::ptr::null_mut())
-        };
-        if result == 0 {
-            return Ok(());
         }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+    })?;
+    Ok(())
 }
 
 /// Consumes one timerfd readiness count without blocking.

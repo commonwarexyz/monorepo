@@ -40,17 +40,11 @@ impl Alarm for NativeAlarm {
     fn new(_shard: usize) -> Result<Self, AlarmInitError> {
         let timebase =
             Timebase::read().map_err(|error| AlarmInitError::new("read Mach timebase", error))?;
-        let raw = loop {
+        let raw = retry_interrupted(|| {
             // SAFETY: `kqueue` takes no pointers and returns a new descriptor.
-            let result = unsafe { libc::kqueue() };
-            if result >= 0 {
-                break result;
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(AlarmInitError::new("create kqueue", error));
-            }
-        };
+            unsafe { libc::kqueue() }
+        })
+        .map_err(|error| AlarmInitError::new("create kqueue", error))?;
         // SAFETY: `raw` is a fresh descriptor whose ownership has not moved.
         let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
         // Ownership is established before fallible setup so every error closes
@@ -157,6 +151,20 @@ impl Alarm for NativeAlarm {
                     Err(_would_block) => break,
                 }
             }
+        }
+    }
+}
+
+/// Retries one integer-returning syscall when interrupted.
+fn retry_interrupted(mut call: impl FnMut() -> libc::c_int) -> io::Result<libc::c_int> {
+    loop {
+        let result = call();
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
 }
@@ -279,28 +287,15 @@ fn duration_from_nanos(nanoseconds: u128) -> io::Result<Duration> {
 
 /// Sets close-on-exec while preserving existing descriptor flags.
 fn set_close_on_exec(descriptor: libc::c_int) -> io::Result<()> {
-    let flags = loop {
+    let flags = retry_interrupted(|| {
         // SAFETY: `descriptor` is live and F_GETFD uses no variadic argument.
-        let result = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
-        if result >= 0 {
-            break result;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    };
-    loop {
+        unsafe { libc::fcntl(descriptor, libc::F_GETFD) }
+    })?;
+    retry_interrupted(|| {
         // SAFETY: `descriptor` is live and the variadic argument is an integer flag set.
-        let result = unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
-        if result >= 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+        unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) }
+    })?;
+    Ok(())
 }
 
 /// Builds one initialized kqueue timer change.
@@ -317,9 +312,9 @@ const fn timer_change(flags: u16, fflags: u32, data: libc::intptr_t) -> libc::ke
 
 /// Applies one timer change while retrying interrupted calls.
 fn submit_change(descriptor: libc::c_int, change: &libc::kevent) -> io::Result<()> {
-    loop {
+    retry_interrupted(|| {
         // SAFETY: `change` is one initialized event and no output buffer is requested.
-        let result = unsafe {
+        unsafe {
             libc::kevent(
                 descriptor,
                 change,
@@ -328,15 +323,9 @@ fn submit_change(descriptor: libc::c_int, change: &libc::kevent) -> io::Result<(
                 0,
                 std::ptr::null(),
             )
-        };
-        if result == 0 {
-            return Ok(());
         }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+    })?;
+    Ok(())
 }
 
 /// Consumes one ready event with a nonblocking zero-timeout call.
@@ -346,21 +335,14 @@ fn consume(descriptor: libc::c_int) -> io::Result<()> {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    loop {
+    let result = retry_interrupted(|| {
         // SAFETY: `event` is writable output storage and `timeout` is initialized.
-        let result =
-            unsafe { libc::kevent(descriptor, std::ptr::null(), 0, &mut event, 1, &timeout) };
-        if result > 0 {
-            return validate_event(&event);
-        }
-        if result == 0 {
-            return Err(io::Error::from(io::ErrorKind::WouldBlock));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
+        unsafe { libc::kevent(descriptor, std::ptr::null(), 0, &mut event, 1, &timeout) }
+    })?;
+    if result == 0 {
+        return Err(io::Error::from(io::ErrorKind::WouldBlock));
     }
+    validate_event(&event)
 }
 
 /// Validates the identity and error state of one retrieved timer event.
