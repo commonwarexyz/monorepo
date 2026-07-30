@@ -13,6 +13,7 @@
 //!   `marshal_e2e_coding_id_disrupter`,
 //!   `marshal_e2e_standard_app_cert_mock_twins`,
 //!   `marshal_e2e_coding_app_cert_mock_twins`,
+//!   `marshal_e2e_coding_app_id_twins`,
 //!   `marshal_e2e_standard_deferred_id_twins_split_header`,
 //!   `marshal_e2e_standard_inline_id_twins_split_header`.
 //! - [`runner`]: drives the standard inline and deferred block paths, including

@@ -34,14 +34,14 @@
 //! The marshal-backed honest engines run at `Epoch::zero()`: marshal's epoch
 //! check ties the consensus epoch to `epocher.containing(height)`, and the
 //! harness `FixedEpocher(20)` maps the low test heights to epoch 0. So the
-//! byzantine `Disrupter` is started via [`start_disrupter_with_epoch`] with
-//! `Epoch::zero()` (the consensus-wide `crate::EPOCH` is left unchanged) so it
-//! emits messages in the same epoch the honest engines run in.
+//! standard Byzantine actor is started via [`start_disrupter_with_epoch`] with
+//! `Epoch::zero()` (the consensus-wide `crate::EPOCH` is left unchanged).
+//! Coding uses the Commitment-typed [`coding_disrupter`] actor, which also emits
+//! messages at epoch 0.
 //!
-//! The disrupter's `Sha256Digest` votes share both the epoch and the payload
-//! type with the honest engines, so it is a fully in-epoch equivocating and
-//! mutating adversary. The three honest validators must still deliver the
-//! target number of ordered blocks.
+//! Each actor's votes share both the epoch and payload type with its honest
+//! engines, so both are fully in-epoch equivocating adversaries. The three
+//! honest validators must still deliver the target number of ordered blocks.
 
 use super::{
     MAX_REQUIRED,
@@ -537,4 +537,26 @@ where
 
         invariants::check_all_blocks(&honest_apps, genesis_digest, None);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SimplexId, strategy::StrategyChoice, utils::Partition};
+    use commonware_consensus::simplex::ForwardingPolicy;
+
+    #[test]
+    fn coding_disrupter_runs_under_strict_id_certificates() {
+        fuzz_marshal_coding_disrupter::<SimplexId>(MarshalDisrupterInput {
+            raw_bytes: vec![0],
+            required_containers: 1,
+            degraded_network: false,
+            partition: Partition::Connected,
+            strategy: StrategyChoice::SmallScope {
+                fault_rounds: 1,
+                fault_rounds_bound: 1,
+            },
+            forwarding: ForwardingPolicy::Disabled,
+        });
+    }
 }

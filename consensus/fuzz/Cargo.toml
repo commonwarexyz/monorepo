@@ -428,6 +428,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "marshal_e2e_coding_app_id_twins"
+path = "fuzz_targets/marshal_e2e_coding_app_id_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "marshal_e2e_standard_deferred_id_twins_split_header"
 path = "fuzz_targets/marshal_e2e_standard_deferred_id_twins_split_header.rs"
 test = false
