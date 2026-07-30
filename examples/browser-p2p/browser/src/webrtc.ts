@@ -247,7 +247,6 @@ export class WebRtcPairing {
       window.clearTimeout(this.#timeout);
       this.#offEvent();
       this.#rendezvous.close();
-      this.#onState("Connected directly");
     } catch (error) {
       this.#attached = false;
       this.#fail(error);

@@ -318,6 +318,10 @@ h1 {
   background: #f7f5ef;
 }
 
+.pairing[hidden] {
+  display: none;
+}
+
 .pairing-heading {
   display: flex;
   align-items: center;

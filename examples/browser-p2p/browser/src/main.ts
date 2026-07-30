@@ -148,6 +148,8 @@ function handleChatEvent(event: ChatEvent): void {
     case "peer":
       currentInviteUrl = undefined;
       elements.pairing.hidden = true;
+      elements.emptyTitle.textContent = "You're connected";
+      elements.emptyDetail.textContent = "Messages are authenticated and encrypted end to end.";
       clearNotice();
       showNotice("Peer authenticated", formatFingerprint(event.publicKey), "success");
       return;
