@@ -20,7 +20,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{Handle, ThreadSpawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -736,7 +736,7 @@ where
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
-        E: Spawner,
+        E: ThreadSpawner,
         I: crate::qmdb::SnapshotBuild<F>,
         C: 'static,
     {

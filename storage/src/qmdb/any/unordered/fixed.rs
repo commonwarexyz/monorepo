@@ -13,7 +13,7 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::ThreadSpawner;
 use commonware_utils::Array;
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
@@ -34,7 +34,7 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
 
 impl<
     F: Family,
-    E: Context + Spawner,
+    E: Context + ThreadSpawner,
     K: Array,
     V: FixedValue,
     H: Hasher,
@@ -69,7 +69,7 @@ pub mod partitioned {
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
-    use commonware_runtime::Spawner;
+    use commonware_runtime::ThreadSpawner;
     use commonware_utils::Array;
 
     /// A key-value QMDB with a partitioned snapshot index.
@@ -94,7 +94,7 @@ pub mod partitioned {
 
     impl<
         F: Family,
-        E: Context + Spawner,
+        E: Context + ThreadSpawner,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -155,7 +155,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
-        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        Clock as _, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},

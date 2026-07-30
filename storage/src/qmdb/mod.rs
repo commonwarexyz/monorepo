@@ -70,7 +70,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
-use commonware_runtime::Spawner;
+use commonware_runtime::ThreadSpawner;
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     cache::Clock,
@@ -569,7 +569,7 @@ async fn build_snapshot_parallel<F, E, C, I>(
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
-    E: Spawner,
+    E: ThreadSpawner,
     C: Contiguous<Item: Operation<F>> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
 {
@@ -738,7 +738,7 @@ pub trait SnapshotBuild<F: Family>:
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
-        E: Spawner,
+        E: ThreadSpawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
         build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
@@ -783,7 +783,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
-        E: Spawner,
+        E: ThreadSpawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
         build_snapshot_parallel(
@@ -814,7 +814,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
-        E: Spawner,
+        E: ThreadSpawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
         build_snapshot_parallel(

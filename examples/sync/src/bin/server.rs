@@ -9,7 +9,7 @@ use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::{boxed, select_loop};
 use commonware_runtime::{
     BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf, Spawner, Storage, StreamOf,
-    Supervisor as _,
+    Supervisor as _, ThreadSpawner,
     telemetry::metrics::{Counter, MetricsExt as _},
     tokio as tokio_runtime,
 };
@@ -706,7 +706,7 @@ where
 #[boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + ThreadSpawner + Rng + Send,
 {
     let db_config = any::create_config(&context);
     let database = any::Database::init(context.child("database"), db_config).await?;
@@ -718,7 +718,7 @@ where
 #[boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler + Storage + Clock + Metrics + Network + ThreadSpawner + Rng + Send,
 {
     let db_config = current::create_config(&context);
     let database = current::Database::init(context.child("database"), db_config).await?;

@@ -14,7 +14,7 @@ use commonware_glue::{
         db::{DatabaseSet, Merkleized as _, Unmerkleized as _},
     },
 };
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Storage, ThreadSpawner};
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{non_empty_range, sequence::U64};
 use futures::StreamExt;
@@ -34,7 +34,7 @@ impl App {
         Self { genesis }
     }
 
-    async fn execute<E: Spawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: ThreadSpawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
         batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
@@ -48,7 +48,7 @@ impl App {
 
 impl<E> Application<E> for App
 where
-    E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: Rng + ThreadSpawner + Metrics + Clock + Storage + BufferPooler,
 {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;

@@ -42,7 +42,8 @@ use commonware_cryptography::{
 use commonware_p2p::utils::mux::Muxer;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Buf, BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Buf, BufMut, Handle, Quota, Supervisor as _, ThreadSpawner,
+    buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     Context as StorageContext,
@@ -197,7 +198,7 @@ impl App {
     }
 
     /// Execute a block against two databases.
-    async fn execute<E: Rng + Spawner + StorageContext>(
+    async fn execute<E: Rng + ThreadSpawner + StorageContext>(
         height: Height,
         batches: (
             <DbA<E> as DatabaseSet<E>>::Unmerkleized,
@@ -235,7 +236,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + StorageContext> Application<E> for App {
+impl<E: Rng + ThreadSpawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;

@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::ThreadSpawner;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<F, K, V> = ordered::Operation<F, K, VariableEncoding<V>>;
@@ -40,7 +40,7 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
 
 impl<
     F: Family,
-    E: Context + Spawner,
+    E: Context + ThreadSpawner,
     K: Key,
     V: VariableValue,
     H: Hasher,
@@ -86,7 +86,7 @@ pub mod partitioned {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
-    use commonware_runtime::Spawner;
+    use commonware_runtime::ThreadSpawner;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -110,7 +110,7 @@ pub mod partitioned {
 
     impl<
         F: Family,
-        E: Context + Spawner,
+        E: Context + ThreadSpawner,
         K: Key,
         V: VariableValue,
         H: Hasher,

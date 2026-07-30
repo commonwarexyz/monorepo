@@ -346,7 +346,7 @@ use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::ThreadSpawner;
 use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -418,7 +418,7 @@ pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
-    E: Context + Spawner,
+    E: Context + ThreadSpawner,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,

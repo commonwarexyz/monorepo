@@ -8,7 +8,7 @@ use commonware_codec::{EncodeShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage, Supervisor as _,
-    tokio as tokio_runtime,
+    ThreadSpawner, tokio as tokio_runtime,
 };
 use commonware_storage::{
     mmr,
@@ -182,7 +182,7 @@ where
 #[boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Network + ThreadSpawner,
 {
     run_full_sync::<any::Database<_>, any::Operation, _, _, _>(
         context,
@@ -224,7 +224,7 @@ where
 #[boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Network + ThreadSpawner,
 {
     run_full_sync::<current::Database<_>, current::Operation, _, _, _>(
         context,
