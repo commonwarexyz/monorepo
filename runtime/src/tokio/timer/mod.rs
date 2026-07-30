@@ -36,6 +36,8 @@
 //! by worker keeps unrelated registration and cancellation paths independent.
 //! Each sleep retains its construction-time shard, while the future and that
 //! shard share the entry until one terminal transition wins.
+//! Expiry commits `FIRED` while removing an entry, then invokes or releases its
+//! waker from reusable driver scratch storage after unlocking the shard.
 //!
 //! Wall-clock deadlines are converted once to a fixed monotonic deadline.
 //! Later wall-clock changes do not move a registered sleep. A 50 nanosecond

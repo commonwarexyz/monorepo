@@ -524,8 +524,8 @@ fn register(
     (entry, sleep)
 }
 
-/// Builds a canceled popped batch whose final waker releases will unwind.
-fn canceled_panicking_waker_batch() -> (Arc<Shard<FakeAlarm>>, Batch, Arc<AtomicUsize>) {
+/// Builds a fired batch whose final waker releases will unwind.
+fn panicking_waker_batch() -> (Batch, Arc<AtomicUsize>) {
     let (shard, control) = fake_shard();
     let drops = Arc::new(AtomicUsize::new(0));
     let panic_on_drop = Arc::new(AtomicBool::new(false));
@@ -551,7 +551,7 @@ fn canceled_panicking_waker_batch() -> (Arc<Shard<FakeAlarm>>, Batch, Arc<Atomic
 
     // Arm destructor panics only after setup can no longer unwind through them.
     panic_on_drop.store(true, AtomicOrdering::Release);
-    (shard, batch, drops)
+    (batch, drops)
 }
 
 /// Consumes one expected producer notification.
@@ -1014,8 +1014,7 @@ fn expiry_removes_only_elapsed_entries_in_deadline_and_sequence_order() {
     assert_eq!(shard.state.lock().entries.len(), 1);
     assert_ne!(future.heap_index.load(AtomicOrdering::Acquire), NOT_IN_HEAP);
 
-    // Completing the batch fires only the elapsed entries.
-    assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
+    // Heap removal commits only the elapsed entries before callbacks run.
     assert_eq!(earliest.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
     assert_eq!(equal_first.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
     assert_eq!(
@@ -1023,6 +1022,7 @@ fn expiry_removes_only_elapsed_entries_in_deadline_and_sequence_order() {
         ENTRY_FIRED
     );
     assert_eq!(future.state.load(AtomicOrdering::Acquire), ENTRY_WAITING);
+    assert!(batch.complete(ENTRY_FIRED).is_none());
 }
 
 #[test]
@@ -1063,13 +1063,13 @@ fn expiry_removes_at_most_thirty_two_entries_per_lock_batch() {
     assert!(driver_ok(shard.take_expired(&mut batch)));
     assert_eq!(batch.entries.len(), WAKE_BATCH);
     assert_eq!(shard.state.lock().entries.len(), 1);
-    assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
+    assert!(batch.complete(ENTRY_FIRED).is_none());
 
     // A second acquisition removes the final entry and completes the drain.
     assert!(!driver_ok(shard.take_expired(&mut batch)));
     assert_eq!(batch.entries.len(), 1);
     assert_eq!(shard.state.lock().entries.len(), 0);
-    assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
+    assert!(batch.complete(ENTRY_FIRED).is_none());
     assert!(entries.iter().all(|entry| {
         entry.state.load(AtomicOrdering::Acquire) == ENTRY_FIRED
             && entry.heap_index.load(AtomicOrdering::Acquire) == NOT_IN_HEAP
@@ -1093,7 +1093,7 @@ fn expiry_callbacks_run_after_releasing_the_shard_lock() {
     // Pop under the lock, then invoke the callback through batch completion.
     let mut batch = Batch::new();
     assert!(!driver_ok(shard.take_expired(&mut batch)));
-    assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
+    assert!(batch.complete(ENTRY_FIRED).is_none());
 
     // Successful acquisition proves callback execution happened outside the lock.
     assert!(checking.acquired.load(AtomicOrdering::Acquire));
@@ -1101,7 +1101,7 @@ fn expiry_callbacks_run_after_releasing_the_shard_lock() {
 }
 
 #[test]
-fn in_flight_cleanup_drops_reentrant_waker_outside_shard_lock() {
+fn batch_completion_drops_reentrant_waker_outside_shard_lock() {
     // Register a polled entry whose final waker destructor re-enters the shard lock.
     let (shard, control) = fake_shard();
     let (entry, registered) = register(&shard, at(10));
@@ -1117,40 +1117,22 @@ fn in_flight_cleanup_drops_reentrant_waker_outside_shard_lock() {
     let mut batch = Batch::new();
     assert!(!driver_ok(shard.take_expired(&mut batch)));
 
-    // Cancel after pop so in-flight storage retains the last Entry owner.
+    // Release every owner except the driver batch after expiry commits.
     drop(registered);
     drop(entry);
     assert!(!acquired.load(AtomicOrdering::Acquire));
 
-    // Completion must release that owner outside the lock and retain batch capacity.
-    assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
+    // Completion must release the final owner outside the shard lock.
+    assert!(batch.complete(ENTRY_FIRED).is_none());
     assert!(acquired.load(AtomicOrdering::Acquire));
-    let state = shard.state.lock();
-    assert!(state.in_flight.is_empty());
-    assert!(state.in_flight.capacity() >= WAKE_BATCH);
+    assert!(batch.entries.is_empty());
+    assert!(batch.entries.capacity() >= WAKE_BATCH);
 }
 
 #[test]
-fn in_flight_cleanup_contains_every_panicking_waker_destructor() {
-    // Leave two canceled entries owned by both the batch and shared in-flight state.
-    let (shard, mut batch, drops) = canceled_panicking_waker_batch();
-
-    // Completion must retain one panic while containing both destructor unwinds.
-    let panic = shard.complete_batch(&mut batch, ENTRY_FIRED);
-
-    // Both entries are released and the shared allocation remains reusable.
-    assert!(panic.is_some());
-    assert_eq!(drops.load(AtomicOrdering::Acquire), 2);
-    let state = shard.state.lock();
-    assert!(state.in_flight.is_empty());
-    assert!(state.in_flight.capacity() >= WAKE_BATCH);
-}
-
-#[test]
-fn batch_cleanup_contains_panicking_waker_destructors_after_stop() {
-    // Drain shared in-flight ownership so only the local batch retains both entries.
-    let (shard, mut batch, drops) = canceled_panicking_waker_batch();
-    shard.stop();
+fn batch_completion_contains_every_panicking_waker_destructor() {
+    // Retain two fired entries whose final waker releases each unwind.
+    let (mut batch, drops) = panicking_waker_batch();
 
     // Explicit completion must retain one panic and continue releasing the batch.
     let panic = batch.complete(ENTRY_FIRED);
@@ -1159,21 +1141,18 @@ fn batch_cleanup_contains_panicking_waker_destructors_after_stop() {
     assert!(panic.is_some());
     assert_eq!(drops.load(AtomicOrdering::Acquire), 2);
     assert!(batch.entries.is_empty());
-    assert!(shard.state.lock().in_flight.is_empty());
 }
 
 #[test]
-fn batch_drop_contains_panicking_waker_destructors_after_stop() {
-    // Drain shared in-flight ownership so dropping the batch releases both entries.
-    let (shard, batch, drops) = canceled_panicking_waker_batch();
-    shard.stop();
+fn batch_drop_contains_every_panicking_waker_destructor() {
+    // Retain two fired entries whose final waker releases each unwind.
+    let (batch, drops) = panicking_waker_batch();
 
     // The abortion cleanup path must contain each destructor unwind internally.
     drop(batch);
 
     // Returning normally proves Drop avoided a nested unwind and released both entries.
     assert_eq!(drops.load(AtomicOrdering::Acquire), 2);
-    assert!(shard.state.lock().in_flight.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1189,56 +1168,6 @@ async fn driver_yields_only_when_budget_is_exhausted_with_more_ready() {
 
     // The explicit cooperative yield must run the competitor before the last callback.
     assert!(over_budget);
-}
-
-#[test]
-fn terminal_races_preserve_cancellation_fire_and_failure_winners() {
-    // Pop three entries so cancellation, firing, and failure can contend locally.
-    let (cancel_shard, cancel_control) = fake_shard();
-    cancel_control.set_now(at(10));
-    let (canceled, canceled_sleep) = register(&cancel_shard, at(10));
-    let mut canceled_batch = Batch::new();
-    assert!(!driver_ok(cancel_shard.take_expired(&mut canceled_batch)));
-
-    // Cancellation wins when the future drops before its popped batch fires.
-    drop(canceled_sleep);
-    assert!(
-        cancel_shard
-            .complete_batch(&mut canceled_batch, ENTRY_FIRED)
-            .is_none()
-    );
-    assert!(!canceled.transition(ENTRY_FAILED));
-    assert_eq!(canceled.state.load(AtomicOrdering::Acquire), ENTRY_CANCELED);
-
-    // Firing wins when batch completion precedes cancellation and failure.
-    let (fire_shard, fire_control) = fake_shard();
-    fire_control.set_now(at(10));
-    let (fired, fired_sleep) = register(&fire_shard, at(10));
-    let mut fired_batch = Batch::new();
-    assert!(!driver_ok(fire_shard.take_expired(&mut fired_batch)));
-    assert!(
-        fire_shard
-            .complete_batch(&mut fired_batch, ENTRY_FIRED)
-            .is_none()
-    );
-    drop(fired_sleep);
-    assert!(!fired.transition(ENTRY_FAILED));
-    assert_eq!(fired.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
-
-    // Failure wins when cleanup completes before fire and future drop.
-    let (failure_shard, failure_control) = fake_shard();
-    failure_control.set_now(at(10));
-    let (failed, failed_sleep) = register(&failure_shard, at(10));
-    let mut failed_batch = Batch::new();
-    assert!(!driver_ok(failure_shard.take_expired(&mut failed_batch)));
-    assert!(
-        failure_shard
-            .complete_batch(&mut failed_batch, ENTRY_FAILED)
-            .is_none()
-    );
-    assert!(!failed.transition(ENTRY_FIRED));
-    drop(failed_sleep);
-    assert_eq!(failed.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
 }
 
 #[test]
@@ -1675,8 +1604,8 @@ fn fatal_failure_is_receiver_visible_when_failed_state_escapes() {
 }
 
 #[test]
-fn stop_marks_entries_popped_into_an_in_progress_batch() {
-    // Pop two expired entries without completing their driver batch.
+fn expiry_commit_precedes_a_later_stop() {
+    // Pop two expired entries without invoking their callbacks.
     let (shard, control) = fake_shard();
     control.set_now(at(10));
     let (first, _first_sleep) = register(&shard, at(10));
@@ -1684,36 +1613,32 @@ fn stop_marks_entries_popped_into_an_in_progress_batch() {
     let mut batch = Batch::new();
     assert!(!driver_ok(shard.take_expired(&mut batch)));
     assert_eq!(batch.entries.len(), 2);
-    assert_eq!(shard.state.lock().in_flight.len(), 2);
+    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
+    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
 
-    // Synchronous stop must find entries no longer resident in the heap.
+    // A later stop cannot overwrite expiry committed under the shard lock.
     shard.stop();
-    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
-    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
-    assert!(shard.state.lock().in_flight.is_empty());
-
-    // Later driver completion loses the terminal race and cannot overwrite shutdown.
-    assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
-    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
-    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
+    assert!(batch.complete(ENTRY_FIRED).is_none());
+    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
+    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
+    assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Stopped);
 }
 
 #[tokio::test]
-async fn registration_clock_failure_fails_an_in_progress_batch() {
-    // Pop two expired entries, then fail a producer clock read before completion.
+async fn registration_clock_failure_preserves_a_committed_expiry_batch() {
+    // Commit two expired entries, then fail a producer clock read before callbacks.
     let (shard, control, panicked) = observed_fake_shard();
     control.set_now(at(10));
     let (first, _first_sleep) = register(&shard, at(10));
     let (second, _second_sleep) = register(&shard, at(10));
     let mut batch = Batch::new();
     assert!(!driver_ok(shard.take_expired(&mut batch)));
-    assert_eq!(shard.state.lock().in_flight.len(), 2);
     control.fail_next_now();
     let failed_registration = shard.register_after(Duration::from_nanos(1));
 
-    // Failure cleanup must cover both shared in-flight entries and the new direct failure.
-    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
-    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    // Failure covers the new entry but cannot overwrite committed expirations.
+    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
+    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
     assert_eq!(
         failed_registration
             .entry
@@ -1721,12 +1646,11 @@ async fn registration_clock_failure_fails_an_in_progress_batch() {
             .load(AtomicOrdering::Acquire),
         ENTRY_FAILED
     );
-    assert!(shard.state.lock().in_flight.is_empty());
-    assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
+    assert!(batch.complete(ENTRY_FIRED).is_none());
 
-    // The pre-cleanup snapshot must report both locally batched entries.
+    // Fatal propagation still preserves the operation that failed.
     let message = fatal_message(panicked).await;
-    assert!(message.contains("locally_batched: 2"));
+    assert!(message.contains("read monotonic clock during registration"));
 }
 
 #[tokio::test]
@@ -1858,7 +1782,6 @@ async fn expiry_waker_panic_propagates_through_driver_and_fails_shard() {
         let state = shard.state.lock();
         assert_eq!(state.lifecycle, ShardLifecycle::Failed);
         assert_eq!(state.entries.len(), 0);
-        assert!(state.in_flight.is_empty());
     }
     let message = fatal_message(panicked).await;
     assert!(message.contains("driver panic"));
@@ -2099,7 +2022,7 @@ fn dropping_sleep_after_ready_does_not_cancel_or_reinsert_entry() {
     control.set_now(at(10));
     let mut batch = Batch::new();
     assert!(!driver_ok(shard.take_expired(&mut batch)));
-    assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
+    assert!(batch.complete(ENTRY_FIRED).is_none());
     assert_eq!(shard.state.lock().entries.len(), 0);
 
     // Dropping the already-ready owner cannot replace FIRED with CANCELED.

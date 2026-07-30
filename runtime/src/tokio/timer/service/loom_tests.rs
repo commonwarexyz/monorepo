@@ -172,12 +172,17 @@ fn model_shard() -> (Arc<Shard<ModelAlarm>>, LoomArc<ModelAlarmState>) {
 #[test]
 fn production_entry_poll_cannot_lose_firing_wake() {
     model(|| {
-        // Race the production Entry poll protocol against its firing transition.
+        // Register one already-expired entry through the production shard.
+        let (shard, _alarm) = model_shard();
         let entry = LoomArc::new(Entry::new());
+        shard.register(deadline(0), LoomArc::clone(&entry));
+
+        // Race polling against the production split expiry and callback path.
         let completer = {
-            let mut batch = Batch::new();
-            batch.entries.push(LoomArc::clone(&entry));
+            let shard = Arc::clone(&shard);
             thread::spawn(move || {
+                let mut batch = Batch::new();
+                assert!(!driver_ok(shard.take_expired(&mut batch)));
                 assert!(batch.complete(ENTRY_FIRED).is_none());
             })
         };
@@ -283,28 +288,39 @@ fn production_entry_has_exactly_one_terminal_winner() {
 }
 
 #[test]
-fn production_stop_races_other_terminal_transitions() {
-    for other in [ENTRY_FIRED, ENTRY_CANCELED, ENTRY_FAILED] {
-        model(move || {
-            // Race orderly stop against one other legal production transition.
-            let entry = LoomArc::new(Entry::new());
-            let stopper = {
-                let entry = LoomArc::clone(&entry);
-                thread::spawn(move || entry.transition(ENTRY_STOPPED))
-            };
-            let contender = {
-                let entry = LoomArc::clone(&entry);
-                thread::spawn(move || entry.transition(other))
-            };
-            let stopped = stopper.join().unwrap();
-            let other_won = contender.join().unwrap();
+fn production_stop_races_expiry_commit_under_the_shard_lock() {
+    model(|| {
+        // Register one expired entry through the production shard.
+        let (shard, _alarm) = model_shard();
+        let entry = LoomArc::new(Entry::new());
+        shard.register(deadline(0), LoomArc::clone(&entry));
 
-            // Exactly one transition wins and its terminal value remains published.
-            assert_ne!(stopped, other_won);
-            let terminal = entry.state.load(Ordering::Acquire);
-            assert_eq!(terminal, if stopped { ENTRY_STOPPED } else { other });
-        });
-    }
+        // Race synchronous stop against the driver's pop and callback path.
+        let stopper = {
+            let shard = Arc::clone(&shard);
+            thread::spawn(move || shard.stop())
+        };
+        let expirer = {
+            let shard = Arc::clone(&shard);
+            thread::spawn(move || {
+                let mut batch = Batch::new();
+                assert!(!driver_ok(shard.take_expired(&mut batch)));
+                assert!(batch.complete(ENTRY_FIRED).is_none());
+            })
+        };
+        stopper.join().unwrap();
+        expirer.join().unwrap();
+
+        // The lock winner commits one terminal state and removes the entry.
+        assert!(matches!(
+            entry.state.load(Ordering::Acquire),
+            ENTRY_FIRED | ENTRY_STOPPED
+        ));
+        let state = shard.state.lock();
+        assert_eq!(state.lifecycle, ShardLifecycle::Stopped);
+        assert_eq!(state.entries.len(), 0);
+        assert_eq!(entry.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
+    });
 }
 
 #[test]
@@ -323,21 +339,20 @@ fn production_registered_sleep_drop_races_driver_completion() {
             thread::spawn(move || {
                 let mut batch = Batch::new();
                 assert!(!driver_ok(shard.take_expired(&mut batch)));
-                assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
+                assert!(batch.complete(ENTRY_FIRED).is_none());
             })
         };
         dropper.join().unwrap();
         driver.join().unwrap();
 
-        // Assertion: Either legal terminal winner leaves no resident or
-        // in-flight entry and publishes the nonresident heap index.
+        // Assertion: Either legal terminal winner leaves no resident entry
+        // and publishes the nonresident heap index.
         assert!(matches!(
             entry.state.load(Ordering::Acquire),
             ENTRY_CANCELED | ENTRY_FIRED
         ));
         let state = shard.state.lock();
         assert_eq!(state.entries.len(), 0);
-        assert!(state.in_flight.is_empty());
         assert_eq!(entry.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
     });
 }

@@ -632,7 +632,7 @@ impl<A: Alarm> Shard<A> {
             .map_err(|error| DriverFailure::io("read monotonic clock during expiry", error))?;
         let mut state = self.state.lock();
         assert!(
-            state.in_flight.is_empty() && batch.entries.is_empty(),
+            batch.entries.is_empty(),
             "timer driver started a batch before completing the previous batch"
         );
         // Consumed one-shot readiness makes the prior armed deadline non-authoritative.
@@ -644,37 +644,16 @@ impl<A: Alarm> Shard<A> {
                 .is_some_and(|item| item.deadline <= now)
         {
             let item = state.entries.pop().expect("timer heap minimum disappeared");
-            state.in_flight.push(EntryArc::clone(&item.entry));
+            // Commit expiry before teardown can observe the removed entry.
+            // Cancellation may win the atomic transition, but not mutate the
+            // heap concurrently. Callbacks and final release remain deferred.
+            let _ = item.entry.transition(ENTRY_FIRED);
             batch.entries.push(item.entry);
         }
         Ok(state
             .entries
             .peek()
             .is_some_and(|item| item.deadline <= now))
-    }
-
-    /// Completes one popped batch and then releases its shared teardown visibility.
-    fn complete_batch(&self, batch: &mut Batch, terminal: u8) -> Option<Box<dyn Any + Send>> {
-        let mut first_panic = batch.complete(terminal);
-        let mut completed = {
-            let mut state = self.state.lock();
-            std::mem::take(&mut state.in_flight)
-        };
-        // Entry and user-waker destructors may re-enter the shard or unwind.
-        while let Some(entry) = completed.pop() {
-            if let Err(panic) = catch_unwind(AssertUnwindSafe(|| drop(entry)))
-                && first_panic.is_none()
-            {
-                first_panic = Some(panic);
-            }
-        }
-        let mut state = self.state.lock();
-        assert!(
-            state.in_flight.is_empty(),
-            "timer lifecycle installed in-flight storage while a batch was completing"
-        );
-        std::mem::swap(&mut state.in_flight, &mut completed);
-        first_panic
     }
 
     /// Marks orderly teardown and releases every queued sleep without waking it.
@@ -686,7 +665,7 @@ impl<A: Alarm> Shard<A> {
             }
             state.lifecycle = ShardLifecycle::Stopped;
             state.armed_deadline = None;
-            drain_pending(&mut state)
+            drain_heap(&mut state.entries)
         };
         complete_entries(pending, ENTRY_STOPPED);
         self.signal.notify();
@@ -709,7 +688,6 @@ impl<A: Alarm> Shard<A> {
             }
             let snapshot = ShardSnapshot {
                 queued: state.entries.len(),
-                locally_batched: state.in_flight.len(),
                 desired: state.entries.peek().map(|item| item.deadline),
                 armed: state.armed_deadline,
                 notified: self.signal.is_notified(),
@@ -723,7 +701,7 @@ impl<A: Alarm> Shard<A> {
             );
             state.lifecycle = ShardLifecycle::Failed;
             state.armed_deadline = None;
-            let pending = drain_pending(&mut state);
+            let pending = drain_heap(&mut state.entries);
             // Claim root interruption while the shard lock prevents a newly
             // failed sleep from racing this more detailed payload.
             let _ = self.panicker.notify_fatal(Box::new(message));
@@ -768,8 +746,6 @@ enum ShardLifecycle {
 struct ShardState {
     /// Indexed 4-ary minimum heap.
     entries: Heap,
-    /// Popped entries still exposed to synchronous teardown.
-    in_flight: Vec<EntryArc<Entry>>,
     /// Wrapping tie breaker for equal deadlines.
     sequence: u64,
     /// Deadline most recently confirmed armed by the driver.
@@ -783,7 +759,6 @@ impl ShardState {
     fn new() -> Self {
         Self {
             entries: Heap::default(),
-            in_flight: Vec::with_capacity(WAKE_BATCH),
             sequence: 0,
             armed_deadline: None,
             lifecycle: ShardLifecycle::Running,
@@ -850,8 +825,6 @@ impl DriverFailure {
 struct ShardSnapshot {
     /// Entries still resident in the heap.
     queued: usize,
-    /// Entries popped into driver scratch storage.
-    locally_batched: usize,
     /// Current desired heap minimum.
     desired: Option<Deadline>,
     /// Deadline last recorded as armed.
@@ -865,7 +838,6 @@ impl fmt::Debug for ShardSnapshot {
         formatter
             .debug_struct("ShardSnapshot")
             .field("queued", &self.queued)
-            .field("locally_batched", &self.locally_batched)
             .field("desired", &self.desired)
             .field("armed", &self.armed)
             .field("notified", &self.notified)
@@ -887,13 +859,16 @@ impl Batch {
         }
     }
 
-    /// Transitions every entry and invokes all callbacks outside the heap lock.
+    /// Completes every entry and invokes all callbacks outside the heap lock.
     fn complete(&mut self, terminal: u8) -> Option<Box<dyn Any + Send>> {
         let mut first_panic = None;
         for entry in self.entries.drain(..) {
             // Waking or releasing the final user waker may unwind.
             let completion = catch_unwind(AssertUnwindSafe(move || {
-                if entry.transition(terminal)
+                // Expiry commits FIRED while popping under the shard lock.
+                // Other lifecycle paths transition their drained entries here.
+                if (entry.state.load(AtomicOrdering::Acquire) == terminal
+                    || entry.transition(terminal))
                     && let Some(waker) = entry.take_waker()
                 {
                     if terminal == ENTRY_STOPPED {
@@ -916,8 +891,8 @@ impl Batch {
 
 impl Drop for Batch {
     fn drop(&mut self) {
-        // Abortion or unwind cannot strand popped entries in WAITING.
-        let _ = self.complete(ENTRY_FAILED);
+        // Abortion or unwind still delivers expiry committed during heap removal.
+        let _ = self.complete(ENTRY_FIRED);
     }
 }
 
@@ -950,7 +925,7 @@ impl DriverLoop {
                         let more = shard.take_expired(&mut self.batch)?;
                         processed = processed.saturating_add(self.batch.entries.len());
                         // Callbacks run after take_expired releases the shard mutex.
-                        if let Some(panic) = shard.complete_batch(&mut self.batch, ENTRY_FIRED) {
+                        if let Some(panic) = self.batch.complete(ENTRY_FIRED) {
                             return Err(DriverFailure::panic(&*panic));
                         }
                         if !more {
@@ -987,7 +962,7 @@ async fn run_driver<A: Alarm>(shard: Arc<Shard<A>>) {
         Err(panic) => DriverFailure::panic(&*panic),
     };
     shard.fail(failure);
-    let _ = driver.batch.complete(ENTRY_FAILED);
+    let _ = driver.batch.complete(ENTRY_FIRED);
 }
 
 /// Durable coalesced notification from any producer to one driver.
@@ -1247,13 +1222,6 @@ fn drain_heap(heap: &mut Heap) -> Vec<EntryArc<Entry>> {
     while let Some(item) = heap.pop() {
         entries.push(item.entry);
     }
-    entries
-}
-
-/// Removes every queued and popped entry while holding the shard mutex.
-fn drain_pending(state: &mut ShardState) -> Vec<EntryArc<Entry>> {
-    let mut entries = drain_heap(&mut state.entries);
-    entries.append(&mut state.in_flight);
     entries
 }
 
