@@ -344,7 +344,7 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
@@ -353,7 +353,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         sync::compact::sync(sync::compact::Config {
             context,
-            source: resolver,
+            source,
             target,
             db_config: config,
             update_rx: Some(tip_updates),
@@ -381,7 +381,7 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
@@ -390,7 +390,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         sync::compact::sync(sync::compact::Config {
             context,
-            source: resolver,
+            source,
             target,
             db_config: config,
             update_rx: Some(tip_updates),
@@ -494,15 +494,13 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct SupersedingCompactResolver {
+    struct SupersedingCompactSource {
         source: Arc<FullFixedDb>,
         stale_target: sync::compact::Target<mmr::Family, Digest>,
         stale_request_tx: mpsc::Sender<()>,
     }
 
-    impl sync::source::Source<sync::compact::Target<mmr::Family, Digest>>
-        for SupersedingCompactResolver
-    {
+    impl sync::Source<sync::compact::Target<mmr::Family, Digest>> for SupersedingCompactSource {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = fixed::Operation<mmr::Family, Digest, Digest>;
@@ -513,8 +511,8 @@ mod tests {
             target: sync::compact::Target<Self::Family, Self::Digest>,
         ) -> Result<
             (
-                sync::source::Response<Self::Family, Self::Op, Self::Digest>,
-                sync::source::Validity,
+                sync::Response<Self::Family, Self::Op, Self::Digest>,
+                sync::Validity,
             ),
             Self::Error,
         > {
@@ -631,14 +629,14 @@ mod tests {
                 leaf_count: source.bounds().end,
             };
 
-            // A larger target the resolver never serves. Its sync attempt
+            // A larger target the source never serves. Its sync attempt
             // hangs so the test can observe the gauges while they diverge.
             let unservable_target = sync::compact::Target {
                 root: Sha256::hash(&[&[0xFF]]),
                 leaf_count: Location::new(*target.leaf_count + 1),
             };
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
-            let resolver = SupersedingCompactResolver {
+            let superseding_source = SupersedingCompactSource {
                 source: Arc::new(source),
                 stale_target: unservable_target.clone(),
                 stale_request_tx,
@@ -652,7 +650,7 @@ mod tests {
             let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
                 client_context,
                 client_config,
-                resolver,
+                superseding_source,
                 target.clone(),
                 update_rx,
                 Some(finish_rx),
@@ -736,7 +734,7 @@ mod tests {
             };
 
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
-            let resolver = SupersedingCompactResolver {
+            let superseding_source = SupersedingCompactSource {
                 source: Arc::new(source),
                 stale_target: stale_target.clone(),
                 stale_request_tx,
@@ -747,7 +745,7 @@ mod tests {
                 <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
                     fixed_config(&context, "supersede-target"),
-                    resolver,
+                    superseding_source,
                     stale_target,
                     update_rx,
                     None,

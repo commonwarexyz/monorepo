@@ -13,10 +13,7 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         self,
-        sync::{
-            compact,
-            source::{Response, Source},
-        },
+        sync::{Response, Source, compact},
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
@@ -37,7 +34,7 @@ type ActorMailbox<DB, F, H> = Mailbox<DB, F, DbOp<DB, F, <H as Hasher>::Digest>,
 type MailboxReceiver<DB, F, H> = actor_mailbox::Receiver<
     mailbox::Message<DB, F, DbOp<DB, F, <H as Hasher>::Digest>, <H as Hasher>::Digest>,
 >;
-type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<mailbox::Delivery<F, Op, D>>>;
+type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<mailbox::ResponseTx<F, Op, D>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -265,28 +262,28 @@ where
         &mut self,
         key: handler::Request<F, H::Digest>,
         value: bytes::Bytes,
-        response: oneshot::Sender<bool>,
+        validity_tx: oneshot::Sender<bool>,
     ) {
         let Some(subscribers) = self.pending.remove(&key) else {
-            response.send_lossy(true);
+            validity_tx.send_lossy(true);
             return;
         };
 
-        let state = match Response::<F, DbOp<DB, F, H::Digest>, H::Digest>::decode_cfg(
+        let response = match Response::<F, DbOp<DB, F, H::Digest>, H::Digest>::decode_cfg(
             value,
             &COMPACT_RESPONSE_CFG,
         ) {
-            Ok(state) => state,
+            Ok(response) => response,
             Err(_) => {
                 self.pending.insert(key, subscribers);
-                response.send_lossy(false);
+                validity_tx.send_lossy(false);
                 return;
             }
         };
 
-        if !Self::valid_compact_state(&key, &state) {
+        if !Self::validate_response(&key, &response) {
             self.pending.insert(key, subscribers);
-            response.send_lossy(false);
+            validity_tx.send_lossy(false);
             return;
         }
 
@@ -294,7 +291,7 @@ where
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok((state.clone(), Some(success_tx))))
+                .send(Ok((response.clone(), Some(success_tx))))
                 .is_err()
             {
                 continue;
@@ -303,7 +300,7 @@ where
         }
 
         if approvals.is_empty() {
-            response.send_lossy(true);
+            validity_tx.send_lossy(true);
             return;
         }
 
@@ -313,24 +310,24 @@ where
                 peer_valid &= approved;
             }
         }
-        response.send_lossy(peer_valid);
+        validity_tx.send_lossy(peer_valid);
     }
 
-    /// Check a peer's compact state against the requested target before handing it to
+    /// Check a peer's compact response against the requested target before handing it to
     /// subscribers. Compact state is exactly one operation, the final commit, plus the pins at
     /// the tip; the proof is what makes the pins believable.
-    fn valid_compact_state(
+    fn validate_response(
         key: &handler::Request<F, H::Digest>,
-        state: &Response<F, DbOp<DB, F, H::Digest>, H::Digest>,
+        response: &Response<F, DbOp<DB, F, H::Digest>, H::Digest>,
     ) -> bool {
         let target = key.to_target();
-        if state.proof.leaves != target.leaf_count || target.leaf_count == Location::new(0) {
+        if response.proof.leaves != target.leaf_count || target.leaf_count == Location::new(0) {
             return false;
         }
-        let [last_commit_op] = &state.operations[..] else {
+        let [last_commit_op] = &response.operations[..] else {
             return false;
         };
-        let Some(pinned_nodes) = &state.pinned_nodes else {
+        let Some(pinned_nodes) = &response.pinned_nodes else {
             return false;
         };
         if pinned_nodes.len() != F::nodes_to_pin(target.leaf_count).count() {
@@ -338,7 +335,7 @@ where
         }
 
         qmdb::verify_proof::<H, _, _>(
-            &state.proof,
+            &response.proof,
             Location::new(*target.leaf_count - 1),
             std::slice::from_ref(last_commit_op),
             &target.root,
@@ -348,15 +345,15 @@ where
     async fn handle_produce(
         &mut self,
         key: handler::Request<F, H::Digest>,
-        response: oneshot::Sender<bytes::Bytes>,
+        response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             return;
         };
-        let Ok((state, _)) = database.serve(key.to_target()).await else {
+        let Ok((response, _)) = database.serve(key.to_target()).await else {
             return;
         };
-        response.send_lossy(state.encode());
+        response_tx.send_lossy(response.encode());
     }
 }
 

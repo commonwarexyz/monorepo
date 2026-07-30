@@ -7,7 +7,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::source::{Request, Response, Source as SyncSource, Validity},
+    qmdb::sync::{Request, Response, Source, Validity},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
@@ -19,7 +19,7 @@ pub struct ResponseDropped;
 
 /// Where the actor delivers a fetched response, along with the channel the caller reports
 /// peer validity on.
-pub(super) type Delivery<F, Op, D> =
+pub(super) type ResponseTx<F, Op, D> =
     oneshot::Sender<Result<(Response<F, Op, D>, Validity), ResponseDropped>>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
@@ -29,7 +29,7 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
         request: handler::Request<F>,
-        response: Delivery<F, Op, D>,
+        response: ResponseTx<F, Op, D>,
     },
     /// Cancel a previously requested operation fetch.
     CancelOperations { request: handler::Request<F> },
@@ -129,7 +129,7 @@ impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
     }
 }
 
-impl<DB, F, Op, D> SyncSource<Request<F>> for Mailbox<DB, F, Op, D>
+impl<DB, F, Op, D> Source<Request<F>> for Mailbox<DB, F, Op, D>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,

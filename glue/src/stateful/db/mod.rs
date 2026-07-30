@@ -80,7 +80,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::source;
+use commonware_storage::qmdb::sync::{Response, Source, Validity};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -112,12 +112,12 @@ pub mod p2p;
 /// write lock ([Self::write]) and put it back on success ([WriteSlot::put]); a failure,
 /// panic, or cancellation mid-operation leaves the cell empty permanently, and every
 /// later [Self::read] or [Self::write] panics: a lost database is fatal here by design;
-/// restart to recover. Resolver access instead reports the source as missing, so serving
+/// restart to recover. Serving instead reports the source as missing, so serving
 /// degrades without crashing remote sync.
 pub struct Shared<DB>(Inner<DB>);
 
-/// The lock wrapped by [`Shared`]. Storage implements its sync resolver traits on
-/// this shape, so [`Shared`]'s resolver impls delegate to it.
+/// The lock wrapped by [`Shared`]. Storage implements its sync source traits on
+/// this shape, so [`Shared`]'s source impls delegate to it.
 type Inner<DB> = Arc<TracedAsyncRwLock<Option<DB>>>;
 
 impl<DB> Clone for Shared<DB> {
@@ -184,28 +184,21 @@ impl<DB> WriteSlot<'_, DB> {
     }
 }
 
-/// Serve any sync request by delegating to the storage implementation on the inner lock.
-impl<DB, Req> source::Source<Req> for Shared<DB>
+impl<DB, Req> Source<Req> for Shared<DB>
 where
     DB: Send + Sync + 'static,
     Req: Send + 'static,
-    Inner<DB>: source::Source<Req>,
+    Inner<DB>: Source<Req>,
 {
-    type Family = <Inner<DB> as source::Source<Req>>::Family;
-    type Digest = <Inner<DB> as source::Source<Req>>::Digest;
-    type Op = <Inner<DB> as source::Source<Req>>::Op;
-    type Error = <Inner<DB> as source::Source<Req>>::Error;
+    type Family = <Inner<DB> as Source<Req>>::Family;
+    type Digest = <Inner<DB> as Source<Req>>::Digest;
+    type Op = <Inner<DB> as Source<Req>>::Op;
+    type Error = <Inner<DB> as Source<Req>>::Error;
 
     async fn serve(
         &self,
         request: Req,
-    ) -> Result<
-        (
-            source::Response<Self::Family, Self::Op, Self::Digest>,
-            source::Validity,
-        ),
-        Self::Error,
-    > {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
         self.0.serve(request).await
     }
 }
@@ -420,13 +413,13 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 /// Parameters for a one-time state-sync pass.
 #[derive(Clone, Copy, Debug)]
 pub struct SyncEngineConfig {
-    /// Maximum operations fetched per resolver request.
+    /// Maximum operations fetched per source request.
     pub fetch_batch_size: NonZeroU64,
 
     /// Number of operations applied per local apply step.
     pub apply_batch_size: usize,
 
-    /// Maximum number of outstanding resolver requests.
+    /// Maximum number of outstanding source requests.
     pub max_outstanding_requests: usize,
 
     /// Capacity of per-database target-update channels.
@@ -447,7 +440,7 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
@@ -541,7 +534,7 @@ where
     fn sync(
         context: E,
         config: Self::Config,
-        resolvers: R,
+        sources: R,
         anchor: Anchor<D>,
         targets: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
@@ -617,7 +610,7 @@ where
     async fn sync(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         anchor: Anchor<D>,
         target: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
@@ -630,7 +623,7 @@ where
         let sync = T::sync_db(
             context,
             config,
-            resolver,
+            source,
             target,
             target_rx,
             Some(finish_rx),
@@ -915,7 +908,7 @@ macro_rules! impl_state_sync_set {
             async fn sync(
                 context: E,
                 config: Self::Config,
-                resolvers: ($($R,)+),
+                sources: ($($R,)+),
                 anchor: Anchor<D>,
                 targets: Self::SyncTargets,
                 tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
@@ -1057,7 +1050,7 @@ macro_rules! impl_state_sync_set {
                             let reached_event_sender = reached_event_tx.clone();
                             let completion_signal = completion_tx.clone();
                             let config = config.$idx;
-                            let resolver = resolvers.$idx;
+                            let source = sources.$idx;
                             let target = targets.$idx;
                             let target_rx = db_channels.$idx.target_rx;
                             let finish_rx = db_channels.$idx.finish_rx;
@@ -1066,7 +1059,7 @@ macro_rules! impl_state_sync_set {
                                 let sync = $T::sync_db(
                                     context,
                                     config,
-                                    resolver,
+                                    source,
                                     target,
                                     target_rx,
                                     Some(finish_rx),
@@ -3495,7 +3488,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let release = Arc::new(AtomicBool::new(true));
-            let resolver = SlowSyncController {
+            let source = SlowSyncController {
                 release: release.clone(),
             };
 
@@ -3509,7 +3502,7 @@ mod tests {
                     >>::sync(
                         context,
                         (),
-                        resolver,
+                        source,
                         anchor(0),
                         0,
                         tip_rx,
@@ -4010,10 +4003,10 @@ mod tests {
             let fast_ready = Arc::new(AtomicBool::new(false));
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
-            let slow_resolver = SlowSyncController {
+            let slow_source = SlowSyncController {
                 release: slow_release.clone(),
             };
-            let fast_resolver = FastSyncObserver {
+            let fast_source = FastSyncObserver {
                 ready: fast_ready.clone(),
                 update_count: fast_update_count.clone(),
             };
@@ -4029,7 +4022,7 @@ mod tests {
                     >>::sync(
                         context,
                         ((), ()),
-                        (slow_resolver, fast_resolver),
+                        (slow_source, fast_source),
                         anchor(0),
                         (0, 0),
                         tip_rx,
@@ -4085,8 +4078,8 @@ mod tests {
             let target = 7u64;
 
             let sync = context.child("tuple_state_sync_noop").spawn({
-                let slow_resolver = slow_release.clone();
-                let fast_resolver = FastSyncObserver {
+                let slow_source = slow_release.clone();
+                let fast_source = FastSyncObserver {
                     ready: fast_ready.clone(),
                     update_count: fast_update_count.clone(),
                 };
@@ -4098,7 +4091,7 @@ mod tests {
                     >>::sync(
                         context,
                         ((), ()),
-                        (slow_resolver, fast_resolver),
+                        (slow_source, fast_source),
                         anchor(target),
                         (target, target),
                         tip_rx,
@@ -4148,8 +4141,8 @@ mod tests {
             let sync = context
                 .child("tuple_state_sync_regroup_unchanged_target")
                 .spawn({
-                    let slow_resolver = slow_release.clone();
-                    let fast_resolver = FastSyncObserver {
+                    let slow_source = slow_release.clone();
+                    let fast_source = FastSyncObserver {
                         ready: fast_ready.clone(),
                         update_count: fast_update_count.clone(),
                     };
@@ -4161,7 +4154,7 @@ mod tests {
                         >>::sync(
                             context,
                             ((), ()),
-                            (slow_resolver, fast_resolver),
+                            (slow_source, fast_source),
                             anchor(0),
                             (0, 7),
                             tip_rx,

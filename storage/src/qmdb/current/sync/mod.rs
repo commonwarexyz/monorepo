@@ -372,8 +372,6 @@ impl_current_sync_database!(
 
 /// A `current` database serves proofs from the `any` database it wraps: the sync engine
 /// operates on the ops root, which is `any`'s root.
-///
-/// Every `current` alias resolves to this one generic, so one implementation covers all four.
 impl<F, E, U, C, I, H, const N: usize, S>
     crate::qmdb::sync::Source<crate::qmdb::sync::source::Request<F>>
     for db::Db<F, E, C, I, H, U, N, S>

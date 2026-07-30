@@ -6,10 +6,7 @@ use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{
-        compact,
-        source::{Response, Source, Validity},
-    },
+    qmdb::sync::{Response, Source, Validity, compact},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
@@ -21,14 +18,14 @@ pub struct ResponseDropped;
 
 /// Where the actor delivers a fetched response, along with the channel the caller reports
 /// peer validity on.
-pub(super) type Delivery<F, Op, D> =
+pub(super) type ResponseTx<F, Op, D> =
     oneshot::Sender<Result<(Response<F, Op, D>, Validity), ResponseDropped>>;
 
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     AttachDatabase(Shared<DB>),
     GetState {
         request: handler::Request<F, D>,
-        response: Delivery<F, Op, D>,
+        response: ResponseTx<F, Op, D>,
     },
     CancelState {
         request: handler::Request<F, D>,
