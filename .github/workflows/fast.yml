@@ -380,8 +380,8 @@ jobs:
         cargo check --target wasm32-unknown-unknown -p commonware-actor
         cargo check --target wasm32-unknown-unknown -p commonware-stream
         cargo check --target wasm32-unknown-unknown -p commonware-p2p
-        cargo check --target wasm32-unknown-unknown -p commonware-websocket
-        if rg 'unsafe impl (Send|Sync)|send_wrapper' runtime/src/web.rs websocket/src/web.rs; then
+        cargo check --target wasm32-unknown-unknown -p commonware-webrtc
+        if rg 'unsafe impl (Send|Sync)|send_wrapper' runtime/src/web.rs webrtc/src; then
           echo "Browser code must not bypass platform thread-safety bounds"
           exit 1
         fi
