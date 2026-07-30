@@ -16,7 +16,12 @@
       <section class="chat" aria-label="Commonware peer-to-peer chat">
         <header class="topbar">
           <div class="brand" aria-label="Commonware Chat">
-            <span class="brand-mark" aria-hidden="true">C</span>
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 40 40">
+                <path d="M7 14h12M13 8v12" />
+                <path d="M20 15c2.2-4.5 4.5-4.5 6.8 0s4.6 4.5 6.8 0" />
+              </svg>
+            </span>
             <div>
               <h1>Commonware</h1>
               <p>Authenticated chat</p>
@@ -63,12 +68,26 @@
             </div>
           </div>
           <div id="qr-panel" class="qr-panel" hidden>
-            <a id="invite-link" target="_blank" rel="noreferrer" aria-label="Open invite link">
-              <img id="invite-qr" width="220" height="220" alt="One-time pairing QR code" />
+            <a
+              id="invite-link"
+              class="qr-link"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Open one-time invite in another tab"
+            >
+              <span class="qr-frame">
+                <img id="invite-qr" width="220" height="220" alt="One-time pairing QR code" />
+              </span>
+              <span class="qr-open">
+                Click QR to open in another tab
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M6 3h7v7M13 3 5.5 10.5M11 9.5V13H3V5h3.5" />
+                </svg>
+              </span>
             </a>
             <div class="qr-copy">
-              <strong>One-time invite</strong>
-              <span>Expires automatically. Do not share it beyond your peer.</span>
+              <strong>Scan to join this private room</strong>
+              <span>One-time invite. Expires automatically.</span>
               <button id="copy-invite" class="primary-button" type="button">Copy link</button>
             </div>
           </div>

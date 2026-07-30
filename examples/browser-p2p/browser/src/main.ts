@@ -182,7 +182,7 @@ function handlePeerDisconnected(): void {
 function presentPeerDisconnected(): void {
   elements.emptyTitle.textContent = "Peer disconnected";
   elements.emptyDetail.textContent = "Create a new invite to start another private chat.";
-  showNotice("Peer disconnected", "The direct connection closed. Your message history is still here.");
+  showNotice("Peer disconnected", "The direct connection closed.");
   elements.retryButton.hidden = false;
 }
 
