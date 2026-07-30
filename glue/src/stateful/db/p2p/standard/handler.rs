@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_resolver::{self as resolver, Delivery, p2p::Producer};
-use commonware_storage::{merkle::Family, qmdb::sync::source::Request};
+use commonware_storage::{merkle::Family, qmdb::sync::Request};
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 

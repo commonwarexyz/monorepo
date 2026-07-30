@@ -66,11 +66,11 @@ struct Config {
     max_outstanding_requests: usize,
 }
 
-/// Every `interval_duration`, request an updated full-sync target from `resolver` and send any
+/// Every `interval_duration`, request an updated full-sync target from `source` and send any
 /// changes on `update_tx`.
 async fn target_update_task<E, Op, D>(
     context: E,
-    resolver: Resolver<Op, D>,
+    source: Resolver<Op, D>,
     update_tx: mpsc::Sender<sync::Target<mmr::Family, D>>,
     interval_duration: Duration,
     initial_target: sync::Target<mmr::Family, D>,
@@ -86,7 +86,7 @@ where
     loop {
         context.sleep(interval_duration).await;
 
-        match resolver.get_sync_target().await {
+        match source.get_sync_target().await {
             Ok(new_target) => {
                 // Check if target has changed
                 if current_target != new_target {
@@ -142,20 +142,19 @@ where
     info!("starting {label} sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver =
-            Resolver::<Op, Key>::connect(context.child("resolver"), config.server).await?;
+        let source = Resolver::<Op, Key>::connect(context.child("resolver"), config.server).await?;
 
-        let initial_target = resolver.get_sync_target().await?;
+        let initial_target = source.get_sync_target().await?;
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
-            let resolver = resolver.clone();
+            let source = source.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
             context.child("target_update").spawn(move |context| {
                 target_update_task(
                     context,
-                    resolver,
+                    source,
                     update_sender,
                     target_update_interval,
                     initial_target_clone,
@@ -166,7 +165,7 @@ where
         sync_once(
             context.child("sync"),
             config.clone(),
-            resolver,
+            source,
             initial_target,
             update_receiver,
             iteration,
@@ -187,7 +186,7 @@ where
     run_full_sync::<any::Database<_>, any::Operation, _, _, _>(
         context,
         config,
-        |context, config, resolver, initial_target, update_receiver, iteration| async move {
+        |context, config, source, initial_target, update_receiver, iteration| async move {
             let db_config = any::create_config(&context);
             let sync_config =
                 sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Key>> {
@@ -195,7 +194,7 @@ where
                     db_config,
                     fetch_batch_size: config.batch_size,
                     target: initial_target,
-                    source: resolver,
+                    source,
                     apply_batch_size: 1024,
                     max_outstanding_requests: config.max_outstanding_requests,
                     update_rx: Some(update_receiver),
@@ -229,7 +228,7 @@ where
     run_full_sync::<current::Database<_>, current::Operation, _, _, _>(
         context,
         config,
-        |context, config, resolver, initial_target, update_receiver, iteration| async move {
+        |context, config, source, initial_target, update_receiver, iteration| async move {
             let db_config = current::create_config(&context);
             let sync_config =
                 sync::engine::Config::<current::Database<_>, Resolver<current::Operation, Key>> {
@@ -237,7 +236,7 @@ where
                     db_config,
                     fetch_batch_size: config.batch_size,
                     target: initial_target,
-                    source: resolver,
+                    source,
                     apply_batch_size: 1024,
                     max_outstanding_requests: config.max_outstanding_requests,
                     update_rx: Some(update_receiver),
@@ -268,7 +267,7 @@ where
     run_full_sync::<immutable::Database<_>, immutable::Operation, _, _, _>(
         context,
         config,
-        |context, config, resolver, initial_target, update_receiver, iteration| async move {
+        |context, config, source, initial_target, update_receiver, iteration| async move {
             let db_config = immutable::create_config(&context);
             let sync_config = sync::engine::Config::<
                 immutable::Database<_>,
@@ -278,7 +277,7 @@ where
                 db_config,
                 fetch_batch_size: config.batch_size,
                 target: initial_target,
-                source: resolver,
+                source,
                 apply_batch_size: 1024,
                 max_outstanding_requests: config.max_outstanding_requests,
                 update_rx: Some(update_receiver),
@@ -308,7 +307,7 @@ where
     run_full_sync::<keyless::Database<_>, keyless::Operation, _, _, _>(
         context,
         config,
-        |context, config, resolver, initial_target, update_receiver, iteration| async move {
+        |context, config, source, initial_target, update_receiver, iteration| async move {
             let db_config = keyless::create_config(&context);
             let sync_config =
                 sync::engine::Config::<keyless::Database<_>, Resolver<keyless::Operation, Key>> {
@@ -316,7 +315,7 @@ where
                     db_config,
                     fetch_batch_size: config.batch_size,
                     target: initial_target,
-                    source: resolver,
+                    source,
                     apply_batch_size: 1024,
                     max_outstanding_requests: config.max_outstanding_requests,
                     update_rx: Some(update_receiver),
@@ -355,12 +354,11 @@ where
     info!("starting {label} compact sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver =
-            Resolver::<Op, Key>::connect(context.child("resolver"), config.server).await?;
-        let target = resolver.get_compact_target().await?;
+        let source = Resolver::<Op, Key>::connect(context.child("resolver"), config.server).await?;
+        let target = source.get_compact_target().await?;
         let sync_config = compact::Config::<DB, Resolver<Op, Key>> {
             context: context.child("sync"),
-            source: resolver,
+            source,
             target,
             db_config: make_db_config(&context),
             update_rx: None,

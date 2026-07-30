@@ -6,7 +6,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::source::{Request, Response, Source as SyncSource, Validity},
+    qmdb::sync::{Request, Response, Source, Validity},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
@@ -128,7 +128,7 @@ impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
     }
 }
 
-impl<DB, F, Op, D> SyncSource<Request<F>> for Mailbox<DB, F, Op, D>
+impl<DB, F, Op, D> Source<Request<F>> for Mailbox<DB, F, Op, D>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,

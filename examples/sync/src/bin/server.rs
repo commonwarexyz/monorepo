@@ -15,7 +15,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{self, Target, compact, source::Source as _},
+    qmdb::sync::{self, Source as _, Target, compact},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{

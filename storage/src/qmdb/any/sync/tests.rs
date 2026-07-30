@@ -1881,7 +1881,7 @@ enum Tamper {
 struct TamperFirstSource<R> {
     inner: R,
     tamper: Tamper,
-    done: Arc<std::sync::atomic::AtomicBool>,
+    done: std::sync::atomic::AtomicBool,
     verdict_rx: Arc<Mutex<Option<oneshot::Receiver<bool>>>>,
 }
 
@@ -1955,7 +1955,7 @@ where
         let source = TamperFirstSource {
             inner: Arc::new(target_db),
             tamper,
-            done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            done: std::sync::atomic::AtomicBool::new(false),
             verdict_rx: verdict_rx.clone(),
         };
 

@@ -294,9 +294,8 @@ where
         let max_proof_digests = cfg
             .max_proof_digests
             .min(cfg.max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT));
-        let (max_ops, op_cfg) = (&cfg.max_ops, &cfg.op);
         let proof = Proof::<F, D>::read_cfg(buf, &max_proof_digests)?;
-        let operations = Vec::<Op>::read_cfg(buf, &((..=*max_ops).into(), op_cfg.clone()))?;
+        let operations = Vec::<Op>::read_cfg(buf, &((..=cfg.max_ops).into(), cfg.op.clone()))?;
         // Pins are the fold-prefix peaks at the requested boundary, independent of `max_ops`.
         let pinned_nodes = Option::<Vec<D>>::read_range(buf, ..=MAX_PINNED_NODES)?;
         Ok(Self {
@@ -323,15 +322,9 @@ where
 }
 
 /// Where to report whether a fetched response verified, so a remote peer can be scored.
-///
-/// `None` when there is no peer to score, e.g. the response came from local storage.
 pub type Validity = Option<oneshot::Sender<bool>>;
 
-/// Anything that can answer request `Req`.
-///
-/// A database is a source; so is an owned snapshot; so is a lock around either, because
-/// wrapping a source yields a source; so is a handle to a remote peer. One implementation of
-/// this trait therefore covers both where the data lives and how it is reached.
+/// A source for proofs and operations.
 pub trait Source<Req: Send + 'static>: Send + Sync {
     /// The merkle family backing this source's proofs.
     type Family: Family;
@@ -356,7 +349,6 @@ pub trait Source<Req: Send + 'static>: Send + Sync {
     + 'a;
 }
 
-/// An `Arc` around a source is a source.
 impl<T, Req> Source<Req> for Arc<T>
 where
     T: Source<Req> + ?Sized,
@@ -378,10 +370,6 @@ where
     }
 }
 
-/// A source that may be absent is a source that may report [`ServeError::MissingSource`].
-///
-/// This is what makes `Arc<Lock<Option<Db>>>` work: the `Option` contributes the missing case,
-/// the lock contributes the guard, and the `Arc` is transparent.
 impl<T, Req> Source<Req> for Option<T>
 where
     T: Source<Req>,
@@ -402,12 +390,6 @@ where
     }
 }
 
-/// A lock around a source is a source.
-///
-/// The guard is held across the whole call, so a writer cannot prune the pins out from under
-/// the proof. A macro rather than one implementation generic over the lock because the two
-/// lock types share no trait, and giving them one would make this overlap with the
-/// implementation for [`Arc`].
 macro_rules! impl_locked_source {
     ($lock:ident) => {
         impl<T, Req> Source<Req> for $lock<T>
@@ -434,11 +416,6 @@ macro_rules! impl_locked_source {
 impl_locked_source!(AsyncRwLock);
 impl_locked_source!(TracedAsyncRwLock);
 
-/// Answer a [`Request`] from a database's inherent proof reads.
-///
-/// Written once and expanded by each [`Source`] implementation below. The two reads
-/// belong to one answer: the pins are only meaningful because the proof in the same response
-/// authenticates them.
 macro_rules! serve_request {
     () => {
         async fn serve(
@@ -466,8 +443,6 @@ macro_rules! serve_request {
     };
 }
 
-/// Every `any` database alias resolves to this one generic, so one implementation covers all
-/// four of them.
 impl<F, E, U, C, I, H, const N: usize, S> Source<Request<F>>
     for crate::qmdb::any::db::Db<F, E, C, I, H, U, N, S>
 where
@@ -489,7 +464,6 @@ where
 
     serve_request!();
 }
-/// Both `immutable` aliases resolve to this one generic.
 impl<F, E, K, V, C, H, T, S> Source<Request<F>>
     for crate::qmdb::immutable::Immutable<F, E, K, V, C, H, T, S>
 where
@@ -514,7 +488,6 @@ where
     serve_request!();
 }
 
-/// Both `keyless` aliases resolve to this one generic.
 impl<F, E, V, C, H, S> Source<Request<F>> for crate::qmdb::keyless::Keyless<F, E, V, C, H, S>
 where
     F: Family,
@@ -725,7 +698,10 @@ pub(crate) mod tests {
     #[test]
     fn test_request_decode_rejects_contradictions() {
         let valid = Request::<mmr::Family>::new(Location::new(128), Location::new(64), NZU64!(16));
-        assert_eq!(Request::<mmr::Family>::decode(valid.encode()).unwrap(), valid);
+        assert_eq!(
+            Request::<mmr::Family>::decode(valid.encode()).unwrap(),
+            valid
+        );
 
         // start >= size
         let mut bad = valid;

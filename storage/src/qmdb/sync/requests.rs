@@ -121,7 +121,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
     }
 
     /// Resolves to the next fetch result, or [`Aborted`] if the request was cancelled.
-    /// Never resolves while no requests are outstanding.
+    /// Never resolves once all completed and aborted results have been drained.
     pub async fn next_completed(&mut self) -> Result<IndexedFetchResult<F, Op, D, E>, Aborted> {
         self.futures.next_completed().await
     }
