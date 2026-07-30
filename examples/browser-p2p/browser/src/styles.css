@@ -11,6 +11,7 @@
   --accent: #365c4d;
   --accent-soft: #e6eee8;
   --danger: #9a443d;
+  --status-pulse-duration: 5.6s;
 }
 
 * {
@@ -140,7 +141,7 @@ h1 {
 .status-dot[data-state="reconnecting"] {
   background: #c88d38;
   box-shadow: 0 0 0 4px rgb(200 141 56 / 14%);
-  animation: pulse 1.4s ease-in-out infinite;
+  animation: pulse var(--status-pulse-duration) ease-in-out infinite;
 }
 
 .notice {
@@ -497,7 +498,7 @@ textarea:disabled {
 
 @keyframes pulse {
   50% {
-    opacity: 0.5;
+    opacity: 0.65;
   }
 }
 
