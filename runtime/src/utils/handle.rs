@@ -308,6 +308,7 @@ impl Panicker {
     /// Notifies the runtime of an infrastructure failure regardless of panic policy.
     ///
     /// Returns true when this failure won the single root-interruption race.
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) fn notify_fatal(&self, panic: Box<dyn Any + Send + 'static>) -> bool {
         self.send(panic)
     }

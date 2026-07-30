@@ -62,7 +62,7 @@ static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 fn allocate_runtime_id(counter: &AtomicU64) -> u64 {
     // Relaxed ordering is sufficient because the counter provides uniqueness only.
     counter
-        .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
+        .try_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
             next.checked_add(1)
         })
         .expect("timer runtime identity space exhausted")
