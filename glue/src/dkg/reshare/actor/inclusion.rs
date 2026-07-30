@@ -491,32 +491,26 @@ where
             },
             completed = &mut verification.task => {
                 let completed = completed.expect("verification task failed");
-                if !verification.complete(completed) {
-                    self.start_verification(&mut verification, epoch, info, store);
-                    continue;
+                if verification.complete(completed) {
+                    let logs = verification.target.clone();
+                    let ceremony = verification
+                        .ready(&logs)
+                        .expect("completed verification must have a result");
+                    self.serve_waiters(
+                        epoch,
+                        store,
+                        logs,
+                        ceremony,
+                        &mut artifact_waiters,
+                        &mut artifacts,
+                    )
+                    .await;
                 }
-                let logs = verification.target.clone();
-                let ceremony = verification
-                    .ready(&logs)
-                    .expect("completed verification must have a result");
-                self.serve_waiters(
-                    epoch,
-                    store,
-                    logs,
-                    ceremony,
-                    &mut artifact_waiters,
-                    &mut artifacts,
-                )
-                .await;
 
                 let target = artifact_waiters.next_target(|| store.logs(epoch));
-                self.retarget_verification(
-                    &mut verification,
-                    epoch,
-                    info,
-                    store,
-                    target,
-                );
+                if verification.retarget_if_idle(target) {
+                    self.start_verification(&mut verification, epoch, info, store);
+                }
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
@@ -1409,6 +1403,46 @@ mod tests {
                 .expect("task should complete");
             assert!(!verification.complete(completed));
             assert!(verification.retarget_if_idle(canonical));
+        });
+    }
+
+    #[test]
+    fn obsolete_completion_skips_canceled_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let obsolete = dealer_logs(0);
+            let canceled = dealer_logs(1);
+            let canonical = dealer_logs(2);
+            let completed_logs = obsolete.clone();
+            let (release_tx, release_rx) = oneshot::channel();
+            let task = context.child("obsolete").spawn(|_| async move {
+                release_rx.await.expect("task should be released");
+                VerifiedLogs::<TestBlsVariant, PrivateKey> {
+                    logs: completed_logs,
+                    ceremony: None,
+                }
+            });
+            let mut verification = Verification::new(obsolete);
+            verification.start(task);
+
+            let (response_tx, response_rx) = oneshot::channel();
+            let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
+            waiters.push(canceled.clone(), response_tx);
+            assert!(verification.retarget(canceled));
+            drop(response_rx);
+
+            release_tx.send(()).expect("task should still be running");
+            let completed = verification
+                .task
+                .take()
+                .expect("task should be present")
+                .await
+                .expect("task should complete");
+            assert!(!verification.complete(completed));
+
+            let target = waiters.next_target(|| canonical.clone());
+            assert_eq!(target, canonical);
+            assert!(verification.retarget_if_idle(target));
         });
     }
 
