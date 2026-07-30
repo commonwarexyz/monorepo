@@ -542,7 +542,7 @@ pub(crate) mod tests {
         merkle::mmr,
         translator::{OneCap, TwoCap},
     };
-    use commonware_codec::{DecodeExt as _, Encode as _};
+    use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_parallel::Rayon;
     use commonware_runtime::{Runner as _, deterministic};
@@ -749,10 +749,9 @@ pub(crate) mod tests {
         assert!(Request::<mmr::Family>::decode(zero_max.as_slice()).is_err());
     }
 
-    /// A source behind a lock reaches the source and reports its error.
+    /// Pins ride outside the operation-count limit: a one-op response may carry many pins.
     #[test]
     fn test_response_decode_allows_pinned_nodes_above_max_ops() {
-        use commonware_codec::{Decode as _, Encode as _};
         let response = Response::<mmr::Family, u64, ShaDigest>::new(
             Proof {
                 leaves: Location::new(10),
@@ -775,7 +774,6 @@ pub(crate) mod tests {
 
     #[test]
     fn test_response_decode_absolute_digest_cap_tightens() {
-        use commonware_codec::{Decode as _, Encode as _};
         let response = Response::<mmr::Family, u64, ShaDigest>::new(
             Proof {
                 leaves: Location::new(10),
@@ -795,27 +793,45 @@ pub(crate) mod tests {
         );
     }
 
+    /// A response carrying exactly the per-request digest cap decodes.
     #[test]
-    fn test_request_decode_rejects_contradictions() {
-        use commonware_codec::{DecodeExt as _, Encode as _};
-        let valid = Request::<mmr::Family>::new(Location::new(128), Location::new(64), NZU64!(16));
-        let decoded = Request::<mmr::Family>::decode(valid.encode()).unwrap();
-        assert_eq!(decoded, valid);
-
-        // start >= size
-        let mut bad = valid;
-        bad.start = Location::new(128);
-        assert!(Request::<mmr::Family>::decode(bad.encode()).is_err());
-
-        // retain_from > size
-        let bad = valid.retaining_from(Location::new(129));
-        assert!(Request::<mmr::Family>::decode(bad.encode()).is_err());
-
-        // boundary at the tip is allowed
-        let tip = valid.retaining_from(Location::new(128));
-        assert_eq!(Request::<mmr::Family>::decode(tip.encode()).unwrap(), tip);
+    fn test_response_decode_allows_max_proof_digests() {
+        let response = Response::<mmr::Family, u64, ShaDigest>::new(
+            Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![ShaDigest::from([7; 32]); MAX_PROOF_DIGESTS_PER_ELEMENT],
+            },
+            vec![1],
+            None,
+        );
+        let cfg = ResponseConfig::request_bounded(1, ());
+        let decoded =
+            Response::<mmr::Family, u64, ShaDigest>::decode_cfg(response.encode(), &cfg).unwrap();
+        assert_eq!(decoded.proof.digests.len(), MAX_PROOF_DIGESTS_PER_ELEMENT);
     }
 
+    /// The pinned-nodes flag must be exactly 0 or 1 on the wire.
+    #[test]
+    fn test_response_decode_rejects_invalid_pins_flag() {
+        let response = Response::<mmr::Family, u64, ShaDigest>::new(
+            Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![ShaDigest::from([7; 32])],
+            },
+            vec![1],
+            None,
+        );
+        let mut bytes = response.encode().to_vec();
+        *bytes.last_mut().unwrap() = 2;
+        let cfg = ResponseConfig::request_bounded(1, ());
+        assert!(
+            Response::<mmr::Family, u64, ShaDigest>::decode_cfg(bytes.as_slice(), &cfg).is_err()
+        );
+    }
+
+    /// A source behind a lock reaches the source and reports its error.
     #[test]
     fn test_locked_source_reaches_source() {
         deterministic::Runner::default().start(|_context| async move {

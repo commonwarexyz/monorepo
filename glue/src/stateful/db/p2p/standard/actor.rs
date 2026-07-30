@@ -287,8 +287,7 @@ where
         };
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
 
-        // Decode limits derive from the original local request key above. Saturating the
-        // conversion only ever tightens the limit.
+        // Limits derive from the pending request key; saturating the conversion only tightens them.
         let cfg = ResponseConfig::request_bounded(
             usize::try_from(key.max_ops.get()).unwrap_or(usize::MAX),
             (),
@@ -308,14 +307,7 @@ where
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok((
-                    Response::new(
-                        decoded.proof.clone(),
-                        decoded.operations.clone(),
-                        decoded.pinned_nodes.clone(),
-                    ),
-                    Some(success_tx),
-                )))
+                .send(Ok((decoded.clone(), Some(success_tx))))
                 .is_err()
             {
                 continue;
@@ -451,8 +443,8 @@ mod tests {
         }
     }
 
-    fn test_request_at(op_count: Location) -> Request<mmr::Family> {
-        Request::new(op_count, Location::new(0), NonZeroU64::new(1).unwrap())
+    fn test_request_at(size: Location) -> Request<mmr::Family> {
+        Request::new(size, Location::new(0), NonZeroU64::new(1).unwrap())
     }
 
     type TestPending = Pending<mmr::Family, TestOp, sha256::Digest>;
@@ -532,12 +524,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
-            let op_count = db.read().await.bounds().end;
+            let size = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
-                .handle_produce(test_request_at(op_count), response_tx)
+                .handle_produce(test_request_at(size), response_tx)
                 .await;
 
             let payload = response_rx
@@ -552,10 +544,10 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
-            let op_count = db.read().await.bounds().end;
+            let size = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
-            let request = Request::new(op_count, Location::new(0), NonZeroU64::new(1_000).unwrap());
+            let request = Request::new(size, Location::new(0), NonZeroU64::new(1_000).unwrap());
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(request, response_tx).await;
 

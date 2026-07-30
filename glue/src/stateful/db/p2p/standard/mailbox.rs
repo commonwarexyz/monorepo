@@ -1,4 +1,4 @@
-//! Mailbox and wire types for the QMDB sync resolver service.
+//! Mailbox for the standard QMDB P2P resolver.
 
 use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel::CancelGuard};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -185,21 +185,21 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
-            let op_count = mmr::Location::new(10);
-            let start_loc = mmr::Location::new(3);
+            let size = mmr::Location::new(10);
+            let start = mmr::Location::new(3);
             let max_ops = NZU64!(2);
 
             // Poll once so the request is enqueued, then abandon the fetch.
             {
-                let get = mailbox.serve(Request::new(op_count, start_loc, max_ops));
+                let get = mailbox.serve(Request::new(size, start, max_ops));
                 futures::pin_mut!(get);
                 assert!(futures::poll!(get.as_mut()).is_pending());
             }
 
             match receiver.recv().await.expect("request should be queued") {
                 Message::GetOperations { request, .. } => {
-                    assert_eq!(request.size, op_count);
-                    assert_eq!(request.start, start_loc);
+                    assert_eq!(request.size, size);
+                    assert_eq!(request.start, start);
                     assert_eq!(request.max_ops, max_ops);
                     assert!(request.retain_from.is_none());
                 }
@@ -209,8 +209,8 @@ mod tests {
 
             match receiver.recv().await.expect("cancel should be queued") {
                 Message::CancelOperations { request } => {
-                    assert_eq!(request.size, op_count);
-                    assert_eq!(request.start, start_loc);
+                    assert_eq!(request.size, size);
+                    assert_eq!(request.start, start);
                     assert_eq!(request.max_ops, max_ops);
                     assert!(request.retain_from.is_none());
                 }
