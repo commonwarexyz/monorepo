@@ -729,7 +729,7 @@ mod ordinary {
     #[tokio::test]
     async fn injected_readiness_fires_a_registered_sleep() {
         // Register one future and run its driver against a pending fake readiness wait.
-        let (shard, control) = fake_shard();
+        let (shard, control, panicked) = observed_fake_shard();
         let registered = shard.register_after(Duration::from_nanos(20));
         let entry = Arc::clone(&registered.entry);
         let driver = tokio::spawn(run_driver(Arc::clone(&shard)));
@@ -747,6 +747,10 @@ mod ordinary {
         assert_eq!(shard.state.lock().entries.len(), 0);
         shard.stop();
         driver.await.unwrap();
+        assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Stopped);
+
+        // Orderly shutdown must leave root execution uninterrupted.
+        assert_eq!(panicked.interrupt(future::ready(7)).await, 7);
     }
 
     #[test]
@@ -1434,25 +1438,6 @@ mod ordinary {
         let message = fatal_message(panicked).await;
         assert!(message.contains("driver panic"));
         assert!(message.contains("injected waker panic"));
-    }
-
-    #[tokio::test]
-    async fn normal_driver_shutdown_does_not_report_fatal_failure() {
-        // Run an empty shard until its fake readiness future is pending.
-        let (shard, control, panicked) = observed_fake_shard();
-        let driver = tokio::spawn(run_driver(Arc::clone(&shard)));
-        control.wait_until_wait_polled().await;
-
-        // Normal stop wakes the driver and allows it to return without failure.
-        shard.stop();
-        driver.await.unwrap();
-        {
-            let state = shard.state.lock();
-            assert_eq!(state.lifecycle, ShardLifecycle::Stopped);
-        }
-
-        // The fatal receiver must remain quiet while an ordinary ready task completes.
-        assert_eq!(panicked.interrupt(future::ready(7)).await, 7);
     }
 
     #[tokio::test]
