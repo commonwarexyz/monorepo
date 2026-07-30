@@ -46,11 +46,84 @@ use tracing::{Instrument as _, debug, info, info_span, warn};
 /// The exact effective dealer-log view used for one verification.
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
 
-/// Boundary-block requests waiting for the current verification target.
+/// Boundary-block responses waiting for one exact artifact verification.
+struct ArtifactWaiter<V: BlsVariant, C: Signer> {
+    logs: PendingLogs<V, C::PublicKey>,
+    responses: Vec<oneshot::Sender<EpochInfoResponse<V, C>>>,
+}
+
+/// Ancestry-specific requests waiting for artifact verification.
 ///
-/// Retargeting must drain these with [`EpochInfoResponse::Pending`] before
-/// accepting waiters for the replacement.
-type ArtifactWaiters<V, C> = Vec<oneshot::Sender<EpochInfoResponse<V, C>>>;
+/// Requests for the same effective log view share one queue entry and one CPU
+/// verification.
+struct ArtifactWaiters<V: BlsVariant, C: Signer> {
+    inner: Vec<ArtifactWaiter<V, C>>,
+}
+
+impl<V: BlsVariant, C: Signer> Default for ArtifactWaiters<V, C> {
+    fn default() -> Self {
+        Self { inner: Vec::new() }
+    }
+}
+
+impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
+    fn push(
+        &mut self,
+        logs: PendingLogs<V, C::PublicKey>,
+        response: oneshot::Sender<EpochInfoResponse<V, C>>,
+    ) {
+        if let Some(waiter) = self.inner.iter_mut().find(|waiter| waiter.logs == logs) {
+            waiter.responses.push(response);
+            return;
+        }
+
+        self.inner.push(ArtifactWaiter {
+            logs,
+            responses: vec![response],
+        });
+    }
+
+    fn retain_open(&mut self) {
+        self.inner.retain_mut(|waiter| {
+            waiter.responses.retain(|response| !response.is_closed());
+            !waiter.responses.is_empty()
+        });
+    }
+
+    fn contains(&self, logs: &PendingLogs<V, C::PublicKey>) -> bool {
+        self.inner.iter().any(|waiter| waiter.logs == *logs)
+    }
+
+    fn next(&self) -> Option<PendingLogs<V, C::PublicKey>> {
+        self.inner.first().map(|waiter| waiter.logs.clone())
+    }
+
+    fn resolve(
+        &mut self,
+        logs: &PendingLogs<V, C::PublicKey>,
+        result: EpochInfoResponse<V, C>,
+    ) {
+        let mut pending = Vec::with_capacity(self.inner.len());
+        for waiter in self.inner.drain(..) {
+            if waiter.logs == *logs {
+                for response in waiter.responses {
+                    let _ = response.send_lossy(result.clone());
+                }
+            } else {
+                pending.push(waiter);
+            }
+        }
+        self.inner = pending;
+    }
+
+    fn target(
+        &mut self,
+        fallback: PendingLogs<V, C::PublicKey>,
+    ) -> PendingLogs<V, C::PublicKey> {
+        self.retain_open();
+        self.next().unwrap_or(fallback)
+    }
+}
 
 /// A locally reconstructed boundary artifact and this node's matching share.
 ///
@@ -80,10 +153,10 @@ struct VerifiedLogs<V: BlsVariant, C: Signer> {
     ceremony: Option<Ceremony<V, C>>,
 }
 
-/// Tracks verification for the latest effective dealer-log set.
+/// Tracks verification for the selected effective dealer-log set.
 ///
 /// CPU work is allowed to finish once started. If the target changes while it
-/// runs, only the latest log set is retained and started after the active task
+/// runs, only the selected log set is retained and started after the active task
 /// completes. This bounds verification to one shared task at a time. All state
 /// is reconstructable after a crash; no speculative result is persisted.
 struct Verification<V: BlsVariant, C: Signer> {
@@ -102,11 +175,10 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
         }
     }
 
-    /// Selects the latest desired log view without interrupting active work.
+    /// Selects the desired log view without interrupting active work.
     ///
     /// Returns whether the target changed. Any completed result for the old
-    /// target is discarded immediately. On change, the caller must also
-    /// invalidate assembled artifacts and resolve old-target waiters.
+    /// target is discarded immediately.
     fn retarget(&mut self, target: PendingLogs<V, C::PublicKey>) -> bool {
         if self.target == target {
             return false;
@@ -127,7 +199,7 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
         self.task = Some(task).into();
     }
 
-    /// Accepts `result` only when it matches the latest target.
+    /// Accepts `result` only when it matches the selected target.
     ///
     /// Returns false for obsolete work so the caller can start the latest
     /// target after the active CPU task has exited.
@@ -393,7 +465,7 @@ where
         let initial_logs = store.logs(epoch);
         let mut verification = Verification::new(initial_logs);
         self.start_verification(&mut verification, epoch, info, store);
-        let mut artifact_waiters: ArtifactWaiters<V, C> = Vec::new();
+        let mut artifact_waiters = ArtifactWaiters::default();
         select_loop! {
             self.context,
             on_stopped => {
@@ -406,27 +478,37 @@ where
                     self.start_verification(&mut verification, epoch, info, store);
                     continue;
                 }
-                if artifact_waiters.is_empty() {
-                    continue;
-                }
                 let logs = verification.target.clone();
-                let ceremony = verification
-                    .ready(&logs)
-                    .expect("completed verification must have a result")
-                    .clone();
-                let artifact = self
-                    .artifact(
-                        epoch,
-                        store,
-                        logs,
-                        &ceremony,
-                        &mut next_players,
-                        &mut artifact_cache,
-                    )
-                    .await;
-                let result = self.artifact_response(&artifact);
-                for waiter in artifact_waiters.drain(..) {
-                    let _ = waiter.send_lossy(result.clone());
+                artifact_waiters.retain_open();
+                if artifact_waiters.contains(&logs) {
+                    let ceremony = verification
+                        .ready(&logs)
+                        .expect("completed verification must have a result")
+                        .clone();
+                    let artifact = self
+                        .artifact(
+                            epoch,
+                            store,
+                            logs.clone(),
+                            &ceremony,
+                            &mut next_players,
+                            &mut artifact_cache,
+                        )
+                        .await;
+                    let result = self.artifact_response(&artifact);
+                    artifact_waiters.resolve(&logs, result);
+                }
+
+                let canonical_logs = store.logs(epoch);
+                if self.schedule_verification(
+                    &mut verification,
+                    epoch,
+                    info,
+                    store,
+                    &mut artifact_waiters,
+                    canonical_logs,
+                ) {
+                    artifact_cache = None;
                 }
             },
             Some(message) = self.mailbox.recv() else {
@@ -514,19 +596,6 @@ where
                         for (dealer, log) in pending_logs {
                             log_map.entry(dealer).or_insert(log);
                         }
-                        if self.replace_verification(
-                            &mut verification,
-                            epoch,
-                            info,
-                            store,
-                            log_map.clone(),
-                        ) {
-                            artifact_cache = None;
-                            for waiter in artifact_waiters.drain(..) {
-                                let _ = waiter.send_lossy(EpochInfoResponse::Pending);
-                            }
-                        }
-
                         if let Some(ceremony) = verification.ready(&log_map).cloned() {
                             let artifact = self
                                 .artifact(
@@ -541,8 +610,19 @@ where
                             let _ = response.send_lossy(self.artifact_response(&artifact));
                             return;
                         }
-                        artifact_waiters.retain(|waiter| !waiter.is_closed());
-                        artifact_waiters.push(response);
+                        artifact_waiters.retain_open();
+                        artifact_waiters.push(log_map, response);
+                        let canonical_logs = store.logs(epoch);
+                        if self.schedule_verification(
+                            &mut verification,
+                            epoch,
+                            info,
+                            store,
+                            &mut artifact_waiters,
+                            canonical_logs,
+                        ) {
+                            artifact_cache = None;
+                        }
                     }
                     .instrument(process)
                     .await;
@@ -585,17 +665,27 @@ where
 
                         let done = block.height() == bounds.last();
                         let canonical_logs = store.logs(epoch);
-                        if self.replace_verification(
-                            &mut verification,
-                            epoch,
-                            info,
-                            store,
-                            canonical_logs.clone(),
-                        ) {
+                        artifact_waiters.retain_open();
+                        let retargeted = if done {
+                            self.replace_verification(
+                                &mut verification,
+                                epoch,
+                                info,
+                                store,
+                                canonical_logs.clone(),
+                            )
+                        } else {
+                            self.schedule_verification(
+                                &mut verification,
+                                epoch,
+                                info,
+                                store,
+                                &mut artifact_waiters,
+                                canonical_logs.clone(),
+                            )
+                        };
+                        if retargeted {
                             artifact_cache = None;
-                            for waiter in artifact_waiters.drain(..) {
-                                let _ = waiter.send_lossy(EpochInfoResponse::Pending);
-                            }
                         }
                         if done {
                             while verification.ready(&canonical_logs).is_none() {
@@ -621,16 +711,14 @@ where
                                 .artifact(
                                     epoch,
                                     store,
-                                    canonical_logs,
+                                    canonical_logs.clone(),
                                     &ceremony,
                                     &mut next_players,
                                     &mut artifact_cache,
                                 )
                                 .await;
                             let result = self.artifact_response(&artifact);
-                            for waiter in artifact_waiters.drain(..) {
-                                let _ = waiter.send_lossy(result.clone());
-                            }
+                            artifact_waiters.resolve(&canonical_logs, result);
                             self.handle_finalized_epoch_info(
                                 epoch,
                                 store,
@@ -720,12 +808,30 @@ where
         }
     }
 
+    /// Selects the oldest live request, falling back to canonical precomputation.
+    ///
+    /// A target with a live waiter remains selected until it completes. Distinct
+    /// ancestry views are therefore verified sequentially without parking an
+    /// earlier request or overlapping CPU tasks.
+    fn schedule_verification(
+        &mut self,
+        verification: &mut Verification<V, C>,
+        epoch: Epoch,
+        info: &Info<V, C::PublicKey>,
+        store: &Store<E, SS, V, C::PublicKey>,
+        waiters: &mut ArtifactWaiters<V, C>,
+        fallback: PendingLogs<V, C::PublicKey>,
+    ) -> bool {
+        let target = waiters.target(fallback);
+        self.replace_verification(verification, epoch, info, store, target)
+    }
+
     /// Retargets asynchronous verification to an exact effective log set.
     ///
     /// A running verification is never overlapped with its replacement. The
-    /// active task finishes first, after which only the latest target is run.
+    /// active task finishes first, after which the selected target is run.
     /// A true return value requires the caller to invalidate the assembled
-    /// artifact and resolve waiters for the old target with `Pending`.
+    /// artifact cache.
     fn replace_verification(
         &mut self,
         verification: &mut Verification<V, C>,
@@ -1228,5 +1334,55 @@ mod tests {
             assert!(verification.complete(completed));
             assert!(verification.ready(&active).is_some());
         });
+    }
+
+    #[test]
+    fn retargeting_preserves_ancestry_waiter() {
+        let logs = dealer_logs(0);
+        let (response_tx, response_rx) = oneshot::channel();
+        let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
+        waiters.push(logs.clone(), response_tx);
+
+        let selected = waiters.target(dealer_logs(1));
+
+        assert_eq!(selected, logs);
+        assert_eq!(waiters.inner.len(), 1);
+        assert_eq!(waiters.inner[0].logs, logs);
+        assert!(response_rx.now_or_never().is_none());
+    }
+
+    #[test]
+    fn resolving_one_ancestry_preserves_other_waiters() {
+        let first = dealer_logs(0);
+        let second = dealer_logs(1);
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, mut second_rx) = oneshot::channel();
+        let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
+        waiters.push(first.clone(), first_tx);
+        waiters.push(second.clone(), second_tx);
+
+        waiters.resolve(&first, EpochInfoResponse::Unavailable);
+
+        assert!(matches!(
+            first_rx.now_or_never(),
+            Some(Ok(EpochInfoResponse::Unavailable))
+        ));
+        assert!((&mut second_rx).now_or_never().is_none());
+        assert_eq!(waiters.target(PendingLogs::new()), second);
+    }
+
+    #[test]
+    fn identical_ancestry_waiters_share_target() {
+        let logs = dealer_logs(0);
+        let (first_tx, _first_rx) = oneshot::channel();
+        let (second_tx, _second_rx) = oneshot::channel();
+        let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
+
+        waiters.push(logs.clone(), first_tx);
+        waiters.push(logs.clone(), second_tx);
+
+        assert_eq!(waiters.inner.len(), 1);
+        assert_eq!(waiters.inner[0].logs, logs);
+        assert_eq!(waiters.inner[0].responses.len(), 2);
     }
 }
