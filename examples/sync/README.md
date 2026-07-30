@@ -98,8 +98,8 @@ The important distinction is between:
 - the compact-server backing **storage** (`full` vs `compact`)
 
 - In `full` mode, the client downloads and replays authenticated operations into a full database.
-- In `compact` mode, the client does **not** store historical operations. Instead it downloads the
-  latest authenticated compact state and materializes a compact-storage target.
+- In `compact` mode, the client does **not** store historical operations. Instead it fetches the
+  latest commit operation with its proof and materializes a compact-storage target.
 
 That means:
 

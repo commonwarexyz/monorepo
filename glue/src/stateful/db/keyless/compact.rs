@@ -6,7 +6,7 @@
 
 use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait,
+    Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -337,7 +337,7 @@ where
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        crate::stateful::db::sync_compact_db(
+        sync_compact_db(
             context,
             config,
             source,
@@ -374,7 +374,7 @@ where
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        crate::stateful::db::sync_compact_db(
+        sync_compact_db(
             context,
             config,
             source,
@@ -442,7 +442,7 @@ mod tests {
             ),
             Self::Error,
         > {
-            if request.size == self.stale_target.leaf_count {
+            if request.size() == self.stale_target.leaf_count {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }

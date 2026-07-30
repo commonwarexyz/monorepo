@@ -653,59 +653,54 @@ mod tests {
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
             let n = db.target().leaf_count;
-            let request = |size: Location<mmr::Family>,
-                           start: Location<mmr::Family>,
-                           retain_from: Option<Location<mmr::Family>>| {
-                Request {
+            let boundary = |size: Location<mmr::Family>, start: Location<mmr::Family>| {
+                Request::Boundary { size, start }
+            };
+            let operations =
+                |size: Location<mmr::Family>, start: Location<mmr::Family>| Request::Operations {
                     size,
                     start,
                     max_ops: NZU64!(1),
-                    retain_from,
-                }
-            };
+                };
 
             let beyond = Location::new(*n + 1);
             assert!(matches!(
-                db.serve(request(beyond, Location::new(*n), Some(beyond)))
+                db.serve(boundary(beyond, Location::new(*n))).await,
+                Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
+            ));
+            assert!(matches!(
+                db.serve(operations(Location::new(0), Location::new(0)))
                     .await,
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
             assert!(matches!(
-                db.serve(request(Location::new(*n - 1), Location::new(*n - 2), None))
+                db.serve(operations(Location::new(*n - 1), Location::new(*n - 2)))
                     .await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
             ));
             assert!(matches!(
-                db.serve(request(n, n, Some(n))).await,
+                db.serve(boundary(n, n)).await,
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
             assert!(matches!(
-                db.serve(request(n, Location::new(*n - 2), Some(n))).await,
+                db.serve(boundary(n, Location::new(*n - 2))).await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
-            ));
-            assert!(matches!(
-                db.serve(request(n, Location::new(*n - 1), Some(n))).await,
-                Err(Error::Merkle(crate::merkle::Error::ElementPruned(_)))
             ));
 
-            // The witness serves pins only at the commit's own location; requests without pins,
-            // or asking for more operations than the witness holds, are also served.
+            // Requests without pins are also served, even when they ask for more operations
+            // than the witness holds.
             let (response, validity_tx) = db
-                .serve(request(n, Location::new(*n - 1), None))
+                .serve(Request::Operations {
+                    size: n,
+                    start: Location::new(*n - 1),
+                    max_ops: NZU64!(5),
+                })
                 .await
                 .unwrap();
             assert!(validity_tx.is_none());
             assert!(response.pinned_nodes.is_none());
             assert_eq!(response.operations.len(), 1);
-            let (response, _) = db
-                .serve(Request {
-                    size: n,
-                    start: Location::new(*n - 1),
-                    max_ops: NZU64!(5),
-                    retain_from: Some(Location::new(*n - 1)),
-                })
-                .await
-                .unwrap();
+            let (response, _) = db.serve(boundary(n, Location::new(*n - 1))).await.unwrap();
             assert_eq!(response.operations.len(), 1);
             assert!(response.pinned_nodes.is_some());
         });
@@ -1136,11 +1131,9 @@ mod tests {
                 let source = source.sync().await.unwrap();
                 let target = source.target();
                 let (response, _) = source
-                    .serve(crate::qmdb::sync::Request {
+                    .serve(Request::Boundary {
                         size: target.leaf_count,
                         start: Location::new(*target.leaf_count - 1),
-                        max_ops: commonware_utils::NZU64!(1),
-                        retain_from: Some(Location::new(*target.leaf_count - 1)),
                     })
                     .await
                     .unwrap();

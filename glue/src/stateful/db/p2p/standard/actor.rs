@@ -30,8 +30,8 @@ type Op<DB> = <Shared<DB> as Source>::Op;
 type DatabaseRoot<DB> = <Shared<DB> as Source>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
 type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>;
-type Pending<F, Op, D> = mailbox::ResponseTx<F, Op, D>;
-type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
+type PendingSubs<F, DB> =
+    BTreeMap<handler::Request<F>, Vec<mailbox::ResponseTx<F, Op<DB>, DatabaseRoot<DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -357,12 +357,19 @@ where
             return;
         }
         // The wire format only carries a flag, and a peer's retention floor is always the
-        // start of the range it asked for.
-        let request = Request {
-            size: key.op_count,
-            start: key.start_loc,
-            max_ops: key.max_ops,
-            retain_from: key.include_pinned_nodes.then_some(key.start_loc),
+        // start of the range it asked for. A boundary fetch returns one operation, so the
+        // wire's max_ops is ignored when the flag is set.
+        let request = if key.include_pinned_nodes {
+            Request::Boundary {
+                size: key.op_count,
+                start: key.start_loc,
+            }
+        } else {
+            Request::Operations {
+                size: key.op_count,
+                start: key.start_loc,
+                max_ops: key.max_ops,
+            }
         };
         let result = database.serve(request).await;
 
@@ -476,7 +483,7 @@ mod tests {
         }
     }
 
-    type TestPending = Pending<mmr::Family, TestOp, sha256::Digest>;
+    type TestPending = mailbox::ResponseTx<mmr::Family, TestOp, sha256::Digest>;
     type TestPendingResult = oneshot::Receiver<
         Result<
             (

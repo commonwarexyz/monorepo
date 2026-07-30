@@ -1772,6 +1772,15 @@ where
     });
 }
 
+/// A validity slot whose receiver is dropped: it marks a response as feedback-accepting,
+/// so the engine retries instead of failing terminally. Mocks that serve bad data and
+/// expect a retry stand in for resolver-backed sources, which are the only sources that
+/// can produce a different answer on retry.
+fn feedback_validity() -> ValidityTx {
+    let (tx, _rx) = oneshot::channel();
+    Some(tx)
+}
+
 /// A source wrapper that corrupts pinned nodes on the first request, then returns correct
 /// data on subsequent requests.
 #[derive(Clone)]
@@ -1782,7 +1791,7 @@ struct CorruptFirstPinnedNodesSource<R> {
 
 impl<R, F> Source for CorruptFirstPinnedNodesSource<R>
 where
-    F: crate::merkle::Family,
+    F: merkle::Family,
     R: Source<Family = F, Digest = Digest>,
 {
     type Family = R::Family;
@@ -1804,6 +1813,7 @@ where
             && !nodes.is_empty()
         {
             nodes[0] = Digest::from([0xFFu8; 32]);
+            return Ok((response, feedback_validity()));
         }
         Ok((response, validity_tx))
     }
@@ -1865,7 +1875,7 @@ where
 /// A source wrapper that replays the first fresh boundary request against the retained
 /// historical root, then blocks the retry until the test releases it.
 #[derive(Clone)]
-struct ReplayFreshBoundarySource<R, F: crate::merkle::Family> {
+struct ReplayFreshBoundarySource<R, F: merkle::Family> {
     inner: R,
     historical_target_size: Location<F>,
     boundary_start: Location<F>,
@@ -1876,7 +1886,7 @@ struct ReplayFreshBoundarySource<R, F: crate::merkle::Family> {
 
 impl<R, F> Source for ReplayFreshBoundarySource<R, F>
 where
-    F: crate::merkle::Family,
+    F: merkle::Family,
     R: Source<Family = F, Digest = Digest>,
 {
     type Family = R::Family;
@@ -1888,8 +1898,8 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
-        if request.size == self.historical_target_size {
-            if request.retain_from.is_some() {
+        if request.size() == self.historical_target_size {
+            if request.retain_from().is_some() {
                 // Simulate a source that has not answered the old target's pinned-nodes
                 // request when the target changes. The update cancels the request and drops
                 // this pending future.
@@ -1902,20 +1912,19 @@ where
             }
         }
 
-        if request.retain_from.is_some() && request.start == self.boundary_start {
+        if request.retain_from().is_some() && request.start() == self.boundary_start {
             let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
                 // Answer the boundary request against the historical size and without pins,
                 // so the engine has to retry it.
-                let historical = Request {
+                let historical = Request::Operations {
                     size: self.historical_target_size,
-                    start: request.start,
-                    max_ops: request.max_ops,
-                    retain_from: None,
+                    start: request.start(),
+                    max_ops: request.max_ops(),
                 };
-                let (mut response, validity_tx) = self.inner.serve(historical).await?;
+                let (mut response, _) = self.inner.serve(historical).await?;
                 response.pinned_nodes = None;
-                return Ok((response, validity_tx));
+                return Ok((response, feedback_validity()));
             }
 
             let release = self.release_boundary_retry.lock().take();

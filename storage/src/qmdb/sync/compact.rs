@@ -30,9 +30,8 @@ use commonware_runtime::{Buf, BufMut};
 
 /// Compact-sync target for a compact-storage database.
 ///
-/// Compact sync authenticates only the final committed root and total leaf count. Unlike replay
-/// sync, there is no lower replay bound here because compact sync does not transfer or reconstruct
-/// historical operations.
+/// Compact sync authenticates only the final committed root and total leaf count. There is no
+/// lower replay bound here because the replayed range is always the single final commit.
 #[derive(Debug)]
 pub struct Target<F: Family, D: Digest> {
     /// Authenticated root of the committed compact state.

@@ -22,18 +22,57 @@ use commonware_utils::{
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// A request for operations from a source's log.
-pub struct Request<F: Family> {
-    /// Prove against the root the merkle structure had at this many operations.
-    pub size: Location<F>,
+pub enum Request<F: Family> {
+    /// Fetch the operations in `[start, start + max_ops)`.
+    Operations {
+        /// Prove against the root the merkle structure had at this many operations.
+        size: Location<F>,
+        /// First operation to return.
+        start: Location<F>,
+        /// Maximum number of operations to return.
+        max_ops: NonZeroU64,
+    },
+    /// Fetch the single operation at `start` plus the pins at that boundary, the lowest
+    /// location the client will retain. The proof in the response authenticates the pins,
+    /// so there is no way to request them on their own.
+    Boundary {
+        /// Prove against the root the merkle structure had at this many operations.
+        size: Location<F>,
+        /// The operation to return, which is also the pin boundary.
+        start: Location<F>,
+    },
+}
+
+impl<F: Family> Request<F> {
+    /// The size whose root the response's proof must verify against.
+    pub const fn size(&self) -> Location<F> {
+        match self {
+            Self::Operations { size, .. } | Self::Boundary { size, .. } => *size,
+        }
+    }
+
     /// First operation to return.
-    pub start: Location<F>,
+    pub const fn start(&self) -> Location<F> {
+        match self {
+            Self::Operations { start, .. } | Self::Boundary { start, .. } => *start,
+        }
+    }
+
     /// Maximum number of operations to return.
-    pub max_ops: NonZeroU64,
-    /// The lowest location the client will retain.
-    ///
-    /// When set, the response also carries the pins at that boundary. The proof in the same
-    /// response authenticates them, so there is no way to request them on their own.
-    pub retain_from: Option<Location<F>>,
+    pub const fn max_ops(&self) -> NonZeroU64 {
+        match self {
+            Self::Operations { max_ops, .. } => *max_ops,
+            Self::Boundary { .. } => NonZeroU64::MIN,
+        }
+    }
+
+    /// The boundary whose pins the response must carry, if any.
+    pub const fn retain_from(&self) -> Option<Location<F>> {
+        match self {
+            Self::Operations { .. } => None,
+            Self::Boundary { start, .. } => Some(*start),
+        }
+    }
 }
 
 impl<F: Family> Clone for Request<F> {
@@ -46,12 +85,23 @@ impl<F: Family> Copy for Request<F> {}
 
 impl<F: Family> std::fmt::Debug for Request<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Request")
-            .field("size", &self.size)
-            .field("start", &self.start)
-            .field("max_ops", &self.max_ops)
-            .field("retain_from", &self.retain_from)
-            .finish()
+        match self {
+            Self::Operations {
+                size,
+                start,
+                max_ops,
+            } => f
+                .debug_struct("Operations")
+                .field("size", size)
+                .field("start", start)
+                .field("max_ops", max_ops)
+                .finish(),
+            Self::Boundary { size, start } => f
+                .debug_struct("Boundary")
+                .field("size", size)
+                .field("start", start)
+                .finish(),
+        }
     }
 }
 
@@ -124,6 +174,8 @@ where
 }
 
 /// Where to report whether a fetched response verified, so a remote peer can be given feedback.
+/// `None` means the answer is final: an invalid response fails the sync instead of being
+/// retried, because a source that accepts no feedback cannot serve a different answer.
 pub type ValidityTx = Option<oneshot::Sender<bool>>;
 
 /// A source for proofs and operations.
@@ -234,9 +286,9 @@ where
         level = "info",
         skip_all,
         fields(
-            size = *request.size,
-            start = *request.start,
-            max_ops = request.max_ops.get(),
+            size = *request.size(),
+            start = *request.start(),
+            max_ops = request.max_ops().get(),
         ),
     )]
     async fn serve(
@@ -245,14 +297,19 @@ where
     ) -> Result<(Response<F, C::Item, H::Digest>, ValidityTx), qmdb::Error<F>> {
         // Reject before the floor lookup so the error carries the requested size and the
         // floor read never touches out-of-range locations.
-        if request.size > self.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(request.size).into());
+        if request.size() > self.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(request.size()).into());
         }
-        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(self, request.size).await?;
+        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(self, request.size()).await?;
         let (proof, operations) = self
-            .historical_proof(request.size, request.start, request.max_ops, inactive_peaks)
+            .historical_proof(
+                request.size(),
+                request.start(),
+                request.max_ops(),
+                inactive_peaks,
+            )
             .await?;
-        let pinned_nodes = match request.retain_from {
+        let pinned_nodes = match request.retain_from() {
             Some(boundary) => Some(self.merkle.pinned_nodes_at(boundary).await?),
             None => None,
         };
@@ -569,11 +626,10 @@ pub(crate) mod tests {
         deterministic::Runner::default().start(|_context| async move {
             let lock = AsyncRwLock::new(FailSource::<mmr::Family, u8, ShaDigest>::new());
 
-            let request = Request {
+            let request = Request::Operations {
                 size: Location::new(1),
                 start: Location::new(0),
                 max_ops: NZU64!(1),
-                retain_from: None,
             };
             let result = lock.serve(request).await;
             assert!(matches!(result, Err(crate::qmdb::Error::KeyNotFound)));

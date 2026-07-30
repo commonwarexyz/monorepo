@@ -17,12 +17,9 @@ use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::{boxed, select};
 use commonware_runtime::Supervisor as _;
-use commonware_utils::{
-    NZU64,
-    channel::{
-        fallible::{AsyncFallibleExt, OneshotExt as _},
-        mpsc,
-    },
+use commonware_utils::channel::{
+    fallible::{AsyncFallibleExt, OneshotExt as _},
+    mpsc,
 };
 use futures::future::{Aborted, Either, pending};
 use mpsc::error::TryRecvError;
@@ -303,18 +300,16 @@ where
 
         // Schedule a boundary request at the lower sync bound if we don't have boundary
         // state yet and one isn't already in flight. The pins it returns are what let us
-        // rebuild the pruned prefix, so it is the only request that sets `retain_from`.
+        // rebuild the pruned prefix.
         if !self.has_boundary_state()
             && !self
                 .outstanding_requests
                 .contains(&self.target.range.start())
         {
             let start_loc = self.target.range.start();
-            let request = Request {
+            let request = Request::Boundary {
                 size: target_size,
                 start: start_loc,
-                max_ops: NZU64!(1),
-                retain_from: Some(start_loc),
             };
             let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
@@ -356,11 +351,10 @@ where
             let batch_size = self.fetch_batch_size.min(gap_size);
 
             // Schedule the request
-            let request = Request {
+            let request = Request::Operations {
                 size: target_size,
                 start: gap_range.start,
                 max_ops: batch_size,
-                retain_from: None,
             };
             let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
@@ -392,7 +386,7 @@ where
         self.fetched_operations.clear();
         self.pinned_nodes = None;
 
-        // Save the current root keyed by its tree size for verifying
+        // Save the current root keyed by its merkle structure size for verifying
         // retained requests that were issued against this target.
         if self.max_retained_roots > 0 {
             self.retained_roots
@@ -550,6 +544,21 @@ where
         Ok(self.is_at_target()? && self.has_boundary_state())
     }
 
+    /// Handle a response that failed validation.
+    ///
+    /// A source that accepts feedback is told and the request is retried: the feedback lets
+    /// a resolver penalize the peer and route the retry elsewhere. A source that is not
+    /// listening cannot serve a different answer, so the failure is terminal.
+    fn reject_response(validity: ValidityTx) -> Result<(), Error<DB, S>> {
+        validity.map_or_else(
+            || Err(SyncError::Engine(EngineError::InvalidResponse)),
+            |validity| {
+                validity.send_lossy(false);
+                Ok(())
+            },
+        )
+    }
+
     /// Handle the result of a fetch operation.
     ///
     /// Verifies the proof against the current root first, then falls back
@@ -577,23 +586,15 @@ where
         // Validate batch size
         let operations_len = operations.len() as u64;
         if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
-            // Invalid batch size - notify source of failure.
-            // We will request these operations again when we scan for unfetched operations.
-            if let Some(validity) = validity {
-                validity.send_lossy(false);
-            }
-            return Ok(());
+            return Self::reject_response(validity);
         }
 
         if proof.leaves != request.target_size {
-            if let Some(validity) = validity {
-                validity.send_lossy(false);
-            }
-            return Ok(());
+            return Self::reject_response(validity);
         }
 
-        // Look up the root to verify against using the tree size the request
-        // asked for. Fresh requests match the current target; retained
+        // Look up the root to verify against using the merkle structure size the
+        // request asked for. Fresh requests match the current target; retained
         // requests match a historical root that was explicitly retained.
         let is_current_target = request.target_size == self.target.range.end();
         let target_root = if is_current_target {
@@ -609,7 +610,7 @@ where
         };
 
         // Pinned nodes are only extracted from proofs for the current root because
-        // the database needs them for the latest tree size.
+        // the database needs them for the latest merkle structure size.
         let need_pinned = is_current_target
             && self.pinned_nodes.is_none()
             && start_loc == self.target.range.start();
@@ -627,16 +628,16 @@ where
             proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
         };
 
-        // Report success or failure to the source.
-        if let Some(validity) = validity {
-            validity.send_lossy(valid);
-        }
-
         if !valid {
             if need_pinned {
-                tracing::warn!("boundary proof or pinned nodes failed verification, will retry");
+                tracing::warn!("boundary proof or pinned nodes failed verification");
             }
-            return Ok(());
+            return Self::reject_response(validity);
+        }
+
+        // Report success to the source.
+        if let Some(validity) = validity {
+            validity.send_lossy(true);
         }
 
         // Cache pinned nodes only from current-root-verified proofs.

@@ -387,7 +387,7 @@ where
                 continue;
             }
             Err(sync::Error::Engine(
-                err @ (sync::EngineError::RootMismatch { .. } | sync::EngineError::InvalidProof),
+                err @ (sync::EngineError::RootMismatch { .. } | sync::EngineError::InvalidResponse),
             )) => {
                 warn!(
                     sync_iteration = iteration,

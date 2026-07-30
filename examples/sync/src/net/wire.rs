@@ -52,7 +52,7 @@ where
     pub target: Target<mmr::Family, D>,
 }
 
-/// Request for compact authenticated state.
+/// Request for the server's current compact sync target.
 #[derive(Debug)]
 pub struct GetCompactTargetRequest {
     pub request_id: RequestId,

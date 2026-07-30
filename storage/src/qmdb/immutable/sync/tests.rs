@@ -1225,10 +1225,7 @@ where
         fetch_batch_size: NZU64!(1),
         target: sync::Target {
             root: target.root,
-            range: commonware_utils::non_empty_range!(
-                Location::new(*target.leaf_count - 1),
-                target.leaf_count
-            ),
+            range: non_empty_range!(Location::new(*target.leaf_count - 1), target.leaf_count),
         },
         source,
         apply_batch_size: 1024,
@@ -1326,6 +1323,13 @@ mod compact_variable_mmr {
         sync::source::ValidityTx,
     );
 
+    /// A validity slot whose receiver is dropped: it marks a response as feedback-accepting,
+    /// so the engine retries instead of failing terminally, like a resolver-backed source.
+    fn feedback_validity() -> sync::source::ValidityTx {
+        let (tx, _rx) = commonware_utils::channel::oneshot::channel();
+        Some(tx)
+    }
+
     impl sync::source::Source for SequenceSource {
         type Family = mmr::Family;
         type Digest = sha256::Digest;
@@ -1343,7 +1347,7 @@ mod compact_variable_mmr {
         }
     }
 
-    /// Serve the compact state for `target` from `source`.
+    /// Fetch `target`'s final commit operation and boundary pins from `source`.
     async fn fetch_compact_state<R>(
         source: &R,
         target: sync::compact::Target<mmr::Family, sha256::Digest>,
@@ -1358,11 +1362,9 @@ mod compact_variable_mmr {
         R: sync::source::Source<Family = mmr::Family, Digest = sha256::Digest>,
     {
         source
-            .serve(sync::Request {
+            .serve(sync::Request::Boundary {
                 size: target.leaf_count,
                 start: Location::new(*target.leaf_count - 1),
-                max_ops: NZU64!(1),
-                retain_from: Some(Location::new(*target.leaf_count - 1)),
             })
             .await
     }
@@ -1470,8 +1472,8 @@ mod compact_variable_mmr {
                 context.child("client"),
                 SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, None),
-                        (good_state, None),
+                        (bad_state, feedback_validity()),
+                        (good_state, feedback_validity()),
                     ]))),
                 },
                 target.clone(),
@@ -1587,8 +1589,8 @@ mod compact_variable_mmr {
                 context.child("client"),
                 SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, None),
-                        (good_state, None),
+                        (bad_state, feedback_validity()),
+                        (good_state, feedback_validity()),
                     ]))),
                 },
                 target.clone(),
@@ -1644,8 +1646,8 @@ mod compact_variable_mmr {
                 context.child("client"),
                 SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, None),
-                        (good_state, None),
+                        (bad_state, feedback_validity()),
+                        (good_state, feedback_validity()),
                     ]))),
                 },
                 target.clone(),
@@ -1816,29 +1818,33 @@ mod compact_variable_mmr {
                     .await
                     .unwrap(),
             );
+            // target2 names a divergent history: the regrown source reaches the same leaf
+            // count under a different root, so it serves state the client can never verify.
+            // The source accepts no feedback, so the engine fails instead of retrying, as it
+            // must against any source (or byzantine peer) that cannot satisfy the target.
+            let divergent_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("divergent_client"),
+                source.clone(),
+                target2.clone(),
+                client_config(&format!("{suffix}-divergent"), &context),
+            ))
+            .await;
+            assert!(matches!(
+                divergent_result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
+            ));
+
+            // A target below the retained tip is refused outright: the witness prunes
+            // everything before its latest commit.
             let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("stale_client"),
                 source.clone(),
-                target2.clone(),
+                target1.clone(),
                 client_config(&format!("{suffix}-stale"), &context),
             ))
             .await;
             assert!(matches!(
                 stale_result,
-                Err(sync::Error::Engine(sync::EngineError::InvalidProof))
-            ));
-
-            // A target below the retained tip is refused outright: the witness prunes
-            // everything before its latest commit.
-            let size_stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
-                context.child("size_stale_client"),
-                source.clone(),
-                target1.clone(),
-                client_config(&format!("{suffix}-size-stale"), &context),
-            ))
-            .await;
-            assert!(matches!(
-                size_stale_result,
                 Err(sync::Error::Source(qmdb::Error::Journal(
                     crate::journal::Error::ItemPruned(_)
                 )))
@@ -2107,6 +2113,13 @@ mod compact_variable_mmb {
         sync::source::ValidityTx,
     );
 
+    /// A validity slot whose receiver is dropped: it marks a response as feedback-accepting,
+    /// so the engine retries instead of failing terminally, like a resolver-backed source.
+    fn feedback_validity() -> sync::source::ValidityTx {
+        let (tx, _rx) = commonware_utils::channel::oneshot::channel();
+        Some(tx)
+    }
+
     impl sync::source::Source for SequenceSource {
         type Family = mmb::Family;
         type Digest = sha256::Digest;
@@ -2124,7 +2137,7 @@ mod compact_variable_mmb {
         }
     }
 
-    /// Serve the compact state for `target` from `source`.
+    /// Fetch `target`'s final commit operation and boundary pins from `source`.
     async fn fetch_compact_state<R>(
         source: &R,
         target: sync::compact::Target<mmb::Family, sha256::Digest>,
@@ -2139,11 +2152,9 @@ mod compact_variable_mmb {
         R: sync::source::Source<Family = mmb::Family, Digest = sha256::Digest>,
     {
         source
-            .serve(sync::Request {
+            .serve(sync::Request::Boundary {
                 size: target.leaf_count,
                 start: Location::new(*target.leaf_count - 1),
-                max_ops: NZU64!(1),
-                retain_from: Some(Location::new(*target.leaf_count - 1)),
             })
             .await
     }
@@ -2251,8 +2262,8 @@ mod compact_variable_mmb {
                 context.child("client"),
                 SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, None),
-                        (good_state, None),
+                        (bad_state, feedback_validity()),
+                        (good_state, feedback_validity()),
                     ]))),
                 },
                 target.clone(),
@@ -2368,8 +2379,8 @@ mod compact_variable_mmb {
                 context.child("client"),
                 SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, None),
-                        (good_state, None),
+                        (bad_state, feedback_validity()),
+                        (good_state, feedback_validity()),
                     ]))),
                 },
                 target.clone(),
@@ -2428,8 +2439,8 @@ mod compact_variable_mmb {
                 context.child("client"),
                 SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, None),
-                        (good_state, None),
+                        (bad_state, feedback_validity()),
+                        (good_state, feedback_validity()),
                     ]))),
                 },
                 target.clone(),
@@ -2601,29 +2612,33 @@ mod compact_variable_mmb {
                     .unwrap(),
             );
             assert_eq!(source.target(), target3);
+            // target2 names a divergent history: the regrown source reaches the same leaf
+            // count under a different root, so it serves state the client can never verify.
+            // The source accepts no feedback, so the engine fails instead of retrying, as it
+            // must against any source (or byzantine peer) that cannot satisfy the target.
+            let divergent_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("divergent_client"),
+                source.clone(),
+                target2.clone(),
+                client_config(&format!("{suffix}-divergent"), &context),
+            ))
+            .await;
+            assert!(matches!(
+                divergent_result,
+                Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
+            ));
+
+            // A target below the retained tip is refused outright: the witness prunes
+            // everything before its latest commit.
             let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("stale_client"),
                 source.clone(),
-                target2.clone(),
+                target1.clone(),
                 client_config(&format!("{suffix}-stale"), &context),
             ))
             .await;
             assert!(matches!(
                 stale_result,
-                Err(sync::Error::Engine(sync::EngineError::InvalidProof))
-            ));
-
-            // A target below the retained tip is refused outright: the witness prunes
-            // everything before its latest commit.
-            let size_stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
-                context.child("size_stale_client"),
-                source.clone(),
-                target1.clone(),
-                client_config(&format!("{suffix}-size-stale"), &context),
-            ))
-            .await;
-            assert!(matches!(
-                size_stale_result,
                 Err(sync::Error::Source(qmdb::Error::Journal(
                     crate::journal::Error::ItemPruned(_)
                 )))

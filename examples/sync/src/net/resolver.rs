@@ -124,10 +124,10 @@ where
         let request_id = self.request_id_generator.next();
         let message = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
             request_id,
-            op_count: request.size,
-            start_loc: request.start,
-            max_ops: request.max_ops,
-            include_pinned_nodes: request.retain_from.is_some(),
+            op_count: request.size(),
+            start_loc: request.start(),
+            max_ops: request.max_ops(),
+            include_pinned_nodes: request.retain_from().is_some(),
         });
         let (tx, rx) = oneshot::channel();
         self.request_tx

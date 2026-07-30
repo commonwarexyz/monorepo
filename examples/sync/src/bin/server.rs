@@ -1,8 +1,9 @@
-//! Server that serves either full replay data or compact authenticated state to sync clients.
+//! Server that serves authenticated operations and proofs to sync clients.
 //!
-//! In `full` mode this serves authenticated operations and proofs for `any`, `current`,
-//! `immutable`, or `keyless` databases. In `compact` mode it serves compact authenticated state
-//! for `immutable` / `keyless` families, backed by either full or compact-storage sources.
+//! In `full` mode this serves `any`, `current`, `immutable`, or `keyless` databases. In
+//! `compact` mode it additionally announces a compact sync target for `immutable` / `keyless`
+//! families, backed by either full or compact-storage sources; the state itself is served
+//! through the same operations requests as `full` mode.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
@@ -19,7 +20,7 @@ use commonware_storage::{
     mmr,
     qmdb::{
         self,
-        sync::{self, Source as _, Target},
+        sync::{self, Source, Target},
     },
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -356,7 +357,7 @@ async fn handle_get_compact_operations<DB>(
 ) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
 where
     DB: CompactSyncable<Family = mmr::Family>,
-    Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
+    Arc<AsyncRwLock<Option<DB>>>: Source<
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
@@ -366,11 +367,19 @@ where
     state.request_counter.inc();
     request.validate()?;
 
-    let serve_request = sync::Request {
-        size: request.op_count,
-        start: request.start_loc,
-        max_ops: request.max_ops,
-        retain_from: request.include_pinned_nodes.then_some(request.start_loc),
+    // A boundary fetch returns one operation, so the wire's max_ops is ignored when the
+    // pinned-nodes flag is set.
+    let serve_request = if request.include_pinned_nodes {
+        sync::Request::Boundary {
+            size: request.op_count,
+            start: request.start_loc,
+        }
+    } else {
+        sync::Request::Operations {
+            size: request.op_count,
+            start: request.start_loc,
+            max_ops: request.max_ops,
+        }
     };
     let (response, _) = state.database.serve(serve_request).await.map_err(|err| {
         warn!(?err, "failed to serve operations from compact state");
@@ -431,7 +440,7 @@ where
     DB: CompactSyncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
+    Arc<AsyncRwLock<Option<DB>>>: Source<
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
@@ -707,7 +716,7 @@ where
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
-    Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
+    Arc<AsyncRwLock<Option<DB>>>: Source<
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,

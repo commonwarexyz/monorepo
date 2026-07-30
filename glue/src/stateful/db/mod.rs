@@ -73,6 +73,7 @@
 //! generations currently assigned to at least one database, so memory usage
 //! is bounded by the number of databases regardless of how long sync runs.
 
+use commonware_codec::Encode;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Roundable, Viewable,
     types::{Height, Round},
@@ -81,7 +82,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
 use commonware_storage::{
-    merkle::Location,
+    merkle::{Family, Location},
     qmdb::sync::{self, Request, Response, Source, ValidityTx},
 };
 use commonware_utils::{
@@ -116,8 +117,8 @@ pub mod p2p;
 /// write lock ([Self::write]) and put it back on success ([WriteSlot::put]); a failure,
 /// panic, or cancellation mid-operation leaves the cell empty permanently, and every
 /// later [Self::read] or [Self::write] panics: a lost database is fatal here by design;
-/// restart to recover. Serving instead reports the source as missing, so serving
-/// degrades without crashing remote sync.
+/// restart to recover. Serve calls instead report the source as missing, so remote
+/// sync degrades without crashing.
 pub struct Shared<DB>(Inner<DB>);
 
 /// The lock wrapped by [`Shared`]. Storage implements its sync source traits on
@@ -1477,10 +1478,10 @@ pub(crate) async fn sync_compact_db<E, DB, R>(
 where
     E: Metrics + Spawner,
     DB: sync::Database<Context = E>,
-    DB::Op: commonware_codec::Encode,
+    DB::Op: Encode,
     R: sync::SourceFor<DB>,
 {
-    fn engine_target<F: commonware_storage::merkle::Family, D: Digest>(
+    fn engine_target<F: Family, D: Digest>(
         target: &sync::compact::Target<F, D>,
     ) -> Result<sync::Target<F, D>, sync::EngineError<F, D>> {
         let end = target.leaf_count;

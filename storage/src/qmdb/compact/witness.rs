@@ -19,7 +19,7 @@ use crate::{
     merkle::{self, Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{
         self, Error,
-        sync::{Response, compact::Target},
+        sync::{Request, Response, compact::Target},
     },
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
@@ -172,55 +172,44 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
     /// Serve `request` from the single committed state this witness retains.
     ///
-    /// The witness holds exactly the final commit operation and the frontier pins at the
-    /// committed leaf count; anything else is refused with the same errors a pruned
-    /// operation log reports.
+    /// The witness holds exactly the final commit operation and the pins one operation
+    /// below it; anything else is refused with the same errors a pruned operation log
+    /// reports.
     #[allow(clippy::type_complexity)]
     pub(crate) fn compact_state<Op: Read>(
         &self,
         cfg: &Op::Cfg,
-        request: crate::qmdb::sync::Request<F>,
+        request: Request<F>,
     ) -> Result<Response<F, Op, D>, Error<F>> {
         // Hold the witness lock only long enough to check the request and snapshot the entry;
         // decode outside it so concurrent readers do not contend.
         let (entry, proof) = self.with(|w| -> Result<(Witness<F, D>, Proof<F, D>), Error<F>> {
             let current = w.leaf_count();
             let last_commit_loc = Location::new(*current - 1);
-            if request.size > current {
-                return Err(merkle::Error::RangeOutOfBounds(request.size).into());
+            if request.size() > current || request.size() == 0 {
+                return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
             }
-            if request.size < current {
-                return Err(crate::journal::Error::ItemPruned(*request.size - 1).into());
+            if request.size() < current {
+                return Err(crate::journal::Error::ItemPruned(*request.size() - 1).into());
             }
-            if request.start >= request.size {
-                return Err(merkle::Error::RangeOutOfBounds(request.start).into());
+            if request.start() >= request.size() {
+                return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
             }
-            if request.start < last_commit_loc {
-                return Err(crate::journal::Error::ItemPruned(*request.start).into());
-            }
-            if let Some(boundary) = request.retain_from
-                && boundary != last_commit_loc
-                && let Some(missing) = F::nodes_to_pin(boundary).next()
-            {
-                return Err(merkle::Error::ElementPruned(missing).into());
+            if request.start() < last_commit_loc {
+                return Err(crate::journal::Error::ItemPruned(*request.start()).into());
             }
             Ok((w.witness.clone(), w.proof.clone()))
         })?;
         let Witness {
             op_bytes,
-            leaf_count,
             pinned_nodes,
+            ..
         } = entry;
         let op = Op::decode_cfg(op_bytes.as_ref(), cfg)
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-        let pinned_nodes = request.retain_from.map(|boundary| {
-            // Any other boundary that survived the checks above pins nothing.
-            if boundary == Location::new(*leaf_count - 1) {
-                pinned_nodes
-            } else {
-                Vec::new()
-            }
-        });
+        // The checks above leave `start == last_commit_loc`, so a boundary request's pin
+        // boundary is exactly the location the stored pins describe.
+        let pinned_nodes = request.retain_from().map(|_| pinned_nodes);
         Ok(Response {
             proof,
             operations: vec![op],
@@ -378,12 +367,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .position_of(target)
             .await?
             .ok_or(Error::Merkle(merkle::Error::RewindBeyondHistory))?;
-        let (witness, op) = rebuild_and_verify::<F, D, H, S, Op>(
-            entry,
-            merkle,
-            commit_codec_config,
-            last_commit_floor,
-        )?;
+        let (witness, op) =
+            rebuild::<F, D, H, S, Op>(entry, merkle, commit_codec_config, last_commit_floor)?;
         self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
         self.replace(witness);
         Ok((self, op))
@@ -545,12 +530,7 @@ where
         return Err(Error::DataCorrupted("missing compact witness"));
     }
     let entry = journal.read(size - 1).await?;
-    rebuild_and_verify::<F, H::Digest, H, S, Op>(
-        entry,
-        merkle,
-        commit_codec_config,
-        last_commit_floor,
-    )
+    rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config, last_commit_floor)
 }
 
 /// Rebuild the Merkle from `witness` and derive its root and commit proof.
@@ -558,7 +538,7 @@ where
 /// The Merkle is reset to the pins one operation below the commit, the commit operation is
 /// appended, and the root and the commit's inclusion proof are computed from the rebuilt
 /// state. A structurally invalid entry fails with [`Error::DataCorrupted`].
-fn rebuild_and_verify<F, D, H, S, Op>(
+fn rebuild<F, D, H, S, Op>(
     witness: Witness<F, D>,
     merkle: &compact::Merkle<F, D, S>,
     commit_codec_config: &Op::Cfg,

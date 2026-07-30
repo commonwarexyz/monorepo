@@ -26,9 +26,10 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch { expected: D, actual: D },
-    /// Compact proof did not verify against the requested root.
-    #[error("compact proof failed verification")]
-    InvalidProof,
+    /// The source served a response that cannot satisfy the target and is not accepting
+    /// feedback; retrying cannot yield a different answer.
+    #[error("response failed validation and the source accepts no feedback")]
+    InvalidResponse,
     /// Invalid target parameters
     #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
     InvalidTarget {

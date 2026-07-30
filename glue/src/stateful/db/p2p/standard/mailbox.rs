@@ -146,10 +146,10 @@ where
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         let request = handler::Request {
-            op_count: request.size,
-            start_loc: request.start,
-            max_ops: request.max_ops,
-            include_pinned_nodes: request.retain_from.is_some(),
+            op_count: request.size(),
+            start_loc: request.start(),
+            max_ops: request.max_ops(),
+            include_pinned_nodes: request.retain_from().is_some(),
         };
 
         let (response_tx, response_rx) = oneshot::channel();
@@ -157,6 +157,7 @@ where
             request: request.clone(),
             response: response_tx,
         });
+
         let mut guard =
             cancel::Guard::new(self.sender.clone(), Message::CancelOperations { request });
         let result = response_rx.await;
@@ -199,11 +200,10 @@ mod tests {
 
             // Poll once so the request is enqueued, then abandon the fetch.
             {
-                let get = mailbox.serve(Request {
+                let get = mailbox.serve(Request::Operations {
                     size: op_count,
                     start: start_loc,
                     max_ops,
-                    retain_from: None,
                 });
                 futures::pin_mut!(get);
                 assert!(futures::poll!(get.as_mut()).is_pending());
@@ -239,11 +239,10 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
-            let get = mailbox.serve(Request {
+            let get = mailbox.serve(Request::Operations {
                 size: mmr::Location::new(10),
                 start: mmr::Location::new(3),
                 max_ops: NZU64!(2),
-                retain_from: None,
             });
             let observe = async move {
                 let Message::GetOperations { response, .. } =

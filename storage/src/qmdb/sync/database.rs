@@ -80,9 +80,9 @@ pub trait Database: Sized + Send {
     ///
     /// Returning `Some` lets a completed sync journal reuse pins from an on-disk
     /// database instead of fetching them from peers. Returning `None` always falls back to
-    /// fetching from peers. Simple append-only variants may verify only the persisted merkle structure size
-    /// and root. Variants with additional pruning-dependent state should also ensure their
-    /// persisted lower bound still covers `target.range.start()`.
+    /// fetching from peers. Simple append-only variants may verify only the persisted merkle
+    /// structure size and root. Variants with additional pruning-dependent state should also
+    /// ensure their persisted lower bound still covers `target.range.start()`.
     fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
