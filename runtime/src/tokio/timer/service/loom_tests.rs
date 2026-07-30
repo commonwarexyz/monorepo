@@ -302,10 +302,7 @@ fn production_stop_races_other_terminal_transitions() {
             // Exactly one transition wins and its terminal value remains published.
             assert_ne!(stopped, other_won);
             let terminal = entry.state.load(Ordering::Acquire);
-            assert_eq!(
-                terminal,
-                if stopped { ENTRY_STOPPED } else { other }
-            );
+            assert_eq!(terminal, if stopped { ENTRY_STOPPED } else { other });
         });
     }
 }

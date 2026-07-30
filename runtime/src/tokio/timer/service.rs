@@ -109,9 +109,7 @@ impl Deadline {
 
 /// Error raised while synchronously constructing a timer shard.
 #[derive(Debug, Error)]
-#[error(
-    "failed to initialize {platform} timer shard {shard} during {operation}: {source}"
-)]
+#[error("failed to initialize {platform} timer shard {shard} during {operation}: {source}")]
 pub(crate) struct InitError {
     /// Operating system adapter being initialized.
     platform: &'static str,

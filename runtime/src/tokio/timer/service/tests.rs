@@ -708,8 +708,8 @@ fn initialization_error_formats_context_and_exposes_source() {
 
     // Format the user-facing representation and inspect the structured error source.
     let display = error.to_string();
-    let source = std::error::Error::source(&error)
-        .expect("initialization error must retain its I/O source");
+    let source =
+        std::error::Error::source(&error).expect("initialization error must retain its I/O source");
 
     // Display remains concise while Error exposes the original I/O failure.
     assert_eq!(display, expected);
@@ -1378,8 +1378,7 @@ fn clean_runtime_shutdown_does_not_report_pending_sleeps() {
     let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
     tracing::subscriber::set_global_default(subscriber)
         .expect("child process must install its tracing subscriber");
-    let runner =
-        crate::tokio::Runner::new(crate::tokio::Config::default().with_worker_threads(1));
+    let runner = crate::tokio::Runner::new(crate::tokio::Config::default().with_worker_threads(1));
 
     // Action: Return the root while polled tasks retain only pending sleep futures.
     runner.start(|context| async move {
@@ -1773,10 +1772,7 @@ async fn wait_failure_fails_pending_sleep_and_reports_fatal() {
     run_driver(Arc::clone(&shard)).await;
 
     // The wait error must stop the shard and fail the resident sleep.
-    assert_eq!(
-        shard.state.lock().lifecycle,
-        ShardLifecycle::Failed
-    );
+    assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Failed);
     assert_eq!(shard.state.lock().entries.len(), 0);
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
     assert!(failed_poll_unwinds(&entry));
@@ -1797,10 +1793,7 @@ async fn driver_panic_is_contained_and_fails_pending_sleep() {
     run_driver(Arc::clone(&shard)).await;
 
     // Driver containment must stop the shard and fail every resident entry.
-    assert_eq!(
-        shard.state.lock().lifecycle,
-        ShardLifecycle::Failed
-    );
+    assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Failed);
     assert_eq!(shard.state.lock().entries.len(), 0);
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
     assert!(failed_poll_unwinds(&entry));
@@ -1900,10 +1893,7 @@ async fn clock_failure_during_registration_stops_service() {
     let entry = Arc::clone(&registered.entry);
 
     // Registration must return a failed future and leave no resident heap entry.
-    assert_eq!(
-        shard.state.lock().lifecycle,
-        ShardLifecycle::Failed
-    );
+    assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Failed);
     assert_eq!(shard.state.lock().entries.len(), 0);
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
     assert!(failed_poll_unwinds(&entry));
@@ -1926,10 +1916,7 @@ async fn disarm_failure_fails_the_running_service() {
     run_driver(Arc::clone(&shard)).await;
 
     // The disarm error must stop the shard and identify its native operation.
-    assert_eq!(
-        shard.state.lock().lifecycle,
-        ShardLifecycle::Failed
-    );
+    assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Failed);
     let message = fatal_message(panicked).await;
     assert!(message.contains("disarm native alarm"));
 }
