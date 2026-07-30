@@ -16,7 +16,7 @@ impl<T: Policy> CancelGuard<T> {
         }
     }
 
-    /// Leaves the request with the actor, for a fetch that reached an answer.
+    /// Suppresses the drop-time cancel; call once the fetch has completed.
     pub(super) fn disarm(&mut self) {
         self.cancel = None;
     }
