@@ -748,6 +748,7 @@ pub(crate) mod tests {
         assert_eq!(decoded.pinned_nodes.unwrap().len(), 3);
     }
 
+    /// An absolute digest cap below the per-request bound wins.
     #[test]
     fn test_response_decode_absolute_digest_cap_tightens() {
         let response = Response::<mmr::Family, u64, ShaDigest>::new(
@@ -805,6 +806,15 @@ pub(crate) mod tests {
         assert!(
             Response::<mmr::Family, u64, ShaDigest>::decode_cfg(bytes.as_slice(), &cfg).is_err()
         );
+    }
+
+    /// The retain_from flag must be exactly 0 or 1 on the wire.
+    #[test]
+    fn test_request_decode_rejects_invalid_retain_flag() {
+        let valid = Request::<mmr::Family>::new(Location::new(128), Location::new(64), NZU64!(16));
+        let mut bytes = valid.encode().to_vec();
+        *bytes.last_mut().unwrap() = 2;
+        assert!(Request::<mmr::Family>::decode(bytes.as_slice()).is_err());
     }
 
     /// A source behind a lock reaches the source and reports its error.
