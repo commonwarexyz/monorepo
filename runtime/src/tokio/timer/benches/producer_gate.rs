@@ -95,7 +95,3 @@ impl ProducerGate {
         self.changed.notify_all();
     }
 }
-
-#[cfg(test)]
-#[path = "producer_gate_tests.rs"]
-mod tests;

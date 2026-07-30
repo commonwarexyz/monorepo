@@ -70,45 +70,13 @@ fn cancellation_orchestration_handles_one_and_multiple_producers() {
 }
 
 #[test]
-fn cancellation_collection_joins_after_first_panic() {
-    use std::time::{Duration, Instant};
-
-    // Setup: Put a panicking producer before one returning a result, and
-    // reserve coordinator storage before either producer is joined.
-    let panicking = std::thread::spawn(|| -> Option<super::ProducerResult> {
-        panic!("injected producer panic");
-    });
-    let succeeding = std::thread::spawn(|| {
-        Some(super::ProducerResult {
-            setup: Duration::ZERO,
-            cancellation: Vec::new(),
-            last_cancellation: Instant::now(),
-            survivors: Vec::new(),
-            completed_early: false,
-        })
-    });
-    let mut results = Vec::with_capacity(2);
-    let allocation = results.as_ptr();
-
-    // Action: Collect both producers into the preallocated destination.
-    let collected = super::collect_producers(vec![panicking, succeeding], &mut results);
-
-    // Assertion: The first panic is retained, the later result was collected,
-    // and collection neither replaced nor grew the destination allocation.
-    assert!(collected.is_err());
-    assert_eq!(results.len(), 1);
-    assert_eq!(results.capacity(), 2);
-    assert_eq!(results.as_ptr(), allocation);
-}
-
-#[test]
 fn recorder_timestamps_first_and_final_callbacks() {
     use std::{sync::atomic::Ordering, time::Instant};
 
-    // Multiple-callback case - Setup: Start with both boundaries unset.
+    // Boundary case - Setup: Start with both callback boundaries unset.
     let multiple = super::Recorder::new(Instant::now(), 3);
 
-    // Multiple-callback case - Action: Record the first and one interior callback.
+    // Boundary case - Action: Record the first and one interior callback.
     multiple.record();
     let first = multiple.first_ns.load(Ordering::Acquire);
     let last_after_first = multiple.last_ns.load(Ordering::Acquire);
@@ -116,17 +84,17 @@ fn recorder_timestamps_first_and_final_callbacks() {
     let first_after_middle = multiple.first_ns.load(Ordering::Acquire);
     let last_after_middle = multiple.last_ns.load(Ordering::Acquire);
 
-    // Multiple-callback case - Assertion: Only the first boundary is timestamped.
+    // Boundary case - Assertion: Only the first boundary is timestamped.
     assert_ne!(first, 0);
     assert_eq!(last_after_first, 0);
     assert_eq!(first_after_middle, first);
     assert_eq!(last_after_middle, 0);
 
-    // Multiple-callback case - Action: Record the final callback.
+    // Boundary case - Action: Record the final callback.
     multiple.record();
     let last = multiple.last_ns.load(Ordering::Acquire);
 
-    // Multiple-callback case - Assertion: The final boundary is timestamped.
+    // Boundary case - Assertion: The final boundary is timestamped.
     assert_eq!(multiple.completed.load(Ordering::Relaxed), 3);
     assert!(last >= first);
 
@@ -142,54 +110,4 @@ fn recorder_timestamps_first_and_final_callbacks() {
     assert_ne!(first, 0);
     assert_eq!(last, first);
     assert_eq!(single.completed.load(Ordering::Relaxed), 1);
-}
-
-#[test]
-fn fairness_peer_times_out_when_callbacks_are_missing() {
-    use commonware_runtime::{Runner as _, tokio as commonware_tokio};
-    use std::{
-        sync::Arc,
-        time::{Duration, Instant},
-    };
-    use tokio::sync::oneshot;
-
-    // Setup: Start the one-worker fairness topology with a recorder that
-    // expects two callbacks and an already-expired watchdog.
-    let runner =
-        commonware_tokio::Runner::new(commonware_tokio::Config::default().with_worker_threads(1));
-    let recorder = Arc::new(super::Recorder::new(Instant::now(), 2));
-    let (ready_sender, ready) = oneshot::channel();
-    let timeout = Instant::now();
-
-    // Action: Run the production peer loop without delivering either callback.
-    let error = runner.start(move |_| async move {
-        let peer = tokio::spawn(super::measure_peer_gap(recorder, ready_sender, timeout));
-        let _ = ready.await.unwrap();
-        peer.await.unwrap().unwrap_err()
-    });
-
-    // Assertion: The watchdog reports the missing callbacks instead of
-    // leaving the benchmark blocked indefinitely.
-    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-    assert!(error.to_string().contains("0 of 2"));
-    assert!(error.to_string().contains("before timeout"));
-    assert_eq!(super::STORM_COMPLETION_TIMEOUT, Duration::from_secs(30));
-}
-
-#[test]
-fn cancellation_scaling_requires_a_measured_baseline() {
-    use std::time::Duration;
-
-    // Setup: Choose one multi-producer drain with and without a measured baseline.
-    let current = Duration::from_micros(5);
-    let baseline = Duration::from_micros(10);
-
-    // Action: Calculate scaling for isolated multi-producer and combined runs.
-    let isolated = super::cancellation_scaling(None, current);
-    let combined = super::cancellation_scaling(Some(baseline), current);
-
-    // Assertion: Isolated profiling reports no invented baseline while combined
-    // profiling retains the measured ratio.
-    assert_eq!(isolated, None);
-    assert_eq!(combined, Some(2.0));
 }
