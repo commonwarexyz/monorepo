@@ -741,23 +741,9 @@ where
             .lock()
             .get(&target_view)
             .is_some_and(|leader| leader == &participants[byz]);
-        // Skip if the crash node cast ANY own nullify pre-crash. A warm-up view
-        // can legally go Notarize -> timeout -> Nullify on this node while the
-        // other quorum identities still finalize it (which this node observes as
-        // `warmup_tip`). Restart uses a genesis floor and replays the whole
-        // journal, re-emitting that notarize AFTER the nullify in the append-only
-        // audit log, which would trip `own_nullify_is_terminal` on a replayed
-        // duplicate, not a real double-vote. Excluding this uncommon path keeps
-        // the audit suite a sound oracle here.
-        let crash_own_nullified = honest[crash_slot]
-            .inner()
-            .nullifies
-            .lock()
-            .values()
-            .any(|signers| signers.contains(&participants[crash]));
-        if !reached || !byz_leads_next || crash_own_nullified {
+        if !reached || !byz_leads_next {
             log::push(format!(
-                "chaos-twins: skipping input (reached={reached} byz_leads_next={byz_leads_next} crash_own_nullified={crash_own_nullified} byz={byz} crash={crash} warmup_tip={warmup_tip} crash_tip={})",
+                "chaos-twins: skipping input (reached={reached} byz_leads_next={byz_leads_next} byz={byz} crash={crash} warmup_tip={warmup_tip} crash_tip={})",
                 clock.latest[crash],
             ));
             return;

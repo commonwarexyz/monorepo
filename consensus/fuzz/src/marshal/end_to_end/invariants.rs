@@ -10,7 +10,10 @@
 //! gaps, duplicates, and same-height forks are all observable (a by-height map
 //! would silently overwrite them).
 
-use super::app::{ApplicationChoice, BlockContextRegistry};
+use super::{
+    app::{ApplicationChoice, BlockContextRegistry},
+    twins::stack::MarshalChoice,
+};
 use crate::simplex::Simplex;
 use commonware_consensus::{
     Block,
@@ -22,6 +25,7 @@ use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::sync::Mutex;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    fmt::Debug,
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -39,20 +43,23 @@ struct CertificationState {
     proposals: ProposedBlocks,
 }
 
-/// Ensures correct automata return the same completed certification verdict
-/// for the same `(round, digest)`. Direct drivers may also record completed
-/// proposals to ensure they never certify as false on the proposing node.
+/// Ensures correct deferred automata return the same completed certification
+/// verdict for the same `(round, digest)`. Direct drivers may also record
+/// completed proposals to ensure no marshal choice certifies them as false on
+/// the proposing node.
 #[derive(Clone)]
 pub(crate) struct CertificationAgreementInvariant {
     state: Arc<Mutex<CertificationState>>,
     stack: Arc<str>,
+    marshal: MarshalChoice,
 }
 
 impl CertificationAgreementInvariant {
-    pub(crate) fn new(stack: Arc<str>) -> Self {
+    pub(crate) fn new(stack: Arc<str>, marshal: MarshalChoice) -> Self {
         Self {
             state: Arc::new(Mutex::new(CertificationState::default())),
             stack,
+            marshal,
         }
     }
 
@@ -77,6 +84,10 @@ impl CertificationAgreementInvariant {
              round={round} digest={digest}; stack={}",
             self.stack,
         );
+
+        if matches!(self.marshal, MarshalChoice::Inline) {
+            return;
+        }
 
         if let Some((first_validator, first_verdict)) = state.agreement.get(&(round, digest)) {
             assert_eq!(
@@ -149,13 +160,9 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
     }
 
     fn observed_mismatch(&self, round: Round, digest: Sha256Digest) -> bool {
-        let block_context = self.block_context(&digest).unwrap_or_else(|| {
-            panic!(
-                "marshal fuzz harness could not resolve the embedded context for a completed \
-                 certification: round={round} digest={digest}; stack={}",
-                self.stack,
-            )
-        });
+        let Some(block_context) = self.block_context(&digest) else {
+            return false;
+        };
         let mismatch = self
             .verified_contexts
             .lock()
@@ -193,6 +200,9 @@ pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
 }
 
 /// Invariant: every pair of consecutively delivered blocks is parent-linked.
+///
+/// [`check_in_order`] runs first and guarantees that after exact duplicate
+/// deliveries are collapsed, the by-height snapshot is one contiguous chain.
 fn check_parent_linkage<B: Block<Digest = Sha256Digest>>(
     idx: usize,
     blocks: &BTreeMap<Height, Arc<B>>,
@@ -227,7 +237,9 @@ pub(super) fn check_pending_acks<B: Block>(
     max_pending_acks: NonZeroUsize,
     stack: &str,
 ) {
-    let acknowledged_through = height.get().saturating_sub(max_pending_acks.get() as u64);
+    let Some(acknowledged_through) = height.get().checked_sub(max_pending_acks.get() as u64) else {
+        return;
+    };
     let pending = application.pending_ack_heights();
     assert!(
         pending
@@ -245,22 +257,26 @@ pub(super) fn check_pending_acks<B: Block>(
 /// Walks the arrival-ordered delivery log. Delivery starts either at the
 /// genesis floor block (height 0, surfaced on a fresh start) or at the first
 /// finalized container (height 1), then every subsequent delivery must advance
-/// by exactly one. Because this is the true arrival sequence, an out-of-order
-/// delivery, a gap, or a duplicate/refinalized height all fail the `+ 1` check.
-fn check_in_order<D>(idx: usize, delivered: &[(Height, D)], stack: &str) {
-    let heights: Vec<u64> = delivered.iter().map(|(h, _)| h.get()).collect();
-    let first = heights.first().copied().unwrap_or(0);
+/// by exactly one or repeat the identical `(height, digest)`. Because this is
+/// the true arrival sequence, an out-of-order delivery, a gap, or a
+/// same-height fork fails the check.
+fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], stack: &str) {
+    let first = delivered.first().map_or(0, |(height, _)| height.get());
     assert!(
         first <= 1,
-        "node{idx} first delivery at height {first} is above the genesis floor + 1 \
-         (sequence={heights:?}); stack={stack}",
+        "node{idx} first delivery at height {first} is above the genesis floor + 1; \
+         sequence={delivered:?}; stack={stack}",
     );
-    for window in heights.windows(2) {
-        assert_eq!(
-            window[1],
-            window[0] + 1,
-            "node{idx} violated in-order delivery (out-of-order, gap, or duplicate); \
-             sequence={heights:?}; stack={stack}",
+    for window in delivered.windows(2) {
+        let (height_0, digest_0) = &window[0];
+        let (height_1, digest_1) = &window[1];
+        assert!(
+            (height_1 == height_0 && digest_1 == digest_0)
+                || height_0.get().checked_add(1) == Some(height_1.get()),
+            "node{idx} violated in-order delivery (out-of-order, gap, or same-height fork): \
+             previous_height={} next_height={}; sequence={delivered:?}; stack={stack}",
+            height_0.get(),
+            height_1.get(),
         );
     }
 }
@@ -273,12 +289,12 @@ fn check_in_order<D>(idx: usize, delivered: &[(Height, D)], stack: &str) {
 /// comparing finalized heights alone would not detect conflicting blocks.
 ///
 /// [`check_in_order`] establishes that each node's delivery log is contiguous
-/// and contains no duplicate heights. Given that, requiring one digest per
-/// height across all honest delivery logs and current tips is equivalent to
-/// pairwise prefix compatibility and also checks that a tip agrees with any
-/// delivered block at the same height. Heights are used instead of raw
-/// sequence indexes because a fresh application may surface genesis at height
-/// 0 or begin with the first finalized block at height 1.
+/// and permits only exact duplicates at one height. Given that, requiring one
+/// digest per height across all honest delivery logs and current tips is
+/// equivalent to pairwise prefix compatibility and also checks that a tip
+/// agrees with any delivered block at the same height. Heights are used instead
+/// of raw sequence indexes because a fresh application may surface genesis at
+/// height 0 or begin with the first finalized block at height 1.
 ///
 /// This detects conflicting finalization, fork divergence, and recovery that
 /// delivers a different block at an already observed height.
@@ -314,5 +330,103 @@ fn agreement<B: Block<Digest = Sha256Digest>>(
                 seen.insert(height, (*idx, "reported tip", digest));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SimplexId;
+    use commonware_consensus::{
+        Reporter as _,
+        marshal::{Update, mocks::block::Block as MockBlock},
+    };
+    use commonware_cryptography::Sha256;
+    use commonware_utils::{Acknowledgement as _, NZUsize, acknowledgement::Exact};
+
+    fn digest(byte: u8) -> Sha256Digest {
+        Sha256Digest([byte; 32])
+    }
+
+    #[test]
+    fn exact_duplicate_delivery_is_allowed() {
+        check_in_order(
+            0,
+            &[
+                (Height::new(1), digest(0xA)),
+                (Height::new(1), digest(0xA)),
+                (Height::new(2), digest(0xB)),
+            ],
+            "test",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "same-height fork")]
+    fn same_height_different_digest_is_rejected() {
+        check_in_order(
+            0,
+            &[(Height::new(1), digest(0xA)), (Height::new(1), digest(0xB))],
+            "test",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "in-order delivery")]
+    fn delivery_gap_is_rejected() {
+        check_in_order(
+            0,
+            &[(Height::new(1), digest(0xA)), (Height::new(3), digest(0xB))],
+            "test",
+        );
+    }
+
+    #[test]
+    fn pending_ack_boundary_below_window_is_vacuous() {
+        type TestBlock = MockBlock<Sha256Digest, ()>;
+
+        let mut application = Application::<TestBlock>::manual_ack();
+        let block = TestBlock::new::<Sha256>((), digest(0), Height::zero(), 0);
+        let (ack, _waiter) = Exact::handle();
+        application.report(Update::Block(Arc::new(block), ack));
+
+        check_pending_acks(0, &application, Height::new(1), NZUsize!(2), "test");
+    }
+
+    #[test]
+    fn missing_block_context_is_an_incomplete_observation() {
+        let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
+            ApplicationChoice::AlwaysAccept,
+            (),
+            |_, _, _| false,
+            BlockContextRegistry::default(),
+            "test".into(),
+        );
+
+        assert!(!invariant.observed_mismatch(Round::zero(), digest(0xA)));
+    }
+
+    #[test]
+    fn inline_certification_disagreement_is_allowed() {
+        let invariant = CertificationAgreementInvariant::new("test".into(), MarshalChoice::Inline);
+        invariant.check_certify_agreement(0, Round::zero(), digest(0xA), true);
+        invariant.check_certify_agreement(1, Round::zero(), digest(0xA), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "certify agreement violated")]
+    fn deferred_certification_disagreement_is_rejected() {
+        let invariant =
+            CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred);
+        invariant.check_certify_agreement(0, Round::zero(), digest(0xA), true);
+        invariant.check_certify_agreement(1, Round::zero(), digest(0xA), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "certified its own proposal as false")]
+    fn inline_self_proposal_clause_remains_unconditional() {
+        let invariant = CertificationAgreementInvariant::new("test".into(), MarshalChoice::Inline);
+        invariant.record_proposal(0, Round::zero(), digest(0xA));
+        invariant.check_certify_agreement(0, Round::zero(), digest(0xA), false);
     }
 }

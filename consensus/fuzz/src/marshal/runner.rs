@@ -10,7 +10,10 @@
 use super::end_to_end::invariants::CertificationAgreementInvariant;
 use crate::{
     SimplexCertificateMock,
-    marshal::end_to_end::twins::{SchemeOf, stack::setup_validator},
+    marshal::end_to_end::twins::{
+        SchemeOf,
+        stack::{MarshalChoice, setup_validator},
+    },
     simplex::Simplex as _,
 };
 use arbitrary::Arbitrary;
@@ -525,6 +528,10 @@ fn fuzz_marshal_actor_standard(input: MarshalActorStandardInput, kind: WrapperKi
         let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
         let certification_invariant = CertificationAgreementInvariant::new(
             format!("application=inline-app wrapper={kind:?}").into(),
+            match kind {
+                WrapperKind::Inline => MarshalChoice::Inline,
+                WrapperKind::Deferred => MarshalChoice::Deferred,
+            },
         );
         let mut available = std::collections::HashSet::new();
         let mut poisoned = std::collections::HashSet::new();

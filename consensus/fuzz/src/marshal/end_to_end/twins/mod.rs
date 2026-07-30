@@ -201,6 +201,7 @@ where
                 honest: Vec::with_capacity(NUM_VALIDATORS as usize - 1),
                 certification_agreement: CertificationAgreementInvariant::new(
                     self.stack_label.clone(),
+                    self.marshal_choice,
                 ),
                 block_contexts,
                 genesis,
