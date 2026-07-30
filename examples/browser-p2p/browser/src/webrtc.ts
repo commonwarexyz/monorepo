@@ -28,7 +28,7 @@ export class WebRtcPairing {
   #signalingClosed = false;
   #closed = false;
   #offEvent: () => void;
-  #timeout: number;
+  #timeout: number | undefined;
 
   constructor(options: {
     role: Role;
@@ -59,10 +59,6 @@ export class WebRtcPairing {
       options.role,
     );
     this.#offEvent = this.#rendezvous.onEvent((event) => this.#queueEvent(event));
-    this.#timeout = window.setTimeout(
-      () => this.#fail(new Error("WebRTC negotiation timed out.")),
-      NEGOTIATION_TIMEOUT_MS,
-    );
 
     this.#connection.addEventListener("icecandidate", (event) => {
       if (event.candidate && !this.#signalingClosed) {
@@ -109,6 +105,7 @@ export class WebRtcPairing {
     this.#onState(this.#role === "initiator" ? "Waiting for phone" : "Joining securely");
     await this.#rendezvous.ready();
     if (this.#role === "responder") {
+      this.#startTimeout();
       await this.#send({ type: "identity", publicKey: this.#chat.publicKey() });
     }
   }
@@ -118,7 +115,7 @@ export class WebRtcPairing {
       return;
     }
     this.#closed = true;
-    window.clearTimeout(this.#timeout);
+    this.#clearTimeout();
     this.#offEvent();
     this.#rendezvous.close();
     this.#channel?.close();
@@ -146,6 +143,7 @@ export class WebRtcPairing {
         if (this.#role !== "initiator" || this.#expectedPeer) {
           throw new Error("The peer identity was unexpected.");
         }
+        this.#startTimeout();
         this.#expectedPeer = signal.publicKey;
         this.#onState("Phone found · connecting");
         await this.#connection.setLocalDescription(await this.#connection.createOffer());
@@ -260,7 +258,7 @@ export class WebRtcPairing {
       );
       this.#authenticated = true;
       this.#signalingClosed = true;
-      window.clearTimeout(this.#timeout);
+      this.#clearTimeout();
       this.#offEvent();
       this.#rendezvous.close();
     } catch (error) {
@@ -275,6 +273,24 @@ export class WebRtcPairing {
     }
     this.close();
     window.dispatchEvent(new CustomEvent("commonware-pairing-error", { detail: error }));
+  }
+
+  #startTimeout(): void {
+    if (this.#timeout !== undefined) {
+      return;
+    }
+    this.#timeout = window.setTimeout(
+      () => this.#fail(new Error("WebRTC negotiation timed out.")),
+      NEGOTIATION_TIMEOUT_MS,
+    );
+  }
+
+  #clearTimeout(): void {
+    if (this.#timeout === undefined) {
+      return;
+    }
+    window.clearTimeout(this.#timeout);
+    this.#timeout = undefined;
   }
 }
 
