@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrd
 use std::{
     any::Any,
     cell::RefCell,
-    fmt,
     future::Future,
     io,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -664,19 +663,18 @@ impl<A: Alarm> Shard<A> {
 
     /// Captures failure state, drains the heap, and interrupts the root runtime.
     fn fail(&self, failure: DriverFailure) {
-        let (snapshot, pending) = {
+        let (queued, desired, armed, notified, pending) = {
             let mut state = self.state.lock();
             if state.lifecycle != ShardLifecycle::Running {
                 return;
             }
-            let snapshot = ShardSnapshot {
-                queued: state.entries.len(),
-                desired: state.entries.peek().map(|item| item.deadline),
-                armed: state.armed_deadline,
-                notified: self.signal.is_notified(),
-            };
+            let queued = state.entries.len();
+            let desired = state.entries.peek().map(|item| item.deadline);
+            let armed = state.armed_deadline;
+            let notified = self.signal.is_notified();
             let message = format!(
-                "{} timer shard {} failed during {}: {}; snapshot={snapshot:?}",
+                "{} timer shard {} failed during {}: {}; snapshot=ShardSnapshot {{ queued: \
+                 {queued}, desired: {desired:?}, armed: {armed:?}, notified: {notified} }}",
                 A::PLATFORM,
                 self.index,
                 failure.operation,
@@ -688,7 +686,7 @@ impl<A: Alarm> Shard<A> {
             // Claim root interruption while the shard lock prevents a newly
             // failed sleep from racing this more detailed payload.
             let _ = self.panicker.notify_fatal(Box::new(message));
-            (snapshot, pending)
+            (queued, desired, armed, notified, pending)
         };
 
         // Every failed shard emits its own actionable diagnostic, even when
@@ -700,7 +698,10 @@ impl<A: Alarm> Shard<A> {
             error = %failure.cause,
             error_kind = ?failure.cause.error_kind(),
             raw_os_error = ?failure.cause.raw_os_error(),
-            ?snapshot,
+            queued,
+            ?desired,
+            ?armed,
+            notified,
             "timer infrastructure failed"
         );
         complete_entries(pending, ENTRY_FAILED);
@@ -800,30 +801,6 @@ impl DriverFailure {
             operation: "driver panic",
             cause: DriverFailureCause::Message(extract_panic_message(panic)),
         }
-    }
-}
-
-/// Pre-cleanup state attached to fatal infrastructure diagnostics.
-struct ShardSnapshot {
-    /// Entries still resident in the heap.
-    queued: usize,
-    /// Current desired heap minimum.
-    desired: Option<Deadline>,
-    /// Deadline last recorded as armed.
-    armed: Option<Deadline>,
-    /// Whether a producer notification is latched.
-    notified: bool,
-}
-
-impl fmt::Debug for ShardSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ShardSnapshot")
-            .field("queued", &self.queued)
-            .field("desired", &self.desired)
-            .field("armed", &self.armed)
-            .field("notified", &self.notified)
-            .finish()
     }
 }
 
