@@ -3,6 +3,7 @@ import "./styles.css";
 import { createBrowserChat, type BrowserP2pSession, type ChatEvent, type ConnectionState } from "./bridge";
 import { connectionView } from "./connection-view";
 import { createInvite, inviteUrl, parseInvite, type Invite } from "./invite";
+import { installThemeToggle } from "./theme";
 import { loadWebRtcConfig, WebRtcPairing } from "./webrtc";
 
 const elements = {
@@ -29,6 +30,7 @@ const elements = {
   sendButton: getElement<HTMLButtonElement>("send-button"),
   statusDot: getElement<HTMLSpanElement>("status-dot"),
   statusText: getElement<HTMLSpanElement>("status-text"),
+  themeToggle: getElement<HTMLButtonElement>("theme-toggle"),
 };
 
 let chat: BrowserP2pSession | undefined;
@@ -36,17 +38,26 @@ let pairing: WebRtcPairing | undefined;
 let state: ConnectionState = "disconnected";
 let currentInviteUrl: string | undefined;
 
+installThemeToggle(elements.themeToggle);
+installViewportSync();
+
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   void sendMessage();
 });
 elements.messageInput.addEventListener("input", resizeComposer);
 elements.messageInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
+  if (
+    event.key === "Enter" &&
+    !event.shiftKey &&
+    !event.isComposing &&
+    !window.matchMedia("(pointer: coarse)").matches
+  ) {
     event.preventDefault();
     elements.composer.requestSubmit();
   }
 });
+elements.messageInput.addEventListener("focus", () => requestAnimationFrame(() => scrollMessagesToEnd(false)));
 elements.identity.addEventListener("click", () => void copyIdentity());
 elements.copyInvite.addEventListener("click", () => void copyInvite());
 elements.retryButton.addEventListener("click", () => void initialize());
@@ -205,6 +216,7 @@ function appendMessage(message: {
   text: string;
   timestamp: number;
 }): void {
+  const shouldScroll = message.direction === "outgoing" || messagesAreNearEnd();
   elements.emptyState.remove();
   const item = document.createElement("li");
   item.className = `message ${message.direction}`;
@@ -221,7 +233,9 @@ function appendMessage(message: {
   time.textContent = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(message.timestamp);
   item.append(body, time);
   elements.messages.append(item);
-  item.scrollIntoView({ behavior: "smooth", block: "end" });
+  if (shouldScroll) {
+    requestAnimationFrame(() => scrollMessagesToEnd(true));
+  }
 }
 
 async function copyIdentity(): Promise<void> {
@@ -251,7 +265,46 @@ function temporarilyLabel(element: HTMLElement, label: string): void {
 
 function resizeComposer(): void {
   elements.messageInput.style.height = "auto";
-  elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 132)}px`;
+  const maxHeight = Number.parseFloat(window.getComputedStyle(elements.messageInput).maxHeight) || 132;
+  elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, maxHeight)}px`;
+  elements.messageInput.dataset.overflow = String(elements.messageInput.scrollHeight > maxHeight);
+  if (document.activeElement === elements.messageInput) {
+    requestAnimationFrame(() => scrollMessagesToEnd(false));
+  }
+}
+
+function messagesAreNearEnd(): boolean {
+  const remaining = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight;
+  return remaining < 80;
+}
+
+function scrollMessagesToEnd(smooth: boolean): void {
+  elements.messages.scrollTo({
+    top: elements.messages.scrollHeight,
+    behavior: smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "auto",
+  });
+}
+
+function installViewportSync(): void {
+  const viewport = window.visualViewport;
+  let frame = 0;
+  const sync = (): void => {
+    window.cancelAnimationFrame(frame);
+    frame = window.requestAnimationFrame(() => {
+      const height = viewport?.height ?? window.innerHeight;
+      document.documentElement.style.setProperty("--app-height", `${Math.round(height)}px`);
+      document.documentElement.style.setProperty("--app-top", `${Math.round(viewport?.offsetTop ?? 0)}px`);
+      resizeComposer();
+      if (document.activeElement === elements.messageInput) {
+        scrollMessagesToEnd(false);
+      }
+    });
+  };
+
+  viewport?.addEventListener("resize", sync);
+  viewport?.addEventListener("scroll", sync);
+  window.addEventListener("resize", sync);
+  sync();
 }
 
 function showNotice(title: string, detail: string, tone: "error" | "success" = "error"): void {
