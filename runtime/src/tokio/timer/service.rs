@@ -9,7 +9,7 @@ use super::heap::{Heap, HeapItem};
 use super::linux::NativeAlarm;
 #[cfg(target_os = "macos")]
 use super::macos::NativeAlarm;
-use crate::utils::Panicker;
+use crate::utils::{Panicker, extract_panic_message, resume_reported_panic};
 use commonware_macros::select;
 use futures::FutureExt as _;
 #[cfg(feature = "loom")]
@@ -49,8 +49,11 @@ const ENTRY_FIRED: u8 = 1;
 /// Entry state after its sleep future is dropped.
 const ENTRY_CANCELED: u8 = 2;
 
-/// Entry state after timer infrastructure stops servicing it.
+/// Entry state after timer infrastructure fails.
 const ENTRY_FAILED: u8 = 3;
+
+/// Entry state after orderly timer service shutdown.
+const ENTRY_STOPPED: u8 = 4;
 
 /// Heap index used by entries that are not resident.
 pub(super) const NOT_IN_HEAP: usize = usize::MAX;
@@ -105,6 +108,10 @@ impl Deadline {
 }
 
 /// Error raised while synchronously constructing a timer shard.
+#[derive(Debug, Error)]
+#[error(
+    "failed to initialize {platform} timer shard {shard} during {operation}: {source}"
+)]
 pub(crate) struct InitError {
     /// Operating system adapter being initialized.
     platform: &'static str,
@@ -114,22 +121,6 @@ pub(crate) struct InitError {
     operation: &'static str,
     /// Underlying I/O error.
     source: io::Error,
-}
-
-impl fmt::Display for InitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "failed to initialize {} timer shard {} during {}: {}",
-            self.platform, self.shard, self.operation, self.source
-        )
-    }
-}
-
-impl fmt::Debug for InitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
-    }
 }
 
 /// Error raised while constructing a native alarm object.
@@ -357,10 +348,16 @@ impl Future for Sleep {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         match &self.get_mut().inner {
-            SleepInner::Ready => Poll::Ready(()),
+            SleepInner::Ready => poll_cooperative_ready(context),
             SleepInner::Registered(sleep) => sleep.entry.poll(context),
         }
     }
+}
+
+/// Consumes scheduler budget before completing an otherwise immediate sleep.
+fn poll_cooperative_ready(context: &mut Context<'_>) -> Poll<()> {
+    let mut budget = std::pin::pin!(tokio::task::coop::consume_budget());
+    budget.as_mut().poll(context)
 }
 
 /// Storage variants for an immediately ready or registered sleep.
@@ -426,7 +423,8 @@ impl Entry {
         // Acquire observes the terminal transition before returning its outcome.
         match self.state.load(AtomicOrdering::Acquire) {
             ENTRY_FIRED => return Poll::Ready(()),
-            ENTRY_FAILED => panic!("high-resolution timer service failed"),
+            ENTRY_FAILED => resume_reported_panic("high-resolution timer service failed"),
+            ENTRY_STOPPED => return Poll::Pending,
             _ => {}
         }
 
@@ -442,7 +440,11 @@ impl Entry {
             }
             ENTRY_FAILED => {
                 self.waker.take();
-                panic!("high-resolution timer service failed");
+                resume_reported_panic("high-resolution timer service failed");
+            }
+            ENTRY_STOPPED => {
+                self.waker.take();
+                Poll::Pending
             }
             _ => Poll::Pending,
         }
@@ -530,21 +532,29 @@ impl<A: Alarm> Shard<A> {
     fn register(&self, deadline: Deadline, entry: EntryArc<Entry>) {
         let notify = {
             let mut state = self.state.lock();
-            if state.stopped || state.failed {
-                // Release makes teardown visible to a later future poll.
-                entry.state.store(ENTRY_FAILED, AtomicOrdering::Release);
-                false
-            } else {
-                let previous = state.entries.peek().map(|item| item.deadline);
-                let sequence = state.sequence;
-                state.sequence = state.sequence.wrapping_add(1);
-                state.entries.push(HeapItem {
-                    deadline,
-                    sequence,
-                    entry,
-                });
-                let desired = state.entries.peek().map(|item| item.deadline);
-                previous != desired && !arm_covers(state.armed_deadline, desired)
+            match state.lifecycle {
+                ShardLifecycle::Stopped => {
+                    // Release makes orderly teardown visible to a later future poll.
+                    entry.state.store(ENTRY_STOPPED, AtomicOrdering::Release);
+                    false
+                }
+                ShardLifecycle::Failed => {
+                    // Release makes fatal teardown visible to a later future poll.
+                    entry.state.store(ENTRY_FAILED, AtomicOrdering::Release);
+                    false
+                }
+                ShardLifecycle::Running => {
+                    let previous = state.entries.peek().map(|item| item.deadline);
+                    let sequence = state.sequence;
+                    state.sequence = state.sequence.wrapping_add(1);
+                    state.entries.push(HeapItem {
+                        deadline,
+                        sequence,
+                        entry,
+                    });
+                    let desired = state.entries.peek().map(|item| item.deadline);
+                    previous != desired && !arm_covers(state.armed_deadline, desired)
+                }
             }
         };
         if notify {
@@ -582,7 +592,7 @@ impl<A: Alarm> Shard<A> {
                 (
                     state.armed_deadline,
                     state.entries.peek().map(|item| item.deadline),
-                    state.stopped,
+                    state.lifecycle != ShardLifecycle::Running,
                 )
             };
             if stopped || arm_covers(armed, desired) {
@@ -602,7 +612,7 @@ impl<A: Alarm> Shard<A> {
             }
 
             let mut state = self.state.lock();
-            if state.stopped {
+            if state.lifecycle != ShardLifecycle::Running {
                 drop(state);
                 let _ = self.alarm.disarm();
                 return Ok(());
@@ -661,27 +671,26 @@ impl<A: Alarm> Shard<A> {
             }
         }
         let mut state = self.state.lock();
-        if state.in_flight.is_empty() {
-            std::mem::swap(&mut state.in_flight, &mut completed);
-        }
-        drop(state);
-        // A concurrent lifecycle path may have installed another allocation.
-        drop(completed);
+        assert!(
+            state.in_flight.is_empty(),
+            "timer lifecycle installed in-flight storage while a batch was completing"
+        );
+        std::mem::swap(&mut state.in_flight, &mut completed);
         first_panic
     }
 
-    /// Marks teardown state and fails every queued sleep without reporting fatal.
+    /// Marks orderly teardown and releases every queued sleep without waking it.
     fn stop(&self) {
         let pending = {
             let mut state = self.state.lock();
-            if state.stopped {
+            if state.lifecycle != ShardLifecycle::Running {
                 return;
             }
-            state.stopped = true;
+            state.lifecycle = ShardLifecycle::Stopped;
             state.armed_deadline = None;
             drain_pending(&mut state)
         };
-        fail_entries(pending);
+        complete_entries(pending, ENTRY_STOPPED);
         self.signal.notify();
     }
 
@@ -695,9 +704,9 @@ impl<A: Alarm> Shard<A> {
     where
         F: FnOnce(),
     {
-        let (snapshot, pending, reported) = {
+        let (snapshot, pending) = {
             let mut state = self.state.lock();
-            if state.failed || state.stopped {
+            if state.lifecycle != ShardLifecycle::Running {
                 return;
             }
             let snapshot = ShardSnapshot {
@@ -714,37 +723,47 @@ impl<A: Alarm> Shard<A> {
                 failure.operation,
                 failure.cause
             );
-            // Publish root interruption while the shard lock prevents a newly
-            // failed sleep from escaping and reporting a generic task panic.
-            let reported = self.panicker.notify_fatal(Box::new(message));
-            state.failed = true;
-            state.stopped = true;
+            state.lifecycle = ShardLifecycle::Failed;
             state.armed_deadline = None;
-            (snapshot, drain_pending(&mut state), reported)
+            let pending = drain_pending(&mut state);
+            // Claim root interruption while the shard lock prevents a newly
+            // failed sleep from racing this more detailed payload.
+            let _ = self.panicker.notify_fatal(Box::new(message));
+            (snapshot, pending)
         };
-        after_exposure();
-        fail_entries(pending);
-        self.signal.notify();
 
-        // Infrastructure failure bypasses the ordinary catch-panics policy.
-        if reported {
-            tracing::error!(
-                platform = A::PLATFORM,
-                shard = self.index,
-                operation = failure.operation,
-                error = %failure.cause,
-                error_kind = ?failure.cause.error_kind(),
-                raw_os_error = ?failure.cause.raw_os_error(),
-                ?snapshot,
-                "timer infrastructure failed"
-            );
-        }
+        // Every failed shard emits its own actionable diagnostic, even when
+        // another panic already claimed or closed root interruption.
+        tracing::error!(
+            platform = A::PLATFORM,
+            shard = self.index,
+            operation = failure.operation,
+            error = %failure.cause,
+            error_kind = ?failure.cause.error_kind(),
+            raw_os_error = ?failure.cause.raw_os_error(),
+            ?snapshot,
+            "timer infrastructure failed"
+        );
+        after_exposure();
+        complete_entries(pending, ENTRY_FAILED);
+        self.signal.notify();
     }
 
     /// Returns whether shutdown has made normal driver work invalid.
     fn is_stopped(&self) -> bool {
-        self.state.lock().stopped
+        self.state.lock().lifecycle != ShardLifecycle::Running
     }
+}
+
+/// Operating state for one timer shard.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShardLifecycle {
+    /// Driver and producers may perform ordinary timer work.
+    Running,
+    /// The owning runtime is shutting down normally.
+    Stopped,
+    /// Native timer infrastructure failed while the runtime was live.
+    Failed,
 }
 
 /// Heap contents and alarm intent protected by one shard mutex.
@@ -757,10 +776,8 @@ struct ShardState {
     sequence: u64,
     /// Deadline most recently confirmed armed by the driver.
     armed_deadline: Option<Deadline>,
-    /// Whether normal service teardown has started.
-    stopped: bool,
-    /// Whether a live infrastructure failure occurred.
-    failed: bool,
+    /// Whether the shard is running, stopped normally, or failed.
+    lifecycle: ShardLifecycle,
 }
 
 impl ShardState {
@@ -771,8 +788,7 @@ impl ShardState {
             in_flight: Vec::with_capacity(WAKE_BATCH),
             sequence: 0,
             armed_deadline: None,
-            stopped: false,
-            failed: false,
+            lifecycle: ShardLifecycle::Running,
         }
     }
 }
@@ -825,14 +841,9 @@ impl DriverFailure {
 
     /// Wraps an unwinding panic as a driver failure.
     fn panic(panic: &(dyn Any + Send)) -> Self {
-        let cause = panic
-            .downcast_ref::<&str>()
-            .map(|value| (*value).to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "non-string panic".to_string());
         Self {
             operation: "driver panic",
-            cause: DriverFailureCause::Message(cause),
+            cause: DriverFailureCause::Message(extract_panic_message(panic)),
         }
     }
 }
@@ -882,12 +893,16 @@ impl Batch {
     fn complete(&mut self, terminal: u8) -> Option<Box<dyn Any + Send>> {
         let mut first_panic = None;
         for entry in self.entries.drain(..) {
-            // The final Entry owner may release a user waker whose destructor unwinds.
+            // Waking or releasing the final user waker may unwind.
             let completion = catch_unwind(AssertUnwindSafe(move || {
                 if entry.transition(terminal)
                     && let Some(waker) = entry.take_waker()
                 {
-                    waker.wake();
+                    if terminal == ENTRY_STOPPED {
+                        drop(waker);
+                    } else {
+                        waker.wake();
+                    }
                 }
                 drop(entry);
             }));
@@ -1169,18 +1184,40 @@ impl Affinity {
     fn assign_worker(&self) {
         THREAD_ASSIGNMENTS.with(|assignments| {
             let mut assignments = assignments.borrow_mut();
-            if matches!(
-                assignments.activate(self.runtime_id),
-                Some((_, AssignmentKind::Worker))
-            ) {
+            let existing = assignments.activate(self.runtime_id);
+            if matches!(existing, Some((_, AssignmentKind::Worker))) {
                 return;
             }
-            // Relaxed ordering is sufficient because this counter allocates unique claims only.
-            let index = self.next_worker.fetch_add(1, AtomicOrdering::Relaxed);
-            assert!(
-                index < self.worker_threads,
-                "Tokio invoked the timer park callback on more workers than configured"
-            );
+
+            // `block_in_place` may move one logical worker core to a temporary
+            // blocking-pool thread. Such threads also invoke this park callback,
+            // so only the configured number of callbacks may claim worker slots.
+            // Relaxed ordering is sufficient because this counter allocates
+            // unique claims only.
+            let Ok(index) = self.next_worker.fetch_update(
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+                |next| {
+                    if next < self.worker_threads {
+                        Some(next + 1)
+                    } else {
+                        None
+                    }
+                },
+            ) else {
+                if existing.is_some() {
+                    return;
+                }
+                let index =
+                    self.next_fallback.fetch_add(1, AtomicOrdering::Relaxed) % self.worker_threads;
+                assignments.install(ThreadAssignment {
+                    runtime_id: self.runtime_id,
+                    lifetime: Arc::downgrade(&self.lifetime),
+                    kind: AssignmentKind::Provisional,
+                    index,
+                });
+                return;
+            };
             assignments.install(ThreadAssignment {
                 runtime_id: self.runtime_id,
                 lifetime: Arc::downgrade(&self.lifetime),
@@ -1219,10 +1256,10 @@ fn drain_pending(state: &mut ShardState) -> Vec<EntryArc<Entry>> {
     entries
 }
 
-/// Fails entries and contains each individual callback unwind.
-fn fail_entries(entries: Vec<EntryArc<Entry>>) {
+/// Transitions entries and contains each individual callback unwind.
+fn complete_entries(entries: Vec<EntryArc<Entry>>, terminal: u8) {
     let mut batch = Batch { entries };
-    let _ = batch.complete(ENTRY_FAILED);
+    let _ = batch.complete(terminal);
 }
 
 #[cfg(all(test, not(feature = "loom")))]

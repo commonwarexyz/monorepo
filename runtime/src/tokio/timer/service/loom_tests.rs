@@ -1,6 +1,7 @@
 use super::{
     Alarm, AlarmInitError, Batch, Deadline, DriverFailure, DriverSignal, ENTRY_CANCELED,
-    ENTRY_FAILED, ENTRY_FIRED, ENTRY_WAITING, Entry, NOT_IN_HEAP, Shard,
+    ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING, Entry, NOT_IN_HEAP, Shard,
+    ShardLifecycle,
 };
 use crate::utils::{Panicker, extract_panic_message};
 use loom::{
@@ -223,6 +224,36 @@ fn production_entry_poll_observes_failure_without_retaining_waker() {
 }
 
 #[test]
+fn production_entry_poll_observes_stop_without_retaining_waker() {
+    model(|| {
+        // Race one production poll against orderly shutdown completion.
+        let entry = LoomArc::new(Entry::new());
+        let poller = {
+            let entry = LoomArc::clone(&entry);
+            thread::spawn(move || {
+                let waker = futures::task::noop_waker();
+                let mut context = Context::from_waker(&waker);
+                assert_eq!(entry.poll(&mut context), Poll::Pending);
+            })
+        };
+        let completer = {
+            let mut batch = Batch::new();
+            batch.entries.push(LoomArc::clone(&entry));
+            thread::spawn(move || {
+                assert!(batch.complete(ENTRY_STOPPED).is_none());
+            })
+        };
+        poller.join().unwrap();
+        completer.join().unwrap();
+
+        // Every interleaving leaves the stopped future quiescent and releases
+        // a waker installed between the production state checks.
+        assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_STOPPED);
+        assert!(entry.take_waker().is_none());
+    });
+}
+
+#[test]
 fn production_entry_has_exactly_one_terminal_winner() {
     model(|| {
         // Race every legal terminal transition through Entry::transition.
@@ -249,6 +280,34 @@ fn production_entry_has_exactly_one_terminal_winner() {
         );
         assert_ne!(terminal, ENTRY_WAITING);
     });
+}
+
+#[test]
+fn production_stop_races_other_terminal_transitions() {
+    for other in [ENTRY_FIRED, ENTRY_CANCELED, ENTRY_FAILED] {
+        model(move || {
+            // Race orderly stop against one other legal production transition.
+            let entry = LoomArc::new(Entry::new());
+            let stopper = {
+                let entry = LoomArc::clone(&entry);
+                thread::spawn(move || entry.transition(ENTRY_STOPPED))
+            };
+            let contender = {
+                let entry = LoomArc::clone(&entry);
+                thread::spawn(move || entry.transition(other))
+            };
+            let stopped = stopper.join().unwrap();
+            let other_won = contender.join().unwrap();
+
+            // Exactly one transition wins and its terminal value remains published.
+            assert_ne!(stopped, other_won);
+            let terminal = entry.state.load(Ordering::Acquire);
+            assert_eq!(
+                terminal,
+                if stopped { ENTRY_STOPPED } else { other }
+            );
+        });
+    }
 }
 
 #[test]
@@ -329,7 +388,7 @@ fn production_rearm_does_not_touch_native_alarm_after_prior_stop() {
         let entry = LoomArc::new(Entry::new());
         shard.register(deadline(100), LoomArc::clone(&entry));
         shard.stop();
-        assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_FAILED);
+        assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_STOPPED);
 
         // Teardown owns native resource cleanup once stop is already visible.
         // Rearm must return without issuing either an arm or disarm operation.
@@ -408,14 +467,14 @@ fn production_rearm_converges_across_concurrent_shard_updates() {
                     assert_eq!(alarm.armed(), Some(deadline(150)));
                 }
                 RearmUpdate::Stop => {
-                    assert!(state.stopped);
+                    assert_eq!(state.lifecycle, ShardLifecycle::Stopped);
                     assert_eq!(desired, None);
                     assert_eq!(state.armed_deadline, None);
                     assert_eq!(alarm.armed(), None);
                 }
             }
             let expected = if matches!(update, RearmUpdate::Stop) {
-                ENTRY_FAILED
+                ENTRY_STOPPED
             } else {
                 ENTRY_CANCELED
             };

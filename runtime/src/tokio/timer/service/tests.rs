@@ -1,11 +1,14 @@
 use super::{
     Affinity, Alarm, AlarmInitError, AssignmentKind, Batch, Deadline, DriverFailure, DriverLoop,
-    DriverSignal, ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_WAITING, EXPIRY_YIELD_BUDGET,
-    Entry, InitError, NEXT_RUNTIME_ID, NOT_IN_HEAP, RegisteredSleep, Shard, Sleep,
-    ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id, arm_covers,
-    initialize_shards, run_driver,
+    DriverSignal, ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING,
+    EXPIRY_YIELD_BUDGET, Entry, InitError, NEXT_RUNTIME_ID, NOT_IN_HEAP, RegisteredSleep, Shard,
+    ShardLifecycle, Sleep, ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id,
+    arm_covers, initialize_shards, run_driver,
 };
-use crate::utils::{Panicked, Panicker, extract_panic_message};
+use crate::{
+    telemetry::traces::collector::{CollectingLayer, TraceStorage},
+    utils::{Panicked, Panicker, extract_panic_message},
+};
 use commonware_utils::sync::{Condvar, Mutex as TestMutex};
 use futures::{
     FutureExt as _, future,
@@ -24,6 +27,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use tracing_subscriber::{Registry, layer::SubscriberExt as _};
 
 /// One native alarm operation recorded by [`FakeAlarm`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -691,7 +695,7 @@ fn constructor_failure_cleans_up_every_initialized_shard() {
 }
 
 #[test]
-fn initialization_error_display_and_debug_include_complete_context() {
+fn initialization_error_formats_context_and_exposes_source() {
     // Construct an initialization error with distinct platform, shard, and operation fields.
     let error = InitError {
         platform: "test-platform",
@@ -702,9 +706,14 @@ fn initialization_error_display_and_debug_include_complete_context() {
     let expected = "failed to initialize test-platform timer shard 7 during create test alarm: \
                     injected initialization source";
 
-    // Both formatting modes must preserve the same actionable initialization context.
-    assert_eq!(format!("{error}"), expected);
-    assert_eq!(format!("{error:?}"), expected);
+    // Format the user-facing representation and inspect the structured error source.
+    let display = error.to_string();
+    let source = std::error::Error::source(&error)
+        .expect("initialization error must retain its I/O source");
+
+    // Display remains concise while Error exposes the original I/O failure.
+    assert_eq!(display, expected);
+    assert_eq!(source.to_string(), "injected initialization source");
 }
 
 #[test]
@@ -933,7 +942,7 @@ fn rearm_converges_when_heap_changes_during_blocked_arm() {
 }
 
 #[test]
-fn stop_during_blocked_rearm_fails_entry_and_disarms_after_syscall() {
+fn stop_during_blocked_rearm_quiesces_entry_and_disarms_after_syscall() {
     // Block the native arm after rearm snapshots one queued deadline.
     let (shard, control) = fake_shard();
     let (entry, registered) = register(&shard, at(100));
@@ -947,7 +956,7 @@ fn stop_during_blocked_rearm_fails_entry_and_disarms_after_syscall() {
 
     // Stop the shard while the native operation remains outside the state lock.
     shard.stop();
-    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
     assert_eq!(shard.state.lock().entries.len(), 0);
     control.release_arm();
     driver_ok(rearming.join().unwrap());
@@ -959,7 +968,7 @@ fn stop_during_blocked_rearm_fails_entry_and_disarms_after_syscall() {
     );
     assert_eq!(shard.state.lock().armed_deadline, None);
     drop(registered);
-    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
 }
 
 #[tokio::test]
@@ -1283,43 +1292,128 @@ fn head_nonhead_and_cross_thread_cancellation_preserve_exact_live_count() {
 }
 
 #[test]
-fn stop_fails_queued_sleeps_without_outliving_sleeps_retaining_alarm() {
+fn stop_quiesces_queued_sleeps_without_retaining_wakers_or_alarm() {
     // Queue two sleeps, including one that has installed a task waker.
     let (shard, control) = fake_shard();
     let first = shard.register_after(Duration::from_nanos(10));
     let first_entry = Arc::clone(&first.entry);
     let second = shard.register_after(Duration::from_nanos(20));
     let second_entry = Arc::clone(&second.entry);
-    let waker = noop_waker();
+    let counter = Arc::new(CountingWaker {
+        wakes: AtomicUsize::new(0),
+    });
+    let waker = waker(Arc::clone(&counter));
     let mut context = Context::from_waker(&waker);
     assert_eq!(first_entry.poll(&mut context), Poll::Pending);
 
-    // Normal service stop must drain and fail every queued sleep.
+    // Normal service stop must drain every queued sleep without waking tasks.
     shard.stop();
     assert_eq!(shard.state.lock().entries.len(), 0);
     assert_eq!(
         first_entry.state.load(AtomicOrdering::Acquire),
-        ENTRY_FAILED
+        ENTRY_STOPPED
     );
     assert_eq!(
         second_entry.state.load(AtomicOrdering::Acquire),
-        ENTRY_FAILED
+        ENTRY_STOPPED
     );
-    assert!(failed_poll_unwinds(&first_entry));
-    assert!(failed_poll_unwinds(&second_entry));
+    assert_eq!(counter.wakes.load(AtomicOrdering::Relaxed), 0);
+    assert!(first_entry.take_waker().is_none());
+
+    // A later poll remains pending and cannot retain another task waker.
+    assert_eq!(first_entry.poll(&mut context), Poll::Pending);
+    assert_eq!(second_entry.poll(&mut context), Poll::Pending);
+    assert!(first_entry.take_waker().is_none());
+    assert!(second_entry.take_waker().is_none());
 
     // Outliving sleeps hold weak cancellation owners and cannot retain the alarm.
     drop(shard);
     assert!(control.is_shutdown());
 
-    // Dropping failed outliving sleeps remains a no-op after shard destruction.
+    // Dropping stopped outliving sleeps remains a no-op after shard destruction.
     drop(first);
     drop(second);
     assert!(control.is_shutdown());
 }
 
 #[test]
-fn registration_after_stop_or_failure_returns_failed_nonresident_entry() {
+fn clean_runtime_shutdown_does_not_report_pending_sleeps() {
+    const CHILD_ENV: &str = "_COMMONWARE_RUNTIME_TIMER_CLEAN_SHUTDOWN_CHILD";
+    const TEST_NAME: &str =
+        "tokio::timer::service::tests::clean_runtime_shutdown_does_not_report_pending_sleeps";
+
+    // Setup: Isolate the global tracing subscriber in a child test process.
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("current test executable must be available"),
+        )
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("clean-shutdown child test must start");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Assertion: The isolated regression completed without a task panic.
+        assert!(
+            output.status.success(),
+            "clean-shutdown child failed\nstdout:\n{}\nstderr:\n{}",
+            stdout,
+            stderr
+        );
+        assert!(
+            stdout.contains(&format!("test {TEST_NAME} ... ok")),
+            "clean-shutdown child did not execute the regression\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("high-resolution timer service failed"),
+            "clean-shutdown child reported a timer failure panic\nstderr:\n{stderr}"
+        );
+        return;
+    }
+
+    use crate::{Clock as _, Runner as _, Spawner as _, Supervisor as _};
+
+    let storage = TraceStorage::default();
+    let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("child process must install its tracing subscriber");
+    let runner =
+        crate::tokio::Runner::new(crate::tokio::Config::default().with_worker_threads(1));
+
+    // Action: Return the root while polled tasks retain only pending sleep futures.
+    runner.start(|context| async move {
+        const TASKS: usize = 256;
+        let started = Arc::new(AtomicUsize::new(0));
+        for _ in 0..TASKS {
+            let sleep = context.sleep(Duration::from_secs(60));
+            let task_started = Arc::clone(&started);
+            let _handle = context.child("pending_timer").spawn(move |_| async move {
+                task_started.fetch_add(1, AtomicOrdering::Release);
+                sleep.await;
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while started.load(AtomicOrdering::Acquire) != TASKS {
+            assert!(
+                Instant::now() < deadline,
+                "pending timer tasks did not all start"
+            );
+            tokio::task::yield_now().await;
+        }
+    });
+
+    // Assertion: Orderly timer teardown emits no generic task-panic diagnostic.
+    assert!(
+        storage
+            .get_all()
+            .iter()
+            .all(|event| event.metadata.content != "task panicked")
+    );
+}
+
+#[test]
+fn registration_after_stop_or_failure_returns_matching_nonresident_entry() {
     // Stop one shard and consume its teardown notification before registering again.
     let (stopped, _stopped_control) = fake_shard();
     stopped.stop();
@@ -1330,7 +1424,7 @@ fn registration_after_stop_or_failure_returns_failed_nonresident_entry() {
     // A stopped shard must reject registration without mutating its heap or signal.
     assert_eq!(
         stopped_entry.state.load(AtomicOrdering::Acquire),
-        ENTRY_FAILED
+        ENTRY_STOPPED
     );
     assert_eq!(
         stopped_entry.heap_index.load(AtomicOrdering::Acquire),
@@ -1346,7 +1440,7 @@ fn registration_after_stop_or_failure_returns_failed_nonresident_entry() {
     let failed_entry = Arc::new(Entry::new());
     failed.register(at(20), Arc::clone(&failed_entry));
 
-    // A failed shard has the same synchronous rejection semantics.
+    // A failed shard rejects registration with the distinct failure terminal.
     assert_eq!(
         failed_entry.state.load(AtomicOrdering::Acquire),
         ENTRY_FAILED
@@ -1366,13 +1460,13 @@ fn repeated_stop_is_idempotent_and_does_not_renotify_driver() {
     let (entry, _registered) = register(&shard, at(10));
     consume_signal(&shard);
     shard.stop();
-    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
     assert_eq!(shard.state.lock().entries.len(), 0);
     consume_signal(&shard);
 
     // A repeated stop must return before draining or notifying a second time.
     shard.stop();
-    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
     assert_eq!(shard.state.lock().entries.len(), 0);
     assert!(!shard.signal.is_notified());
 }
@@ -1397,8 +1491,7 @@ async fn duplicate_failure_and_failure_after_stop_are_ignored() {
     assert!(!message.contains("duplicate operation"));
     {
         let state = failed.state.lock();
-        assert!(state.failed);
-        assert!(state.stopped);
+        assert_eq!(state.lifecycle, ShardLifecycle::Failed);
     }
 
     // Stop a fresh shard before reporting a failure and retain its fatal receiver.
@@ -1413,11 +1506,60 @@ async fn duplicate_failure_and_failure_after_stop_are_ignored() {
     // Failure after normal stop must neither reclassify nor interrupt the runtime.
     {
         let state = stopped.state.lock();
-        assert!(state.stopped);
-        assert!(!state.failed);
+        assert_eq!(state.lifecycle, ShardLifecycle::Stopped);
     }
     assert!(!stopped.signal.is_notified());
     assert_eq!(panicked.interrupt(future::ready(7)).await, 7);
+}
+
+#[test]
+fn every_failed_shard_logs_when_root_notification_is_closed() {
+    // Setup: Close the shared interruption receiver and capture structured diagnostics.
+    let (panicker, panicked) = Panicker::new(false);
+    drop(panicked);
+    let (first_alarm, _first_control) = FakeAlarm::controlled();
+    let first = Shard::new(0, first_alarm, panicker.clone());
+    let (second_alarm, _second_control) = FakeAlarm::controlled();
+    let second = Shard::new(1, second_alarm, panicker);
+    let storage = TraceStorage::default();
+    let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
+
+    // Action: Fail two shards after neither can publish a root interruption.
+    tracing::subscriber::with_default(subscriber, || {
+        first.fail(DriverFailure::io(
+            "first injected operation",
+            injected_error("first"),
+        ));
+        second.fail(DriverFailure::io(
+            "second injected operation",
+            injected_error("second"),
+        ));
+    });
+
+    // Assertion: Each shard emits one independently actionable diagnostic.
+    let events = storage.get_all();
+    let diagnostics: Vec<_> = events
+        .iter()
+        .filter(|event| event.metadata.content == "timer infrastructure failed")
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    for (shard, operation) in [
+        ("0", "first injected operation"),
+        ("1", "second injected operation"),
+    ] {
+        assert!(diagnostics.iter().any(|event| {
+            event
+                .metadata
+                .fields
+                .iter()
+                .any(|(name, value)| name == "shard" && value == shard)
+                && event
+                    .metadata
+                    .fields
+                    .iter()
+                    .any(|(name, value)| name == "operation" && value == operation)
+        }));
+    }
 }
 
 #[tokio::test]
@@ -1458,33 +1600,51 @@ async fn fatal_failure_is_published_before_failed_state_escapes() {
     let (panicker, panicked) = Panicker::new(false);
     let task_panicker = panicker.clone();
     let shard = Arc::new(Shard::new(0, alarm, panicker));
+    let storage = TraceStorage::default();
+    let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
 
     // Observe the interval after failure becomes visible to registration but
     // before the service starts waking its previously queued sleepers.
-    shard.fail_with_exposure_hook(
-        DriverFailure::io("injected operation", injected_error("root cause")),
-        || {
-            let entry = Arc::new(Entry::new());
-            shard.register(at(10), Arc::clone(&entry));
-            assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    tracing::subscriber::with_default(subscriber, || {
+        shard.fail_with_exposure_hook(
+            DriverFailure::io("injected operation", injected_error("root cause")),
+            || {
+                let entry = Arc::new(Entry::new());
+                shard.register(at(10), Arc::clone(&entry));
+                assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
 
-            // Simulate the task wrapper reporting this newly failed sleep's
-            // generic panic as soon as the failed state escapes.
-            let panic = catch_unwind(AssertUnwindSafe(|| {
-                let waker = noop_waker();
-                let mut context = Context::from_waker(&waker);
-                let _ = entry.poll(&mut context);
-            }))
-            .expect_err("polling a failed entry must panic");
-            task_panicker.notify(panic);
-        },
-    );
+                // Route the production failed-entry payload through the same
+                // Panicker path used by the spawned-task wrapper.
+                let panic = catch_unwind(AssertUnwindSafe(|| {
+                    let waker = noop_waker();
+                    let mut context = Context::from_waker(&waker);
+                    let _ = entry.poll(&mut context);
+                }))
+                .expect_err("polling a failed entry must panic");
+                task_panicker.notify(panic);
+            },
+        );
+    });
 
-    // The earlier publication must preserve the detailed infrastructure cause.
+    // The earlier publication must preserve one detailed cause without a
+    // duplicate generic task-panic event.
     let message = fatal_message(panicked).await;
     assert!(message.contains("injected operation"));
     assert!(message.contains("injected fake alarm root cause failure"));
     assert!(!message.contains("high-resolution timer service failed"));
+    let events = storage.get_all();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.metadata.content == "timer infrastructure failed")
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.metadata.content != "task panicked")
+    );
 }
 
 #[test]
@@ -1516,7 +1676,7 @@ fn fatal_failure_is_receiver_visible_when_failed_state_escapes() {
 }
 
 #[test]
-fn stop_fails_entries_popped_into_an_in_progress_batch() {
+fn stop_marks_entries_popped_into_an_in_progress_batch() {
     // Pop two expired entries without completing their driver batch.
     let (shard, control) = fake_shard();
     control.set_now(at(10));
@@ -1527,16 +1687,16 @@ fn stop_fails_entries_popped_into_an_in_progress_batch() {
     assert_eq!(batch.entries.len(), 2);
     assert_eq!(shard.state.lock().in_flight.len(), 2);
 
-    // Synchronous stop must find and fail entries no longer resident in the heap.
+    // Synchronous stop must find entries no longer resident in the heap.
     shard.stop();
-    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
-    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
+    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
     assert!(shard.state.lock().in_flight.is_empty());
 
-    // Later driver completion loses the terminal race and cannot overwrite failure.
+    // Later driver completion loses the terminal race and cannot overwrite shutdown.
     assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
-    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
-    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
+    assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
 }
 
 #[tokio::test]
@@ -1584,8 +1744,7 @@ async fn arm_failure_fails_every_pending_sleep_and_reports_snapshot() {
     // Failure cleanup must empty the heap and mark every sleep failed.
     {
         let state = shard.state.lock();
-        assert!(state.failed);
-        assert!(state.stopped);
+        assert_eq!(state.lifecycle, ShardLifecycle::Failed);
         assert_eq!(state.entries.len(), 0);
     }
     assert_eq!(
@@ -1614,7 +1773,10 @@ async fn wait_failure_fails_pending_sleep_and_reports_fatal() {
     run_driver(Arc::clone(&shard)).await;
 
     // The wait error must stop the shard and fail the resident sleep.
-    assert!(shard.state.lock().stopped);
+    assert_eq!(
+        shard.state.lock().lifecycle,
+        ShardLifecycle::Failed
+    );
     assert_eq!(shard.state.lock().entries.len(), 0);
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
     assert!(failed_poll_unwinds(&entry));
@@ -1635,7 +1797,10 @@ async fn driver_panic_is_contained_and_fails_pending_sleep() {
     run_driver(Arc::clone(&shard)).await;
 
     // Driver containment must stop the shard and fail every resident entry.
-    assert!(shard.state.lock().failed);
+    assert_eq!(
+        shard.state.lock().lifecycle,
+        ShardLifecycle::Failed
+    );
     assert_eq!(shard.state.lock().entries.len(), 0);
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
     assert!(failed_poll_unwinds(&entry));
@@ -1698,8 +1863,7 @@ async fn expiry_waker_panic_propagates_through_driver_and_fails_shard() {
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
     {
         let state = shard.state.lock();
-        assert!(state.failed);
-        assert!(state.stopped);
+        assert_eq!(state.lifecycle, ShardLifecycle::Failed);
         assert_eq!(state.entries.len(), 0);
         assert!(state.in_flight.is_empty());
     }
@@ -1720,8 +1884,7 @@ async fn normal_driver_shutdown_does_not_report_fatal_failure() {
     driver.await.unwrap();
     {
         let state = shard.state.lock();
-        assert!(state.stopped);
-        assert!(!state.failed);
+        assert_eq!(state.lifecycle, ShardLifecycle::Stopped);
     }
 
     // The fatal receiver must remain quiet while an ordinary ready task completes.
@@ -1737,7 +1900,10 @@ async fn clock_failure_during_registration_stops_service() {
     let entry = Arc::clone(&registered.entry);
 
     // Registration must return a failed future and leave no resident heap entry.
-    assert!(shard.state.lock().stopped);
+    assert_eq!(
+        shard.state.lock().lifecycle,
+        ShardLifecycle::Failed
+    );
     assert_eq!(shard.state.lock().entries.len(), 0);
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
     assert!(failed_poll_unwinds(&entry));
@@ -1760,7 +1926,10 @@ async fn disarm_failure_fails_the_running_service() {
     run_driver(Arc::clone(&shard)).await;
 
     // The disarm error must stop the shard and identify its native operation.
-    assert!(shard.state.lock().stopped);
+    assert_eq!(
+        shard.state.lock().lifecycle,
+        ShardLifecycle::Failed
+    );
     let message = fatal_message(panicked).await;
     assert!(message.contains("disarm native alarm"));
 }
@@ -1831,6 +2000,28 @@ fn ready_sleep_is_ready_on_first_poll() {
 
     // Immediate sleeps must complete on their first poll.
     assert_eq!(Pin::new(&mut sleep).poll(&mut context), Poll::Ready(()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ready_sleep_loop_cooperates_with_other_tasks() {
+    // Setup: Queue a peer behind a task that repeatedly awaits immediate sleeps.
+    let peer_ran = Arc::new(AtomicBool::new(false));
+    let peer_flag = Arc::clone(&peer_ran);
+    let peer = tokio::spawn(async move {
+        peer_flag.store(true, AtomicOrdering::Release);
+    });
+
+    // Action: Await more immediate sleeps than one Tokio cooperative budget.
+    for _ in 0..1_024 {
+        Sleep::ready().await;
+        if peer_ran.load(AtomicOrdering::Acquire) {
+            break;
+        }
+    }
+
+    // Assertion: Budget exhaustion yields to the already-runnable peer.
+    assert!(peer_ran.load(AtomicOrdering::Acquire));
+    peer.await.unwrap();
 }
 
 #[test]
@@ -2155,21 +2346,137 @@ fn runtime_identity_exhaustion_never_wraps_or_recovers() {
 }
 
 #[test]
-fn worker_allocator_panics_when_callbacks_overclaim() {
-    // Consume the only worker index from one thread.
+fn excess_worker_callbacks_receive_provisional_assignments() {
+    // Setup: Consume the only worker index from one thread.
     let affinity = Arc::new(affinity(1));
-    {
+    let worker = {
         let affinity = Arc::clone(&affinity);
-        thread::spawn(move || affinity.assign_worker())
-            .join()
-            .unwrap();
+        thread::spawn(move || {
+            affinity.assign_worker();
+            super::THREAD_ASSIGNMENTS.with(|assignments| {
+                assignments
+                    .borrow()
+                    .get(affinity.runtime_id)
+                    .expect("worker callback must install an assignment")
+            })
+        })
+        .join()
+        .unwrap()
+    };
+    assert_eq!(worker, (0, AssignmentKind::Worker));
+
+    // Action: Invoke the callback twice on a fresh replacement-worker thread.
+    let replacement = {
+        let affinity = Arc::clone(&affinity);
+        thread::spawn(move || {
+            affinity.assign_worker();
+            affinity.assign_worker();
+            super::THREAD_ASSIGNMENTS.with(|assignments| {
+                assignments
+                    .borrow()
+                    .get(affinity.runtime_id)
+                    .expect("replacement callback must install an assignment")
+            })
+        })
+        .join()
+        .unwrap()
+    };
+
+    // Assertion: The excess callback uses one stable in-range fallback without
+    // consuming another unique worker claim.
+    assert_eq!(replacement, (0, AssignmentKind::Provisional));
+    assert_eq!(affinity.next_worker.load(AtomicOrdering::Relaxed), 1);
+    assert_eq!(affinity.next_fallback.load(AtomicOrdering::Relaxed), 1);
+}
+
+#[test]
+fn block_in_place_replacement_worker_retains_runtime_progress() {
+    const REPETITIONS: usize = 4;
+
+    // Setup: Start a one-worker Tokio runtime and let its original worker
+    // consume the sole unique affinity claim before any blocking handoff.
+    let setup = super::Setup::new(1);
+    let affinity = Arc::clone(&setup.affinity);
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(1).enable_all();
+    setup.configure(&mut builder);
+    let runtime = builder.build().expect("Tokio runtime must build");
+    let claim_deadline = Instant::now() + Duration::from_secs(5);
+    while affinity.next_worker.load(AtomicOrdering::Relaxed) != 1 {
+        assert!(
+            Instant::now() < claim_deadline,
+            "original worker did not claim its affinity"
+        );
+        thread::yield_now();
     }
 
-    // A second distinct worker callback exceeds configuration and must panic.
-    let overclaim = {
-        let affinity = Arc::clone(&affinity);
-        thread::spawn(move || affinity.assign_worker()).join()
-    };
-    assert!(overclaim.is_err());
-    assert_eq!(affinity.next_worker.load(AtomicOrdering::Relaxed), 2);
+    // Action: Repeatedly block the original worker while its replacement
+    // services another task and reaches the production park callback.
+    runtime.block_on(async {
+        for iteration in 0..REPETITIONS {
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let blocker = tokio::spawn(async move {
+                tokio::task::block_in_place(move || {
+                    entered_tx
+                        .send(())
+                        .expect("test must observe the blocking handoff");
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("test must release the blocked worker");
+                });
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker did not enter block_in_place");
+
+            // The first fresh replacement must park and install a provisional
+            // assignment before any probe task makes its own fallback choice.
+            if iteration == 0 {
+                let park_deadline = Instant::now() + Duration::from_secs(5);
+                while affinity.next_fallback.load(AtomicOrdering::Relaxed) == 0
+                    && Instant::now() < park_deadline
+                {
+                    thread::yield_now();
+                }
+            }
+
+            let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel(1);
+            let probe_affinity = Arc::clone(&affinity);
+            let probe = tokio::spawn(async move {
+                let index = probe_affinity.select();
+                let assignment = super::THREAD_ASSIGNMENTS.with(|assignments| {
+                    assignments
+                        .borrow()
+                        .get(probe_affinity.runtime_id)
+                        .expect("replacement worker must retain an assignment")
+                });
+                progress_tx
+                    .send((index, assignment))
+                    .expect("test must observe replacement-worker progress");
+            });
+            let progress = progress_rx.recv_timeout(Duration::from_secs(5));
+
+            // Always unblock the original worker before asserting so a failed
+            // progress probe cannot strand runtime teardown.
+            release_tx
+                .send(())
+                .expect("blocked worker must still be waiting");
+            blocker.await.expect("blocking task must complete");
+            probe.await.expect("replacement-worker probe must complete");
+
+            let (index, assignment) =
+                progress.expect("replacement worker did not service the probe task");
+            assert_eq!(index, assignment.0);
+            assert!(index < affinity.worker_threads);
+            if iteration == 0 {
+                assert_eq!(assignment.1, AssignmentKind::Provisional);
+            }
+        }
+    });
+
+    // Assertion: Every handoff completed, all selections stayed in range, and
+    // temporary replacement threads never consumed another worker identity.
+    assert_eq!(affinity.next_worker.load(AtomicOrdering::Relaxed), 1);
+    assert!((1..=REPETITIONS).contains(&affinity.next_fallback.load(AtomicOrdering::Relaxed)));
 }

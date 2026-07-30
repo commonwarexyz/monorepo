@@ -1,7 +1,7 @@
 use crate::{
     Error,
     telemetry::metrics::raw::Gauge,
-    utils::{extract_panic_message, supervision::Tree},
+    utils::{extract_panic_message, is_reported_panic, supervision::Tree},
 };
 use commonware_utils::{
     channel::oneshot,
@@ -293,9 +293,11 @@ impl Panicker {
 
     /// Notifies the [Panicker] that a panic has occurred.
     pub(crate) fn notify(&self, panic: Box<dyn Any + Send + 'static>) {
-        // Log the panic
-        let err = extract_panic_message(&*panic);
-        error!(?err, "task panicked");
+        // Infrastructure failures emit richer diagnostics before their waiters unwind.
+        if !is_reported_panic(&*panic) {
+            let err = extract_panic_message(&*panic);
+            error!(?err, "task panicked");
+        }
 
         // If we are catching panics, just return
         if self.catch {
@@ -400,7 +402,11 @@ impl Aborter {
 #[cfg(test)]
 mod tests {
     use super::{Handle, Panicker, extract_panic_message};
-    use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
+    use crate::{
+        Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic,
+        telemetry::traces::collector::{CollectingLayer, TraceStorage},
+        utils::resume_reported_panic,
+    };
     use commonware_utils::channel::oneshot;
     use futures::future;
     use std::{
@@ -411,6 +417,7 @@ mod tests {
         },
         task::Poll,
     };
+    use tracing_subscriber::{Registry, layer::SubscriberExt as _};
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
@@ -463,6 +470,24 @@ mod tests {
                 .downcast_ref::<String>()
                 .is_some_and(|message| message.starts_with("fatal "))
         );
+    }
+
+    #[test]
+    fn already_reported_panic_skips_generic_task_log() {
+        // Setup: Capture task diagnostics and construct an already-reported unwind payload.
+        let storage = TraceStorage::default();
+        let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            resume_reported_panic("reported infrastructure failure");
+        }))
+        .expect_err("reported infrastructure failure did not unwind");
+        let (panicker, _panicked) = Panicker::new(true);
+
+        // Action: Route the payload through the ordinary spawned-task panic path.
+        tracing::subscriber::with_default(subscriber, || panicker.notify(panic));
+
+        // Assertion: The earlier infrastructure diagnostic is not duplicated.
+        assert!(storage.is_empty());
     }
 
     #[test]

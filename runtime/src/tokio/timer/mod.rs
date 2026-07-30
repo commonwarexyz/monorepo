@@ -24,10 +24,10 @@
 //! Each entry has exactly one terminal transition:
 //!
 //! ```text
-//!              WAITING
-//!             /   |   \
-//!            v    v    v
-//!         FIRED CANCELED FAILED
+//!                 WAITING
+//!              /    |    \    \
+//!             v     v     v    v
+//!          FIRED CANCELED FAILED STOPPED
 //! ```
 //!
 //! The heap mutex owns registration and alarm intent. Native alarm operations
@@ -45,8 +45,10 @@
 //!
 //! Driver errors and panics claim root interruption before waking failed
 //! sleepers, so an ordinary task panic cannot replace the infrastructure
-//! diagnostic. This bypasses ordinary task-panic catching. Service teardown
-//! also fails queued sleeps, signals drivers, and aborts their tasks.
+//! diagnostic. Failed sleepers unwind with an already-reported marker so they
+//! do not duplicate that diagnostic. Orderly service teardown instead marks
+//! queued sleeps stopped without waking them, signals drivers, and aborts
+//! their tasks.
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "linux", target_os = "macos"))] {
