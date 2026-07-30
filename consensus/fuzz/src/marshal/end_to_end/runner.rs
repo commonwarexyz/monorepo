@@ -350,7 +350,7 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
 
         run_liveness_phases(&context, &oracle, &participants, &honest_apps, required).await;
 
-        invariants::check_all_blocks(&honest_apps, None);
+        invariants::check_all_blocks(&honest_apps, genesis_commitment, None);
     });
 }
 
@@ -383,6 +383,7 @@ pub fn fuzz_marshal_coding_disrupter(input: MarshalDisrupterInput) {
         }
 
         let genesis = coding_genesis();
+        let genesis_digest = genesis.inner().digest();
         let genesis_commitment = genesis.commitment();
 
         let mut honest_apps: Vec<(usize, Application<CodingB>)> = Vec::new();
@@ -442,6 +443,6 @@ pub fn fuzz_marshal_coding_disrupter(input: MarshalDisrupterInput) {
 
         run_liveness_phases(&context, &oracle, &participants, &honest_apps, required).await;
 
-        invariants::check_all_blocks(&honest_apps, None);
+        invariants::check_all_blocks(&honest_apps, genesis_digest, None);
     });
 }

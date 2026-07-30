@@ -161,6 +161,22 @@ fn entered_round_via_nullification(
         .any(|nullified| next_term_start(nullified.view().get(), term_length) == view)
 }
 
+fn timeout_trigger_exempted(
+    round: Round,
+    term_length: TermLength,
+    observed_nullifications: &BTreeSet<Round>,
+    observed_finalizations: &BTreeSet<Round>,
+    successful_certifications: &BTreeSet<Round>,
+) -> bool {
+    observed_nullifications.iter().any(|nullified| {
+        nullified.epoch() == round.epoch()
+            && nullification_covers(nullified.view().get(), round.view().get(), term_length)
+    }) || observed_finalizations
+        .iter()
+        .any(|finalized| finalized >= &round)
+        || successful_certifications.contains(&round)
+}
+
 fn check_basic_invariants(term_length: TermLength, replicas: Vec<ReplicaState>) {
     // Invariants:
     // - no_conflicting_quorum_notarizations
@@ -1202,6 +1218,11 @@ fn check_fuzz_invariants<E, S, L>(
         let mut predecessor_evidence: BTreeSet<u64> = BTreeSet::new();
         let mut own_nullified: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
         let mut observed_finalizations: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
+        let mut timeout_triggers: BTreeMap<u32, BTreeMap<Round, BTreeSet<&'static str>>> =
+            BTreeMap::new();
+        let mut trigger_observed_nullifications: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
+        let mut trigger_successful_certifications: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
+        let mut trigger_own_votes: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
         let mut accepted_signed: BTreeSet<(Round, View, Sha256Digest)> = BTreeSet::new();
 
         // Resolves an attributable certificate's signer bitmap to participant
@@ -1280,6 +1301,16 @@ fn check_fuzz_invariants<E, S, L>(
             let incarnation_observed_finalizations = observed_finalizations
                 .entry(recorded.generation)
                 .or_default();
+            let incarnation_timeout_triggers =
+                timeout_triggers.entry(recorded.generation).or_default();
+            let incarnation_trigger_observed_nullifications = trigger_observed_nullifications
+                .entry(recorded.generation)
+                .or_default();
+            let incarnation_trigger_successful_certifications = trigger_successful_certifications
+                .entry(recorded.generation)
+                .or_default();
+            let incarnation_trigger_own_votes =
+                trigger_own_votes.entry(recorded.generation).or_default();
             match &recorded.event {
                 Event::Activity { valid: false, .. } => {}
                 Event::Activity {
@@ -1295,6 +1326,16 @@ fn check_fuzz_invariants<E, S, L>(
                         }
                         Activity::Nullification(certificate) => {
                             observed_nullifications.insert(certificate.round());
+                            incarnation_trigger_observed_nullifications.insert(certificate.round());
+                        }
+                        Activity::Notarize(vote) if vote.signer() == observer_idx => {
+                            incarnation_trigger_own_votes.insert(vote.proposal.round);
+                        }
+                        Activity::Nullify(vote) if vote.signer() == observer_idx => {
+                            incarnation_trigger_own_votes.insert(vote.round);
+                        }
+                        Activity::Finalize(vote) if vote.signer() == observer_idx => {
+                            incarnation_trigger_own_votes.insert(vote.proposal.round);
                         }
                         _ => {}
                     }
@@ -1714,6 +1755,15 @@ fn check_fuzz_invariants<E, S, L>(
                         } => {
                             accepted_proposals.insert((context.round, context.parent, *payload));
                         }
+                        AutomatonEvent::ProposeCompleted {
+                            context,
+                            outcome: Completion::Closed,
+                        } => {
+                            incarnation_timeout_triggers
+                                .entry(context.round)
+                                .or_default()
+                                .insert("dropped propose");
+                        }
                         AutomatonEvent::VerifyCompleted {
                             context,
                             payload,
@@ -1724,6 +1774,10 @@ fn check_fuzz_invariants<E, S, L>(
                                 accepted_proposals.insert(key);
                             } else {
                                 rejected_proposals.insert(key);
+                                incarnation_timeout_triggers
+                                    .entry(context.round)
+                                    .or_default()
+                                    .insert("verify false");
                             }
                         }
                         AutomatonEvent::CertifyCompleted {
@@ -1734,8 +1788,13 @@ fn check_fuzz_invariants<E, S, L>(
                             let key = (*round, *payload);
                             if *result {
                                 successful_certifications.insert(key);
+                                incarnation_trigger_successful_certifications.insert(*round);
                             } else {
                                 failed_certifications.insert(key);
+                                incarnation_timeout_triggers
+                                    .entry(*round)
+                                    .or_default()
+                                    .insert("certify false");
                             }
                         }
                         _ => {}
@@ -1888,6 +1947,49 @@ fn check_fuzz_invariants<E, S, L>(
                         _ => {}
                     }
                 }
+            }
+        }
+
+        // Invariant: timeout_triggers_make_progress
+        // A dropped proposal, rejected verification, or rejected
+        // certification arms a timeout for its view. Once same-incarnation
+        // evidence proves the node advanced, it must have emitted its own
+        // nullify vote unless a certificate moved it out of the view. A trigger
+        // in the run's final active view remains a legal prefix; bounded
+        // liveness checks detect a node that stays silent there. A restart
+        // terminates the prior incarnation, so only triggers from the latest
+        // generation remain actionable.
+        if let Some(generation) = events.last().map(|recorded| recorded.generation)
+            && let Some(triggers) = timeout_triggers.get(&generation)
+        {
+            let empty = BTreeSet::new();
+            let incarnation_own_nullified = own_nullified.get(&generation).unwrap_or(&empty);
+            let incarnation_observed_nullifications = trigger_observed_nullifications
+                .get(&generation)
+                .unwrap_or(&empty);
+            let incarnation_observed_finalizations =
+                observed_finalizations.get(&generation).unwrap_or(&empty);
+            let incarnation_successful_certifications = trigger_successful_certifications
+                .get(&generation)
+                .unwrap_or(&empty);
+            let incarnation_own_votes = trigger_own_votes.get(&generation).unwrap_or(&empty);
+
+            for (round, reasons) in triggers {
+                let exempted = timeout_trigger_exempted(
+                    *round,
+                    term_length,
+                    incarnation_observed_nullifications,
+                    incarnation_observed_finalizations,
+                    incarnation_successful_certifications,
+                );
+                let advanced = exempted || incarnation_own_votes.iter().any(|voted| voted > round);
+                if !advanced {
+                    continue;
+                }
+                assert!(
+                    incarnation_own_nullified.contains(round) || exempted,
+                    "Invariant violation: advanced past timeout trigger without nullify: observer {observer_bytes:?}, generation {generation}, round {round:?}, triggers {reasons:?}"
+                );
             }
         }
 
@@ -3346,6 +3448,131 @@ mod tests {
         );
     }
 
+    fn record_later_own_vote(reporter: &mut AuditReporter, schemes: &[id_mock::Scheme]) {
+        // Advance without adding any certificate exit that would exempt the trigger.
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], Round::new(Epoch::new(1), View::new(1)))
+                .unwrap(),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn dropped_proposal_must_make_progress() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        record_automaton(
+            &reporter,
+            AutomatonEvent::ProposeCompleted {
+                context: automaton_context(participants[0].clone(), &proposal),
+                outcome: Completion::Closed,
+            },
+        );
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn rejected_verification_must_make_progress() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        record_verify_result(&reporter, participants[1].clone(), &proposal, false);
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn rejected_certification_must_make_progress() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        record_certify_result(&reporter, &proposal(1, 0, 0xA), false);
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn timeout_trigger_exemptions_are_exact() {
+        let round = proposal(4, 3, 0xA).round;
+        let higher = proposal(5, 4, 0xB).round;
+        let lower = proposal(3, 2, 0xC).round;
+        let term_length = TermLength::new(NZU32!(5));
+        let empty = BTreeSet::new();
+        let exempted = |nullifications: &BTreeSet<Round>,
+                        finalizations: &BTreeSet<Round>,
+                        certifications: &BTreeSet<Round>| {
+            timeout_trigger_exempted(
+                round,
+                term_length,
+                nullifications,
+                finalizations,
+                certifications,
+            )
+        };
+
+        assert!(exempted(&BTreeSet::from([lower]), &empty, &empty));
+        assert!(exempted(&empty, &BTreeSet::from([higher]), &empty));
+        assert!(exempted(&empty, &empty, &BTreeSet::from([round])));
+        assert!(!exempted(
+            &BTreeSet::from([higher]),
+            &BTreeSet::from([lower]),
+            &BTreeSet::from([higher])
+        ));
+    }
+
+    #[test]
+    fn timeout_trigger_is_satisfied_by_own_nullify() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        record_verify_result(&reporter, participants[1].clone(), &proposal, false);
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], proposal.round).unwrap(),
+        ));
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn timeout_trigger_from_prior_generation_is_exempt() {
+        let (participants, schemes) = vote_fixture();
+        let reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        record_verify_result(&reporter, participants[1].clone(), &proposal, false);
+        reporter.set_generation(1);
+        record_automaton(
+            &reporter,
+            AutomatonEvent::ProposeCompleted {
+                context: automaton_context(participants[0].clone(), &proposal),
+                outcome: Completion::Canceled,
+            },
+        );
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn prior_generation_nullify_does_not_exempt_live_trigger() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], proposal.round).unwrap(),
+        ));
+        reporter.set_generation(1);
+        record_verify_result(&reporter, participants[1].clone(), &proposal, false);
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
     #[test]
     #[should_panic(expected = "notarized multiple exact proposals")]
     fn exact_proposal_non_equivocation_rejects_same_payload_with_different_parents() {
@@ -3455,6 +3682,9 @@ mod tests {
         reporter.report(Activity::Notarize(
             Notarize::sign(&schemes[1], proposal).unwrap(),
         ));
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[1], round(5)).unwrap(),
+        ));
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 
@@ -3481,7 +3711,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_certification_at_the_end_of_a_prefix_is_allowed() {
+    fn timeout_trigger_without_advancement_is_allowed() {
         let (participants, schemes) = vote_fixture();
         let reporter = audit_reporter(0, &participants, &schemes);
         record_certify_result(&reporter, &proposal(5, 4, 0xA), false);

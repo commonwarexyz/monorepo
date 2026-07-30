@@ -17,11 +17,11 @@ use super::{
 use crate::simplex::Simplex;
 use commonware_consensus::{
     Block,
-    marshal::mocks::application::Application,
+    marshal::mocks::{application::Application, block::Block as MockBlock},
     simplex::types::Context as SimplexContext,
-    types::{Height, Round},
+    types::{Height, Round, coding::Commitment},
 };
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography::{Digest, Digestible, PublicKey, sha256::Digest as Sha256Digest};
 use commonware_utils::sync::Mutex;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -36,6 +36,25 @@ type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
 type CertifyVerdicts = HashMap<(Round, Sha256Digest), (usize, bool)>;
 type ProposedBlocks = HashSet<(usize, Round, Sha256Digest)>;
+type AuditedBlock<D, P> = MockBlock<Sha256Digest, SimplexContext<D, P>>;
+type AuditedApplication<D, P> = Application<AuditedBlock<D, P>>;
+type AuditedBlocks<D, P> = BTreeMap<Height, Arc<AuditedBlock<D, P>>>;
+
+pub(super) trait ConsensusParentDigest: Digest {
+    fn block_digest(&self) -> Sha256Digest;
+}
+
+impl ConsensusParentDigest for Sha256Digest {
+    fn block_digest(&self) -> Sha256Digest {
+        *self
+    }
+}
+
+impl ConsensusParentDigest for Commitment {
+    fn block_digest(&self) -> Sha256Digest {
+        self.block()
+    }
+}
 
 #[derive(Default)]
 struct CertificationState {
@@ -195,36 +214,68 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
 }
 
 /// Run block-ordering and agreement invariants.
-pub fn check_all_blocks<B: Block<Digest = Sha256Digest>>(
-    honest_apps: &[(usize, Application<B>)],
+pub(super) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
+    honest_apps: &[(usize, AuditedApplication<D, P>)],
+    genesis: Sha256Digest,
     stack: Option<&str>,
 ) {
     let stack = stack.unwrap_or("unspecified");
     for (idx, app) in honest_apps {
-        check_local_blocks(*idx, app, stack);
+        check_local_blocks(*idx, app, genesis, stack);
     }
     agreement(honest_apps, stack);
 }
 
 /// Run block-ordering and parent-linkage invariants for one node.
-pub(super) fn check_local_blocks<B: Block<Digest = Sha256Digest>>(
+pub(super) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
     idx: usize,
-    app: &Application<B>,
+    app: &AuditedApplication<D, P>,
+    genesis: Sha256Digest,
     stack: &str,
 ) {
     check_in_order(idx, &app.delivered(), stack);
-    check_parent_linkage(idx, &app.blocks(), stack);
+    check_parent_linkage(idx, &app.blocks(), genesis, stack);
 }
 
 /// Invariant: every pair of consecutively delivered blocks is parent-linked.
 ///
 /// [`check_in_order`] runs first and guarantees that after exact duplicate
 /// deliveries are collapsed, the by-height snapshot is one contiguous chain.
-fn check_parent_linkage<B: Block<Digest = Sha256Digest>>(
+fn check_parent_linkage<D: ConsensusParentDigest, P: PublicKey>(
     idx: usize,
-    blocks: &BTreeMap<Height, Arc<B>>,
+    blocks: &AuditedBlocks<D, P>,
+    genesis: Sha256Digest,
     stack: &str,
 ) {
+    if let Some((height, block)) = blocks.first_key_value() {
+        if *height == Height::zero() {
+            assert_eq!(
+                block.digest(),
+                genesis,
+                "node{idx} delivered the wrong genesis block: digest={} expected={genesis}; \
+                 stack={stack}",
+                block.digest(),
+            );
+        } else {
+            assert_eq!(
+                block.parent(),
+                genesis,
+                "node{idx} delivered a chain not rooted at genesis: first_height={} parent={} \
+                 expected={genesis}; stack={stack}",
+                height.get(),
+                block.parent(),
+            );
+            assert_eq!(
+                block.context.parent.1.block_digest(),
+                genesis,
+                "node{idx} delivered a chain whose first embedded consensus parent is not \
+                 genesis: first_height={} context_parent={} expected={genesis}; stack={stack}",
+                height.get(),
+                block.context.parent.1.block_digest(),
+            );
+        }
+    }
+
     for (height, block) in blocks {
         let Some(next_height) = height.get().checked_add(1).map(Height::new) else {
             continue;
@@ -241,6 +292,25 @@ fn check_parent_linkage<B: Block<Digest = Sha256Digest>>(
             block.digest(),
             next_height.get(),
             next.parent(),
+        );
+        assert_eq!(
+            next.context.parent.1.block_digest(),
+            block.digest(),
+            "node{idx} delivered a chain with a broken embedded consensus parent: height {} \
+             digest={} but height {} context_parent={}; stack={stack}",
+            height.get(),
+            block.digest(),
+            next_height.get(),
+            next.context.parent.1.block_digest(),
+        );
+        assert!(
+            next.context.round > block.context.round,
+            "node{idx} delivered a chain with non-increasing consensus rounds: height {} \
+             round={} but height {} round={}; stack={stack}",
+            height.get(),
+            block.context.round,
+            next_height.get(),
+            next.context.round,
         );
     }
 }
@@ -353,16 +423,42 @@ fn agreement<B: Block<Digest = Sha256Digest>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SimplexId;
+    use crate::{SimplexId, id_mock};
     use commonware_consensus::{
         Reporter as _,
         marshal::{Update, mocks::block::Block as MockBlock},
+        types::{Epoch, View},
     };
     use commonware_cryptography::Sha256;
     use commonware_utils::{Acknowledgement as _, NZUsize, acknowledgement::Exact};
 
+    type TestContext = SimplexContext<Sha256Digest, id_mock::PublicKey>;
+    type ContextBlock = MockBlock<Sha256Digest, TestContext>;
+
     fn digest(byte: u8) -> Sha256Digest {
         Sha256Digest([byte; 32])
+    }
+
+    fn context(view: u64, parent: Sha256Digest) -> TestContext {
+        TestContext {
+            round: Round::new(Epoch::zero(), View::new(view)),
+            leader: id_mock::PublicKey::from_index(0),
+            parent: (View::new(view.saturating_sub(1)), parent),
+        }
+    }
+
+    fn block(
+        view: u64,
+        context_parent: Sha256Digest,
+        parent: Sha256Digest,
+        height: u64,
+    ) -> ContextBlock {
+        ContextBlock::new::<Sha256>(
+            context(view, context_parent),
+            parent,
+            Height::new(height),
+            height,
+        )
     }
 
     #[test]
@@ -396,6 +492,44 @@ mod tests {
             &[(Height::new(1), digest(0xA)), (Height::new(3), digest(0xB))],
             "test",
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "not rooted at genesis")]
+    fn wrong_chain_root_is_rejected() {
+        let genesis = digest(0xA);
+        let first = block(1, genesis, digest(0xB), 1);
+        let blocks = BTreeMap::from([(Height::new(1), Arc::new(first))]);
+
+        check_parent_linkage(0, &blocks, genesis, "test");
+    }
+
+    #[test]
+    #[should_panic(expected = "broken embedded consensus parent")]
+    fn embedded_parent_linkage_is_checked() {
+        let genesis = digest(0xA);
+        let first = block(1, genesis, genesis, 1);
+        let second = block(2, digest(0xB), first.digest(), 2);
+        let blocks = BTreeMap::from([
+            (Height::new(1), Arc::new(first)),
+            (Height::new(2), Arc::new(second)),
+        ]);
+
+        check_parent_linkage(0, &blocks, genesis, "test");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-increasing consensus rounds")]
+    fn consensus_rounds_must_increase() {
+        let genesis = digest(0xA);
+        let first = block(2, genesis, genesis, 1);
+        let second = block(2, first.digest(), first.digest(), 2);
+        let blocks = BTreeMap::from([
+            (Height::new(1), Arc::new(first)),
+            (Height::new(2), Arc::new(second)),
+        ]);
+
+        check_parent_linkage(0, &blocks, genesis, "test");
     }
 
     #[test]
