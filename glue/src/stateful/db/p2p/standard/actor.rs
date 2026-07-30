@@ -289,12 +289,10 @@ where
 
         // Decode limits derive from the original local request key above. Saturating the
         // conversion only ever tightens the limit.
-        let cfg = ResponseConfig {
-            max_ops: usize::try_from(key.max_ops.get()).unwrap_or(usize::MAX),
-            // The per-request proof bound is the effective cap.
-            max_proof_digests: usize::MAX,
-            op: (),
-        };
+        let cfg = ResponseConfig::request_bounded(
+            usize::try_from(key.max_ops.get()).unwrap_or(usize::MAX),
+            (),
+        );
         let decoded = match Response::<F, Op<F, DB>, DatabaseRoot<F, DB>>::decode_cfg(value, &cfg) {
             Ok(decoded) => decoded,
             Err(_) => {
