@@ -101,10 +101,7 @@ impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
         responses
     }
 
-    fn next_target<F>(
-        &mut self,
-        fallback: F,
-    ) -> PendingLogs<V, C::PublicKey>
+    fn next_target<F>(&mut self, fallback: F) -> PendingLogs<V, C::PublicKey>
     where
         F: FnOnce() -> PendingLogs<V, C::PublicKey>,
     {
@@ -211,10 +208,7 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
     ///
     /// The outer `None` means no matching verification has completed;
     /// `Some(None)` means verification completed and the ceremony failed.
-    fn ready(
-        &self,
-        logs: &PendingLogs<V, C::PublicKey>,
-    ) -> Option<Option<&Ceremony<V, C>>> {
+    fn ready(&self, logs: &PendingLogs<V, C::PublicKey>) -> Option<Option<&Ceremony<V, C>>> {
         if self.target != *logs {
             return None;
         }
