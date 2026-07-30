@@ -8,7 +8,6 @@ pub(super) use futures::task::AtomicWaker;
 pub(in crate::tokio::timer) use loom::sync::Arc as EntryArc;
 #[cfg(not(feature = "loom"))]
 pub(in crate::tokio::timer) use std::sync::Arc as EntryArc;
-
 #[cfg(feature = "loom")]
 use std::task::Waker;
 

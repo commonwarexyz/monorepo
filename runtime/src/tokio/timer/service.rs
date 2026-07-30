@@ -2,9 +2,9 @@
 
 mod sync;
 
+pub(super) use self::sync::EntryArc;
 use self::sync::{AtomicWaker, Mutex};
 use super::heap::{Heap, HeapItem};
-pub(super) use self::sync::EntryArc;
 #[cfg(target_os = "linux")]
 use super::linux::NativeAlarm;
 #[cfg(target_os = "macos")]
@@ -13,9 +13,7 @@ use crate::utils::Panicker;
 use commonware_macros::select;
 use futures::FutureExt as _;
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{
-    AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering,
-};
+use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 use std::{

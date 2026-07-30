@@ -267,9 +267,7 @@ fn production_registered_sleep_drop_races_driver_completion() {
             thread::spawn(move || {
                 let mut batch = Batch::new();
                 assert!(!driver_ok(shard.take_expired(&mut batch)));
-                assert!(shard
-                    .complete_batch(&mut batch, ENTRY_FIRED)
-                    .is_none());
+                assert!(shard.complete_batch(&mut batch, ENTRY_FIRED).is_none());
             })
         };
         dropper.join().unwrap();

@@ -533,16 +533,18 @@ mod tests {
             sender.send(()).unwrap();
             budget_consumers.push_back(receiver);
         }
-        let task = future::poll_fn(move |context| loop {
-            let receiver = budget_consumers
-                .front_mut()
-                .expect("Tokio cooperative budget exceeded test capacity");
-            match std::future::Future::poll(std::pin::Pin::new(receiver), context) {
-                Poll::Ready(Ok(())) => {
-                    budget_consumers.pop_front();
+        let task = future::poll_fn(move |context| {
+            loop {
+                let receiver = budget_consumers
+                    .front_mut()
+                    .expect("Tokio cooperative budget exceeded test capacity");
+                match std::future::Future::poll(std::pin::Pin::new(receiver), context) {
+                    Poll::Ready(Ok(())) => {
+                        budget_consumers.pop_front();
+                    }
+                    Poll::Ready(Err(_)) => panic!("budget-consumer sender closed without a value"),
+                    Poll::Pending => return Poll::Ready(7),
                 }
-                Poll::Ready(Err(_)) => panic!("budget-consumer sender closed without a value"),
-                Poll::Pending => return Poll::Ready(7),
             }
         });
 

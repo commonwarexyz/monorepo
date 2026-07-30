@@ -225,9 +225,7 @@ struct FakeAlarmControl {
 impl FakeAlarmControl {
     /// Returns the number of times the platform deadline limit was requested.
     fn max_deadline_reads(&self) -> usize {
-        self.state
-            .max_deadline_reads
-            .load(AtomicOrdering::Relaxed)
+        self.state.max_deadline_reads.load(AtomicOrdering::Relaxed)
     }
 
     /// Advances or rewinds the manual monotonic clock.
@@ -1032,10 +1030,7 @@ fn expiry_clock_failure_preserves_queue_and_operation_context() {
         Err(failure) => failure,
     };
     assert_eq!(failure.operation, "read monotonic clock during expiry");
-    assert_eq!(
-        failure.cause.to_string(),
-        "injected fake alarm now failure"
-    );
+    assert_eq!(failure.cause.to_string(), "injected fake alarm now failure");
     assert_eq!(shard.state.lock().entries.len(), 1);
     assert!(batch.entries.is_empty());
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_WAITING);
@@ -2032,19 +2027,13 @@ fn fallback_threads_receive_balanced_round_robin_shards() {
 
     // Action: Count the production fallback selections made under contention.
     let mut counts = [0_usize; 4];
-    for index in threads
-        .into_iter()
-        .map(|thread| thread.join().unwrap())
-    {
+    for index in threads.into_iter().map(|thread| thread.join().unwrap()) {
         counts[index] += 1;
     }
 
     // Assertion: Consecutive claims balance exactly across every native shard.
     assert_eq!(counts, [4; 4]);
-    assert_eq!(
-        affinity.next_fallback.load(AtomicOrdering::Relaxed),
-        16
-    );
+    assert_eq!(affinity.next_fallback.load(AtomicOrdering::Relaxed), 16);
 }
 
 #[test]
