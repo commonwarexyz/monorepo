@@ -3,7 +3,6 @@
 use commonware_utils::sync::{Condvar, Mutex};
 use futures::task::ArcWake;
 use std::{
-    any::Any,
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -17,13 +16,18 @@ pub(crate) mod thread;
 
 mod handle;
 pub use handle::Handle;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use handle::MetricHandle;
 #[commonware_macros::stability(ALPHA)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use handle::Panicked;
-pub(crate) use handle::{Aborter, MetricHandle, Panicker};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use handle::Panicker;
 
 mod cell;
 pub use cell::Cell as ContextCell;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod supervision;
 
 /// The execution mode of a task.
@@ -65,7 +69,8 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
-pub(crate) fn extract_panic_message(err: &(dyn Any + Send)) -> String {
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn extract_panic_message(err: &(dyn std::any::Any + Send)) -> String {
     err.downcast_ref::<&str>().map_or_else(
         || {
             err.downcast_ref::<String>()

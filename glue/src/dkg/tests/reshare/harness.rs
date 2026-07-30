@@ -58,8 +58,8 @@ use commonware_formatting::hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
-    buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
+    Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Scheduler as _, Spawner, Storage,
+    Supervisor as _, buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
     archive::prunable,

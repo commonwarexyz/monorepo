@@ -1,5 +1,6 @@
 //! Utility functions for traces
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod status;
 
 #[cfg(any(test, feature = "test-utils"))]

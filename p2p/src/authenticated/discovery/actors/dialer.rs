@@ -13,8 +13,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
-    StreamOf, spawn_cell,
+    BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, Metrics, Resolver, SinkOf,
+    Spawner, StreamOf, TcpEndpoint, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::encrypted::{Config as StreamConfig, dial};
@@ -49,7 +49,10 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
+pub struct Actor<
+    E: Spawner + Clock + Dialer<Endpoint = TcpEndpoint> + Resolver + Metrics,
+    C: Signer,
+> {
     context: ContextCell<E>,
 
     // ---------- State ----------
@@ -68,8 +71,16 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     attempts: CounterFamily<metrics::Peer<C::PublicKey>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, C: Signer>
-    Actor<E, C>
+impl<
+    E: Spawner
+        + BufferPooler
+        + Clock
+        + Dialer<Endpoint = TcpEndpoint>
+        + Resolver
+        + CryptoRng
+        + Metrics,
+    C: Signer,
+> Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");
@@ -108,7 +119,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
             move |mut context| async move {
                 let timeout = context.sleep(dial_timeout);
                 let dial = async {
-                    // Resolve ingress to socket addresses (filtered by private IP policy)
+                    // Preserve the legacy policy of selecting one resolved address per attempt.
                     let addresses: Vec<_> = ingress
                         .resolve_filtered(&context, allow_private_ips)
                         .await
@@ -120,14 +131,15 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                     };
 
                     // Attempt to dial peer
-                    let (sink, stream) = match context.dial(address).await {
-                        Ok(stream) => stream,
+                    let connection = match context.dial(&TcpEndpoint::Socket(address)).await {
+                        Ok(connection) => connection,
                         Err(err) => {
                             debug!(?err, "failed to dial peer");
                             return;
                         }
                     };
-                    debug!(?peer, ?ingress, "dialed peer");
+                    let (sink, stream, _) = connection.split();
+                    debug!(?peer, ?address, "dialed peer");
 
                     // Upgrade connection
                     let instance = match dial(context, config, peer.clone(), stream, sink).await {
@@ -218,7 +230,9 @@ mod tests {
     use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
-    use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Acceptor as _, Clock, Runner, Scheduler as _, Supervisor as _, deterministic,
+    };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::NZUsize;
     use std::{
@@ -249,7 +263,7 @@ mod tests {
             // The deterministic network completes the transport dial immediately, but retaining
             // the listener without accepting leaves the encrypted handshake pending.
             let _listener = context
-                .bind(address)
+                .bind(&address)
                 .await
                 .expect("Failed to bind listener");
             let mut dialer = Actor::new(

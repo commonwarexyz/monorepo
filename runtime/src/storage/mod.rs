@@ -91,27 +91,36 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 });
 
-stability_scope!(ALPHA {
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod audited;
     pub mod faulty;
     pub mod memory;
 });
-stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
+stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-storage")) {
     pub mod iouring;
 });
 stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage"))) {
     pub mod tokio;
 });
 stability_scope!(BETA {
+    /// Offset where V1 blob data begins after its header.
+    pub(crate) const V1_BLOB_DATA_OFFSET: u64 = 4096;
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub mod metered;
 
+    #[cfg(not(target_arch = "wasm32"))]
     mod header;
-    pub(crate) use header::{Header, Layout};
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) use header::Header;
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) use header::Layout;
 
     /// Validate that a partition name contains only allowed characters.
     ///
     /// Partition names must only contain alphanumeric characters, dashes ('-'),
     /// or underscores ('_').
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
         if partition.is_empty()
             || partition

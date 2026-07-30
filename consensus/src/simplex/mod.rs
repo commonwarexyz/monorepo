@@ -569,7 +569,7 @@ mod tests {
     };
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
-        Clock, IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
+        Clock, IoBuf, Metrics as _, Quota, Runner, Scheduler, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{

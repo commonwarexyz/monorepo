@@ -7,6 +7,7 @@ use commonware_runtime::{
     IoBuf, IoBufs, Metrics as RuntimeMetrics, Name, Supervisor,
     telemetry::metrics::{Metric, Registered, Registration},
 };
+use commonware_utils::PlatformSend;
 use core::future;
 use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
 
@@ -92,7 +93,7 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
         self.recipients.clone()
     }
 
-    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
+    fn send(self, _: impl Into<IoBufs> + PlatformSend, _: bool) -> Unreliable<Feedback> {
         Unreliable::new(Feedback::Ok)
     }
 }
@@ -153,7 +154,11 @@ mod tests {
             vec![self.peer.clone()]
         }
 
-        fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Unreliable<Feedback> {
+        fn send(
+            self,
+            _message: impl Into<IoBufs> + PlatformSend,
+            _priority: bool,
+        ) -> Unreliable<Feedback> {
             Unreliable::Rejected
         }
     }

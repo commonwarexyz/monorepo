@@ -17,6 +17,8 @@ commonware_macros::stability_scope!(BETA {
     use alloc::{boxed::Box, vec::Vec};
     use bytes::{BufMut, BytesMut};
     use core::time::Duration;
+    mod platform;
+    pub use platform::{PlatformSend, PlatformSync};
     pub mod faults;
     pub use faults::{Faults, N3f1, N5f1};
 

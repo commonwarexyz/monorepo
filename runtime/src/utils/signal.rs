@@ -21,7 +21,7 @@ use std::{
 /// ## Basic Usage
 ///
 /// ```rust
-/// use commonware_runtime::{Spawner, Runner, deterministic, signal::Signaler};
+/// use commonware_runtime::{Scheduler, Runner, deterministic, signal::Signaler};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -50,7 +50,7 @@ use std::{
 ///
 /// ```rust
 /// use commonware_macros::select;
-/// use commonware_runtime::{Clock, Spawner, Runner, Supervisor, deterministic, Metrics, signal::Signaler};
+/// use commonware_runtime::{Clock, Scheduler, Runner, Supervisor, deterministic, Metrics, signal::Signaler};
 /// use commonware_utils::channel::oneshot;
 /// use std::time::Duration;
 ///

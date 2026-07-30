@@ -1,9 +1,10 @@
-//! Communicate with a fixed set of authenticated peers with known addresses over encrypted connections.
+//! Communicate with authenticated peers over encrypted connections.
 //!
-//! `lookup` provides multiplexed communication between fully-connected peers
-//! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.).
-//! Unlike `discovery`, peers in `lookup` don't use a discovery mechanism to find each other;
-//! each peer's address is supplied by the application layer.
+//! `lookup` provides multiplexed communication between peers identified by cryptographic
+//! identities (for example, BLS or Ed25519 keys). Applications may either provide a tracked set
+//! of TCP addresses through [`Network`] or supply already-established transport connections
+//! through [`AttachmentNetwork`]. The attachment path supports outbound-only transports and
+//! peers whose identity is learned during an authenticated inbound handshake.
 //!
 //! # Features
 //!
@@ -12,9 +13,9 @@
 //!
 //! # Design
 //!
-//! ## Discovery
+//! ## Address-tracked network
 //!
-//! This module operates under the assumption that all peers are aware of and synchronized on
+//! [`Network`] operates under the assumption that all peers are aware of and synchronized on
 //! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
 //! list of peer `PublicKey`/`SocketAddr` pairs (`(u64, Vec<(PublicKey, SocketAddr)>)`).
 //!
@@ -110,7 +111,7 @@
 //! ```rust
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
+//! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Scheduler, Supervisor};
 //! use commonware_utils::{NZU32, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -194,17 +195,29 @@ mod network;
 mod types;
 
 pub use crate::authenticated::channels::{Error, Receiver, Sender};
-pub use actors::tracker::Oracle;
+#[stability(ALPHA)]
+pub use actors::attachment::{
+    Attachments, Error as AttachmentError, ExactPeerAdmission, PeerAdmission, Rejected,
+};
+#[stability(ALPHA)]
+pub use actors::tracker::Oracle as ReachabilityOracle;
+use commonware_macros::stability;
 pub use config::Config;
-pub use network::Network;
+#[stability(ALPHA)]
+pub use config::{AttachmentConfig, GenericConfig};
+#[stability(ALPHA)]
+pub use network::{AcceptingNetwork, AttachmentNetwork, DialOnlyNetwork};
+pub use network::{Network, Oracle};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        Address, AddressableManager, CheckedSender as _, Ingress, LimitedSender as _, Provider,
+        Address, AddressableManager, Advertisement, CheckedSender as _, Ingress,
+        LimitedSender as _, PeerEndpoint, Provider, Reachability, ReachabilityManager as _,
         Receiver, Recipients, Sender,
         authenticated::{
+            admission::{ExactPeerAdmission, InboundAdmission, Rejection},
             channels,
             relay::Relay,
             router::{Actor as RouterActor, Config as RouterConfig},
@@ -214,19 +227,25 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
-        Supervisor as _, deterministic, telemetry::metrics::count_running_tasks, tokio,
+        Acceptor, BufferPooler, Clock, Connection, ConnectionInfo, Dialer, IoBuf, Listener, Metrics,
+        Quota, Resolver, Runner, Scheduler, Spawner, Supervisor as _, TcpEndpoint, TcpOrigin,
+        deterministic, mocks, telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
         channel::mpsc,
         hostname,
         ordered::{Map, Set},
+        sync::Mutex,
     };
     use rand_core::{CryptoRng, Rng};
     use std::{
-        collections::HashSet,
+        collections::{HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -239,6 +258,423 @@ mod tests {
 
     const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
     const DEFAULT_MESSAGE_BACKLOG: usize = 128;
+
+    struct AttachedConnection {
+        sink: mocks::Sink,
+        stream: mocks::Stream,
+        origin: u8,
+    }
+
+    impl Connection for AttachedConnection {
+        type Sink = mocks::Sink;
+        type Stream = mocks::Stream;
+        type Origin = u8;
+
+        fn split(self) -> (Self::Sink, Self::Stream, ConnectionInfo<Self::Origin>) {
+            (
+                self.sink,
+                self.stream,
+                ConnectionInfo {
+                    origin: Some(self.origin),
+                    transport: "test_attachment",
+                },
+            )
+        }
+    }
+
+    fn attached_pair() -> (AttachedConnection, AttachedConnection) {
+        let (sink_0, stream_1) = mocks::Channel::init();
+        let (sink_1, stream_0) = mocks::Channel::init();
+        (
+            AttachedConnection {
+                sink: sink_0,
+                stream: stream_0,
+                origin: 1,
+            },
+            AttachedConnection {
+                sink: sink_1,
+                stream: stream_1,
+                origin: 0,
+            },
+        )
+    }
+
+    fn attachment_config(
+        signer: ed25519::PrivateKey,
+        expected_peer: ed25519::PublicKey,
+    ) -> AttachmentConfig<ed25519::PrivateKey, ExactPeerAdmission<ed25519::PublicKey>> {
+        let tcp = Config::test(
+            signer,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            MAX_MESSAGE_SIZE,
+        );
+        let generic = GenericConfig::from(tcp);
+        AttachmentConfig {
+            stream: generic.stream,
+            admission: ExactPeerAdmission::new(expected_peer),
+            mailbox_size: generic.mailbox_size,
+            max_concurrent_handshakes: NZU32!(8),
+            send_batch_size: generic.send_batch_size,
+            ping_frequency: generic.ping_frequency,
+            tracked_peer_sets: generic.tracked_peer_sets,
+            peer_connection_cooldown: generic.peer_connection_cooldown,
+            block_duration: generic.block_duration,
+        }
+    }
+
+    #[test]
+    fn test_tcp_dialer_respects_endpoint_policy() {
+        deterministic::Runner::default().start(|context| async move {
+            let private = Ingress::Socket(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1));
+            let dns = Ingress::Dns {
+                host: hostname!("example.com"),
+                port: 443,
+            };
+
+            let restricted =
+                super::network::TcpDialer::new(context.child("restricted"), false, false);
+            assert!(!restricted.supports(&private));
+            assert!(!restricted.supports(&dns));
+
+            let permissive =
+                super::network::TcpDialer::new(context.child("permissive"), true, true);
+            assert!(permissive.supports(&private));
+            assert!(permissive.supports(&dns));
+        });
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    enum TestEndpoint {
+        Unsupported,
+        First,
+        Second,
+    }
+
+    impl PeerEndpoint for TestEndpoint {}
+
+    struct DialOnlyTransport {
+        attempts: Arc<Mutex<Vec<TestEndpoint>>>,
+    }
+
+    impl Dialer for DialOnlyTransport {
+        type Endpoint = TestEndpoint;
+        type Connection = AttachedConnection;
+
+        fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+            *endpoint != TestEndpoint::Unsupported
+        }
+
+        async fn dial(
+            &self,
+            endpoint: &Self::Endpoint,
+        ) -> Result<Self::Connection, commonware_runtime::Error> {
+            self.attempts.lock().push(endpoint.clone());
+            Err(commonware_runtime::Error::ConnectionFailed)
+        }
+    }
+
+    struct BurstAcceptor {
+        connections: Arc<Mutex<Option<VecDeque<AttachedConnection>>>>,
+        accepted: Arc<AtomicUsize>,
+    }
+
+    impl BurstAcceptor {
+        fn new(connections: VecDeque<AttachedConnection>) -> (Self, Arc<AtomicUsize>) {
+            let accepted = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    connections: Arc::new(Mutex::new(Some(connections))),
+                    accepted: accepted.clone(),
+                },
+                accepted,
+            )
+        }
+    }
+
+    impl Acceptor for BurstAcceptor {
+        type Bind = ();
+        type Connection = AttachedConnection;
+        type Listener = BurstListener;
+
+        async fn bind(&self, _bind: &Self::Bind) -> Result<Self::Listener, commonware_runtime::Error> {
+            Ok(BurstListener {
+                connections: self.connections.lock().take().unwrap(),
+                accepted: self.accepted.clone(),
+            })
+        }
+    }
+
+    struct BurstListener {
+        connections: VecDeque<AttachedConnection>,
+        accepted: Arc<AtomicUsize>,
+    }
+
+    impl Listener for BurstListener {
+        type Connection = AttachedConnection;
+
+        async fn accept(&mut self) -> Result<Self::Connection, commonware_runtime::Error> {
+            let Some(connection) = self.connections.pop_front() else {
+                return std::future::pending().await;
+            };
+            self.accepted.fetch_add(1, Ordering::Relaxed);
+            Ok(connection)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct RejectZeroOrigin;
+
+    impl InboundAdmission<ed25519::PublicKey, u8> for RejectZeroOrigin {
+        type Permit = ();
+
+        fn pre_auth(
+            &self,
+            info: &ConnectionInfo<u8>,
+        ) -> Result<Self::Permit, Rejection> {
+            if info.origin == Some(0) {
+                return Err(Rejection::Application);
+            }
+            Ok(())
+        }
+
+        async fn post_auth(
+            &self,
+            _permit: Self::Permit,
+            _peer: &ed25519::PublicKey,
+            _info: &ConnectionInfo<u8>,
+        ) -> Result<(), Rejection> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_attachment_network_authenticates_exact_keys_and_exchanges_message() {
+        deterministic::Runner::default().start(|context| async move {
+            let signer_0 = ed25519::PrivateKey::from_seed(0);
+            let signer_1 = ed25519::PrivateKey::from_seed(1);
+            let key_0 = signer_0.public_key();
+            let key_1 = signer_1.public_key();
+
+            let (mut network_0, _oracle_0, attachments_0) = AttachmentNetwork::new(
+                context.child("peer_0"),
+                attachment_config(signer_0, key_1.clone()),
+            );
+            let (mut network_1, _oracle_1, attachments_1) = AttachmentNetwork::new(
+                context.child("peer_1"),
+                attachment_config(signer_1, key_0.clone()),
+            );
+            let (mut sender_0, _receiver_0) =
+                network_0.register(7, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            let (_sender_1, mut receiver_1) =
+                network_1.register(7, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network_0.start();
+            network_1.start();
+
+            let (connection_0, connection_1) = attached_pair();
+            let expected_key = key_1.clone();
+            let outbound_attachments = attachments_0.clone();
+            let outbound = context.child("attach_outbound").spawn(move |_| async move {
+                outbound_attachments
+                    .attach_outbound(expected_key, connection_0)
+                    .await
+            });
+            let inbound_attachments = attachments_1.clone();
+            let inbound = context.child("attach_inbound").spawn(move |_| async move {
+                inbound_attachments.attach_inbound(connection_1).await
+            });
+            assert_eq!(outbound.await.unwrap(), Ok(()));
+            assert_eq!(inbound.await.unwrap(), Ok(()));
+
+            let message = IoBuf::from(b"attached lookup".to_vec());
+            loop {
+                let sent = sender_0.send(Recipients::One(key_1.clone()), message.clone(), true);
+                if sent.as_ref() == [key_1.clone()] {
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let (authenticated_sender, received) = receiver_1.recv().await.unwrap();
+            assert_eq!(authenticated_sender, key_0);
+            assert_eq!(received, b"attached lookup".as_slice());
+        });
+    }
+
+    #[test]
+    fn test_attachment_network_rejects_expected_key_mismatch() {
+        deterministic::Runner::default().start(|context| async move {
+            let signer_0 = ed25519::PrivateKey::from_seed(10);
+            let signer_1 = ed25519::PrivateKey::from_seed(11);
+            let wrong_key = ed25519::PrivateKey::from_seed(12).public_key();
+            let key_0 = signer_0.public_key();
+            let key_1 = signer_1.public_key();
+
+            let (network_0, _oracle_0, attachments_0) = AttachmentNetwork::new(
+                context.child("peer_0"),
+                attachment_config(signer_0, key_1.clone()),
+            );
+            let (network_1, _oracle_1, attachments_1) =
+                AttachmentNetwork::new(context.child("peer_1"), attachment_config(signer_1, key_0));
+            network_0.start();
+            network_1.start();
+
+            let (connection_0, connection_1) = attached_pair();
+            let outbound_attachments = attachments_0.clone();
+            let outbound = context.child("attach_outbound").spawn(move |_| async move {
+                outbound_attachments
+                    .attach_outbound(wrong_key, connection_0)
+                    .await
+            });
+            let inbound_attachments = attachments_1.clone();
+            let inbound = context.child("attach_inbound").spawn(move |_| async move {
+                inbound_attachments.attach_inbound(connection_1).await
+            });
+            assert_eq!(outbound.await.unwrap(), Err(AttachmentError::Handshake));
+            let _ = inbound.await;
+        });
+    }
+
+    #[test]
+    fn test_dial_only_network_skips_unsupported_endpoints_in_order_and_outbound_only_peers() {
+        deterministic::Runner::default().start(|context| async move {
+            let signer = ed25519::PrivateKey::from_seed(20);
+            let dialable_peer = ed25519::PrivateKey::from_seed(21).public_key();
+            let outbound_only_peer = ed25519::PrivateKey::from_seed(22).public_key();
+            let attempts = Arc::new(Mutex::new(Vec::new()));
+            let transport = DialOnlyTransport {
+                attempts: attempts.clone(),
+            };
+            let tcp = Config::test(
+                signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                MAX_MESSAGE_SIZE,
+            );
+            let mut config = GenericConfig::from(tcp);
+            config.peer_connection_cooldown = Duration::from_hours(1);
+            let (network, mut oracle) =
+                DialOnlyNetwork::new(context.child("network"), transport, config);
+
+            let advertisement = Advertisement::new(vec![
+                TestEndpoint::Unsupported,
+                TestEndpoint::First,
+                TestEndpoint::Second,
+            ])
+            .unwrap();
+            oracle.track(
+                0,
+                Map::try_from(vec![
+                    (dialable_peer, Reachability::Dialable(advertisement)),
+                    (outbound_only_peer, Reachability::OutboundOnly),
+                ])
+                .unwrap(),
+            );
+            network.start();
+
+            context.sleep(Duration::from_secs(2)).await;
+            assert_eq!(
+                *attempts.lock(),
+                vec![TestEndpoint::First, TestEndpoint::Second]
+            );
+        });
+    }
+
+    #[test]
+    fn test_accepting_network_survives_attachment_mailbox_overflow() {
+        const BURST_SIZE: usize = 3;
+
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let signer = ed25519::PrivateKey::from_seed(30);
+            let expected_peer = ed25519::PrivateKey::from_seed(31).public_key();
+            let tcp = Config::test(
+                signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                MAX_MESSAGE_SIZE,
+            );
+            let mut config = GenericConfig::from(tcp);
+            config.mailbox_size = NZUsize!(1);
+
+            let connections = (0..BURST_SIZE)
+                .map(|_| attached_pair().0)
+                .collect::<VecDeque<_>>();
+            let (acceptor, accepted) = BurstAcceptor::new(connections);
+            let transport = DialOnlyTransport {
+                attempts: Arc::new(Mutex::new(Vec::new())),
+            };
+            let (network, _oracle) =
+                DialOnlyNetwork::new(context.child("network"), transport, config);
+            let network = network.accepting(
+                acceptor,
+                (),
+                ExactPeerAdmission::new(expected_peer),
+                NZU32!(1),
+            );
+            let mut network_task = network.start();
+
+            while accepted.load(Ordering::Relaxed) < BURST_SIZE {
+                select! {
+                    result = &mut network_task => {
+                        panic!(
+                            "accepting network stopped after accepting {} of {BURST_SIZE} connections: {result:?}",
+                            accepted.load(Ordering::Relaxed),
+                        );
+                    },
+                    _ = context.sleep(Duration::from_millis(1)) => {},
+                }
+            }
+
+            select! {
+                result = &mut network_task => {
+                    panic!("accepting network stopped after the connection burst: {result:?}");
+                },
+                _ = context.sleep(Duration::from_millis(1)) => {},
+            }
+
+            network_task.abort();
+            let _ = network_task.await;
+        });
+    }
+
+    #[test]
+    fn test_accepting_network_survives_pre_auth_rejection() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let signer = ed25519::PrivateKey::from_seed(32);
+            let tcp = Config::test(
+                signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                MAX_MESSAGE_SIZE,
+            );
+            let config = GenericConfig::from(tcp);
+
+            let (mut rejected, _) = attached_pair();
+            rejected.origin = 0;
+            let (mut accepted_connection, _) = attached_pair();
+            accepted_connection.origin = 1;
+            let (acceptor, accepted) =
+                BurstAcceptor::new(VecDeque::from([rejected, accepted_connection]));
+            let transport = DialOnlyTransport {
+                attempts: Arc::new(Mutex::new(Vec::new())),
+            };
+            let (network, _oracle) =
+                DialOnlyNetwork::new(context.child("network"), transport, config);
+            let network = network.accepting(acceptor, (), RejectZeroOrigin, NZU32!(1));
+            let mut network_task = network.start();
+
+            while accepted.load(Ordering::Relaxed) < 2 {
+                select! {
+                    result = &mut network_task => {
+                        panic!(
+                            "accepting network stopped after accepting {} of 2 connections: {result:?}",
+                            accepted.load(Ordering::Relaxed),
+                        );
+                    },
+                    _ = context.sleep(Duration::from_millis(1)) => {},
+                }
+            }
+
+            network_task.abort();
+            let _ = network_task.await;
+        });
+    }
 
     /// Ensure no message rate limiting occurred.
     ///
@@ -259,13 +695,19 @@ mod tests {
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
-    async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: u32,
-        base_port: u16,
-        n: usize,
-        mode: Mode,
-    ) {
+    async fn run_network<E>(context: E, max_message_size: u32, base_port: u16, n: usize, mode: Mode)
+    where
+        E: Scheduler
+            + Spawner
+            + BufferPooler
+            + Clock
+            + CryptoRng
+            + Acceptor<Bind = SocketAddr>
+            + Dialer<Endpoint = TcpEndpoint, Connection = <E as Acceptor>::Connection>
+            + Resolver
+            + Metrics,
+        <E as Acceptor>::Connection: Connection<Origin = TcpOrigin>,
+    {
         // Create peers
         let mut peers_and_sks = Vec::new();
         for i in 0..n {

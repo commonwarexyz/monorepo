@@ -1,30 +1,30 @@
-use crate::{Error, IoBufs, SinkOf, StreamOf, deterministic::Auditor};
+use crate::{Acceptor, Connection as _, Dialer, Error, IoBufs, deterministic::Auditor};
 use std::{net::SocketAddr, sync::Arc};
 
 /// A sink that audits network operations.
 pub struct Sink<S: crate::Sink> {
     auditor: Arc<Auditor>,
     inner: S,
-    remote_addr: SocketAddr,
+    remote: String,
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
         self.auditor.event(b"send_attempt", |hasher| {
-            hasher.update(self.remote_addr.to_string().as_bytes());
+            hasher.update(self.remote.as_bytes());
             hasher.update_bufs(&bufs);
         });
 
         self.inner.send(bufs).await.inspect_err(|e| {
             self.auditor.event(b"send_failure", |hasher| {
-                hasher.update(self.remote_addr.to_string().as_bytes());
+                hasher.update(self.remote.as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
         })?;
 
         self.auditor.event(b"send_success", |hasher| {
-            hasher.update(self.remote_addr.to_string().as_bytes());
+            hasher.update(self.remote.as_bytes());
         });
         Ok(())
     }
@@ -34,25 +34,25 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
 pub struct Stream<S: crate::Stream> {
     auditor: Arc<Auditor>,
     inner: S,
-    remote_addr: SocketAddr,
+    remote: String,
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
-            hasher.update(self.remote_addr.to_string().as_bytes());
+            hasher.update(self.remote.as_bytes());
             hasher.update(len.to_be_bytes());
         });
 
         let bufs = self.inner.recv(len).await.inspect_err(|e| {
             self.auditor.event(b"recv_failure", |hasher| {
-                hasher.update(self.remote_addr.to_string().as_bytes());
+                hasher.update(self.remote.as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
         })?;
 
         self.auditor.event(b"recv_success", |hasher| {
-            hasher.update(self.remote_addr.to_string().as_bytes());
+            hasher.update(self.remote.as_bytes());
             hasher.update_bufs(&bufs);
         });
 
@@ -64,130 +64,190 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
     }
 }
 
+pub struct Connection<S, St, O> {
+    auditor: Arc<Auditor>,
+    sink: S,
+    stream: St,
+    info: crate::ConnectionInfo<O>,
+    remote: String,
+}
+
+impl<S, St, O> crate::Connection for Connection<S, St, O>
+where
+    S: crate::Sink,
+    St: crate::Stream,
+    O: Clone + std::fmt::Debug + crate::PlatformSend + crate::PlatformSync + 'static,
+{
+    type Sink = Sink<S>;
+    type Stream = Stream<St>;
+    type Origin = O;
+
+    fn split(
+        self,
+    ) -> (
+        Self::Sink,
+        Self::Stream,
+        crate::ConnectionInfo<Self::Origin>,
+    ) {
+        (
+            Sink {
+                auditor: Arc::clone(&self.auditor),
+                inner: self.sink,
+                remote: self.remote.clone(),
+            },
+            Stream {
+                auditor: self.auditor,
+                inner: self.stream,
+                remote: self.remote,
+            },
+            self.info,
+        )
+    }
+}
+
 /// A listener that audits network operations.
 pub struct Listener<L: crate::Listener> {
     auditor: Arc<Auditor>,
     inner: L,
-    local_addr: SocketAddr,
+    bind: String,
 }
 
 impl<L: crate::Listener> crate::Listener for Listener<L> {
-    type Sink = Sink<L::Sink>;
-    type Stream = Stream<L::Stream>;
+    type Connection = Connection<
+        <L::Connection as crate::Connection>::Sink,
+        <L::Connection as crate::Connection>::Stream,
+        <L::Connection as crate::Connection>::Origin,
+    >;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+    async fn accept(&mut self) -> Result<Self::Connection, Error> {
         self.auditor.event(b"accept_attempt", |hasher| {
-            hasher.update(self.local_addr.to_string().as_bytes());
+            hasher.update(self.bind.as_bytes());
         });
 
-        let (addr, sink, stream) = self.inner.accept().await.inspect_err(|e| {
+        let inner = self.inner.accept().await.inspect_err(|e| {
             self.auditor.event(b"accept_failure", |hasher| {
-                hasher.update(self.local_addr.to_string().as_bytes());
+                hasher.update(self.bind.as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
         })?;
-
+        let (sink, stream, info) = inner.split();
+        let remote = format!("{:?}", info.origin);
         self.auditor.event(b"accept_success", |hasher| {
-            hasher.update(self.local_addr.to_string().as_bytes());
-            hasher.update(addr.to_string().as_bytes());
+            hasher.update(self.bind.as_bytes());
+            hasher.update(info.transport.as_bytes());
+            hasher.update(remote.as_bytes());
         });
 
-        Ok((
-            addr,
-            Sink {
-                auditor: self.auditor.clone(),
-                inner: sink,
-                remote_addr: addr,
-            },
-            Stream {
-                auditor: self.auditor.clone(),
-                inner: stream,
-                remote_addr: addr,
-            },
-        ))
+        Ok(Connection {
+            auditor: Arc::clone(&self.auditor),
+            sink,
+            stream,
+            info,
+            remote,
+        })
     }
+}
 
+impl<L: crate::TcpListener> crate::TcpListener for Listener<L> {
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
         self.inner.local_addr()
     }
 }
 
 /// An audited network implementation which wraps another
-/// [crate::Network] and records audit events for network operations.
+/// transport and records audit events for network operations.
 #[derive(Clone)]
-pub struct Network<N: crate::Network> {
+pub struct Network<N> {
     auditor: Arc<Auditor>,
     inner: N,
 }
 
-impl<N: crate::Network> Network<N> {
+impl<N> Network<N> {
     /// Creates a new audited network that wraps the provided network implementation.
     pub const fn new(inner: N, auditor: Arc<Auditor>) -> Self {
         Self { auditor, inner }
     }
 }
 
-impl<N: crate::Network> crate::Network for Network<N> {
+impl<N: Acceptor> Acceptor for Network<N> {
+    type Bind = N::Bind;
+    type Connection = Connection<
+        <N::Connection as crate::Connection>::Sink,
+        <N::Connection as crate::Connection>::Stream,
+        <N::Connection as crate::Connection>::Origin,
+    >;
     type Listener = Listener<N::Listener>;
 
-    async fn bind(&self, local_addr: SocketAddr) -> Result<Self::Listener, Error> {
+    async fn bind(&self, bind: &Self::Bind) -> Result<Self::Listener, Error> {
+        let bind_label = format!("{bind:?}");
         self.auditor.event(b"bind_attempt", |hasher| {
-            hasher.update(local_addr.to_string().as_bytes());
+            hasher.update(bind_label.as_bytes());
         });
 
-        let inner = self.inner.bind(local_addr).await.inspect_err(|e| {
+        let inner = self.inner.bind(bind).await.inspect_err(|e| {
             self.auditor.event(b"bind_failure", |hasher| {
-                hasher.update(local_addr.to_string().as_bytes());
+                hasher.update(bind_label.as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
         })?;
 
         self.auditor.event(b"bind_success", |hasher| {
-            hasher.update(local_addr.to_string().as_bytes());
+            hasher.update(bind_label.as_bytes());
         });
 
         Ok(Listener {
-            auditor: self.auditor.clone(),
+            auditor: Arc::clone(&self.auditor),
             inner,
-            local_addr,
+            bind: bind_label,
         })
     }
+}
 
-    async fn dial(&self, remote_addr: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
+impl<N: Dialer> Dialer for Network<N> {
+    type Endpoint = N::Endpoint;
+    type Connection = Connection<
+        <N::Connection as crate::Connection>::Sink,
+        <N::Connection as crate::Connection>::Stream,
+        <N::Connection as crate::Connection>::Origin,
+    >;
+
+    fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+        self.inner.supports(endpoint)
+    }
+
+    async fn dial(&self, endpoint: &Self::Endpoint) -> Result<Self::Connection, Error> {
+        let remote = format!("{endpoint:?}");
         self.auditor.event(b"dial_attempt", |hasher| {
-            hasher.update(remote_addr.to_string().as_bytes());
+            hasher.update(remote.as_bytes());
         });
 
-        let (sink, stream) = self.inner.dial(remote_addr).await.inspect_err(|e| {
+        let inner = self.inner.dial(endpoint).await.inspect_err(|e| {
             self.auditor.event(b"dial_failure", |hasher| {
-                hasher.update(remote_addr.to_string().as_bytes());
+                hasher.update(remote.as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
         })?;
 
         self.auditor.event(b"dial_success", |hasher| {
-            hasher.update(remote_addr.to_string().as_bytes());
+            hasher.update(remote.as_bytes());
         });
 
-        Ok((
-            Sink {
-                auditor: self.auditor.clone(),
-                inner: sink,
-                remote_addr,
-            },
-            Stream {
-                auditor: self.auditor.clone(),
-                inner: stream,
-                remote_addr,
-            },
-        ))
+        let (sink, stream, info) = inner.split();
+        Ok(Connection {
+            auditor: Arc::clone(&self.auditor),
+            sink,
+            stream,
+            info,
+            remote,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        Error, IoBuf, IoBufs, Listener as _, Network as _, Sink as _, Stream as _,
+        Acceptor as _, Connection as _, Dialer as _, Error, IoBuf, IoBufs, Listener as _,
+        Sink as _, Stream as _, TcpEndpoint,
         deterministic::Auditor,
         network::{
             audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
@@ -223,6 +283,74 @@ mod tests {
         fn peek(&self, _max_len: usize) -> &[u8] {
             &[]
         }
+    }
+
+    struct OriginConnection {
+        origin: u64,
+        sink: RecordingSink,
+        stream: RecordingStream,
+    }
+
+    impl crate::Connection for OriginConnection {
+        type Sink = RecordingSink;
+        type Stream = RecordingStream;
+        type Origin = u64;
+
+        fn split(
+            self,
+        ) -> (
+            Self::Sink,
+            Self::Stream,
+            crate::ConnectionInfo<Self::Origin>,
+        ) {
+            (
+                self.sink,
+                self.stream,
+                crate::ConnectionInfo {
+                    origin: Some(self.origin),
+                    transport: "test",
+                },
+            )
+        }
+    }
+
+    struct OriginListener(Option<OriginConnection>);
+
+    impl crate::Listener for OriginListener {
+        type Connection = OriginConnection;
+
+        async fn accept(&mut self) -> Result<Self::Connection, Error> {
+            self.0.take().ok_or(Error::Closed)
+        }
+    }
+
+    fn origin_listener(origin: u64, auditor: Arc<Auditor>) -> super::Listener<OriginListener> {
+        super::Listener {
+            auditor,
+            inner: OriginListener(Some(OriginConnection {
+                origin,
+                sink: RecordingSink {
+                    chunk_counts: Arc::new(Mutex::new(Vec::new())),
+                },
+                stream: RecordingStream {
+                    bufs: Arc::new(Mutex::new(None)),
+                },
+            })),
+            bind: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_origin_is_audited_before_split() {
+        let first = Arc::new(Auditor::default());
+        let second = Arc::new(Auditor::default());
+        let mut first_listener = origin_listener(1, first.clone());
+        let mut second_listener = origin_listener(2, second.clone());
+
+        let _first_connection = first_listener.accept().await.unwrap();
+        let _second_connection = second_listener.accept().await.unwrap();
+
+        assert_ne!(first.state(), second.state());
     }
 
     #[tokio::test]
@@ -277,8 +405,8 @@ mod tests {
         // the same address because we're not actually binding to it.
         let listener_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
         let listeners = [
-            networks[0].bind(listener_addr).await.unwrap(),
-            networks[1].bind(listener_addr).await.unwrap(),
+            networks[0].bind(&listener_addr).await.unwrap(),
+            networks[1].bind(&listener_addr).await.unwrap(),
         ];
         verify_auditors("after binding");
 
@@ -286,7 +414,7 @@ mod tests {
         let mut server_handles = Vec::new();
         for mut listener in listeners {
             let handle = tokio::spawn(async move {
-                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                let (mut sink, mut stream, _) = listener.accept().await.unwrap().split();
 
                 // Receive data from client
                 let received = stream.recv(CLIENT_MSG.len()).await.unwrap();
@@ -304,7 +432,11 @@ mod tests {
         for network in &networks {
             let network = network.clone();
             let handle = tokio::spawn(async move {
-                let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
+                let (mut sink, mut stream, _) = network
+                    .dial(&TcpEndpoint::Socket(listener_addr))
+                    .await
+                    .unwrap()
+                    .split();
 
                 // Send data to server
                 sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
@@ -323,7 +455,7 @@ mod tests {
 
         // Step 4: Test error conditions (attempting to bind to same address again)
         for network in &networks {
-            let result = network.bind(listener_addr).await;
+            let result = network.bind(&listener_addr).await;
             assert!(result.is_err());
         }
         verify_auditors("after bind error");
@@ -331,7 +463,7 @@ mod tests {
         // Step 5: Test dialing to non-existent server
         let bad_addr = SocketAddr::from(([127, 0, 0, 1], 9999));
         for network in &networks {
-            let result = network.dial(bad_addr).await;
+            let result = network.dial(&TcpEndpoint::Socket(bad_addr)).await;
             assert!(result.is_err());
         }
         verify_auditors("after failed dial attempts");
@@ -345,7 +477,7 @@ mod tests {
             inner: RecordingSink {
                 chunk_counts: chunk_counts.clone(),
             },
-            remote_addr: SocketAddr::from(([127, 0, 0, 1], 1234)),
+            remote: SocketAddr::from(([127, 0, 0, 1], 1234)).to_string(),
         };
 
         sink.send(IoBufs::from(vec![
@@ -372,7 +504,7 @@ mod tests {
                     IoBuf::from(b"d".to_vec()),
                 ])))),
             },
-            remote_addr: SocketAddr::from(([127, 0, 0, 1], 1234)),
+            remote: SocketAddr::from(([127, 0, 0, 1], 1234)).to_string(),
         };
 
         let received = stream.recv(4).await.unwrap();

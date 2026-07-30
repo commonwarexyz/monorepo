@@ -1,16 +1,26 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
-use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
-use commonware_actor::{Feedback, Unreliable, mailbox};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::Blocker;
+use crate::{CheckedSender, Receiver, Recipients, Sender};
+#[cfg(not(target_arch = "wasm32"))]
+use commonware_actor::mailbox;
+use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Codec, Error};
+#[cfg(not(target_arch = "wasm32"))]
 use commonware_cryptography::PublicKey;
+#[cfg(not(target_arch = "wasm32"))]
 use commonware_macros::select_loop;
+#[cfg(not(target_arch = "wasm32"))]
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPool, ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell,
-};
-use commonware_utils::futures::Pool;
-use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
+use commonware_runtime::{BufferPool, iobuf::EncodeExt};
+#[cfg(not(target_arch = "wasm32"))]
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+#[cfg(not(target_arch = "wasm32"))]
+use commonware_utils::{PlatformSend, futures::Pool};
+use std::time::SystemTime;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{collections::VecDeque, num::NonZeroUsize};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
@@ -141,9 +151,11 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// reading more bytes. Successfully decoded messages are forwarded through a bounded mailbox; if
 /// the consumer falls behind and the mailbox fills, additional decoded messages are dropped (they
 /// would likely no longer be useful by the time we get back to them).
+#[cfg(not(target_arch = "wasm32"))]
 struct Decoded<P: PublicKey, V>(P, V);
 
-impl<P: PublicKey, V> mailbox::UnreliablePolicy for Decoded<P, V> {
+#[cfg(not(target_arch = "wasm32"))]
+impl<P: PublicKey, V: PlatformSend> mailbox::UnreliablePolicy for Decoded<P, V> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -152,11 +164,13 @@ impl<P: PublicKey, V> mailbox::UnreliablePolicy for Decoded<P, V> {
 }
 
 /// Receiver half for successfully decoded messages from a [`WrappedBackgroundReceiver`].
-pub struct BackgroundReceiver<P: PublicKey, V> {
+#[cfg(not(target_arch = "wasm32"))]
+pub struct BackgroundReceiver<P: PublicKey, V: PlatformSend> {
     receiver: mailbox::UnreliableReceiver<Decoded<P, V>>,
 }
 
-impl<P: PublicKey, V> BackgroundReceiver<P, V> {
+#[cfg(not(target_arch = "wasm32"))]
+impl<P: PublicKey, V: PlatformSend> BackgroundReceiver<P, V> {
     /// Receive the next successfully decoded message.
     pub async fn recv(&mut self) -> Option<(P, V)> {
         self.receiver
@@ -166,13 +180,14 @@ impl<P: PublicKey, V> BackgroundReceiver<P, V> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
     E: Spawner,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     R: Receiver<PublicKey = P>,
-    V: Codec + Send,
+    V: Codec + PlatformSend,
     T: Strategy,
 {
     context: ContextCell<E>,
@@ -183,13 +198,14 @@ where
     strategy: T,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<E, P, B, R, V, T> WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
     E: Spawner + Metrics,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     R: Receiver<PublicKey = P>,
-    V: Codec + Send + 'static,
+    V: Codec + PlatformSend + 'static,
     T: Strategy,
 {
     /// Create a new [`WrappedBackgroundReceiver`].

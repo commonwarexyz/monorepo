@@ -1,7 +1,7 @@
 use super::error::Error;
 use crate::Secret;
+use alloc::{vec, vec::Vec};
 use rand_core::CryptoRng;
-use std::vec::Vec;
 use zeroize::Zeroizing;
 
 /// Size of the ChaCha20-Poly1305 authentication tag.

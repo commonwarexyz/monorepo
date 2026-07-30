@@ -168,7 +168,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
+    use commonware_runtime::{Runner as _, Scheduler as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::encrypted::{
         Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
         listen,

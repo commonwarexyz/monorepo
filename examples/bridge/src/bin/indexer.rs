@@ -24,7 +24,9 @@ use commonware_cryptography::{
 };
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
-use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
+use commonware_runtime::{
+    Acceptor as _, Connection as _, Listener as _, Runner, Scheduler as _, Supervisor as _, tokio,
+};
 use commonware_stream::encrypted::{Config as StreamConfig, listen};
 use commonware_utils::{
     TryCollect,
@@ -236,7 +238,10 @@ fn main() {
         });
 
         // Start listener
-        let mut listener = context.bind(socket).await.expect("failed to bind listener");
+        let mut listener = context
+            .bind(&socket)
+            .await
+            .expect("failed to bind listener");
         let config = StreamConfig {
             signing_key: signer,
             namespace: INDEXER_NAMESPACE.to_vec(),
@@ -247,10 +252,11 @@ fn main() {
         };
         loop {
             // Listen for connection
-            let Ok((_, sink, stream)) = listener.accept().await else {
+            let Ok(connection) = listener.accept().await else {
                 debug!("failed to accept connection");
                 continue;
             };
+            let (sink, stream, _) = connection.split();
 
             let (peer, mut sender, mut receiver) = match listen(
                 context.child("listener"),

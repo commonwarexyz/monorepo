@@ -63,11 +63,7 @@ const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
 // The alignment reasoning above assumes newly created blobs place their data on a
 // storage-page boundary.
-const _: () = assert!(
-    crate::storage::Layout::V1
-        .data_offset()
-        .is_multiple_of(STORAGE_PAGE_SIZE)
-);
+const _: () = assert!(crate::storage::V1_BLOB_DATA_OFFSET.is_multiple_of(STORAGE_PAGE_SIZE));
 
 const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
 const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;

@@ -33,6 +33,8 @@ mod storage;
 stability_scope!(ALPHA {
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
+});
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod deterministic;
     pub mod mocks;
 });
@@ -49,18 +51,22 @@ stability_scope!(BETA {
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
+    #[cfg(not(target_arch = "wasm32"))]
     use commonware_parallel::Rayon;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
+    pub use commonware_utils::{PlatformSend, PlatformSync};
     use iobuf::PoolError;
     use std::{
         future::Future,
         io::Error as IoError,
         net::SocketAddr,
-        num::NonZeroUsize,
         sync::Arc,
         time::{Duration, SystemTime},
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::num::NonZeroUsize;
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) use telemetry::metrics::{METRICS_PREFIX, child_label, prefixed_name};
     use thiserror::Error;
 
@@ -101,6 +107,14 @@ stability_scope!(BETA {
         SendFailed,
         #[error("recv failed")]
         RecvFailed,
+        #[error("transport failed: {0}")]
+        TransportFailed(String),
+        #[error("unsupported endpoint")]
+        UnsupportedEndpoint,
+        #[error("protocol violation: {0}")]
+        ProtocolViolation(String),
+        #[error("incoming buffer limit exceeded")]
+        IncomingBufferExceeded,
         #[error("dns resolution failed: {0}")]
         ResolveFailed(String),
         #[error(
@@ -155,8 +169,8 @@ stability_scope!(BETA {
         /// Start running a root task.
         ///
         /// When this function returns, all spawned tasks will be canceled. If clean
-        /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
-        /// [Spawner::stopped] to coordinate clean shutdown.
+        /// shutdown cannot be implemented via `Drop`, consider using [Scheduler::stop] and
+        /// [Scheduler::stopped] to coordinate clean shutdown.
         fn start<F, Fut>(self, f: F) -> Fut::Output
         where
             F: FnOnce(Self::Context) -> Fut,
@@ -173,7 +187,7 @@ stability_scope!(BETA {
     }
 
     /// Interface to track task hierarchy and identity.
-    pub trait Supervisor: Send + Sync + 'static {
+    pub trait Supervisor: PlatformSend + PlatformSync + 'static {
         /// Return the current label prefix and attributes.
         fn name(&self) -> Name;
 
@@ -258,27 +272,7 @@ stability_scope!(BETA {
     }
 
     /// Interface that any task scheduler must implement to spawn tasks.
-    pub trait Spawner: Supervisor {
-        /// Return a [`Spawner`] that schedules the next task onto the runtime's shared executor.
-        ///
-        /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
-        /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
-        /// tasks on a work-stealing executor are not starved. For long-lived, blocking work, use
-        /// [`Spawner::dedicated`] instead.
-        ///
-        /// The shared executor with `blocking == false` is the default spawn mode.
-        #[must_use]
-        fn shared(self, blocking: bool) -> Self;
-
-        /// Return a [`Spawner`] that runs the next task on a dedicated thread when the runtime supports it.
-        ///
-        /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
-        /// shared executor.
-        ///
-        /// This is not the default behavior. See [`Spawner::shared`] for more information.
-        #[must_use]
-        fn dedicated(self) -> Self;
-
+    pub trait Scheduler: Supervisor {
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
@@ -308,7 +302,7 @@ stability_scope!(BETA {
         /// # Spawn Configuration
         ///
         /// [`Spawner::dedicated`] and [`Spawner::shared`] only affect the
-        /// handle they return. [`Supervisor::child`] and [`Spawner::spawn`]
+        /// handle they return. [`Supervisor::child`] and [`Scheduler::spawn`]
         /// both start child task contexts from a clean spawn configuration.
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
@@ -316,15 +310,15 @@ stability_scope!(BETA {
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             Self: Sized,
-            F: FnOnce(Self) -> Fut + Send + 'static,
-            Fut: Future<Output = T> + Send + 'static,
-            T: Send + 'static;
+            F: FnOnce(Self) -> Fut + PlatformSend + 'static,
+            Fut: Future<Output = T> + PlatformSend + 'static,
+            T: PlatformSend + 'static;
 
         /// Signals the runtime to stop execution and waits for all outstanding tasks
         /// to perform any required cleanup and exit.
         ///
         /// This method does not actually kill any tasks but rather signals to them, using
-        /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
+        /// the [signal::Signal] returned by [Scheduler::stopped], that they should exit.
         /// It then waits for all [signal::Signal] references to be dropped before returning.
         ///
         /// ## Multiple Stop Calls
@@ -343,18 +337,35 @@ stability_scope!(BETA {
             self,
             value: i32,
             timeout: Option<Duration>,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
+        ) -> impl Future<Output = Result<(), Error>> + PlatformSend;
 
-        /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
+        /// Returns an instance of a [signal::Signal] that resolves when [Scheduler::stop] is called by
         /// any task.
         ///
-        /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
+        /// If [Scheduler::stop] has already been called, the [signal::Signal] returned will resolve
         /// immediately. The [signal::Signal] returned will always resolve to the value of the
-        /// first [Spawner::stop] call.
+        /// first [Scheduler::stop] call.
         fn stopped(&self) -> signal::Signal;
     }
 
+    /// Scheduling hints for runtimes that support thread placement.
+    ///
+    /// A runtime may treat these as placement hints when it cannot provide a distinct executor or
+    /// thread. Single-threaded runtimes implement [`Scheduler`] without implementing this trait.
+    pub trait Spawner: Scheduler {
+        /// Return a spawner that schedules the next task on the shared executor.
+        ///
+        /// Set `blocking` when the task may briefly block its executor thread.
+        #[must_use]
+        fn shared(self, blocking: bool) -> Self;
+
+        /// Return a spawner that requests dedicated placement for the next task.
+        #[must_use]
+        fn dedicated(self) -> Self;
+    }
+
     /// Interface that runtimes implement to provide parallel execution strategies.
+    #[cfg(not(target_arch = "wasm32"))]
     pub trait Strategizer: Spawner {
         /// Returns a new [Rayon] strategy with the requested parallelism.
         ///
@@ -428,18 +439,21 @@ stability_scope!(BETA {
     pub trait Clock:
         governor::clock::Clock<Instant = SystemTime>
         + governor::clock::ReasonablyRealtime
-        + Send
-        + Sync
+        + PlatformSend
+        + PlatformSync
         + 'static
     {
         /// Returns the current time.
         fn current(&self) -> SystemTime;
 
         /// Sleep for the given duration.
-        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + PlatformSend + 'static;
 
         /// Sleep until the given deadline.
-        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep_until(
+            &self,
+            deadline: SystemTime,
+        ) -> impl Future<Output = ()> + PlatformSend + 'static;
 
         /// Await a future with a timeout, returning `Error::Timeout` if it expires.
         ///
@@ -465,10 +479,10 @@ stability_scope!(BETA {
             &self,
             duration: Duration,
             future: F,
-        ) -> impl Future<Output = Result<T, Error>> + Send + '_
+        ) -> impl Future<Output = Result<T, Error>> + PlatformSend + '_
         where
-            F: Future<Output = T> + Send + 'static,
-            T: Send + 'static,
+            F: Future<Output = T> + PlatformSend + 'static,
+            T: PlatformSend + 'static,
         {
             async move {
                 select! {
@@ -479,69 +493,135 @@ stability_scope!(BETA {
         }
     }
 
-    /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
-    pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
-
-    /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
-    pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
-
-    /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
-    pub type ListenerOf<N> = <N as crate::Network>::Listener;
-
-    /// Interface that any runtime must implement to create
-    /// network connections.
-    pub trait Network: Send + Sync + 'static {
-        /// The type of [Listener] that's returned when binding to a socket.
-        /// Accepting a connection returns a [Sink] and [Stream] which are defined
-        /// by the [Listener] and used to send and receive data over the connection.
-        type Listener: Listener;
-
-        /// Bind to the given socket address.
-        fn bind(
-            &self,
-            socket: SocketAddr,
-        ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
-
-        /// Dial the given socket address.
-        fn dial(
-            &self,
-            socket: SocketAddr,
-        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
-    }
-
-    /// Interface for DNS resolution.
-    pub trait Resolver: Send + Sync + 'static {
-        /// Resolve a hostname to IP addresses.
-        ///
-        /// Returns a list of IP addresses that the hostname resolves to.
+    /// Interface for resolving hostnames to IP addresses.
+    ///
+    /// New transports should resolve their own endpoints while dialing. This trait remains
+    /// available for callers that resolve legacy host-based addresses explicitly.
+    pub trait Resolver: PlatformSend + PlatformSync + 'static {
+        /// Resolves `host` to its IP addresses.
         fn resolve(
             &self,
             host: &str,
-        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
+        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + PlatformSend;
     }
 
-    /// Interface that any runtime must implement to handle
-    /// incoming network connections.
-    pub trait Listener: Sync + Send + 'static {
-        /// The type of [Sink] that's returned when accepting a connection.
-        /// This is used to send data to the remote connection.
-        type Sink: Sink;
-        /// The type of [Stream] that's returned when accepting a connection.
-        /// This is used to receive data from the remote connection.
-        type Stream: Stream;
+    /// Transport-observed metadata for an established connection.
+    #[derive(Clone, Debug)]
+    pub struct ConnectionInfo<O> {
+        /// Remote peer metadata observed by the transport, if available.
+        ///
+        /// This describes the other end of the transport and is not an authenticated peer identity.
+        pub origin: Option<O>,
+        /// Stable, low-cardinality transport name for logs and metrics.
+        pub transport: &'static str,
+    }
 
-        /// Accept an incoming connection.
+    /// An established reliable byte stream.
+    pub trait Connection: PlatformSend + PlatformSync + 'static {
+        /// Write half of the reliable byte stream.
+        type Sink: Sink;
+        /// Read half of the reliable byte stream.
+        type Stream: Stream;
+        /// Transport-observed remote peer metadata.
+        type Origin: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
+
+        /// Separates the connection into independent byte-stream halves and transport metadata.
+        fn split(self) -> (Self::Sink, Self::Stream, ConnectionInfo<Self::Origin>);
+    }
+
+    /// Outbound connection capability.
+    pub trait Dialer: PlatformSend + PlatformSync + 'static {
+        /// Transport-specific instructions for establishing a connection.
+        type Endpoint: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
+        /// Connection returned after transport establishment.
+        type Connection: Connection;
+
+        /// Returns whether this dialer understands an endpoint without performing I/O.
+        fn supports(&self, _endpoint: &Self::Endpoint) -> bool {
+            true
+        }
+
+        /// Establishes a connection to `endpoint`.
+        fn dial<'a>(
+            &'a self,
+            endpoint: &'a Self::Endpoint,
+        ) -> impl Future<Output = Result<Self::Connection, Error>> + PlatformSend + 'a;
+    }
+
+    /// Inbound connection capability.
+    pub trait Acceptor: PlatformSend + PlatformSync + 'static {
+        /// Transport-specific local binding instructions.
+        type Bind: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
+        /// Connection produced by this acceptor.
+        type Connection: Connection;
+        /// Bound listener that accepts connections.
+        type Listener: Listener<Connection = Self::Connection>;
+
+        /// Binds a listener according to `bind`.
+        fn bind<'a>(
+            &'a self,
+            bind: &'a Self::Bind,
+        ) -> impl Future<Output = Result<Self::Listener, Error>> + PlatformSend + 'a;
+    }
+
+    /// Accepts established connections from a bound transport.
+    pub trait Listener: PlatformSend + PlatformSync + 'static {
+        /// Connection returned by [`Self::accept`].
+        type Connection: Connection;
+
+        /// Waits for the next established inbound connection.
         fn accept(
             &mut self,
-        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+        ) -> impl Future<Output = Result<Self::Connection, Error>> + PlatformSend;
+    }
 
-        /// Returns the local address of the listener.
+    /// Socket-specific metadata exposed by TCP listeners.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub trait TcpListener: Listener {
         fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
+    }
+
+    /// Connection returned by a [`Dialer`].
+    pub type ConnectionOf<D> = <D as Dialer>::Connection;
+    /// Write half returned by a dialer's connection.
+    pub type SinkOf<D> = <<D as Dialer>::Connection as Connection>::Sink;
+    /// Read half returned by a dialer's connection.
+    pub type StreamOf<D> = <<D as Dialer>::Connection as Connection>::Stream;
+    /// Origin metadata returned by a dialer's connection.
+    pub type OriginOf<D> = <<D as Dialer>::Connection as Connection>::Origin;
+
+    /// TCP dial location.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub enum TcpEndpoint {
+        /// Connect directly to a socket address.
+        Socket(SocketAddr),
+        /// Resolve a hostname and try the resulting addresses in randomized order.
+        Dns {
+            /// Hostname to resolve.
+            host: String,
+            /// Destination port.
+            port: u16,
+            /// Whether resolved private addresses may be contacted.
+            allow_private_ips: bool,
+        },
+    }
+
+    impl From<SocketAddr> for TcpEndpoint {
+        fn from(value: SocketAddr) -> Self {
+            Self::Socket(value)
+        }
+    }
+
+    /// Remote endpoint observed by a TCP connection.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub struct TcpOrigin {
+        /// Remote socket observed by the transport.
+        pub remote: SocketAddr,
     }
 
     /// Interface that any runtime must implement to send
     /// messages over a network connection.
-    pub trait Sink: Sync + Send + 'static {
+    pub trait Sink: PlatformSend + PlatformSync + 'static {
         /// Send a message to the sink.
         ///
         /// # Warning
@@ -554,13 +634,13 @@ stability_scope!(BETA {
         /// partial write may have occurred.
         fn send(
             &mut self,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
+            bufs: impl Into<IoBufs> + PlatformSend,
+        ) -> impl Future<Output = Result<(), Error>> + PlatformSend;
     }
 
     /// Interface that any runtime must implement to receive
     /// messages over a network connection.
-    pub trait Stream: Sync + Send + 'static {
+    pub trait Stream: PlatformSend + PlatformSync + 'static {
         /// Receive exactly `len` bytes from the stream.
         ///
         /// The runtime allocates the buffer and returns it as `IoBufs`.
@@ -573,7 +653,10 @@ stability_scope!(BETA {
         ///
         /// Dropping the future (e.g. via `select!`) also poisons the stream, since
         /// partially read data may be lost.
-        fn recv(&mut self, len: usize) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+        fn recv(
+            &mut self,
+            len: usize,
+        ) -> impl Future<Output = Result<IoBufs, Error>> + PlatformSend;
 
         /// Peek at buffered data without consuming.
         ///
@@ -766,7 +849,7 @@ stability_scope!(BETA {
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
-    pub trait BufferPooler: Send + Sync + 'static {
+    pub trait BufferPooler: PlatformSend + PlatformSync + 'static {
         /// Returns the network [BufferPool].
         fn network_buffer_pool(&self) -> &BufferPool;
 
@@ -776,7 +859,7 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA, cfg(feature = "external") {
     /// Interface that runtimes can implement to constrain the execution latency of a future.
-    pub trait Pacer: Clock + Send + Sync + 'static {
+    pub trait Pacer: Clock + PlatformSend + PlatformSync + 'static {
         /// Defer completion of a future until a specified `latency` has elapsed. If the future is
         /// not yet ready at the desired time of completion, the runtime will block until the future
         /// is ready.
@@ -800,33 +883,33 @@ stability_scope!(BETA, cfg(feature = "external") {
             &'a self,
             latency: Duration,
             future: F,
-        ) -> impl Future<Output = T> + Send + 'a
+        ) -> impl Future<Output = T> + PlatformSend + 'a
         where
-            F: Future<Output = T> + Send + 'a,
-            T: Send + 'a;
+            F: Future<Output = T> + PlatformSend + 'a,
+            T: PlatformSend + 'a;
     }
 
     /// Extension trait that makes it more ergonomic to use [Pacer].
     ///
     /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
     /// runtime should delay completion relative to the clock.
-    pub trait FutureExt: Future + Send + Sized {
+    pub trait FutureExt: Future + PlatformSend + Sized {
         /// Delay completion of the future until a specified `latency` on `pacer`.
         fn pace<'a, E>(
             self,
             pacer: &'a E,
             latency: Duration,
-        ) -> impl Future<Output = Self::Output> + Send + 'a
+        ) -> impl Future<Output = Self::Output> + PlatformSend + 'a
         where
             E: Pacer + 'a,
-            Self: Send + 'a,
-            Self::Output: Send + 'a,
+            Self: PlatformSend + 'a,
+            Self::Output: PlatformSend + 'a,
         {
             pacer.pace(latency, self)
         }
     }
 
-    impl<F> FutureExt for F where F: Future + Send {}
+    impl<F> FutureExt for F where F: Future + PlatformSend {}
 });
 
 #[cfg(test)]

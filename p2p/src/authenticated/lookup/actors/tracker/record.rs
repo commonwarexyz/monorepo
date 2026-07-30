@@ -1,23 +1,23 @@
 use crate::{
+    Advertisement, PeerEndpoint, Reachability,
     authenticated::dialing::{DialStatus, ReserveResult},
-    types::{self, Ingress},
 };
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use rand_core::Rng;
-use std::{
-    net::IpAddr,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
-pub enum Address {
+pub enum Address<E: PeerEndpoint> {
     /// Peer is the local node.
     Myself,
 
     /// Address is provided when peer is tracked.
-    Known(types::Address),
+    Known(Reachability<E>),
+
+    /// Peer is authorized for an attached connection but has no dial endpoint.
+    Undialable,
 }
 
 /// Represents the connection status of a peer.
@@ -38,9 +38,9 @@ pub enum Status {
 
 /// Represents a record of a peer's address and associated information.
 #[derive(Clone, Debug)]
-pub struct Record {
+pub struct Record<E: PeerEndpoint> {
     /// Address state of the peer.
-    address: Address,
+    address: Address<E>,
 
     /// Connection status of the peer.
     status: Status,
@@ -64,13 +64,13 @@ pub struct Record {
     next_dial_at: SystemTime,
 }
 
-impl Record {
+impl<E: PeerEndpoint> Record<E> {
     // ---------- Constructors ----------
 
     /// Create a new record with a known address.
-    pub const fn known(addr: types::Address) -> Self {
+    pub const fn known(reachability: Reachability<E>) -> Self {
         Self {
-            address: Address::Known(addr),
+            address: Address::Known(reachability),
             status: Status::Inert,
             stale_connection: false,
             primary_sets: 0,
@@ -95,19 +95,40 @@ impl Record {
         }
     }
 
+    /// Create a provisional record for a peer reached through an attached connection.
+    pub const fn undialable() -> Self {
+        Self {
+            address: Address::Undialable,
+            status: Status::Inert,
+            stale_connection: false,
+            primary_sets: 0,
+            secondary_sets: 0,
+            persistent: false,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
     // ---------- Setters ----------
 
     /// Update the record with a new address.
     ///
     /// Returns `true` if the address was changed, `false` if unchanged or self.
-    pub fn update(&mut self, addr: types::Address) -> bool {
+    pub fn update(&mut self, reachability: Reachability<E>) -> bool {
         match &mut self.address {
             Address::Myself => false,
+            Address::Undialable => {
+                self.address = Address::Known(reachability);
+                if self.is_reserved_or_connected() {
+                    self.stale_connection = true;
+                }
+                true
+            }
             Address::Known(existing) => {
-                if *existing == addr {
+                if *existing == reachability {
                     return false;
                 }
-                *existing = addr;
+                *existing = reachability;
                 if self.is_reserved_or_connected() {
                     self.stale_connection = true;
                 }
@@ -171,6 +192,9 @@ impl Record {
             return false;
         }
         self.status = Status::Active;
+        if matches!(self.address, Address::Undialable) {
+            self.persistent = true;
+        }
         true
     }
 
@@ -225,21 +249,14 @@ impl Record {
     /// Returns [DialStatus::Now] if the peer can be dialed immediately,
     /// [DialStatus::After] if it will become dialable at a future time,
     /// or [DialStatus::Unavailable] if it is not dialable at all.
-    pub fn dialable(
-        &self,
-        now: SystemTime,
-        allow_private_ips: bool,
-        allow_dns: bool,
-    ) -> DialStatus {
+    pub fn dialable(&self, now: SystemTime) -> DialStatus {
         if self.status != Status::Inert || !self.is_outbound_target() {
             return DialStatus::Unavailable;
         }
-        let ingress = match &self.address {
-            Address::Known(addr) => addr.ingress(),
-            Address::Myself => return DialStatus::Unavailable,
-        };
-        if !ingress.is_valid(allow_private_ips, allow_dns) {
-            return DialStatus::Unavailable;
+        match &self.address {
+            Address::Known(Reachability::Dialable(_)) => {}
+            Address::Known(Reachability::OutboundOnly) => return DialStatus::Unavailable,
+            Address::Myself | Address::Undialable => return DialStatus::Unavailable,
         }
         if self.next_dial_at > now {
             DialStatus::After(self.next_dial_at)
@@ -248,38 +265,18 @@ impl Record {
         }
     }
 
-    /// Returns `true` if this peer is acceptable (can accept an incoming connection from them).
-    ///
-    /// A peer is acceptable if:
-    /// - The peer is eligible (in a peer set, not ourselves)
-    /// - The source IP matches the expected egress IP for this peer (if not bypass_ip_check)
-    /// - We are not already connected or reserved
-    pub fn acceptable(&self, source_ip: IpAddr, bypass_ip_check: bool) -> bool {
-        if !self.eligible() || self.status != Status::Inert {
-            return false;
-        }
-        if bypass_ip_check {
-            return true;
-        }
-        match &self.address {
-            Address::Known(addr) => addr.egress_ip() == source_ip,
-            Address::Myself => false,
-        }
+    /// Returns `true` if this peer is eligible and has no active reservation or connection.
+    pub const fn acceptable(&self) -> bool {
+        self.eligible() && matches!(self.status, Status::Inert)
     }
 
-    /// Return the ingress address for dialing, if known.
-    pub fn ingress(&self) -> Option<Ingress> {
+    /// Returns the peer's advertised endpoints, if it can be dialed.
+    pub fn advertisement(&self) -> Option<Advertisement<E>> {
         match &self.address {
-            Address::Myself => None,
-            Address::Known(addr) => Some(addr.ingress()),
-        }
-    }
-
-    /// Return the egress IP for filtering, if known.
-    pub const fn egress_ip(&self) -> Option<IpAddr> {
-        match &self.address {
-            Address::Myself => None,
-            Address::Known(addr) => Some(addr.egress_ip()),
+            Address::Known(Reachability::Dialable(advertisement)) => Some(advertisement.clone()),
+            Address::Known(Reachability::OutboundOnly) | Address::Myself | Address::Undialable => {
+                None
+            }
         }
     }
 
@@ -303,6 +300,12 @@ impl Record {
             Address::Known(_) => {
                 self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
             }
+            Address::Undialable => {
+                self.primary_sets > 0
+                    || self.secondary_sets > 0
+                    || self.persistent
+                    || matches!(self.status, Status::Reserved | Status::Active)
+            }
         }
     }
 }
@@ -310,64 +313,99 @@ impl Record {
 mod tests {
     use super::*;
     use commonware_runtime::{Runner, deterministic};
-    use std::{net::SocketAddr, time::Duration};
 
-    fn test_socket() -> SocketAddr {
-        SocketAddr::from(([54, 12, 1, 9], 8080))
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct Endpoint(&'static str);
+
+    impl PeerEndpoint for Endpoint {}
+
+    type TestRecord = Record<Endpoint>;
+
+    fn dialable(endpoints: &[&'static str]) -> Reachability<Endpoint> {
+        Reachability::Dialable(
+            Advertisement::new(endpoints.iter().copied().map(Endpoint).collect()).unwrap(),
+        )
     }
 
-    fn test_address() -> types::Address {
-        types::Address::Symmetric(test_socket())
+    fn known() -> TestRecord {
+        Record::known(dialable(&["primary"]))
     }
 
     #[test]
     fn test_myself_initial_state() {
-        let record = Record::myself();
+        let record = TestRecord::myself();
         assert!(matches!(record.address, Address::Myself));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.primary_sets, 0);
+        assert_eq!(record.secondary_sets, 0);
         assert!(record.persistent);
-        assert!(record.ingress().is_none());
+        assert!(record.advertisement().is_none());
         assert!(!record.is_blockable());
-        assert_eq!(record.status, Status::Inert);
         assert!(!record.deletable());
         assert!(!record.eligible());
     }
 
     #[test]
     fn test_known_initial_state() {
-        let record = Record::known(test_address());
+        let record = known();
         assert!(matches!(record.address, Address::Known(_)));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.primary_sets, 0);
+        assert_eq!(record.secondary_sets, 0);
         assert!(!record.persistent);
-        assert!(record.ingress().is_some());
+        assert_eq!(
+            record.advertisement().unwrap().endpoints(),
+            &[Endpoint("primary")]
+        );
         assert!(record.is_blockable());
         assert!(record.deletable());
         assert!(!record.eligible());
     }
 
     #[test]
+    fn test_attached_peer_can_gain_reachability() {
+        let mut record = TestRecord::undialable();
+        let reachability = dialable(&["first", "second"]);
+        assert!(record.update(reachability.clone()));
+        assert_eq!(
+            record.advertisement(),
+            match reachability {
+                Reachability::Dialable(advertisement) => Some(advertisement),
+                Reachability::OutboundOnly => unreachable!(),
+            }
+        );
+        assert!(!record.is_outbound_target());
+    }
+
+    #[test]
     fn test_is_blockable() {
-        // Myself is not blockable
-        let record_myself = Record::myself();
+        let record_myself = TestRecord::myself();
         assert!(!record_myself.is_blockable());
 
-        // Known peers are blockable
-        let record_known = Record::known(test_address());
+        let record_known = known();
         assert!(record_known.is_blockable());
+
+        let record_undialable = TestRecord::undialable();
+        assert!(record_undialable.is_blockable());
     }
 
     #[test]
     fn test_increment_decrement_and_deletable() {
-        let mut record_known = Record::known(test_address());
+        let mut record_known = known();
         assert!(record_known.deletable());
         record_known.increment_primary();
+        assert_eq!(record_known.primary_sets(), 1);
         assert!(!record_known.deletable());
         record_known.decrement_primary();
         assert!(record_known.deletable());
 
-        let mut record_myself = Record::myself();
+        record_known.increment_secondary();
+        assert_eq!(record_known.secondary_sets(), 1);
+        assert!(!record_known.deletable());
+        record_known.decrement_secondary();
+        assert!(record_known.deletable());
+
+        let mut record_myself = TestRecord::myself();
         assert!(!record_myself.deletable());
         record_myself.increment_primary();
         assert!(!record_myself.deletable());
@@ -378,7 +416,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_decrement_panics_at_zero() {
-        let mut record = Record::known(test_address());
+        let mut record = known();
         assert_eq!(record.primary_sets, 0);
         record.decrement_primary();
     }
@@ -386,7 +424,7 @@ mod tests {
     #[test]
     fn test_status_transitions_reserve_connect_release() {
         deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
+            let mut record = known();
 
             assert_eq!(record.status, Status::Inert);
             assert_eq!(
@@ -402,7 +440,7 @@ mod tests {
             );
             assert_eq!(record.status, Status::Reserved);
 
-            record.connect();
+            assert!(record.connect());
             assert_eq!(record.status, Status::Active);
 
             assert_eq!(
@@ -428,7 +466,7 @@ mod tests {
     #[test]
     fn test_needs_teardown_after_losing_eligibility() {
         deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
+            let mut record = known();
             record.increment_primary();
 
             assert!(!record.needs_teardown());
@@ -444,7 +482,7 @@ mod tests {
             assert!(record.needs_teardown());
             assert!(record.is_reserved_or_connected());
 
-            record.connect();
+            assert!(record.connect());
             assert!(record.needs_teardown());
             assert!(record.is_reserved_or_connected());
 
@@ -457,17 +495,14 @@ mod tests {
     #[test]
     fn test_reserved_connect_rejected_after_address_change() {
         deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
+            let mut record = known();
             record.increment_primary();
             assert_eq!(
                 record.reserve(&mut context, Duration::ZERO),
                 ReserveResult::Reserved
             );
 
-            assert!(record.update(types::Address::Symmetric(SocketAddr::from((
-                [54, 12, 1, 10],
-                8081,
-            )))));
+            assert!(record.update(dialable(&["replacement"])));
             assert!(record.needs_teardown());
             assert!(!record.connect());
             assert_eq!(record.status, Status::Reserved);
@@ -480,7 +515,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_connect_when_not_reserved_panics_from_inert() {
-        let mut record = Record::known(test_address());
+        let mut record = known();
         record.connect();
     }
 
@@ -488,12 +523,12 @@ mod tests {
     #[should_panic]
     fn test_connect_when_active_panics() {
         deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
+            let mut record = known();
             assert_eq!(
                 record.reserve(&mut context, Duration::ZERO),
                 ReserveResult::Reserved
             );
-            record.connect();
+            assert!(record.connect());
             record.connect();
         });
     }
@@ -501,16 +536,16 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_release_when_inert_panics() {
-        let mut record = Record::known(test_address());
+        let mut record = known();
         record.release();
     }
 
     #[test]
     fn test_deletable_logic_detailed() {
         deterministic::Runner::default().start(|mut context| async move {
-            assert!(!Record::myself().deletable());
+            assert!(!TestRecord::myself().deletable());
 
-            let mut record = Record::known(test_address());
+            let mut record = known();
             assert_eq!(record.primary_sets, 0);
             assert_eq!(record.status, Status::Inert);
             assert!(record.deletable());
@@ -524,7 +559,7 @@ mod tests {
             );
             assert!(!record.deletable());
 
-            record.connect();
+            assert!(record.connect());
             assert!(!record.deletable());
 
             record.release();
@@ -537,86 +572,56 @@ mod tests {
 
     #[test]
     fn test_eligible_logic() {
-        // Myself is never eligible
-        assert!(!Record::myself().eligible());
+        assert!(!TestRecord::myself().eligible());
 
-        // Known records are only eligible when in a peer set
-        let mut record_known = Record::known(test_address());
+        let mut record_known = known();
         assert!(!record_known.eligible(), "Not eligible when sets=0");
         record_known.increment_primary();
         assert!(record_known.eligible(), "Eligible when sets>0");
         record_known.decrement_primary();
         assert!(!record_known.eligible(), "Not eligible when sets=0 again");
+
+        record_known.increment_secondary();
+        assert!(record_known.eligible(), "Eligible when in a secondary set");
+
+        let record_undialable = TestRecord::undialable();
+        assert!(!record_undialable.eligible());
+        assert!(!record_undialable.acceptable());
+        assert!(record_undialable.advertisement().is_none());
     }
 
     #[test]
-    fn test_acceptable_checks_eligibility_status_and_ip() {
+    fn test_acceptable_checks_eligibility_and_status() {
         deterministic::Runner::default().start(|mut context| async move {
-            use std::net::IpAddr;
-
-            let egress_ip: IpAddr = [8, 8, 8, 8].into();
-            let wrong_ip: IpAddr = [1, 2, 3, 4].into();
-            let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
-
-            let mut record = Record::known(types::Address::Symmetric(public_socket));
+            let mut record = known();
             record.increment_primary();
-            assert!(record.acceptable(egress_ip, false));
-            assert!(!record.acceptable(wrong_ip, false));
+            assert!(record.acceptable());
 
-            let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
-            assert!(!record_not_eligible.acceptable(egress_ip, false));
+            let record_not_eligible = known();
+            assert!(!record_not_eligible.acceptable());
 
-            let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
+            let mut record_reserved = known();
             record_reserved.increment_primary();
             record_reserved.reserve(&mut context, Duration::ZERO);
-            assert!(!record_reserved.acceptable(egress_ip, false));
+            assert!(!record_reserved.acceptable());
 
-            let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
+            let mut record_connected = known();
             record_connected.increment_primary();
             record_connected.reserve(&mut context, Duration::ZERO);
             record_connected.connect();
-            assert!(!record_connected.acceptable(egress_ip, false));
-        });
-    }
+            assert!(!record_connected.acceptable());
 
-    #[test]
-    fn test_acceptable_bypass_ip_check() {
-        deterministic::Runner::default().start(|mut context| async move {
-            use std::net::IpAddr;
-
-            let egress_ip: IpAddr = [8, 8, 8, 8].into();
-            let wrong_ip: IpAddr = [1, 2, 3, 4].into();
-            let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
-
-            let mut record = Record::known(types::Address::Symmetric(public_socket));
-            record.increment_primary();
-            assert!(record.acceptable(wrong_ip, true));
-
-            let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
-            assert!(!record_not_eligible.acceptable(egress_ip, true));
-
-            let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
-            record_reserved.increment_primary();
-            record_reserved.reserve(&mut context, Duration::ZERO);
-            assert!(!record_reserved.acceptable(egress_ip, true));
-
-            let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
-            record_connected.increment_primary();
-            record_connected.reserve(&mut context, Duration::ZERO);
-            record_connected.connect();
-            assert!(!record_connected.acceptable(egress_ip, true));
-
-            assert!(!Record::myself().acceptable(egress_ip, true));
+            assert!(!TestRecord::myself().acceptable());
         });
     }
 
     #[test]
     fn test_reserve_sets_next_dial() {
         deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
+            let mut record = known();
             record.increment_primary();
             let now = context.current();
-            assert_eq!(record.dialable(now, true, true), DialStatus::Now);
+            assert_eq!(record.dialable(now), DialStatus::Now);
 
             let interval = Duration::from_secs(1);
             assert_eq!(
@@ -625,8 +630,7 @@ mod tests {
             );
             record.release();
 
-            // Immediately after release, dialable returns After with jittered time.
-            let status = record.dialable(now, true, true);
+            let status = record.dialable(now);
             match status {
                 DialStatus::After(t) => {
                     assert!(t >= now + interval);
@@ -640,7 +644,7 @@ mod tests {
     #[test]
     fn test_reserve_rate_limited() {
         deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
+            let mut record = known();
             let interval = Duration::from_secs(5);
 
             assert_eq!(
@@ -649,13 +653,11 @@ mod tests {
             );
             record.release();
 
-            // Immediate re-reserve is rate-limited.
             assert_eq!(
                 record.reserve(&mut context, interval),
                 ReserveResult::RateLimited
             );
 
-            // After interval elapses, reserve succeeds again.
             context.sleep(interval).await;
             assert_eq!(
                 record.reserve(&mut context, interval),
@@ -665,66 +667,31 @@ mod tests {
     }
 
     #[test]
-    fn test_dialable_checks_ingress_ip() {
-        use Ingress;
-        use std::net::IpAddr;
-
+    fn test_dialable_requires_outbound_target_and_advertisement() {
         let now = SystemTime::UNIX_EPOCH;
 
-        // Public ingress, public egress - dialable
-        let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
-        let mut record_public = Record::known(types::Address::Symmetric(public_socket));
-        record_public.increment_primary();
-        assert_eq!(record_public.dialable(now, false, true), DialStatus::Now);
-
-        // Private ingress (Socket), public egress - NOT dialable when allow_private_ips=false
-        let private_ingress =
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 8080);
-        let public_egress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 9090);
-        let asymmetric_private_ingress = types::Address::Asymmetric {
-            ingress: Ingress::Socket(private_ingress),
-            egress: public_egress,
-        };
-        let mut record_private_ingress = Record::known(asymmetric_private_ingress);
-        record_private_ingress.increment_primary();
+        let mut secondary = Record::known(dialable(&["first", "second"]));
+        secondary.increment_secondary();
+        assert_eq!(secondary.dialable(now), DialStatus::Unavailable);
         assert_eq!(
-            record_private_ingress.dialable(now, false, true),
-            DialStatus::Unavailable
-        );
-        assert_eq!(
-            record_private_ingress.dialable(now, true, true),
-            DialStatus::Now
+            secondary.advertisement().unwrap().endpoints(),
+            &[Endpoint("first"), Endpoint("second")]
         );
 
-        // Public ingress (Socket), private egress - dialable (egress not checked for dialing)
-        let public_ingress = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 8080);
-        let private_egress =
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 9090);
-        let asymmetric_private_egress = types::Address::Asymmetric {
-            ingress: Ingress::Socket(public_ingress),
-            egress: private_egress,
-        };
-        let mut record_private_egress = Record::known(asymmetric_private_egress);
-        record_private_egress.increment_primary();
-        assert_eq!(
-            record_private_egress.dialable(now, false, true),
-            DialStatus::Now
-        );
+        secondary.increment_primary();
+        assert_eq!(secondary.dialable(now), DialStatus::Now);
 
-        // DNS ingress (no IP to check) - dialable (DNS private check happens at dial time)
-        let dns_ingress = types::Address::Asymmetric {
-            ingress: Ingress::Dns {
-                host: commonware_utils::hostname!("example.com"),
-                port: 8080,
-            },
-            egress: public_egress,
-        };
-        let mut record_dns = Record::known(dns_ingress);
-        record_dns.increment_primary();
-        assert_eq!(record_dns.dialable(now, false, true), DialStatus::Now);
+        let mut outbound_only = Record::known(Reachability::<Endpoint>::OutboundOnly);
+        outbound_only.increment_primary();
+        assert!(outbound_only.acceptable());
+        assert_eq!(outbound_only.dialable(now), DialStatus::Unavailable);
+        assert!(outbound_only.advertisement().is_none());
+
+        assert!(outbound_only.update(dialable(&["replacement", "fallback"])));
+        assert_eq!(outbound_only.dialable(now), DialStatus::Now);
         assert_eq!(
-            record_dns.dialable(now, false, false),
-            DialStatus::Unavailable
+            outbound_only.advertisement().unwrap().endpoints(),
+            &[Endpoint("replacement"), Endpoint("fallback")]
         );
     }
 }

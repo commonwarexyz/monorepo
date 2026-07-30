@@ -416,7 +416,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock as _, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
+        BufferPooler, Clock as _, Metrics as _, Runner as _, Scheduler as _, Supervisor as _,
         buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{

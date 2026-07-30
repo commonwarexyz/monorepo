@@ -115,7 +115,7 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock, Quota, Runner, Spawner, Supervisor as _,
+        Clock, Quota, Runner, Scheduler, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };

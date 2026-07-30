@@ -593,7 +593,7 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
+        BufferPooler, Error as RError, Runner, Scheduler as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_pending_syncs},

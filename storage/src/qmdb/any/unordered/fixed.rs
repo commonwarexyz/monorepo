@@ -155,7 +155,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
-        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        Clock as _, Metrics as _, Runner as _, Scheduler as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},

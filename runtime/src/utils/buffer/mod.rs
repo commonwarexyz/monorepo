@@ -1,6 +1,12 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
-use futures::future::{BoxFuture, FutureExt as _, Shared};
+use futures::{FutureExt as _, future::Shared};
+
+#[cfg(not(target_arch = "wasm32"))]
+type CompletionFuture = futures::future::BoxFuture<'static, Result<(), crate::Error>>;
+
+#[cfg(target_arch = "wasm32")]
+type CompletionFuture = futures::future::LocalBoxFuture<'static, Result<(), crate::Error>>;
 
 pub mod paged;
 mod read;
@@ -16,7 +22,7 @@ pub use write::Write;
 /// dropping one neither cancels the underlying sync nor consumes its result, and every
 /// observer sees the same outcome.
 #[derive(Clone)]
-struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
+struct Completion(Shared<CompletionFuture>);
 
 impl Completion {
     /// Return a handle for the sync result.
@@ -32,7 +38,11 @@ impl Completion {
 
 impl From<crate::Handle<()>> for Completion {
     fn from(handle: crate::Handle<()>) -> Self {
-        Self(handle.boxed().shared())
+        #[cfg(not(target_arch = "wasm32"))]
+        let handle = handle.boxed();
+        #[cfg(target_arch = "wasm32")]
+        let handle = handle.boxed_local();
+        Self(handle.shared())
     }
 }
 

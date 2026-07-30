@@ -20,7 +20,11 @@ use tracing::{error, trace, warn};
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
+#[cfg(not(target_arch = "wasm32"))]
 type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
+
+#[cfg(target_arch = "wasm32")]
+type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>>>>>;
 
 /// Shared handle to one in-flight fetch generation. The cache keeps one copy in `page_fetches`,
 /// and each waiter clones the `Arc` while it is still interested in the result.
@@ -400,7 +404,10 @@ impl CacheRef {
                     };
 
                     // Make the future shareable and insert it into the map.
+                    #[cfg(not(target_arch = "wasm32"))]
                     let fetch_future = future.boxed().shared();
+                    #[cfg(target_arch = "wasm32")]
+                    let fetch_future = future.boxed_local().shared();
                     let fetch = Arc::new(fetch_future.clone());
                     v.insert(PageFetchEntry {
                         fetch: Arc::clone(&fetch),
@@ -603,7 +610,7 @@ mod tests {
     use super::{super::Checksum, *};
     use crate::{
         Buf, BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _,
-        Spawner as _, Storage as _, Supervisor as _, buffer::paged::CHECKSUM_SIZE, deterministic,
+        Scheduler as _, Storage as _, Supervisor as _, buffer::paged::CHECKSUM_SIZE, deterministic,
         telemetry::metrics::Registry,
     };
     use commonware_cryptography::Crc32;

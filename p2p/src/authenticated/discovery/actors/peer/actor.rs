@@ -408,7 +408,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
+        BufferPooler, IoBuf, Runner, Scheduler, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
