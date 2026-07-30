@@ -33,4 +33,5 @@ test("keeps identity copy feedback visible inside the identity row", async () =>
 
   expect(feedback).toContain("display: inline-block");
   expect(feedback).not.toContain("position: absolute");
+  expect(stylesheet).toContain(".identity-value");
 });

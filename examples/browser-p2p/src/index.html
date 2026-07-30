@@ -61,10 +61,12 @@
         <section class="identity-panel" aria-label="Your ephemeral identity">
           <div class="identity-copy">
             <span class="eyebrow">Your ephemeral identity</span>
-            <button id="identity" class="fingerprint" type="button" title="Copy public key" disabled>
-              Waiting for WASM
-            </button>
-            <span id="identity-copy-feedback" class="copy-tooltip" aria-hidden="true" hidden>Copied</span>
+            <div class="identity-value">
+              <button id="identity" class="fingerprint" type="button" title="Copy public key" disabled>
+                Waiting for WASM
+              </button>
+              <span id="identity-copy-feedback" class="copy-tooltip" aria-hidden="true" hidden>Copied</span>
+            </div>
           </div>
           <span class="ephemeral-note">New on every load</span>
         </section>

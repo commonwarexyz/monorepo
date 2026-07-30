@@ -396,13 +396,20 @@ h1 {
   min-width: 0;
 }
 
+.identity-value {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
 .fingerprint:not(:disabled):hover {
   color: var(--accent);
 }
 
 .copy-tooltip {
   display: inline-block;
-  margin-left: 8px;
+  flex: none;
   padding: 3px 7px;
   border-radius: 999px;
   color: var(--paper);
