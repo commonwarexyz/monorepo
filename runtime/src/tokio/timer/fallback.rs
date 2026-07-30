@@ -7,6 +7,7 @@ use std::{
     task::{Context, Poll},
     time::{Duration, SystemTime},
 };
+use thiserror::Error;
 use tokio::runtime::Builder;
 
 /// No-op builder setup on targets that use Tokio timers.
@@ -58,14 +59,8 @@ impl Timer {
 }
 
 /// Infallible fallback initialization error.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum InitError {}
-
-impl std::fmt::Display for InitError {
-    fn fmt(&self, _formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {}
-    }
-}
 
 /// Concrete fallback future with eager Tokio sleep construction.
 pub(crate) struct Sleep {
@@ -77,10 +72,17 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        self.inner
-            .as_mut()
-            .map_or(Poll::Ready(()), |sleep| sleep.as_mut().poll(context))
+        match self.inner.as_mut() {
+            Some(sleep) => sleep.as_mut().poll(context),
+            None => poll_cooperative_ready(context),
+        }
     }
+}
+
+/// Consumes scheduler budget before completing an otherwise immediate sleep.
+fn poll_cooperative_ready(context: &mut Context<'_>) -> Poll<()> {
+    let mut budget = std::pin::pin!(tokio::task::coop::consume_budget());
+    budget.as_mut().poll(context)
 }
 
 #[cfg(test)]

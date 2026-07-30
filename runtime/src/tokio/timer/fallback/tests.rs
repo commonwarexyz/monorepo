@@ -1,6 +1,12 @@
 use super::*;
 use futures::task::noop_waker;
-use std::task::Context;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::Context,
+};
 
 /// Creates the descriptor-free fallback timer facade.
 fn timer() -> Timer {
@@ -34,14 +40,36 @@ fn zero_and_past_sleeps_are_ready_on_first_poll() {
     let mut zero = timer.sleep(Duration::ZERO);
     let mut past = timer.sleep_until(SystemTime::UNIX_EPOCH);
 
-    // Both futures satisfy the facade bounds and complete on their first poll
-    // without a scheduler yield.
+    // Both futures satisfy the facade bounds and complete with fresh scheduler budget.
     assert_send_static(&zero);
     assert_send_static(&past);
     assert_eq!(poll_once(&mut zero), Poll::Ready(()));
     assert_eq!(poll_once(&mut past), Poll::Ready(()));
     assert!(zero.inner.is_none());
     assert!(past.inner.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn immediate_sleep_loop_cooperates_with_other_tasks() {
+    // Setup: Queue a peer behind a task that repeatedly awaits immediate sleeps.
+    let timer = timer();
+    let peer_ran = Arc::new(AtomicBool::new(false));
+    let peer_flag = Arc::clone(&peer_ran);
+    let peer = tokio::spawn(async move {
+        peer_flag.store(true, Ordering::Release);
+    });
+
+    // Action: Await more immediate sleeps than one Tokio cooperative budget.
+    for _ in 0..1_024 {
+        timer.sleep(Duration::ZERO).await;
+        if peer_ran.load(Ordering::Acquire) {
+            break;
+        }
+    }
+
+    // Assertion: Budget exhaustion yields to the already-runnable peer.
+    assert!(peer_ran.load(Ordering::Acquire));
+    peer.await.unwrap();
 }
 
 #[tokio::test]
