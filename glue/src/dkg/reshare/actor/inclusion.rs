@@ -182,14 +182,16 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
         true
     }
 
-    /// Retargets only when no verification task is running.
+    /// Selects a target only when no verification task is running.
     ///
-    /// This preserves active waiter-driven work at the epoch boundary.
+    /// This preserves active waiter-driven work at the epoch boundary. Returns
+    /// whether the selected target has no completed result and must be started.
     fn retarget_if_idle(&mut self, target: PendingLogs<V, C::PublicKey>) -> bool {
         if self.task.is_some() {
             return false;
         }
-        self.retarget(target)
+        self.retarget(target);
+        self.ceremony.is_none()
     }
 
     /// Installs the sole active task for the selected effective log view.
@@ -690,13 +692,9 @@ where
                                         .await;
                                     }
                                 }
-                                self.retarget_verification(
-                                    &mut verification,
-                                    epoch,
-                                    info,
-                                    store,
-                                    canonical_logs.clone(),
-                                );
+                                if verification.retarget_if_idle(canonical_logs.clone()) {
+                                    self.start_verification(&mut verification, epoch, info, store);
+                                }
                             }
                             let ceremony = verification
                                 .ready(&canonical_logs)
@@ -1378,6 +1376,39 @@ mod tests {
             assert!(verification.complete(completed));
             assert!(verification.retarget_if_idle(canonical.clone()));
             assert_eq!(verification.target, canonical);
+        });
+    }
+
+    #[test]
+    fn finalization_restarts_canonical_after_obsolete_verification() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let obsolete = dealer_logs(0);
+            let canonical = dealer_logs(1);
+            let completed_logs = obsolete.clone();
+            let (release_tx, release_rx) = oneshot::channel();
+            let task = context.child("obsolete").spawn(|_| async move {
+                release_rx.await.expect("task should be released");
+                VerifiedLogs::<TestBlsVariant, PrivateKey> {
+                    logs: completed_logs,
+                    ceremony: None,
+                }
+            });
+            let mut verification = Verification::new(obsolete);
+            verification.start(task);
+
+            assert!(verification.retarget(canonical.clone()));
+            assert!(!verification.retarget_if_idle(canonical.clone()));
+
+            release_tx.send(()).expect("task should still be running");
+            let completed = verification
+                .task
+                .take()
+                .expect("task should be present")
+                .await
+                .expect("task should complete");
+            assert!(!verification.complete(completed));
+            assert!(verification.retarget_if_idle(canonical));
         });
     }
 
