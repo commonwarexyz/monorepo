@@ -1,18 +1,18 @@
 //! Shared machinery for the compact-db witness journal.
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
-//! [`Witness`] is a complete snapshot of one synced commit: the encoded commit operation,
+//! [`Witness`] is a complete snapshot of one published commit: the encoded commit operation,
 //! its single-leaf inclusion proof against the committed root, and the pinned frontier nodes of
 //! the compact Merkle. On open and rewind, the in-memory Merkle is rebuilt from an entry and the
 //! entry's proof is re-verified against the root recomputed from the rebuilt frontier; a
 //! mismatch fails with [`Error::DataCorrupted`].
 //!
 //! Entries are strictly increasing in committed leaf count (`proof.leaves`), so a leaf count
-//! uniquely identifies a rewind or prune target. The journal `commit` or `sync` after an append
-//! is the commit point: a crash before it drops the unsynced tail on reopen, recovering the
-//! previous commit. For [`Store::start_sync`] the commit point is the completion of the returned
-//! handle. [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip entry is
-//! never pruned.
+//! uniquely identifies a rewind or prune target. An appended entry becomes durable when the
+//! journal `commit` or `sync` completes. For [`Store::start_sync`] it becomes durable when the
+//! returned handle completes. Before that point, the entry is not guaranteed durable and recovery
+//! may fall back to the previous commit. [`Store::prune`] bounds how far back [`Store::rewind`] can
+//! reach. The tip entry is never pruned.
 
 use crate::{
     Context, SyncCompletion,
@@ -30,7 +30,7 @@ use commonware_utils::sync::RwLock;
 use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// A single durably persisted witness: a complete snapshot of one synced commit.
+/// A witness journal entry containing a complete snapshot of one published commit.
 ///
 /// The root is not stored: it is recomputed from the rebuilt frontier and authenticated against
 /// `proof`.
@@ -174,7 +174,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         f(&self.tip_witness.read())
     }
 
-    /// Replace the cached witness after the matching compact Merkle state is persisted or loaded.
+    /// Replace the cached witness after the matching compact Merkle state is staged or loaded.
     pub(crate) fn replace(&self, witness: VerifiedWitness<F, D>) {
         *self.tip_witness.write() = witness;
     }
@@ -324,7 +324,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
     /// Decide what a persist must write, clearing the journal first when an import is pending.
     ///
-    /// Returns `None` if the durable tip already matches the in-memory Merkle and no import is
+    /// Returns `None` if the cached tip already matches the in-memory Merkle and no import is
     /// pending, otherwise the witness to append and install in the cache.
     async fn stage<H, S>(
         mut self,
@@ -337,9 +337,10 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         S: Strategy,
     {
         // An equal leaf count means no commit has been applied since the cache was set.
-        // Normally the cache mirrors the journal tip, so the state is already durable and there
-        // is nothing to do. During a pending import the cached witness is not in the journal
-        // yet, so it is exactly what must be persisted: replace the journal's contents with it.
+        // Normally the cache mirrors the journal tip, so there is no witness to append. A
+        // start_sync may still be proving that tip durable, which pending_sync tracks separately.
+        // During a pending import the cached witness is not in the journal yet, so it is exactly
+        // what must be persisted. Replace the journal's contents with it.
         let cached_leaves = self.with(|w| w.leaf_count());
         let verified = if cached_leaves == merkle.leaves() {
             if !self.import_pending.load(Ordering::Relaxed) {

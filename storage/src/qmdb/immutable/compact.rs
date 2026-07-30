@@ -1,16 +1,16 @@
 //! An immutable authenticated db that discards historical operations, retaining only a witness
-//! for each synced commit.
+//! for each published commit.
 //!
 //! Mirrors the API of [`crate::qmdb::immutable::Immutable`] (`new_batch -> merkleize ->
-//! apply_batch -> sync`, pipelined batch chains, `StaleBatch` validation) but is backed by
-//! the peak-only [`crate::merkle::compact`]. Because history is discarded, there are no
-//! `get` / `proof` / `bounds` methods; use the full variant if you need them.
+//! apply_batch -> commit / sync / start_sync`, pipelined batch chains, `StaleBatch` validation)
+//! but is backed by the peak-only [`crate::merkle::compact`]. Because history is discarded,
+//! there are no `get` / `proof` / `bounds` methods. Use the full variant if you need them.
 //!
 //! # Witness journal
 //!
-//! The witness journal holds a complete snapshot of every synced commit, so [`Db::rewind`] can
-//! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind re-verify the persisted snapshot; corruption surfaces as [`Error::DataCorrupted`].
+//! The witness journal holds a complete snapshot of every published commit, so [`Db::rewind`] can
+//! restore any commit still retained there. History is bounded only by [`Db::prune`]. Reopen and
+//! rewind re-verify the persisted snapshot. Corruption surfaces as [`Error::DataCorrupted`].
 //! The witness (the last-commit operation plus its inclusion proof) is also what lets compact
 //! nodes serve compact sync without retaining historical operations.
 //!
@@ -20,7 +20,7 @@
 //! [`crate::qmdb::immutable::Immutable`]: the root is computed over the encoded operation
 //! sequence, and that sequence must include the same floor to produce the same root as the
 //! full variant. The floor has no effect on pruning or snapshot rebuilding here; all
-//! historical in-memory state is discarded on every sync.
+//! historical in-memory state is discarded whenever a witness is published.
 
 use super::operation::Operation;
 use crate::{
@@ -64,7 +64,7 @@ pub struct Config<C, S: Strategy> {
 }
 
 /// An immutable authenticated db that discards historical operations, retaining only a witness
-/// for each synced commit.
+/// for each published commit.
 pub struct Db<F, E, K, V, H, C, S: Strategy>
 where
     F: Family,
@@ -516,8 +516,9 @@ where
 
     /// Apply a merkleized batch to the database.
     ///
-    /// Returns the range of locations written. The state is updated in memory only; call
-    /// [`Self::commit`] or [`Self::sync`] to persist.
+    /// Returns the range of locations written. The state is updated in memory only. Call
+    /// [`Self::commit`] or [`Self::sync`], or await the handle returned by [`Self::start_sync`],
+    /// to persist it.
     ///
     /// # Errors
     ///
@@ -601,14 +602,14 @@ where
         Ok(self)
     }
 
-    /// Rewind the db to the synced commit with exactly `target` operations, discarding any
+    /// Rewind the db to the published commit with exactly `target` operations, discarding any
     /// uncommitted batches and any later commits. The rewind is made durable before this
     /// method returns.
     ///
     /// # Errors
     ///
     /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained commit has exactly `target` operations (never synced, or pruned).
+    /// no retained commit has exactly `target` operations (never published, or pruned).
     #[tracing::instrument(name = "qmdb.immutable.compact.db.rewind", level = "info", skip_all)]
     pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>>
     where

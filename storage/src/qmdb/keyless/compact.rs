@@ -1,16 +1,16 @@
 //! A keyless authenticated db that discards historical operations, retaining only a witness
-//! for each synced commit.
+//! for each published commit.
 //!
 //! Mirrors the API of [`crate::qmdb::keyless::Keyless`] (`new_batch -> merkleize ->
-//! apply_batch -> sync`, pipelined batch chains, `StaleBatch` validation) but is backed by
-//! the peak-only [`crate::merkle::compact`]. Because history is discarded, there are no
-//! `get` / `proof` / `bounds` methods; use the full variant if you need them.
+//! apply_batch -> commit / sync / start_sync`, pipelined batch chains, `StaleBatch` validation)
+//! but is backed by the peak-only [`crate::merkle::compact`]. Because history is discarded,
+//! there are no `get` / `proof` / `bounds` methods. Use the full variant if you need them.
 //!
 //! # Witness journal
 //!
-//! The witness journal holds a complete snapshot of every synced commit, so [`Db::rewind`] can
-//! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind re-verify the persisted snapshot; corruption surfaces as [`Error::DataCorrupted`].
+//! The witness journal holds a complete snapshot of every published commit, so [`Db::rewind`] can
+//! restore any commit still retained there. History is bounded only by [`Db::prune`]. Reopen and
+//! rewind re-verify the persisted snapshot. Corruption surfaces as [`Error::DataCorrupted`].
 //! The witness (the last-commit operation plus its inclusion proof) is also what lets compact
 //! nodes serve compact sync without retaining historical operations.
 //!
@@ -20,7 +20,7 @@
 //! [`crate::qmdb::keyless::Keyless`]: the root is computed over the encoded operation
 //! sequence, and that sequence must include the same floor to produce the same root as the
 //! full variant. The floor has no effect on pruning or snapshot rebuilding here; all
-//! historical in-memory state is discarded on every sync.
+//! historical in-memory state is discarded whenever a witness is published.
 
 use super::operation::Operation;
 use crate::{
@@ -59,7 +59,7 @@ pub struct Config<C, S: Strategy> {
 }
 
 /// A keyless authenticated db that discards historical operations, retaining only a witness
-/// for each synced commit.
+/// for each published commit.
 pub struct Db<F, E, V, H, C, S: Strategy>
 where
     F: Family,
@@ -500,8 +500,9 @@ where
 
     /// Apply a merkleized batch to the database.
     ///
-    /// Returns the range of locations written. The state is updated in memory only; call
-    /// [`Self::commit`] or [`Self::sync`] to persist.
+    /// Returns the range of locations written. The state is updated in memory only. Call
+    /// [`Self::commit`] or [`Self::sync`], or await the handle returned by [`Self::start_sync`],
+    /// to persist it.
     ///
     /// # Errors
     ///
@@ -577,14 +578,14 @@ where
         Ok(self)
     }
 
-    /// Rewind the db to the synced commit with exactly `target` operations, discarding any
+    /// Rewind the db to the published commit with exactly `target` operations, discarding any
     /// uncommitted batches and any later commits. The rewind is made durable before this
     /// method returns.
     ///
     /// # Errors
     ///
     /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained commit has exactly `target` operations (never synced, or pruned).
+    /// no retained commit has exactly `target` operations (never published, or pruned).
     #[tracing::instrument(name = "qmdb.keyless.compact.db.rewind", level = "info", skip_all)]
     pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>>
     where
@@ -653,10 +654,11 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
     use core::future::Future;
@@ -735,6 +737,63 @@ mod tests {
             .await;
         let (db, _) = db.apply_batch(batch).unwrap();
         db
+    }
+
+    /// A sync handle must not block database use while the witness sync is pending.
+    #[test_traced]
+    fn test_compact_start_sync_overlaps_work() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let partition = "keyless-start-sync-overlap";
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+
+            let starts_before = pending.starts();
+            let entered_before = pending.entered();
+            let completions_before = pending.completions();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
+            assert_eq!(pending.completions(), completions_before);
+            let first_target = db.target();
+
+            let waiter = ctx
+                .child("await_sync")
+                .spawn(|_| async move { handle.await.unwrap() });
+            while pending.entered() == entered_before {
+                reschedule().await;
+            }
+
+            db = apply_append(db, 2).await;
+            assert_ne!(db.root(), first_target.root);
+            assert_eq!(db.target(), first_target);
+            assert_eq!(
+                pending.completions(),
+                completions_before,
+                "the database made progress while the sync was still in flight"
+            );
+
+            pending.unblock();
+            waiter.await.unwrap();
+
+            // The mid-sync batch becomes the servable durable state after the next start_sync
+            // handle completes.
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            let target = db.target();
+            drop(db);
+
+            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.target(), target);
+            assert_eq!(db.get_metadata(), Some(U64::new(2)));
+            db.destroy().await.unwrap();
+        });
     }
 
     /// State persisted via an awaited start_sync handle is recovered on reopen.
