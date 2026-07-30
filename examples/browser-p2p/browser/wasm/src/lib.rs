@@ -1,6 +1,5 @@
 #![cfg(target_arch = "wasm32")]
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use commonware_codec::DecodeExt as _;
 use commonware_cryptography::{Signer as _, ed25519};
 use commonware_math::algebra::Random as _;
@@ -8,50 +7,31 @@ use commonware_p2p::authenticated::lookup::{
     AttachmentConfig, AttachmentNetwork, PeerAdmission, Rejected,
 };
 use commonware_p2p::{Receiver as _, Recipients, Sender as _};
-use commonware_runtime::{ConnectionInfo, Dialer as _, IoBuf, Quota, web::Runtime};
+use commonware_runtime::{ConnectionInfo, IoBuf, Quota, web::Runtime};
 use commonware_stream::encrypted;
 use commonware_utils::{NZUsize, sys_rng};
-use commonware_websocket::{
-    MAX_ENDPOINT_LEN, WebSocketConnection, WebSocketDialer, WebSocketEndpoint, WebSocketOrigin,
-};
+use commonware_webrtc::{WebRtcConfig, WebRtcConnection, WebRtcOrigin};
 use futures::channel::oneshot;
 use js_sys::{Date, Function, Object, Promise, Reflect};
-use serde::Deserialize;
 use std::{cell::RefCell, num::NonZeroU32, rc::Rc, time::Duration};
-use url::Url;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
+use web_sys::{RtcDataChannel, RtcPeerConnection};
 
 const CHAT_CHANNEL: u64 = 0;
 const CHAT_NAMESPACE: &[u8] = b"_COMMONWARE_BROWSER_P2P_CHAT";
-const MAX_PAIRING_PAYLOAD_SIZE: usize = 4 * 1024;
 const MAX_CHAT_MESSAGE_SIZE: usize = 16 * 1024;
 const MAX_NETWORK_MESSAGE_SIZE: u32 = 64 * 1024;
 const CHANNEL_BACKLOG: usize = 128;
 
 type ChatSender = commonware_p2p::authenticated::lookup::Sender<
     ed25519::PublicKey,
-    commonware_runtime::web::Context<WebSocketDialer>,
+    commonware_runtime::web::Context<()>,
 >;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PairingPayload {
-    version: u8,
-    desktop_public_key: String,
-    websocket_url: String,
-    capability: String,
-    session_id: String,
-    expires_at: u64,
-}
-
-struct ValidatedPairing {
-    desktop_public_key: ed25519::PublicKey,
-    websocket_endpoint: WebSocketEndpoint,
-}
-
 struct State {
-    runtime: Option<Runtime<WebSocketDialer>>,
+    runtime: Option<Runtime<()>>,
+    connection: Option<WebRtcConnection>,
     sender: Option<ChatSender>,
     peer: Option<ed25519::PublicKey>,
     generation: u64,
@@ -61,6 +41,7 @@ impl State {
     const fn new() -> Self {
         Self {
             runtime: None,
+            connection: None,
             sender: None,
             peer: None,
             generation: 0,
@@ -72,6 +53,7 @@ impl State {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown(0);
         }
+        self.connection = None;
         self.sender = None;
         self.peer = None;
         self.generation = self.generation.wrapping_add(1);
@@ -96,26 +78,41 @@ impl BrowserChat {
         self.public_key.clone()
     }
 
-    /// Connect to the desktop identified by the pairing payload.
-    pub fn connect(&self, pairing_payload: String) -> Promise {
-        let pairing = match validate_pairing(&pairing_payload) {
-            Ok(pairing) => pairing,
-            Err(error) => return rejected_promise(error),
+    /// Attach an established WebRTC data channel to the authenticated chat network.
+    pub fn prepare(
+        &self,
+        peer_connection: RtcPeerConnection,
+        data_channel: RtcDataChannel,
+    ) -> Result<(), JsValue> {
+        let connection =
+            WebRtcConnection::new(peer_connection, data_channel, WebRtcConfig::default())
+                .map_err(|_| JsValue::from_str("Could not initialize the WebRTC transport."))?;
+        let mut state = self.state.borrow_mut();
+        if state.runtime.is_some() || state.connection.is_some() {
+            return Err(JsValue::from_str("A WebRTC transport is already prepared."));
+        }
+        state.connection = Some(connection);
+        Ok(())
+    }
+
+    /// Start the Commonware handshake after both browser adapters are ready.
+    pub fn attach(&self, expected_peer_hex: String, outbound: bool) -> Promise {
+        let expected_peer = match parse_public_key(&expected_peer_hex) {
+            Ok(peer) => peer,
+            Err(message) => return rejected_promise(message),
         };
 
-        self.stop(false);
         emit_connection(&self.on_event, "connecting");
 
-        let runtime = match Runtime::new() {
-            Ok(runtime) => runtime.with_dialer(WebSocketDialer::default()),
-            Err(_) => {
-                let message = "Could not initialize the browser network runtime.";
-                emit_error(&self.on_event, message, false);
-                emit_connection(&self.on_event, "disconnected");
-                return rejected_promise(message);
-            }
+        let connection = match self.state.borrow_mut().connection.take() {
+            Some(connection) => connection,
+            None => return self.reject_attach("The WebRTC transport is not prepared."),
         };
 
+        let runtime = match Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return self.reject_attach("Could not initialize the browser runtime."),
+        };
         let generation = {
             let mut state = self.state.borrow_mut();
             state.runtime = Some(runtime.clone());
@@ -127,11 +124,10 @@ impl BrowserChat {
         let (result_sender, result_receiver) = oneshot::channel();
 
         runtime.spawn_root(move |context| async move {
-            let config = attachment_config(private_key);
+            let config = attachment_config(private_key, expected_peer.clone());
             let (mut network, _oracle, attachments) =
-                AttachmentNetwork::<_, _, WebSocketConnection, RejectInbound>::new(
-                    context.clone(),
-                    config,
+                AttachmentNetwork::<_, _, WebRtcConnection, ExactPeerAdmission>::new(
+                    context, config,
                 );
             let (sender, mut receiver) = network.register(
                 CHAT_CHANNEL,
@@ -140,19 +136,15 @@ impl BrowserChat {
             );
             let _network = network.start();
 
-            let connection = match context.dial(&pairing.websocket_endpoint).await {
-                Ok(connection) => connection,
-                Err(_) => {
-                    connection_failed(&state, generation, &on_event, result_sender);
-                    return;
-                }
+            let attached = if outbound {
+                attachments
+                    .attach_outbound(expected_peer.clone(), connection)
+                    .await
+            } else {
+                attachments.attach_inbound(connection).await
             };
-            if attachments
-                .attach_outbound(pairing.desktop_public_key.clone(), connection)
-                .await
-                .is_err()
-            {
-                connection_failed(&state, generation, &on_event, result_sender);
+            if attached.is_err() {
+                fail_attach(&state, generation, &on_event, result_sender);
                 return;
             }
 
@@ -163,18 +155,15 @@ impl BrowserChat {
             {
                 let mut current = state.borrow_mut();
                 current.sender = Some(sender);
-                current.peer = Some(pairing.desktop_public_key.clone());
+                current.peer = Some(expected_peer.clone());
             }
-            emit_peer(&on_event, &pairing.desktop_public_key.to_string());
+            emit_peer(&on_event, &expected_peer.to_string());
             emit_connection(&on_event, "connected");
             let _ = result_sender.send(Ok(()));
 
             let mut next_message_id = 0_u64;
-            loop {
-                let Ok((sender, message)) = receiver.recv().await else {
-                    break;
-                };
-                if sender != pairing.desktop_public_key {
+            while let Ok((sender, message)) = receiver.recv().await {
+                if sender != expected_peer {
                     emit_error(
                         &on_event,
                         "Ignored a message from an unexpected peer.",
@@ -183,45 +172,25 @@ impl BrowserChat {
                     continue;
                 }
                 let bytes = message.as_ref();
-                let Some((source, text)) = bytes.split_at_checked(32) else {
-                    emit_error(&on_event, "Ignored a malformed chat message.", false);
-                    continue;
-                };
-                if text.len() > MAX_CHAT_MESSAGE_SIZE {
+                if bytes.len() > MAX_CHAT_MESSAGE_SIZE {
                     emit_error(&on_event, "Ignored an oversized chat message.", false);
                     continue;
                 }
-                let Ok(source) = ed25519::PublicKey::decode(source) else {
-                    emit_error(
-                        &on_event,
-                        "Ignored a chat message with an invalid identity.",
-                        false,
-                    );
-                    continue;
-                };
-                let Ok(text) = std::str::from_utf8(text) else {
-                    emit_error(
-                        &on_event,
-                        "Ignored a chat message that was not valid UTF-8.",
-                        false,
-                    );
+                let Ok(text) = std::str::from_utf8(bytes) else {
+                    emit_error(&on_event, "Ignored a non-UTF-8 chat message.", false);
                     continue;
                 };
                 next_message_id = next_message_id.wrapping_add(1);
                 emit_message(
                     &on_event,
                     &format!("{generation}-{next_message_id}"),
-                    &source.to_string(),
+                    &sender.to_string(),
                     text,
                 );
             }
 
-            if clear_connection(&state, generation) {
-                emit_error(
-                    &on_event,
-                    "The authenticated peer connection closed. Scan a fresh invite to rejoin.",
-                    false,
-                );
+            if stop_generation(&state, generation) {
+                emit_error(&on_event, "The authenticated connection closed.", false);
                 emit_connection(&on_event, "disconnected");
             }
         });
@@ -241,7 +210,7 @@ impl BrowserChat {
         future_to_promise(async move {
             result
                 .map(|()| JsValue::UNDEFINED)
-                .map_err(|message| JsValue::from_str(message))
+                .map_err(JsValue::from_str)
         })
     }
 
@@ -257,6 +226,12 @@ impl BrowserChat {
         if emit && stopped {
             emit_connection(&self.on_event, "disconnected");
         }
+    }
+
+    fn reject_attach(&self, message: &'static str) -> Promise {
+        emit_error(&self.on_event, message, true);
+        emit_connection(&self.on_event, "disconnected");
+        rejected_promise(message)
     }
 }
 
@@ -279,29 +254,35 @@ pub fn create_browser_chat(on_event: Function) -> BrowserChat {
     }
 }
 
-#[derive(Clone, Copy)]
-struct RejectInbound;
+#[derive(Clone)]
+struct ExactPeerAdmission {
+    expected_peer: ed25519::PublicKey,
+}
 
-impl PeerAdmission<ed25519::PublicKey, WebSocketOrigin> for RejectInbound {
+impl PeerAdmission<ed25519::PublicKey, WebRtcOrigin> for ExactPeerAdmission {
     type Permit = ();
 
-    fn pre_auth(&self, _info: &ConnectionInfo<WebSocketOrigin>) -> Result<Self::Permit, Rejected> {
-        Err(Rejected)
+    fn pre_auth(&self, _info: &ConnectionInfo<WebRtcOrigin>) -> Result<Self::Permit, Rejected> {
+        Ok(())
     }
 
     async fn post_auth(
         &self,
         _permit: Self::Permit,
-        _peer: &ed25519::PublicKey,
-        _info: &ConnectionInfo<WebSocketOrigin>,
+        peer: &ed25519::PublicKey,
+        _info: &ConnectionInfo<WebRtcOrigin>,
     ) -> Result<(), Rejected> {
-        Err(Rejected)
+        if peer != &self.expected_peer {
+            return Err(Rejected);
+        }
+        Ok(())
     }
 }
 
 fn attachment_config(
     private_key: ed25519::PrivateKey,
-) -> AttachmentConfig<ed25519::PrivateKey, RejectInbound> {
+    expected_peer: ed25519::PublicKey,
+) -> AttachmentConfig<ed25519::PrivateKey, ExactPeerAdmission> {
     AttachmentConfig {
         stream: encrypted::Config {
             signing_key: private_key,
@@ -311,7 +292,7 @@ fn attachment_config(
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),
         },
-        admission: RejectInbound,
+        admission: ExactPeerAdmission { expected_peer },
         mailbox_size: NZUsize!(128),
         send_batch_size: NZUsize!(8),
         ping_frequency: Duration::from_secs(30),
@@ -321,74 +302,14 @@ fn attachment_config(
     }
 }
 
-fn validate_pairing(input: &str) -> Result<ValidatedPairing, &'static str> {
-    if input.is_empty() || input.len() > MAX_PAIRING_PAYLOAD_SIZE {
-        return Err("The pairing payload has an invalid size.");
+fn parse_public_key(value: &str) -> Result<ed25519::PublicKey, &'static str> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Expected peer must be a 32-byte hex Ed25519 key.");
     }
-    let payload: PairingPayload = serde_json::from_str(input)
-        .map_err(|_| "The pairing payload is not valid canonical JSON.")?;
-    if payload.version != 1 {
-        return Err("The pairing payload version is not supported.");
-    }
-    if payload.desktop_public_key.len() != 64
-        || !payload
-            .desktop_public_key
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err("The pairing payload contains an invalid Ed25519 public key.");
-    }
-    let key_bytes = commonware_formatting::from_hex(&payload.desktop_public_key)
-        .ok_or("The pairing payload contains an invalid Ed25519 public key.")?;
-    let desktop_public_key = ed25519::PublicKey::decode(key_bytes.as_slice())
-        .map_err(|_| "The pairing payload contains an invalid Ed25519 public key.")?;
-
-    if !valid_base64url::<32>(&payload.capability, 43) {
-        return Err("The pairing payload contains an invalid capability.");
-    }
-    if !valid_base64url::<16>(&payload.session_id, 22) {
-        return Err("The pairing payload contains an invalid session identifier.");
-    }
-    let now = (Date::now() / 1_000.0).floor() as u64;
-    if payload.expires_at <= now || payload.expires_at > 9_007_199_254_740_991 {
-        return Err("The pairing session has expired or has an invalid expiry.");
-    }
-    if payload.websocket_url.len() > MAX_ENDPOINT_LEN {
-        return Err("The pairing WebSocket endpoint is too long.");
-    }
-
-    let mut url = Url::parse(&payload.websocket_url)
-        .map_err(|_| "The pairing payload contains an invalid WebSocket endpoint.")?;
-    if !matches!(url.scheme(), "ws" | "wss")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.host_str().is_none()
-    {
-        return Err("The pairing payload contains an invalid WebSocket endpoint.");
-    }
-    url.query_pairs_mut()
-        .append_pair("sid", &payload.session_id)
-        .append_pair("cap", &payload.capability);
-    let websocket_endpoint = WebSocketEndpoint::new(url.to_string())
-        .map_err(|_| "The pairing payload contains an invalid WebSocket endpoint.")?;
-
-    Ok(ValidatedPairing {
-        desktop_public_key,
-        websocket_endpoint,
-    })
-}
-
-fn valid_base64url<const N: usize>(value: &str, expected_len: usize) -> bool {
-    value.len() == expected_len
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        && URL_SAFE_NO_PAD
-            .decode(value)
-            .ok()
-            .and_then(|bytes| <[u8; N]>::try_from(bytes).ok())
-            .is_some()
+    let bytes = commonware_formatting::from_hex(value)
+        .ok_or("Expected peer must be a 32-byte hex Ed25519 key.")?;
+    ed25519::PublicKey::decode(bytes.as_slice())
+        .map_err(|_| "Expected peer must be a 32-byte hex Ed25519 key.")
 }
 
 fn send_message(state: &RefCell<State>, text: String) -> Result<(), &'static str> {
@@ -411,14 +332,14 @@ fn send_message(state: &RefCell<State>, text: String) -> Result<(), &'static str
     Ok(())
 }
 
-fn connection_failed(
+fn fail_attach(
     state: &RefCell<State>,
     generation: u64,
     on_event: &Function,
     result_sender: oneshot::Sender<Result<(), &'static str>>,
 ) {
-    let message = "Could not establish an authenticated connection to the desktop.";
-    if !clear_connection(state, generation) {
+    let message = "Could not authenticate the expected peer.";
+    if !stop_generation(state, generation) {
         let _ = result_sender.send(Err("Connection was canceled."));
         return;
     }
@@ -431,13 +352,12 @@ fn is_current(state: &RefCell<State>, generation: u64) -> bool {
     state.borrow().generation == generation
 }
 
-fn clear_connection(state: &RefCell<State>, generation: u64) -> bool {
+fn stop_generation(state: &RefCell<State>, generation: u64) -> bool {
     let mut current = state.borrow_mut();
     if current.generation != generation {
         return false;
     }
-    current.sender = None;
-    current.peer = None;
+    current.stop();
     true
 }
 

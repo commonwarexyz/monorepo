@@ -8,7 +8,11 @@ export type ChatEvent =
 
 export interface BrowserP2pSession {
   publicKey(): string;
-  connect(pairingPayload: string): Promise<void>;
+  prepare(peerConnection: RTCPeerConnection, dataChannel: RTCDataChannel): void;
+  attach(
+    expectedPeer: string,
+    outbound: boolean,
+  ): Promise<void>;
   send(text: string): Promise<void>;
   disconnect(): void;
   free(): void;
@@ -57,7 +61,8 @@ function validateSession(value: unknown): asserts value is BrowserP2pSession {
   const session = value as Partial<BrowserP2pSession>;
   const methods: Array<keyof BrowserP2pSession> = [
     "publicKey",
-    "connect",
+    "prepare",
+    "attach",
     "send",
     "disconnect",
     "free",
