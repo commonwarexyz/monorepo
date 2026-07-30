@@ -24,11 +24,15 @@
 //! - The recovery watermark advances only after the blob state it describes is durable.
 //! - Except while a clear is staged or after adopting a legacy pruning boundary, the recovery
 //!   watermark never trails the pruning boundary (`boundary <= watermark <= size`). A prune records
-//!   the just-synced size as the watermark, so the watermark covers the retained items the boundary
-//!   exposes. Recovery relies on this: a durable watermark above the boundary proves those retained
-//!   items existed, so their loss is corruption rather than a completed prune. A staged clear may
-//!   temporarily lower the watermark below the old boundary; its clear target supersedes both.
-//!   A legacy checkpoint may also carry a sub-boundary watermark, which recovery treats as stale.
+//!   a proven-durable size as the watermark (the just-synced size for `prune`, or the
+//!   already-proven durable frontier for `start_prune`, which needs no fresh data sync), so the
+//!   watermark covers the retained items the boundary exposes. The boundary never advances in a
+//!   metadata version without a covering watermark in that same version, so a torn or partial write
+//!   can never leave the boundary ahead of the durable watermark. Recovery relies on this: a
+//!   durable watermark above the boundary proves those retained items existed, so their loss is
+//!   corruption rather than a completed prune. A staged clear may temporarily lower the watermark
+//!   below the old boundary; its clear target supersedes both. A legacy checkpoint may also carry a
+//!   sub-boundary watermark, which recovery treats as stale.
 //! - An entry is lowered before blob state moves backward (rewind, clear).
 //!
 //! Together they make backward operations recoverable without requiring blob presence alone to
@@ -126,7 +130,8 @@ impl<E: Context> Checkpoint<E> {
     /// at or below the current one is ignored, returning a resolved handle.
     /// A started advance's failure leaves the raised value staged: later advances at or below
     /// it are ignored, and the next checkpoint write observes the failure and fails.
-    /// Invariant: all items below `watermark` are durable.
+    ///
+    /// Precondition: all items below `watermark` are durable.
     pub(super) async fn start_watermark_sync(
         mut self,
         watermark: u64,
@@ -135,6 +140,43 @@ impl<E: Context> Checkpoint<E> {
             return Ok((self, Handle::ready(Ok(()))));
         }
         self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
+        let (metadata, handle) = self.metadata.start_sync().await?;
+        self.metadata = metadata;
+        Ok((self, handle))
+    }
+
+    /// Begin recording `boundary` and raising the watermark to `watermark`, returning a completion
+    /// handle. The boundary is always written. The watermark is written only if it is not already
+    /// current.
+    ///
+    /// # Preconditions
+    ///
+    /// - all items below `watermark` are durable
+    /// - `boundary <= watermark`
+    /// - `boundary` advances past the recorded boundary
+    pub(super) async fn start_persist(
+        mut self,
+        boundary: u64,
+        watermark: u64,
+    ) -> Result<(Self, Handle<()>), Error> {
+        assert!(boundary <= watermark);
+
+        // Confirm the caller is advancing the boundary.
+        assert!(
+            !matches!(self.boundary_hint(), Some(current) if current >= boundary),
+            "start_persist requires an advancing boundary"
+        );
+
+        // Advance the watermark if it's not already current.
+        let advance_watermark = !matches!(self.watermark(), Some(current) if current >= watermark);
+
+        // Stage both entries before the single sync so a boundary advance and its covering
+        // watermark land in one metadata version; a crash can never expose one advance without the
+        // other.
+        self.metadata.put(PRUNING_BOUNDARY_KEY, boundary.into());
+        if advance_watermark {
+            self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
+        }
         let (metadata, handle) = self.metadata.start_sync().await?;
         self.metadata = metadata;
         Ok((self, handle))

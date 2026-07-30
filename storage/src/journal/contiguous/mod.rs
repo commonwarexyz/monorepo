@@ -14,7 +14,13 @@
 use super::Error;
 use commonware_runtime::Handle;
 use futures::{Stream, StreamExt as _, stream};
-use std::{future::Future, num::NonZeroUsize, ops::Range};
+use std::{
+    future::Future,
+    num::NonZeroUsize,
+    ops::Range,
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tracing::warn;
 
 mod blobs;
@@ -152,6 +158,65 @@ where
         ReplayStreamState::next,
     )
     .flat_map(stream::iter)
+}
+
+/// A deferred prune returned by `start_prune`.
+///
+/// Awaiting or spawning it drives the pruning boundary to durability and unlinks the freed blobs
+/// off the hot path; dropping it leaves the unlink for recovery or a later reset to complete. The
+/// output mirrors a durability [Handle]: `Ok(())` once the boundary is durable and the blobs are
+/// removed.
+///
+/// The handle may remain active after its journal is dropped and reserves the journal's partition.
+/// Before reopening that partition in the same process, await or drop the handle; otherwise a stale
+/// unlink could remove blobs used by the reopened journal.
+#[must_use = "await or spawn the handle to observe completion and reclaim the pruned blobs"]
+pub struct PruneHandle {
+    boundary: u64,
+    pruned: bool,
+    inner: Handle<()>,
+}
+
+impl PruneHandle {
+    /// A prune that advanced the boundary.
+    ///
+    /// `inner` durably records the pruning boundary and unlinks the blobs.
+    pub(super) const fn new(boundary: u64, inner: Handle<()>) -> Self {
+        Self {
+            boundary,
+            pruned: true,
+            inner,
+        }
+    }
+
+    /// A no-op prune: the boundary was unchanged and nothing needs unlinking.
+    pub(super) fn noop(boundary: u64) -> Self {
+        Self {
+            boundary,
+            pruned: false,
+            inner: Handle::ready(Ok(())),
+        }
+    }
+
+    /// The effective pruning boundary after clamping to the blob and durability limits. All items
+    /// at positions below it are (being) pruned.
+    pub const fn boundary(&self) -> u64 {
+        self.boundary
+    }
+
+    /// Whether this call pruned anything (freed at least one whole blob). Awaiting the handle is a
+    /// resolved no-op when `false`.
+    pub const fn pruned(&self) -> bool {
+        self.pruned
+    }
+}
+
+impl Future for PruneHandle {
+    type Output = Result<(), commonware_runtime::Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.inner).poll(cx)
+    }
 }
 
 /// A read-only, position-based view of a contiguous journal.

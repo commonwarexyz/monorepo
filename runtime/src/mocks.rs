@@ -953,6 +953,65 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
     }
 }
 
+/// Controls a [RemoveFaultContext]: while armed, every `remove` fails with an injected error.
+#[derive(Clone, Default)]
+pub struct RemoveFaults {
+    fail: Arc<Mutex<bool>>,
+}
+
+impl RemoveFaults {
+    /// Start failing removes.
+    pub fn arm(&self) {
+        *self.fail.lock() = true;
+    }
+
+    /// Stop failing removes.
+    pub fn disarm(&self) {
+        *self.fail.lock() = false;
+    }
+
+    fn check(&self) -> Result<(), Error> {
+        if *self.fail.lock() {
+            return Err(Error::Io(
+                std::io::Error::other("injected remove failure").into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Context wrapper whose `remove` fails while the shared [RemoveFaults] is armed. The switch
+/// propagates to `child(...)` contexts, so removals issued by a child context fail too.
+#[derive(Clone)]
+pub struct RemoveFaultContext<E> {
+    pub inner: E,
+    pub faults: RemoveFaults,
+}
+
+forward_context!(RemoveFaultContext, faults);
+
+impl<E: Storage> Storage for RemoveFaultContext<E> {
+    type Blob = E::Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.inner.open_versioned(partition, name, versions).await
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
 /// Context wrapper whose blobs fail `sync` and `start_sync` for a single partition.
 #[derive(Clone)]
 pub struct SyncFaultContext<E> {

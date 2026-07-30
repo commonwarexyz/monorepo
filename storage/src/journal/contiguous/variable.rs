@@ -12,7 +12,7 @@
 //! durable. See the [`fixed`] module docs for the full model.
 
 use super::{
-    Contiguous, Many, Mutable, blob_first_position,
+    Contiguous, Many, Mutable, PruneHandle, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     durability::Barrier,
     fixed,
@@ -52,7 +52,7 @@ use std::{
 };
 #[commonware_macros::stability(ALPHA)]
 use tracing::debug;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -1571,6 +1571,74 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((self, true))
     }
 
+    /// See [Journal::start_prune].
+    pub(crate) async fn start_prune(
+        mut self: Box<Self>,
+        min_position: u64,
+    ) -> Result<(Box<Self>, PruneHandle), Error> {
+        let items_per_blob = self.items_per_blob.get();
+        // The joint proven-durable frontier for both journals. It must never be the offsets
+        // sub-journal's own frontier, which can run ahead of the data after a one-sided sync.
+        let watermark = self.barrier.size();
+
+        // Clamp the target to the proven-durable frontier: `start_prune` reclaims only already-
+        // durable data, so it needs no data sync. Cap at the physical tail and never regress below
+        // the current boundary (as `prune` does).
+        let target_blob = position_to_blob(min_position, items_per_blob);
+        let watermark_blob = position_to_blob(watermark, items_per_blob);
+        let min_blob = target_blob
+            .min(watermark_blob)
+            .min(self.blobs.tail_blob_index())
+            .max(position_to_blob(self.bounds.start, items_per_blob));
+
+        // The max keeps a mid-blob adopted boundary from regressing to its blob's start.
+        let new_boundary = blob_first_position(min_blob, items_per_blob)?.max(self.bounds.start);
+
+        if min_position > watermark {
+            // Log any attempt to prune data that isn't already durable in case it's not the
+            // intent of the caller. We clamp the boundary to the durable frontier instead of
+            // returning an error since pruning is already best-effort by contract.
+            info!(
+                requested = min_position,
+                frontier = watermark,
+                effective = new_boundary,
+                "clamping start_prune boundary to durable frontier"
+            );
+        }
+
+        if min_blob <= self.blobs.oldest_blob_index() {
+            return Ok((self, PruneHandle::noop(new_boundary)));
+        }
+
+        // Retained data below the boundary must be durable, or a crash could lose data recorded as
+        // pruned; the real-prune path (past the no-op above) guarantees `new_boundary <= watermark`.
+        assert!(new_boundary <= watermark);
+
+        // The offsets journal is the durable prune record. Its own `start_prune` commits the
+        // boundary and raises the offsets watermark to the joint frontier (no data sync), deferring
+        // its stale-blob unlink; the returned handle joins that durability. Recovery completes an
+        // interrupted prune from the committed offsets boundary, so both unlinks are deferred into
+        // the handle below.
+        let (offsets, offsets_handle) = self.offsets.start_prune(new_boundary, watermark).await?;
+        self.offsets = offsets;
+        self.bounds.start = new_boundary;
+
+        // Defer the data unlink into the returned handle, gated on the offsets boundary being
+        // durable so a crash never removes data ahead of an uncommitted boundary.
+        let data_removal = self.blobs.start_prune(min_blob).await;
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
+
+        let handle = Handle::from_future(async move {
+            offsets_handle.await?;
+            data_removal.await
+        });
+        Ok((self, PruneHandle::new(new_boundary, handle)))
+    }
+
     /// See [Journal::start_sync].
     pub(crate) async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
@@ -2354,6 +2422,32 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok((self, pruned))
     }
 
+    /// Begin pruning items at positions strictly less than `min_position` off the hot path, without
+    /// a data sync.
+    ///
+    /// `min_position` is clamped down to the proven-durable frontier: only already-synced data is
+    /// reclaimed, so no data fsync is needed. Data made durable only by [`Self::commit`] is not
+    /// reclaimable here: `commit` persists the data blobs but not the offsets journal, so the
+    /// proven-durable frontier does not advance until [`Self::sync`]. Use `sync` (or [`Self::prune`],
+    /// which syncs) to reclaim committed-but-unsynced data. A request beyond the frontier is clamped
+    /// rather than rejected. As with `prune`, blob boundaries are preserved, so slightly fewer items
+    /// than requested may be pruned.
+    ///
+    /// The boundary is recorded by a pipelined write to the offsets journal's checkpoint (which
+    /// also advances the recovery watermark to the frontier), and the freed data and offsets blobs
+    /// are unlinked as the returned [PruneHandle] completes. Like [`Self::start_sync`], recording
+    /// the boundary waits for a prior in-flight checkpoint sync before starting a new one. Await
+    /// the handle to observe a durable boundary and removed blobs, or drive it off the hot path.
+    /// Until the handle resolves `Ok` the boundary advance is provisional: a failed metadata write
+    /// or a crash reverts it, so drive it to `Ok` before durably recording anything derived from
+    /// the boundary. A dropped or crashed removal is completed by recovery from the durable
+    /// boundary, so the unlink never has to finish atomically or in order.
+    pub async fn start_prune(mut self, min_position: u64) -> Result<(Self, PruneHandle), Error> {
+        let (inner, handle) = self.0.start_prune(min_position).await?;
+        self.0 = inner;
+        Ok((self, handle))
+    }
+
     /// Persist data blobs so committed data survives a crash.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it.
@@ -2381,6 +2475,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Persist data blobs and all metadata for both the data and offsets journals.
+    ///
+    /// Deferred prunes are the exception: if a [`Self::start_prune`] handle was dropped instead of
+    /// driven, its blobs are unlinked on the next open rather than by this call.
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.0 = self.0.sync().await?;
         Ok(self)
@@ -4450,6 +4547,235 @@ mod tests {
             let names = context.scan(&cfg.data_partition()).await.unwrap();
             assert!(!names.contains(&0u64.to_be_bytes().to_vec()));
             assert!(!names.contains(&1u64.to_be_bytes().to_vec()));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `start_prune` below the durable watermark commits the boundary and frees the old data and
+    /// offsets blobs without a data sync: the watermark is unchanged and the boundary survives a
+    /// reopen.
+    #[test_traced]
+    fn test_variable_start_prune_below_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-start-prune-below".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let watermark = journal.0.offsets.recovery_watermark();
+
+            let (journal, handle) = journal.start_prune(10).await.unwrap();
+            assert!(handle.pruned());
+            assert_eq!(handle.boundary(), 10);
+
+            // No data sync; the persisted watermark already covers the frontier, so it does not
+            // move.
+            assert_eq!(journal.0.offsets.recovery_watermark(), watermark);
+            assert_eq!(journal.bounds(), 10..15);
+            handle.await.unwrap();
+
+            // Pruned items are gone; retained items remain.
+            assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(_))));
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            drop(journal);
+
+            // The committed boundary survives a reopen and the freed blobs stay pruned.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..15);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A `start_prune` target past the durable watermark is clamped to it: only already-synced
+    /// blobs are freed, the retained unsynced tail is untouched, and the watermark does not move.
+    #[test_traced]
+    fn test_variable_start_prune_clamps_to_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-start-prune-clamp".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+            // Append past the durable watermark without syncing.
+            for i in 15..20u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            assert_eq!(journal.0.offsets.recovery_watermark(), 15);
+
+            // Request pruning the whole journal; it clamps to the watermark's blob boundary.
+            let (journal, handle) = journal.start_prune(20).await.unwrap();
+            assert_eq!(journal.bounds(), 15..20);
+            assert_eq!(journal.0.offsets.recovery_watermark(), 15);
+            handle.await.unwrap();
+
+            // The retained (unsynced) tail above the boundary is still readable.
+            for i in 15..20u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `commit` alone does not let `start_prune` advance past the offsets (sync) frontier: `commit`
+    /// makes the data durable but not the offsets journal, so the proven-durable frontier does not
+    /// move, and committed-but-unsynced data stays reclaimable only after a `sync`.
+    #[test_traced]
+    fn test_variable_start_prune_does_not_reclaim_committed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-start-prune-committed".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+            assert_eq!(journal.0.offsets.recovery_watermark(), 10);
+
+            // Append past the synced frontier and commit (not sync): the data becomes durable but
+            // the offsets journal does not, so the proven-durable frontier stays at 10.
+            for i in 10..15u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let journal = journal.commit().await.unwrap();
+            assert_eq!(journal.0.offsets.recovery_watermark(), 10);
+
+            // Pruning past the frontier clamps to the synced frontier (10), not the commit frontier
+            // (15): the committed-but-unsynced data is retained, not reclaimed.
+            let (journal, handle) = journal.start_prune(15).await.unwrap();
+            assert_eq!(journal.bounds(), 10..15);
+            assert_eq!(journal.0.offsets.recovery_watermark(), 10);
+            handle.await.unwrap();
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A `start_prune` handle dropped at the parked data unlink leaves the offsets boundary durably
+    /// committed with data ahead of it. Recovery completes the interrupted prune from that
+    /// boundary.
+    #[test_traced]
+    fn test_variable_start_prune_interrupted_unlink_completed_by_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-start-prune-interrupted".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Park the deferred data unlink: the handle makes the offsets boundary durable and
+            // removes the offsets blobs, then parks before removing any data blob.
+            journal.0.blobs.halt_prune_unlinks = true;
+            let (journal, handle) = journal.start_prune(10).await.unwrap();
+            {
+                futures::pin_mut!(handle);
+                assert!(
+                    futures::poll!(handle.as_mut()).is_pending(),
+                    "start_prune handle must park at the halted data unlink"
+                );
+            }
+            // Crash: drop the parked handle and the journal without finishing the unlink.
+            drop(journal);
+
+            // Recovery completes the interrupted prune from the durable offsets boundary.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("recovery must complete the interrupted prune");
+            assert_eq!(journal.bounds(), 10..15);
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `clear_to_size` fences an in-flight deferred unlink before reusing the freed indices: a
+    /// stale unlink driven after the reset must not delete a blob the reset repopulated.
+    #[test_traced]
+    fn test_variable_start_prune_fenced_by_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-start-prune-fence".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Begin a deferred prune but do not drive the returned handle: the unlink of the old
+            // data and offsets blobs is still pending when the reset runs.
+            let (journal, handle) = journal.start_prune(10).await.unwrap();
+
+            // The reset must drive the pending unlink to completion before reusing the low indices.
+            let mut journal = journal.clear_to_size(0).await.unwrap();
+            for i in 0..5u64 {
+                (journal, _) = journal.append(&(100 + i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Driving the stale handle now is a no-op: its unlinks already completed during the
+            // reset, so the freshly written blob 0 survives.
+            handle.await.unwrap();
+            assert_eq!(journal.bounds(), 0..5);
+            for i in 0..5u64 {
+                assert_eq!(journal.read(i).await.unwrap(), 100 + i);
+            }
             journal.destroy().await.unwrap();
         });
     }
