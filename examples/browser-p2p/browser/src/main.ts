@@ -6,6 +6,7 @@ import { createInvite, inviteUrl, parseInvite, type Invite } from "./invite";
 import { loadWebRtcConfig, WebRtcPairing } from "./webrtc";
 
 const elements = {
+  chat: getElement<HTMLElement>("chat"),
   composer: getElement<HTMLFormElement>("composer"),
   copyInvite: getElement<HTMLButtonElement>("copy-invite"),
   emptyState: getElement<HTMLLIElement>("empty-state"),
@@ -19,6 +20,7 @@ const elements = {
   noticeDetail: getElement<HTMLParagraphElement>("notice-detail"),
   noticeTitle: getElement<HTMLElement>("notice-title"),
   pairing: getElement<HTMLElement>("pairing"),
+  pairingHeading: getElement<HTMLDivElement>("pairing-heading"),
   pairingDetail: getElement<HTMLParagraphElement>("pairing-detail"),
   pairingTitle: getElement<HTMLElement>("pairing-title"),
   qr: getElement<HTMLImageElement>("invite-qr"),
@@ -61,8 +63,10 @@ void initialize();
 async function initialize(): Promise<void> {
   cleanup();
   clearNotice();
+  elements.chat.dataset.view = "pairing";
   elements.retryButton.hidden = true;
   elements.qrPanel.hidden = true;
+  elements.pairingHeading.hidden = false;
   elements.pairing.hidden = false;
   setConnectionState("connecting", "Creating identity");
 
@@ -84,8 +88,6 @@ async function initialize(): Promise<void> {
     invite ??= createInvite(publicKey);
     if (role === "initiator") {
       await displayInvite(invite, webRtcConfig.applicationUrl);
-      elements.emptyTitle.textContent = "Scan to connect";
-      elements.emptyDetail.textContent = "Open the one-time QR on a phone. Signaling is encrypted before it leaves this browser.";
     } else {
       elements.pairingTitle.textContent = "Joining invite";
       elements.pairingDetail.textContent = "Pinning the identity carried by the QR and connecting directly.";
@@ -119,8 +121,7 @@ async function displayInvite(invite: Invite, applicationUrl: string): Promise<vo
   });
   elements.inviteLink.href = currentInviteUrl;
   elements.qrPanel.hidden = false;
-  elements.pairingTitle.textContent = "Scan once with your phone";
-  elements.pairingDetail.textContent = "The QR contains a short-lived pairing secret and this browser's identity.";
+  elements.pairingHeading.hidden = true;
 }
 
 async function sendMessage(): Promise<void> {
@@ -153,6 +154,7 @@ function handleChatEvent(event: ChatEvent): void {
     }
     case "peer":
       currentInviteUrl = undefined;
+      elements.chat.dataset.view = "chat";
       elements.pairing.hidden = true;
       elements.emptyTitle.textContent = "You're connected";
       elements.emptyDetail.textContent = "Messages are authenticated and encrypted end to end.";

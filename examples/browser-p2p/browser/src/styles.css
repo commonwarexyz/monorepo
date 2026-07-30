@@ -53,6 +53,13 @@ button:disabled {
   width: min(720px, calc(100vw - 40px));
   height: min(790px, calc(100vh - 92px));
   min-height: 620px;
+  grid-template-areas:
+    "topbar"
+    "notice"
+    "identity"
+    "messages"
+    "pairing"
+    "composer";
   grid-template-rows: auto auto auto minmax(120px, 1fr) auto auto;
   overflow: hidden;
   border: 1px solid rgb(28 28 26 / 9%);
@@ -60,6 +67,16 @@ button:disabled {
   background: rgb(251 250 246 / 94%);
   box-shadow: 0 24px 70px rgb(47 43 32 / 12%), 0 3px 12px rgb(47 43 32 / 6%);
   backdrop-filter: blur(20px);
+}
+
+.chat[data-view="pairing"] {
+  grid-template-areas:
+    "topbar"
+    "notice"
+    "identity"
+    "pairing"
+    "composer";
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
 }
 
 .topbar,
@@ -70,6 +87,7 @@ button:disabled {
 }
 
 .topbar {
+  grid-area: topbar;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -153,6 +171,7 @@ h1 {
 }
 
 .notice {
+  grid-area: notice;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -186,6 +205,7 @@ h1 {
 }
 
 .identity-panel {
+  grid-area: identity;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -230,6 +250,7 @@ h1 {
 
 .messages {
   display: flex;
+  grid-area: messages;
   flex-direction: column;
   gap: 12px;
   min-height: 0;
@@ -239,6 +260,10 @@ h1 {
   list-style: none;
   scrollbar-color: #cecbc2 transparent;
   scrollbar-width: thin;
+}
+
+.chat[data-view="pairing"] .messages {
+  display: none;
 }
 
 .empty-state {
@@ -322,6 +347,8 @@ h1 {
 
 .pairing {
   display: grid;
+  grid-area: pairing;
+  align-content: center;
   justify-items: center;
   padding-block: 20px 22px;
   border-top: 1px solid var(--line);
@@ -336,6 +363,10 @@ h1 {
 
 .pairing-heading {
   text-align: center;
+}
+
+.pairing-heading[hidden] {
+  display: none;
 }
 
 input,
@@ -498,6 +529,7 @@ input[aria-invalid="true"] {
 
 .composer {
   display: flex;
+  grid-area: composer;
   align-items: flex-end;
   gap: 10px;
   padding-block: 16px 20px;

@@ -13,13 +13,12 @@
   </head>
   <body>
     <main class="shell">
-      <section class="chat" aria-label="Commonware peer-to-peer chat">
+      <section id="chat" class="chat" aria-label="Commonware peer-to-peer chat">
         <header class="topbar">
           <div class="brand" aria-label="Commonware Chat">
             <span class="brand-mark" aria-hidden="true">
               <svg viewBox="0 0 40 40">
-                <path d="M7 14h12M13 8v12" />
-                <path d="M20 15c2.2-4.5 4.5-4.5 6.8 0s4.6 4.5 6.8 0" />
+                <path d="M9 20h22M14.5 10.5l11 19M25.5 10.5l-11 19" />
               </svg>
             </span>
             <div>
@@ -60,8 +59,8 @@
           </li>
         </ol>
 
-        <section id="pairing" class="pairing" aria-labelledby="pairing-title">
-          <div class="pairing-heading">
+        <section id="pairing" class="pairing" aria-label="Pairing">
+          <div id="pairing-heading" class="pairing-heading">
             <div>
               <span class="eyebrow" id="pairing-title">Preparing invite</span>
               <p id="pairing-detail">Pairing requires one QR scan.</p>
@@ -86,8 +85,8 @@
               </span>
             </a>
             <div class="qr-copy">
-              <strong>Scan to join this private room</strong>
-              <span>One-time invite. Expires automatically.</span>
+              <strong>Scan with your phone</strong>
+              <span>Encrypted signaling. Invite expires automatically.</span>
               <button id="copy-invite" class="primary-button" type="button">Copy link</button>
             </div>
           </div>
