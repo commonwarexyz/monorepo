@@ -207,10 +207,6 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     /// Returns the operations and a proof that they were present in the database when it had
     /// `op_count` operations. If `include_pinned_nodes` is true, the result will include the
     /// pinned merkle nodes at `start_loc`.
-    ///
-    /// The corresponding `cancel_tx` is dropped when the engine no longer needs this
-    /// request (e.g. due to a target update), causing `cancel_rx.await` to return
-    /// `Err`. Implementations may `select!` on it to abort in-flight work early.
     #[allow(clippy::type_complexity)]
     fn get_operations<'a>(
         &'a self,
@@ -218,7 +214,6 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
     ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
     + Send
     + 'a;
@@ -248,7 +243,6 @@ macro_rules! impl_resolver {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_operations(
                     op_count,
@@ -290,7 +284,6 @@ macro_rules! impl_resolver {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
                 fetch_operations(
@@ -329,7 +322,6 @@ macro_rules! impl_resolver {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
@@ -388,7 +380,6 @@ macro_rules! impl_resolver_immutable {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_operations(
                     op_count,
@@ -430,7 +421,6 @@ macro_rules! impl_resolver_immutable {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
                 fetch_operations(
@@ -469,7 +459,6 @@ macro_rules! impl_resolver_immutable {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
@@ -517,7 +506,6 @@ macro_rules! impl_resolver_keyless {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_operations(
                     op_count,
@@ -556,7 +544,6 @@ macro_rules! impl_resolver_keyless {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
                 fetch_operations(
@@ -592,7 +579,6 @@ macro_rules! impl_resolver_keyless {
                 start_loc: Location<Self::Family>,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
@@ -691,7 +677,6 @@ pub(crate) mod tests {
             _start_loc: Location<F>,
             _max_ops: NonZeroU64,
             _include_pinned_nodes: bool,
-            _cancel: oneshot::Receiver<()>,
         ) -> Result<FetchResult<F, Op, D>, qmdb::Error<F>> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }

@@ -4,5 +4,6 @@
 //! - [`compact`]: resolver for compact-storage QMDBs that fetch one
 //!   authenticated frontier state instead of replaying operations.
 
+mod cancel;
 pub mod compact;
 pub mod standard;

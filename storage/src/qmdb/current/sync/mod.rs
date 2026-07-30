@@ -73,7 +73,7 @@ use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_utils::{Array, bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange};
+use commonware_utils::{Array, bitmap::Prunable as BitMap, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -403,7 +403,6 @@ macro_rules! impl_current_resolver {
                 start_loc: Location<F>,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
                 fetch_operations(
                     op_count,
@@ -451,7 +450,6 @@ macro_rules! impl_current_resolver {
                 start_loc: Location<F>,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
                 let db = self.read().await;
                 fetch_operations(
@@ -496,7 +494,6 @@ macro_rules! impl_current_resolver {
                 start_loc: Location<F>,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;

@@ -1795,17 +1795,10 @@ where
         start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         let mut result = self
             .inner
-            .get_operations(
-                op_count,
-                start_loc,
-                max_ops,
-                include_pinned_nodes,
-                cancel_rx,
-            )
+            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
             .await?;
         // Corrupt pinned nodes only on the first request that includes them.
         if result.pinned_nodes.is_some()
@@ -1898,21 +1891,13 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
         start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         if op_count == self.historical_target_size {
             if include_pinned_nodes {
-                let _ = cancel_rx.await;
-                return self
-                    .inner
-                    .get_operations(
-                        op_count,
-                        start_loc,
-                        max_ops,
-                        include_pinned_nodes,
-                        oneshot::channel().1,
-                    )
-                    .await;
+                // Simulate a resolver that has not answered the old target's pinned-nodes
+                // request when the target changes. The update cancels the request and drops
+                // this pending future.
+                return std::future::pending().await;
             }
 
             let release = self.release_historical_gap.lock().take();
@@ -1926,13 +1911,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
             if attempt == 0 {
                 let mut result = self
                     .inner
-                    .get_operations(
-                        self.historical_target_size,
-                        start_loc,
-                        max_ops,
-                        false,
-                        oneshot::channel().1,
-                    )
+                    .get_operations(self.historical_target_size, start_loc, max_ops, false)
                     .await?;
                 result.pinned_nodes = None;
                 return Ok(result);
@@ -1945,13 +1924,7 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
         }
 
         self.inner
-            .get_operations(
-                op_count,
-                start_loc,
-                max_ops,
-                include_pinned_nodes,
-                cancel_rx,
-            )
+            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
             .await
     }
 }

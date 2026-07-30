@@ -204,16 +204,9 @@ where
         start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
     ) -> Result<resolver::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         self.0
-            .get_operations(
-                op_count,
-                start_loc,
-                max_ops,
-                include_pinned_nodes,
-                cancel_rx,
-            )
+            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
             .await
     }
 }
