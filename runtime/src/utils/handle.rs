@@ -339,9 +339,9 @@ impl Panicked {
     where
         Fut: Future,
     {
-        let mut panicked = std::pin::pin!(self.receiver);
         // Capture root-task panics long enough to arbitrate them against a
         // detailed infrastructure failure published during the same poll.
+        let mut panicked = std::pin::pin!(self.receiver);
         let mut task = std::pin::pin!(AssertUnwindSafe(task).catch_unwind());
         let mut interruption_open = true;
         poll_fn(|context| {
