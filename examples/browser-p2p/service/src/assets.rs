@@ -77,7 +77,7 @@ fn content_type(path: &str) -> &'static str {
 }
 
 fn cache_control(path: &str) -> &'static str {
-    if path == "/index.html" {
+    if path == "/index.html" || path.starts_with("/wasm/") {
         return "no-cache";
     }
     "public, max-age=31536000, immutable"
@@ -99,5 +99,6 @@ mod tests {
         assert_eq!(content_type("/app.js"), "text/javascript; charset=utf-8");
         assert_eq!(content_type("/module.wasm"), "application/wasm");
         assert_eq!(cache_control("/index.html"), "no-cache");
+        assert_eq!(cache_control("/wasm/browser_p2p.js"), "no-cache");
     }
 }
