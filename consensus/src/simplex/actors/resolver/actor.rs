@@ -225,6 +225,9 @@ impl<
             Certificate::Nullification(nullification) => (None, Some(nullification.view())),
             Certificate::Notarization(_) => (None, None),
         };
+
+        // A nullification retires background and targeted nullification demand across the rest of
+        // its term. Retain a tombstone above finalization so delayed requests cannot recreate it.
         if let Some(nullified) = nullified {
             let term_end = nullified.term_end(self.state.term_length());
             if term_end > self.last_finalized {
@@ -232,9 +235,13 @@ impl<
             }
             self.retire(resolver, Purpose::Nullification, nullified, term_end);
         }
+
+        // Certificate state owns floor selection and background repair.
         let effects = self.state.handle(certificate);
         self.apply_effects(resolver, effects);
 
+        // Finalization is the global retirement boundary. Remove covered tombstones and resolver
+        // requests so delayed work cannot recreate demand below the finalized view.
         let Some(finalized) = finalized else {
             return;
         };
