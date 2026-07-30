@@ -16,7 +16,7 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, Metrics, SinkOf, Spawner,
+    BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, Metrics, SinkOf, Scheduler,
     StreamOf, TcpEndpoint, TcpOrigin, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
@@ -53,7 +53,7 @@ pub struct Config<C: Signer> {
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
 pub struct Actor<
-    E: Spawner + BufferPooler + Clock + Dialer<Endpoint = TcpEndpoint> + Metrics,
+    E: Scheduler + BufferPooler + Clock + Dialer<Endpoint = TcpEndpoint> + Metrics,
     C: Signer,
 > {
     context: ContextCell<E>,
@@ -75,7 +75,7 @@ pub struct Actor<
 }
 
 impl<
-    E: Spawner + BufferPooler + Clock + Dialer<Endpoint = TcpEndpoint> + CryptoRng + Metrics,
+    E: Scheduler + BufferPooler + Clock + Dialer<Endpoint = TcpEndpoint> + CryptoRng + Metrics,
     C: Signer,
 > Actor<E, C>
 where

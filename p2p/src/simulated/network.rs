@@ -20,7 +20,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Acceptor, Clock, Connection, ContextCell, Dialer, Handle, IoBuf, IoBufs, Listener as _, Metrics,
-    Quota, Spawner, TcpEndpoint, TcpOrigin, spawn_cell,
+    Quota, Scheduler, TcpEndpoint, TcpOrigin, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -139,7 +139,7 @@ pub struct Config {
 pub struct Network<
     E: Acceptor<Bind = SocketAddr, Connection: Connection<Origin = TcpOrigin>>
         + Dialer<Endpoint = TcpEndpoint, Connection: Connection<Origin = TcpOrigin>>
-        + Spawner
+        + Scheduler
         + Rng
         + Clock
         + Metrics,
@@ -200,7 +200,7 @@ pub struct Network<
 impl<
     E: Acceptor<Bind = SocketAddr, Connection: Connection<Origin = TcpOrigin>>
         + Dialer<Endpoint = TcpEndpoint, Connection: Connection<Origin = TcpOrigin>>
-        + Spawner
+        + Scheduler
         + Rng
         + Clock
         + Metrics,
@@ -691,7 +691,7 @@ impl<
 impl<
     E: Acceptor<Bind = SocketAddr, Connection: Connection<Origin = TcpOrigin>>
         + Dialer<Endpoint = TcpEndpoint, Connection: Connection<Origin = TcpOrigin>>
-        + Spawner
+        + Scheduler
         + Rng
         + Clock
         + Metrics,
@@ -1219,7 +1219,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 impl<P: PublicKey> Receiver<P> {
     /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
-    pub fn split_with<E: Spawner, R: SplitRouter<P>>(
+    pub fn split_with<E: Scheduler, R: SplitRouter<P>>(
         mut self,
         context: E,
         router: R,
@@ -1287,7 +1287,7 @@ impl<P: PublicKey> Peer<P> {
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
     async fn new<
-        E: Spawner
+        E: Scheduler
             + Acceptor<Bind = SocketAddr, Connection: Connection<Origin = TcpOrigin>>
             + Metrics
             + Clock,
@@ -1435,7 +1435,7 @@ struct Link {
 impl Link {
     #[allow(clippy::too_many_arguments)]
     fn new<
-        E: Spawner
+        E: Scheduler
             + Dialer<Endpoint = TcpEndpoint, Connection: Connection<Origin = TcpOrigin>>
             + Clock
             + Metrics,

@@ -2,7 +2,7 @@
 
 use crate::{
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor, ThreadSpawner,
+    Scheduler, Storage, Supervisor, Spawner,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -510,7 +510,7 @@ pub struct DelayedSyncContext<E> {
 
 forward_context!(DelayedSyncContext, pending);
 
-impl<E: Spawner> Spawner for DelayedSyncContext<E> {
+impl<E: Scheduler> Scheduler for DelayedSyncContext<E> {
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -530,7 +530,7 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
     }
 }
 
-impl<E: ThreadSpawner> ThreadSpawner for DelayedSyncContext<E> {
+impl<E: Spawner> Spawner for DelayedSyncContext<E> {
     fn shared(mut self, blocking: bool) -> Self {
         self.inner = self.inner.shared(blocking);
         self
@@ -1049,7 +1049,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clock, Runner, Sink, Spawner, Stream, deterministic};
+    use crate::{Clock, Runner, Sink, Scheduler, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 

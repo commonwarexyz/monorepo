@@ -11,7 +11,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Scheduler, spawn_cell,
 };
 use commonware_utils::channel::{fallible::FallibleExt, mpsc};
 use rand_core::Rng;
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
+pub struct Actor<E: Scheduler + Rng + Clock + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- Message-Passing ----------
@@ -44,7 +44,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
 }
 
-impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
+impl<E: Scheduler + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C::PublicKey>, Oracle<C::PublicKey>) {

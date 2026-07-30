@@ -17,7 +17,7 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::ThreadSpawner;
+use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
@@ -38,7 +38,7 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
 
 impl<
     F: Family,
-    E: Context + ThreadSpawner,
+    E: Context + Spawner,
     K: Array,
     V: FixedValue,
     H: Hasher,
@@ -77,7 +77,7 @@ pub mod partitioned {
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
-    use commonware_runtime::ThreadSpawner;
+    use commonware_runtime::Spawner;
     use commonware_utils::Array;
 
     /// An ordered key-value QMDB with a partitioned snapshot index.
@@ -102,7 +102,7 @@ pub mod partitioned {
 
     impl<
         F: Family,
-        E: Context + ThreadSpawner,
+        E: Context + Spawner,
         K: Array,
         V: FixedValue,
         H: Hasher,

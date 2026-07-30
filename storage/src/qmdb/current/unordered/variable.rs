@@ -22,7 +22,7 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::ThreadSpawner;
+use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -39,7 +39,7 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 
 impl<
     F: Graftable,
-    E: Context + ThreadSpawner,
+    E: Context + Spawner,
     K: Array,
     V: VariableValue,
     H: Hasher,
@@ -87,7 +87,7 @@ pub mod partitioned {
 
     impl<
         F: Graftable,
-        E: Context + ThreadSpawner,
+        E: Context + Spawner,
         K: Array,
         V: VariableValue,
         H: Hasher,

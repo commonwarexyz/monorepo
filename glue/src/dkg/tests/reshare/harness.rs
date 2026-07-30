@@ -58,8 +58,8 @@ use commonware_formatting::hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
-    ThreadSpawner, buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
+    Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage,
+    Supervisor as _, buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
     archive::prunable,
@@ -227,7 +227,7 @@ struct App {
 }
 
 impl App {
-    async fn execute<E: Rng + ThreadSpawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
         mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
@@ -237,7 +237,7 @@ impl App {
     }
 }
 
-impl<E: Rng + ThreadSpawner + Metrics + Clock + Storage + BufferPooler> Application<E> for App {
+impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E> for App {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;

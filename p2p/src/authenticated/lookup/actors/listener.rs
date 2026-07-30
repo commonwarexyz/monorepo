@@ -9,7 +9,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Acceptor, BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, KeyedRateLimiter,
-    Listener, Metrics, Quota, SinkOf, Spawner, StreamOf, TcpOrigin, spawn_cell,
+    Listener, Metrics, Quota, SinkOf, Scheduler, StreamOf, TcpOrigin, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_stream::encrypted::{Config as StreamConfig, listen};
@@ -69,7 +69,7 @@ pub struct Config<C: Signer> {
 }
 
 pub struct Actor<
-    E: Spawner
+    E: Scheduler
         + BufferPooler
         + Clock
         + Acceptor<Bind = SocketAddr>
@@ -98,7 +98,7 @@ pub struct Actor<
 }
 
 impl<
-    E: Spawner
+    E: Scheduler
         + BufferPooler
         + Clock
         + Acceptor<Bind = SocketAddr>

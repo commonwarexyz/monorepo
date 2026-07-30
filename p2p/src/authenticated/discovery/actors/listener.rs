@@ -8,7 +8,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Acceptor, BufferPooler, Clock, Connection, ConnectionOf, ContextCell, Dialer, Handle,
-    KeyedRateLimiter, Listener, Metrics, Quota, SinkOf, Spawner, StreamOf, TcpEndpoint, TcpOrigin,
+    KeyedRateLimiter, Listener, Metrics, Quota, SinkOf, Scheduler, StreamOf, TcpEndpoint, TcpOrigin,
     spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -35,7 +35,7 @@ pub struct Config<C: Signer> {
 }
 
 pub struct Actor<
-    E: Spawner
+    E: Scheduler
         + BufferPooler
         + Clock
         + Dialer<Endpoint = TcpEndpoint>
@@ -61,7 +61,7 @@ pub struct Actor<
 }
 
 impl<
-    E: Spawner
+    E: Scheduler
         + BufferPooler
         + Clock
         + Dialer<Endpoint = TcpEndpoint>

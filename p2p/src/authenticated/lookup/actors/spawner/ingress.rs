@@ -56,7 +56,7 @@ mod tests {
         Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
+    use commonware_runtime::{Runner as _, Scheduler as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::encrypted::{
         Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
         listen,

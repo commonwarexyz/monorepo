@@ -27,7 +27,7 @@ use tracing::error;
 
 /// Handle to an asynchronous result.
 ///
-/// Handles returned by [`crate::Spawner::spawn`] abort the spawned task. Completion handles only
+/// Handles returned by [`crate::Scheduler::spawn`] abort the spawned task. Completion handles only
 /// stop waiting when aborted, resolving to [`Error::Aborted`]; they do not cancel the underlying
 /// work.
 pub struct Handle<T>
@@ -421,7 +421,7 @@ impl Aborter {
 mod tests {
     use super::Handle;
     use crate::{
-        Error, Metrics as _, Runner, Spawner, Supervisor as _, ThreadSpawner as _, deterministic,
+        Error, Metrics as _, Runner, Scheduler, Supervisor as _, Spawner as _, deterministic,
     };
     use commonware_utils::channel::oneshot;
     use futures::future;

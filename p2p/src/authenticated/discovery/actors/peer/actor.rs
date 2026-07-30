@@ -14,7 +14,7 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Scheduler, Stream,
     iobuf::EncodeExt, telemetry::metrics::CounterFamily,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
@@ -23,7 +23,7 @@ use rand_core::CryptoRng;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
+pub struct Actor<E: Scheduler + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -42,7 +42,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
+impl<E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C>, Relay<EncodedData>) {
         let (control_sender, control_receiver) =
             Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
@@ -408,7 +408,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
+        BufferPooler, IoBuf, Runner, Scheduler, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::encrypted::Config as StreamConfig;

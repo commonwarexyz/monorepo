@@ -157,7 +157,7 @@
 //! ```rust
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
+//! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Scheduler, Supervisor};
 //! use commonware_utils::{ordered::Set, NZU32};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -263,7 +263,7 @@ mod tests {
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
         Acceptor, BufferPooler, Clock, Connection, ConnectionOf, Dialer, Handle, IoBuf, Metrics,
-        Quota, Runner, Spawner, Supervisor as _, TcpEndpoint, TcpOrigin, deterministic,
+        Quota, Runner, Scheduler, Supervisor as _, TcpEndpoint, TcpOrigin, deterministic,
         telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
@@ -305,7 +305,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     async fn run_network<E>(context: E, max_message_size: u32, base_port: u16, n: usize, mode: Mode)
     where
-        E: Spawner
+        E: Scheduler
             + BufferPooler
             + Clock
             + CryptoRng

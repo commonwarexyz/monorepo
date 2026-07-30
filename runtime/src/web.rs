@@ -4,7 +4,7 @@
 
 use crate::{
     BufferPool, BufferPoolConfig, BufferPooler, Clock, Dialer, Error, Execution, Handle, Metrics,
-    Name, Spawner, Supervisor,
+    Name, Scheduler, Supervisor,
     signal::Signal,
     telemetry::metrics::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
@@ -412,7 +412,7 @@ impl<D: 'static> Supervisor for Context<D> {
     }
 }
 
-impl<D: 'static> Spawner for Context<D> {
+impl<D: 'static> Scheduler for Context<D> {
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + 'static,

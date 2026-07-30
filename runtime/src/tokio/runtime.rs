@@ -8,7 +8,7 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
     Acceptor, BufferPool, BufferPoolConfig, Clock, ConnectionOf, Dialer, Error, Execution, Handle,
-    METRICS_PREFIX, Name, Spawner as _, Supervisor as _, TcpEndpoint, ThreadSpawner as _,
+    METRICS_PREFIX, Name, Scheduler as _, Supervisor as _, TcpEndpoint, Spawner as _,
     child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
@@ -539,7 +539,7 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Implementation of [crate::Spawner], [crate::Clock],
+/// Implementation of [crate::Scheduler], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
 pub struct Context {
@@ -561,7 +561,7 @@ impl Context {
     }
 }
 
-impl crate::Spawner for Context {
+impl crate::Scheduler for Context {
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -644,7 +644,7 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::ThreadSpawner for Context {
+impl crate::Spawner for Context {
     fn dedicated(mut self) -> Self {
         self.execution = Execution::Dedicated;
         self

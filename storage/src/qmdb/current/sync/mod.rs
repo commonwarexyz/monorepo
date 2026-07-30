@@ -72,7 +72,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::ThreadSpawner;
+use commonware_runtime::Spawner;
 use commonware_utils::{Array, bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -112,7 +112,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
 where
     F: Graftable,
-    E: Context + ThreadSpawner,
+    E: Context + Spawner,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
@@ -257,7 +257,7 @@ macro_rules! impl_current_sync_database {
         impl<F, E, K, V, H, T, const N: usize, S> Database for $db<F, E, K, V, H, T, N, S>
         where
             F: Graftable,
-            E: Context + ThreadSpawner,
+            E: Context + Spawner,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,

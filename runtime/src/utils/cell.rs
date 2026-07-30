@@ -8,12 +8,12 @@ const DUPLICATE_CONTEXT: &str = "runtime context already present";
 ///
 /// The macro uses the context's default spawn configuration (supervised, shared executor with
 /// `blocking == false`). If you need to mark the task as blocking or request a dedicated thread,
-/// take the context via [`Cell::take`] and call the appropriate [`crate::Spawner`] methods before spawning.
+/// take the context via [`Cell::take`] and call the appropriate [`crate::Scheduler`] methods before spawning.
 #[macro_export]
 macro_rules! spawn_cell {
     ($cell:expr, $body:expr $(,)?) => {{
         let __commonware_context = $cell.take();
-        $crate::Spawner::spawn(__commonware_context, move |context| {
+        $crate::Scheduler::spawn(__commonware_context, move |context| {
             $cell.restore(context);
             $body
         })

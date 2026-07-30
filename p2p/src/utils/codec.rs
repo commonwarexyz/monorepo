@@ -17,7 +17,7 @@ use commonware_runtime::{
     BufferPool, iobuf::EncodeExt,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{ContextCell, Handle, Metrics, Scheduler, spawn_cell};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_utils::{PlatformSend, futures::Pool};
 #[cfg(not(target_arch = "wasm32"))]
@@ -185,7 +185,7 @@ impl<P: PublicKey, V: PlatformSend> BackgroundReceiver<P, V> {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
-    E: Spawner,
+    E: Scheduler,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     R: Receiver<PublicKey = P>,
@@ -203,7 +203,7 @@ where
 #[cfg(not(target_arch = "wasm32"))]
 impl<E, P, B, R, V, T> WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
-    E: Spawner + Metrics,
+    E: Scheduler + Metrics,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     R: Receiver<PublicKey = P>,

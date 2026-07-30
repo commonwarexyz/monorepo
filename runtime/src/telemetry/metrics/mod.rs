@@ -229,7 +229,7 @@ pub fn has_metric_value(metrics: &str, name: &str, value: impl std::fmt::Display
 ///
 /// ```rust
 /// use commonware_runtime::{
-///     deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics, Runner, Spawner,
+///     deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics, Runner, Scheduler,
 ///     Supervisor,
 /// };
 /// use std::time::Duration;
@@ -863,7 +863,7 @@ impl Register for Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
+    use crate::{Metrics as _, Runner, Scheduler, Supervisor as _, deterministic};
     use commonware_macros::test_traced;
     use futures::future;
     use std::sync::mpsc::{self, TryRecvError};

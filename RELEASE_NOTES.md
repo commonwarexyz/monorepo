@@ -597,7 +597,7 @@ as epoch, round, shard, or peer should be modeled with `with_attribute()`
 The runtime trait surface was also split more clearly ([#3680]):
 
 - `Supervisor` owns task identity.
-- `Spawner` builds on supervision and controls task placement.
+- `Scheduler` builds on supervision and controls task placement.
 - `Tracing` controls spans.
 - `Metrics` controls metric registration and encoding.
 - `Observer` groups tracing and metrics when both are required.

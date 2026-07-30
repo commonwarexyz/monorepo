@@ -61,7 +61,7 @@
 //! ```rust
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner, Supervisor};
+//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Scheduler, Supervisor};
 //! use commonware_utils::{NZU32, NZUsize};
 //! use std::time::Duration;
 //!
@@ -192,7 +192,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group};
     use commonware_runtime::{
-        Clock, IoBuf, Quota, Runner, Spawner, Supervisor as _, deterministic, reschedule,
+        Clock, IoBuf, Quota, Runner, Scheduler, Supervisor as _, deterministic, reschedule,
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{

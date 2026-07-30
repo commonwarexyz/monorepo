@@ -11,7 +11,7 @@ use crate::{
     utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::metrics::GaugeExt};
+use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Scheduler, telemetry::metrics::GaugeExt};
 use commonware_utils::{PrioritySet, SystemTimeExt, ordered::Set as OrderedSet};
 use rand::{Rng, seq::IteratorRandom};
 use std::{
@@ -94,7 +94,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     metrics: Metrics<C>,
 }
 
-impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Scheduler + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,

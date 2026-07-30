@@ -46,7 +46,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::ThreadSpawner;
+use commonware_runtime::Spawner;
 use commonware_utils::{Array, range::NonEmptyRange};
 use core::num::NonZeroUsize;
 
@@ -69,7 +69,7 @@ async fn build_db<F, E, U, I, H, C, T, S>(
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
-    E: Context + ThreadSpawner,
+    E: Context + Spawner,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
@@ -124,7 +124,7 @@ macro_rules! impl_sync_database {
         impl<F, E, K, V, H, T, S> qmdb::sync::Database for $db<F, E, K, V, H, T, S>
         where
             F: merkle::Family,
-            E: Context + ThreadSpawner,
+            E: Context + Spawner,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,

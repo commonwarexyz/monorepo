@@ -1,6 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
-use commonware_runtime::{Clock, Error, Spawner, web::Runtime};
+use commonware_runtime::{Clock, Error, Scheduler, web::Runtime};
 use js_sys::Promise;
 use std::{
     cell::RefCell,

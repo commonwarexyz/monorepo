@@ -27,7 +27,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, Metrics, Supervisor};
+//! use commonware_runtime::{Scheduler, Runner, deterministic, Metrics, Supervisor};
 //!
 //! let executor =  deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -897,7 +897,7 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
-/// Implementation of [crate::Spawner], [crate::Clock],
+/// Implementation of [crate::Scheduler], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
 pub struct Context {
@@ -1116,7 +1116,7 @@ impl Context {
     }
 }
 
-impl crate::Spawner for Context {
+impl crate::Scheduler for Context {
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -1186,7 +1186,7 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::ThreadSpawner for Context {
+impl crate::Spawner for Context {
     fn dedicated(mut self) -> Self {
         self.execution = Execution::Dedicated;
         self
@@ -1611,7 +1611,7 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        Blob, Connection as _, Listener as _, Metrics as _, Runner as _, Spawner as _, Storage,
+        Blob, Connection as _, Listener as _, Metrics as _, Runner as _, Scheduler as _, Storage,
         Strategizer, Supervisor as _, deterministic, reschedule,
     };
     use commonware_macros::test_traced;

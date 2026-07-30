@@ -16,7 +16,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
     Acceptor, BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, Metrics, Quota,
-    Spawner, TcpEndpoint, TcpOrigin, spawn_cell,
+    Scheduler, TcpEndpoint, TcpOrigin, spawn_cell,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
@@ -25,7 +25,7 @@ use tracing::{debug, info};
 
 /// Authenticated network whose transport connections are supplied explicitly.
 pub struct AttachmentNetwork<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
+    E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
     C: Signer,
     N: Connection,
     A: attachment::PeerAdmission<C::PublicKey, N::Origin>,
@@ -43,7 +43,7 @@ pub struct AttachmentNetwork<
 }
 
 impl<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
+    E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
     C: Signer,
     N: Connection,
     A: attachment::PeerAdmission<C::PublicKey, N::Origin>,
@@ -168,7 +168,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
-    E: Spawner
+    E: Scheduler
         + BufferPooler
         + Clock
         + CryptoRng
@@ -191,7 +191,7 @@ pub struct Network<
 }
 
 impl<
-    E: Spawner
+    E: Scheduler
         + BufferPooler
         + Clock
         + CryptoRng

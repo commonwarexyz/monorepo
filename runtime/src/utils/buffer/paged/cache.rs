@@ -603,7 +603,7 @@ mod tests {
     use super::{super::Checksum, *};
     use crate::{
         Buf, BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _,
-        Spawner as _, Storage as _, Supervisor as _, buffer::paged::CHECKSUM_SIZE, deterministic,
+        Scheduler as _, Storage as _, Supervisor as _, buffer::paged::CHECKSUM_SIZE, deterministic,
         telemetry::metrics::Registry,
     };
     use commonware_cryptography::Crc32;

@@ -17,7 +17,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
     Acceptor, BufferPooler, Clock, Connection, ConnectionOf, ContextCell, Dialer, Handle, Metrics,
-    Quota, Spawner, TcpEndpoint, TcpOrigin, spawn_cell,
+    Quota, Scheduler, TcpEndpoint, TcpOrigin, spawn_cell,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
@@ -32,7 +32,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
-    E: Spawner
+    E: Scheduler
         + BufferPooler
         + Clock
         + CryptoRng
@@ -55,7 +55,7 @@ pub struct Network<
 }
 
 impl<
-    E: Spawner
+    E: Scheduler
         + BufferPooler
         + Clock
         + CryptoRng

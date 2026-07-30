@@ -6,7 +6,7 @@ use commonware_cryptography::{PublicKey, Signer};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     BufferPooler, Clock, Connection, ConnectionInfo, ContextCell, Handle, Metrics, PlatformSend,
-    PlatformSync, Spawner, spawn_cell,
+    PlatformSync, Scheduler, spawn_cell,
 };
 use commonware_stream::encrypted::{self, Config as StreamConfig};
 use commonware_utils::channel::oneshot;
@@ -133,7 +133,7 @@ impl<N: Connection, P: PublicKey> Attachments<N, P> {
 }
 
 pub struct Actor<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
+    E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
     C: Signer,
     N: Connection,
     A: PeerAdmission<C::PublicKey, N::Origin>,
@@ -145,7 +145,7 @@ pub struct Actor<
 }
 
 impl<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
+    E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
     C: Signer,
     N: Connection,
     A: PeerAdmission<C::PublicKey, N::Origin>,

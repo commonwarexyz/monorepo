@@ -14,7 +14,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     BufferPooler, Clock, Connection, ConnectionOf, ContextCell, Dialer, Handle, Metrics, SinkOf,
-    Spawner, StreamOf, TcpEndpoint, TcpOrigin, spawn_cell,
+    Scheduler, StreamOf, TcpEndpoint, TcpOrigin, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::encrypted::{Config as StreamConfig, dial};
@@ -50,7 +50,7 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + Clock + Dialer<Endpoint = TcpEndpoint> + Metrics, C: Signer>
+pub struct Actor<E: Scheduler + Clock + Dialer<Endpoint = TcpEndpoint> + Metrics, C: Signer>
 where
     ConnectionOf<E>: Connection<Origin = TcpOrigin>,
 {
@@ -73,7 +73,7 @@ where
 }
 
 impl<
-    E: Spawner + BufferPooler + Clock + Dialer<Endpoint = TcpEndpoint> + CryptoRng + Metrics,
+    E: Scheduler + BufferPooler + Clock + Dialer<Endpoint = TcpEndpoint> + CryptoRng + Metrics,
     C: Signer,
 > Actor<E, C>
 where

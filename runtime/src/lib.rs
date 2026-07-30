@@ -174,8 +174,8 @@ stability_scope!(BETA {
         /// Start running a root task.
         ///
         /// When this function returns, all spawned tasks will be canceled. If clean
-        /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
-        /// [Spawner::stopped] to coordinate clean shutdown.
+        /// shutdown cannot be implemented via `Drop`, consider using [Scheduler::stop] and
+        /// [Scheduler::stopped] to coordinate clean shutdown.
         fn start<F, Fut>(self, f: F) -> Fut::Output
         where
             F: FnOnce(Self::Context) -> Fut,
@@ -277,7 +277,7 @@ stability_scope!(BETA {
     }
 
     /// Interface that any task scheduler must implement to spawn tasks.
-    pub trait Spawner: Supervisor {
+    pub trait Scheduler: Supervisor {
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
@@ -306,8 +306,8 @@ stability_scope!(BETA {
         ///
         /// # Spawn Configuration
         ///
-        /// [`ThreadSpawner::dedicated`] and [`ThreadSpawner::shared`] only affect the
-        /// handle they return. [`Supervisor::child`] and [`Spawner::spawn`]
+        /// [`Spawner::dedicated`] and [`Spawner::shared`] only affect the
+        /// handle they return. [`Supervisor::child`] and [`Scheduler::spawn`]
         /// both start child task contexts from a clean spawn configuration.
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
@@ -323,7 +323,7 @@ stability_scope!(BETA {
         /// to perform any required cleanup and exit.
         ///
         /// This method does not actually kill any tasks but rather signals to them, using
-        /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
+        /// the [signal::Signal] returned by [Scheduler::stopped], that they should exit.
         /// It then waits for all [signal::Signal] references to be dropped before returning.
         ///
         /// ## Multiple Stop Calls
@@ -344,18 +344,18 @@ stability_scope!(BETA {
             timeout: Option<Duration>,
         ) -> impl Future<Output = Result<(), Error>> + PlatformSend;
 
-        /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
+        /// Returns an instance of a [signal::Signal] that resolves when [Scheduler::stop] is called by
         /// any task.
         ///
-        /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
+        /// If [Scheduler::stop] has already been called, the [signal::Signal] returned will resolve
         /// immediately. The [signal::Signal] returned will always resolve to the value of the
-        /// first [Spawner::stop] call.
+        /// first [Scheduler::stop] call.
         fn stopped(&self) -> signal::Signal;
     }
 
     /// Native scheduling hints for work that requires special thread placement.
     #[cfg(not(target_arch = "wasm32"))]
-    pub trait ThreadSpawner: Spawner {
+    pub trait Spawner: Scheduler {
         /// Return a spawner that schedules the next task on the shared executor.
         ///
         /// Set `blocking` when the task may briefly block its executor thread.
@@ -933,7 +933,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_clock_sleep<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             // Capture initial time
@@ -952,7 +952,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_clock_sleep_until<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock + Metrics,
+        R::Context: Scheduler + Clock + Metrics,
     {
         runner.start(|context| async move {
             // Trigger sleep
@@ -970,7 +970,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_clock_sleep_until_far_future<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             let sleep = context.sleep_until(SystemTime::limit());
@@ -984,7 +984,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_clock_timeout<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             // Future completes before timeout
@@ -1015,7 +1015,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_root_finishes<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner,
+        R::Context: Scheduler,
     {
         runner.start(|context| async move {
             context.spawn(|_| async move {
@@ -1032,7 +1032,7 @@ mod tests {
     fn test_spawn_after_abort<R>(#[case] runner: R)
     where
         R: Runner,
-        R::Context: Spawner,
+        R::Context: Scheduler,
     {
         runner.start(|context| async move {
             // Create a child context
@@ -1064,7 +1064,7 @@ mod tests {
         )]
         execution: Execution,
     ) where
-        R::Context: ThreadSpawner,
+        R::Context: Spawner,
     {
         runner.start(|context| async move {
             let context = match execution {
@@ -1103,7 +1103,7 @@ mod tests {
     #[should_panic(expected = "blah")]
     fn test_panic_aborts_spawn<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             context.child("panic").spawn(|_| async move {
@@ -1124,7 +1124,7 @@ mod tests {
     #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
     fn test_panic_aborts_spawn_caught<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
             let result = context.child("panic").spawn(|_| async move {
@@ -1141,7 +1141,7 @@ mod tests {
     #[should_panic(expected = "boom")]
     fn test_multiple_panics<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             context.child("panic").spawn(|_| async move {
@@ -1168,7 +1168,7 @@ mod tests {
     #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
     fn test_multiple_panics_caught<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         let (res1, res2, res3) = runner.start(|context| async move {
             let handle1 = context.child("panic").spawn(|_| async move {
@@ -1557,7 +1557,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_blob_clone_and_concurrent_read<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Storage + Metrics,
+        R::Context: Scheduler + Storage + Metrics,
     {
         runner.start(|context| async move {
             let partition = "test_partition";
@@ -1628,7 +1628,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_shutdown<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Scheduler + Metrics + Clock,
     {
         let kill = 9;
         runner.start(|context| async move {
@@ -1663,7 +1663,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_shutdown_multiple_signals<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Scheduler + Metrics + Clock,
     {
         let kill = 42;
         runner.start(|context| async move {
@@ -1717,7 +1717,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_shutdown_timeout<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Scheduler + Metrics + Clock,
     {
         let kill = 42;
         runner.start(|context| async move {
@@ -1746,7 +1746,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_shutdown_multiple_stop_calls<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Scheduler + Metrics + Clock,
     {
         let kill1 = 42;
         let kill2 = 43;
@@ -1811,7 +1811,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_unfulfilled_shutdown<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Metrics,
+        R::Context: Scheduler + Metrics,
     {
         runner.start(|context| async move {
             // Spawn a task that waits for signal
@@ -1834,7 +1834,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_dedicated<R: Runner>(#[case] runner: R)
     where
-        R::Context: ThreadSpawner,
+        R::Context: Spawner,
     {
         runner.start(|context| async move {
             let handle = context.dedicated().spawn(|_| async move { 42 });
@@ -1847,7 +1847,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1888,7 +1888,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_abort_on_parent_abort<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1926,7 +1926,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_abort_on_parent_completion<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1961,7 +1961,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_cascading_abort<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             // We create the following tree of tasks. All tasks will run
@@ -2039,7 +2039,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_child_survives_sibling_completion<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             let (child_started_tx, child_started_rx) = oneshot::channel();
@@ -2100,7 +2100,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_clone_chain<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             let (parent_started_tx, parent_started_rx) = oneshot::channel();
@@ -2156,7 +2156,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_sparse_clone_chain<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Scheduler + Clock,
     {
         runner.start(|context| async move {
             let (leaf_started_tx, leaf_started_rx) = oneshot::channel();
@@ -2198,7 +2198,7 @@ mod tests {
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
     ) where
-        R::Context: ThreadSpawner,
+        R::Context: Spawner,
     {
         runner.start(|context| async move {
             let context = match execution {
@@ -2220,7 +2220,7 @@ mod tests {
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
     ) where
-        R::Context: ThreadSpawner + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             let spawner = match execution {
@@ -2247,7 +2247,7 @@ mod tests {
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
     ) where
-        R::Context: ThreadSpawner + Clock,
+        R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
             let spawner = match execution {
@@ -2324,7 +2324,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_late_waker<R: Runner>(#[case] runner: R)
     where
-        R::Context: Metrics + Spawner,
+        R::Context: Metrics + Scheduler,
     {
         // A future that captures its waker and sends it to the caller, then
         // stays pending forever.
@@ -2610,7 +2610,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_metrics_spawn_attribute_cardinality<R: Runner>(#[case] runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Scheduler + Metrics + Clock,
     {
         runner.start(|context| async move {
             const ROUNDS: u64 = 128;

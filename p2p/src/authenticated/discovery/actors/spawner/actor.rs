@@ -15,7 +15,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Scheduler, Stream, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use rand_core::CryptoRng;
@@ -23,7 +23,7 @@ use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
 pub struct Actor<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
+    E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
     O: Sink,
     I: Stream,
     C: PublicKey,
@@ -44,7 +44,7 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey>
+impl<E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey>
     Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
