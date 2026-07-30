@@ -19,212 +19,120 @@ fn sample_accounting_is_checked() {
 }
 
 #[test]
-fn cli_accepts_inline_values_and_cargo_marker() {
-    // Setup: Mix inline and separate values with Cargo's trailing marker.
+fn cli_selects_profiles_and_uses_fixed_workloads() {
+    // Setup: Mix inline and separate selectors with Cargo's trailing marker.
     let arguments = [
         "--scenario=worst-case",
+        "--backend=all",
         "--backend",
         "tokio",
         "--worker-threads=2",
-        "--accuracy-concurrency",
-        "3,5",
-        "--worst-batches",
-        "1",
+        "--accuracy-batches",
+        "4",
+        "--worst-batches=1",
         "--bench",
-    ]
-    .into_iter()
-    .map(str::to_owned);
+    ];
 
     // Action: Parse and validate the complete synthetic command line.
     let config = super::Config::parse_from(arguments).unwrap().unwrap();
 
-    // Assertion: Every selected value and derived producer count is retained.
+    // Assertion: Selectors are retained while workload dimensions stay fixed.
     assert_eq!(config.scenario, super::ScenarioSelection::WorstCase);
     assert_eq!(config.backend, super::BackendSelection::Tokio);
     assert_eq!(config.worker_threads, 2);
-    assert_eq!(config.accuracy_concurrency, [3, 5]);
+    assert_eq!(config.accuracy_batches, 4);
     assert_eq!(config.worst_batches, 1);
+    assert_eq!(super::ACCURACY_CONCURRENCY, [1_000, 10_000]);
+    assert_eq!(super::REGISTRATION_TIMERS, 50_000);
+    assert_eq!(super::CANCELLATION_TIMERS, 100_000);
+    assert_eq!(super::STORM_TIMERS, 50_000);
     assert_eq!(config.cancellation_producer_counts(), [1, 2, 8]);
 }
 
 #[test]
-fn cli_skips_harness_and_filtered_invocations() {
-    // Setup: Select representative Criterion and libtest arguments used by
-    // filtered, listing, test, and benchmark-reporting workflows.
+fn cli_skips_cargo_harness_and_filtered_invocations() {
+    // Setup: Choose representative filters and Criterion or libtest flags.
     let invocations = [
-        vec!["iobuf"],
-        vec!["--list"],
-        vec!["-v"],
-        vec!["-vn"],
-        vec!["-cnever"],
-        vec!["--test"],
-        vec!["--noplot"],
-        vec!["--no-capture"],
-        vec!["--shuffle-seed", "7"],
-        vec!["--sample-size", "10"],
-        vec!["--output-format", "bencher"],
-        vec!["--output-format=bencher"],
+        &["--bench", "iobuf"][..],
+        &["--bench", "--list"],
+        &["--bench", "-v"],
+        &["--bench", "--noplot"],
+        &["--bench", "--no-capture"],
+        &["--bench", "--sample-size", "10"],
+        &["--bench", "--output-format=bencher"],
     ];
 
     for invocation in invocations {
-        // Action: Parse each compatibility invocation through the production path.
-        let parsed = super::Config::parse_from(invocation.into_iter().map(str::to_owned)).unwrap();
+        // Action: Parse each invocation through the production compatibility path.
+        let parsed = super::Config::parse_from(invocation.iter().copied()).unwrap();
 
-        // Assertion: The custom harness exits without running its expensive suite.
+        // Assertion: The custom harness does not run its production-sized suite.
         assert!(parsed.is_none());
     }
 }
 
 #[test]
-fn cli_rejects_unknown_timer_options() {
-    // Setup: Supply one dashed option outside the timer and harness interfaces.
-    let arguments = ["--unknown-timer-option", "value"]
-        .into_iter()
-        .map(str::to_owned);
+fn cli_keeps_timer_invocations_strict() {
+    // Setup: Choose invalid values, a removed workload knob, and a mixed
+    // timer-plus-Criterion invocation.
+    let invocations = [
+        &["--worker-threads", "0"][..],
+        &["--scenario", "unknown"],
+        &["--scenario", "expiry", "--storm-timers", "1"],
+        &["--bench", "--scenario", "expiry", "--noplot"],
+    ];
 
-    // Action: Parse the unsupported timer invocation.
-    let error = super::Config::parse_from(arguments).unwrap_err();
+    for invocation in invocations {
+        // Action: Parse each invalid timer invocation through clap.
+        let error = super::Config::parse_from(invocation.iter().copied()).unwrap_err();
 
-    // Assertion: Compatibility handling does not hide misspelled timer options.
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(error.to_string().contains("unknown option"));
-}
-
-#[test]
-fn cli_rejects_zero_for_positive_options() {
-    // Setup: Supply zero for an option that controls a nonempty batch.
-    let arguments = ["--accuracy-batches", "0"].into_iter().map(str::to_owned);
-
-    // Action: Parse the invalid synthetic command line.
-    let error = super::Config::parse_from(arguments).unwrap_err();
-
-    // Assertion: Validation fails as invalid input rather than panicking.
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-}
-
-#[test]
-fn cli_rejects_zero_peer_lead() {
-    // Setup: Request a fairness peer that starts at the storm deadline.
-    let arguments = ["--peer-lead-us", "0"].into_iter().map(str::to_owned);
-
-    // Action: Parse the invalid synthetic command line.
-    let error = super::Config::parse_from(arguments).unwrap_err();
-
-    // Assertion: The peer must have time to become runnable before expiry.
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(error.to_string().contains("--peer-lead-us"));
-}
-
-#[test]
-fn cli_requires_peer_lead_before_storm_deadline() {
-    // Setup: Choose peer leads equal to and greater than the storm lead.
-    let invalid_leads = [("50", "50"), ("50", "51")];
-
-    for (storm_lead, peer_lead) in invalid_leads {
-        // Action: Parse each ordering through the complete configuration path.
-        let arguments = ["--storm-lead-us", storm_lead, "--peer-lead-us", peer_lead]
-            .into_iter()
-            .map(str::to_owned);
-        let error = super::Config::parse_from(arguments).unwrap_err();
-
-        // Assertion: The fairness peer cannot be configured to start at or
-        // after timer expiry.
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("smaller"));
+        // Assertion: Timer selections do not hide invalid or obsolete options.
+        assert!(matches!(
+            error.kind(),
+            clap::error::ErrorKind::InvalidValue
+                | clap::error::ErrorKind::UnknownArgument
+                | clap::error::ErrorKind::ValueValidation
+        ));
     }
 }
 
 #[test]
-fn cli_requires_one_registered_timer_per_producer() {
-    // Setup: Select eight producers but only seven cancellation timers.
-    let arguments = [
-        "--worker-threads",
-        "2",
-        "--cancellation-timers",
-        "7",
-        "--cancel-percent",
-        "100",
-    ]
-    .into_iter()
-    .map(str::to_owned);
+fn cli_help_describes_only_supported_controls() {
+    // Setup: Request help through the timer-specific command line.
+    let arguments = ["--help"];
 
-    // Action: Parse the undersized cancellation workload.
+    // Action: Render the clap help diagnostic.
     let error = super::Config::parse_from(arguments).unwrap_err();
+    let help = error.to_string();
 
-    // Assertion: Empty producer partitions are rejected before the benchmark.
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(error.to_string().contains("every producer registers"));
+    // Assertion: Profiling controls are present and workload tuning is absent.
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert!(help.contains("--scenario"));
+    assert!(help.contains("--backend"));
+    assert!(help.contains("--worker-threads"));
+    assert!(help.contains("--accuracy-batches"));
+    assert!(help.contains("--worst-batches"));
+    assert!(!help.contains("--storm-timers"));
+    assert!(!help.contains("--cancel-percent"));
 }
 
 #[test]
-fn cli_requires_one_canceled_timer_per_producer() {
-    // Setup: Register one timer per producer but cancel only half of them.
-    let arguments = [
-        "--worker-threads",
-        "2",
-        "--cancellation-timers",
-        "8",
-        "--cancel-percent",
-        "50",
-    ]
-    .into_iter()
-    .map(str::to_owned);
+fn validation_applies_only_to_selected_workloads() {
+    // Setup: Overflow accuracy accounting in selected and unselected scenarios.
+    let batches = usize::MAX.to_string();
+    let selected = ["--scenario", "accuracy", "--accuracy-batches", &batches];
+    let unselected = ["--scenario", "registration", "--accuracy-batches", &batches];
 
-    // Action: Parse the cancellation workload with idle measured producers.
-    let error = super::Config::parse_from(arguments).unwrap_err();
+    // Action: Parse both configurations through clap and derived validation.
+    let selected_error = super::Config::parse_from(selected).unwrap_err();
+    let unselected_config = super::Config::parse_from(unselected).unwrap().unwrap();
 
-    // Assertion: Every advertised producer must perform measured cancellation.
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(error.to_string().contains("every producer cancels"));
-}
-
-#[test]
-fn accuracy_only_ignores_cancellation_topology() {
-    // Setup: Select only accuracy with invalid unused cancellation and expiry relationships.
-    let arguments = [
-        "--scenario",
-        "accuracy",
-        "--worker-threads",
-        "4",
-        "--cancellation-timers",
-        "1",
-        "--cancel-percent",
-        "101",
-        "--storm-lead-us",
-        "1",
-        "--peer-lead-us",
-        "2",
-    ]
-    .into_iter()
-    .map(str::to_owned);
-
-    // Action: Parse a configuration that never runs cancellation.
-    let config = super::Config::parse_from(arguments).unwrap().unwrap();
-
-    // Assertion: Unused producer topology does not reject the accuracy workload.
-    assert_eq!(config.scenario, super::ScenarioSelection::Accuracy);
-    assert_eq!(config.cancellation_timers, 1);
-    assert_eq!(config.cancel_percent, 101);
-}
-
-#[test]
-fn registration_only_ignores_accuracy_dimensions() {
-    // Setup: Select registration with an overflowing unused accuracy sample count.
-    let arguments = vec![
-        "--scenario".to_owned(),
-        "registration".to_owned(),
-        "--accuracy-batches".to_owned(),
-        "2".to_owned(),
-        "--accuracy-concurrency".to_owned(),
-        usize::MAX.to_string(),
-    ];
-
-    // Action: Parse a configuration that never allocates accuracy samples.
-    let config = super::Config::parse_from(arguments).unwrap().unwrap();
-
-    // Assertion: Only registration validation applies to the selected workload.
-    assert_eq!(config.scenario, super::ScenarioSelection::Registration);
-    assert_eq!(config.accuracy_concurrency, [usize::MAX]);
+    // Assertion: Only a workload that will run validates its sample count.
+    assert_eq!(
+        selected_error.kind(),
+        clap::error::ErrorKind::ValueValidation
+    );
+    assert_eq!(unselected_config.accuracy_batches, usize::MAX);
 }
 
 #[test]
@@ -238,18 +146,7 @@ fn cancellation_scenarios_select_requested_producer_levels() {
 
     for (scenario, expected) in scenarios {
         // Action: Parse the selector through the production command-line path.
-        let arguments = [
-            "--scenario",
-            scenario,
-            "--worker-threads",
-            "2",
-            "--cancellation-timers",
-            "8",
-            "--cancel-percent",
-            "100",
-        ]
-        .into_iter()
-        .map(str::to_owned);
+        let arguments = ["--scenario", scenario, "--worker-threads", "2"];
         let config = super::Config::parse_from(arguments).unwrap().unwrap();
 
         // Assertion: Profiling can isolate single or contending cancellation.
@@ -258,24 +155,20 @@ fn cancellation_scenarios_select_requested_producer_levels() {
 }
 
 #[test]
-fn single_producer_validation_ignores_unselected_topology() {
-    // Setup: Configure fewer timers than the unselected oversubscribed level.
+fn cli_rejects_oversubscribed_fixed_cancellation_workload() {
+    // Setup: Select more producers than the fixed cancellation workload serves.
+    let worker_threads = 25_000usize;
     let arguments = [
-        "--scenario",
-        "cancellation-single",
-        "--worker-threads",
-        "4",
-        "--cancellation-timers",
-        "1",
-        "--cancel-percent",
-        "100",
-    ]
-    .into_iter()
-    .map(str::to_owned);
+        "--scenario".to_owned(),
+        "cancellation-multi".to_owned(),
+        "--worker-threads".to_owned(),
+        worker_threads.to_string(),
+    ];
 
-    // Action: Parse the isolated single-producer cancellation workload.
-    let config = super::Config::parse_from(arguments).unwrap().unwrap();
+    // Action: Parse the oversubscribed producer topology.
+    let error = super::Config::parse_from(arguments).unwrap_err();
 
-    // Assertion: Validation requires only the one producer that will run.
-    assert_eq!(config.cancellation_producer_counts(), [1]);
+    // Assertion: Every advertised producer must cancel at least one timer.
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    assert!(error.to_string().contains("fixed workload"));
 }

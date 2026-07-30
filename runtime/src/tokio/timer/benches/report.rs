@@ -1,6 +1,12 @@
 //! Shared percentile calculation and benchmark reporting.
 
-use crate::{Backend, Config};
+use crate::{
+    Backend, Config,
+    config::{
+        ACCURACY_CONCURRENCY, ACCURACY_SPREAD, CANCEL_PERCENT, CANCELLATION_TIMERS, PEER_LEAD,
+        REGISTRATION_STEP, REGISTRATION_TIMERS, STORM_LEAD, STORM_TIMERS,
+    },
+};
 use std::{
     fmt::Write as _,
     io,
@@ -89,7 +95,7 @@ impl ClockPairSpan {
     }
 }
 
-/// Prints the platform and every effective command-line setting.
+/// Prints the effective benchmark configuration and platform.
 pub(crate) fn print_effective_config(config: &Config) {
     let shards = config
         .shards()
@@ -108,16 +114,16 @@ pub(crate) fn print_effective_config(config: &Config) {
         shards,
         config.accuracy_batches,
         config.accuracy_batches,
-        config.accuracy_concurrency,
-        config.accuracy_spread.as_micros(),
+        ACCURACY_CONCURRENCY,
+        ACCURACY_SPREAD.as_micros(),
         config.worst_batches,
-        config.registration_timers,
-        config.registration_step.as_nanos(),
-        config.cancellation_timers,
-        config.cancel_percent,
-        config.storm_timers,
-        config.storm_lead.as_micros(),
-        config.peer_lead.as_micros(),
+        REGISTRATION_TIMERS,
+        REGISTRATION_STEP.as_nanos(),
+        CANCELLATION_TIMERS,
+        CANCEL_PERCENT,
+        STORM_TIMERS,
+        STORM_LEAD.as_micros(),
+        PEER_LEAD.as_micros(),
         fairness_shards_label(),
         fd_count_label(),
     );
@@ -127,7 +133,7 @@ pub(crate) fn print_effective_config(config: &Config) {
 pub(crate) fn print_fairness_config(config: &Config) {
     let accounting = format_sample_counts(
         config.worst_batches,
-        &[("timers_per_batch", config.storm_timers)],
+        &[("timers_per_batch", STORM_TIMERS)],
         &[
             ("first_dispatch", config.worst_batches),
             ("full_drain", config.worst_batches),
@@ -140,8 +146,8 @@ pub(crate) fn print_fairness_config(config: &Config) {
         config.worker_threads,
         fairness_shards_label(),
         accounting,
-        config.storm_lead.as_micros(),
-        config.peer_lead.as_micros(),
+        STORM_LEAD.as_micros(),
+        PEER_LEAD.as_micros(),
         fd_count_label(),
     );
     println!(

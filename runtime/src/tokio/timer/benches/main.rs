@@ -20,7 +20,7 @@ use std::{error::Error, io};
 
 /// Parses configuration and runs the selected production timer workloads.
 fn main() -> Result<(), Box<dyn Error>> {
-    let Some(config) = Config::parse()? else {
+    let Some(config) = Config::parse() else {
         return Ok(());
     };
     if config.scenario.runs_accuracy() || config.scenario.runs_contention() {

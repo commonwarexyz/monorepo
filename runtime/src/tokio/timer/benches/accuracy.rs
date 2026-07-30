@@ -1,6 +1,10 @@
 //! Application-observed timer accuracy scenarios.
 
-use crate::{Backend, Config, checked_observations, report, sleep_for, sleep_until};
+use crate::{
+    Backend, Config, checked_observations,
+    config::{ACCURACY_CONCURRENCY, ACCURACY_SPREAD},
+    report, sleep_for, sleep_until,
+};
 use commonware_runtime::tokio as commonware_tokio;
 use std::{
     io,
@@ -123,7 +127,7 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
             mode: Mode::Synchronized,
         },
     ];
-    for &concurrency in &config.accuracy_concurrency {
+    for &concurrency in &ACCURACY_CONCURRENCY {
         scenarios.push(Scenario {
             concurrency,
             target: Duration::from_micros(100),
@@ -144,13 +148,8 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
 
             // A configured sample is a batch, so every slot contributes one value.
             for _ in 0..config.accuracy_batches {
-                let batch = run_batch(
-                    Arc::clone(&clock),
-                    backend,
-                    *scenario,
-                    config.accuracy_spread,
-                )
-                .await?;
+                let batch =
+                    run_batch(Arc::clone(&clock), backend, *scenario, ACCURACY_SPREAD).await?;
                 lateness.extend(batch.lateness);
                 clock_pair_span.observe(batch.clock_pair_span);
             }

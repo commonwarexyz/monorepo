@@ -2,6 +2,10 @@
 
 use crate::{
     Backend, BenchSleep, Config, checked_observations,
+    config::{
+        CANCEL_PERCENT, CANCELLATION_TIMERS, PEER_LEAD, REGISTRATION_STEP, REGISTRATION_TIMERS,
+        STORM_LEAD, STORM_TIMERS,
+    },
     peer_gap::{PeerGap, dispatch_lateness},
     poll_once,
     producer_gate::{ProducerGate, ProducerRelease},
@@ -58,13 +62,9 @@ async fn benchmark_descending_registration(
         let mut elapsed = Vec::with_capacity(config.worst_batches);
         let mut peak_live_fd_count = report::PeakFdCount::default();
         for _ in 0..config.worst_batches {
-            let result = run_registration_batch(
-                &clock,
-                backend,
-                config.registration_timers,
-                config.registration_step,
-            )
-            .await?;
+            let result =
+                run_registration_batch(&clock, backend, REGISTRATION_TIMERS, REGISTRATION_STEP)
+                    .await?;
             elapsed.push(result.elapsed);
             peak_live_fd_count.observe(result.live_fd_count);
         }
@@ -73,16 +73,13 @@ async fn benchmark_descending_registration(
             "{}::descending_registration/backend={} timers={} step_ns={}",
             module_path!(),
             backend,
-            config.registration_timers,
-            config.registration_step.as_nanos(),
+            REGISTRATION_TIMERS,
+            REGISTRATION_STEP.as_nanos(),
         );
         report::print_duration(
             &name,
             config.worst_batches,
-            &[
-                ("timers_per_batch", config.registration_timers),
-                ("producers", 1),
-            ],
+            &[("timers_per_batch", REGISTRATION_TIMERS), ("producers", 1)],
             "registration",
             &elapsed,
             Some(&peak_live_fd_count),
@@ -152,13 +149,13 @@ async fn benchmark_cancellation(
     for backend in config.backends() {
         let mut one_producer_p50 = None;
         for producers in config.cancellation_producer_counts() {
-            let total_canceled = config
-                .cancellation_timers
-                .checked_mul(config.cancel_percent)
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "cancel count overflow")
-                })?
-                / 100;
+            let total_canceled =
+                CANCELLATION_TIMERS
+                    .checked_mul(CANCEL_PERCENT)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "cancel count overflow")
+                    })?
+                    / 100;
             let cancellation_samples = checked_observations(config.worst_batches, total_canceled)?;
             let setup_samples = checked_observations(config.worst_batches, producers)?;
             let mut setup = Vec::with_capacity(setup_samples);
@@ -171,7 +168,7 @@ async fn benchmark_cancellation(
                 let latency = run_cancellation_batch(
                     Arc::clone(&clock),
                     backend,
-                    config.cancellation_timers,
+                    CANCELLATION_TIMERS,
                     total_canceled,
                     producers,
                     batch,
@@ -181,7 +178,7 @@ async fn benchmark_cancellation(
                 let throughput = run_cancellation_batch(
                     Arc::clone(&clock),
                     backend,
-                    config.cancellation_timers,
+                    CANCELLATION_TIMERS,
                     total_canceled,
                     producers,
                     batch,
@@ -229,14 +226,14 @@ async fn benchmark_cancellation(
                 "{}::cancellation/backend={} timers={} cancel_percent={} producers={}",
                 module_path!(),
                 backend,
-                config.cancellation_timers,
-                config.cancel_percent,
+                CANCELLATION_TIMERS,
+                CANCEL_PERCENT,
                 producers,
             );
             let accounting = report::format_sample_counts(
                 config.worst_batches,
                 &[
-                    ("timers_per_batch", config.cancellation_timers),
+                    ("timers_per_batch", CANCELLATION_TIMERS),
                     ("producers", producers),
                 ],
                 &[
@@ -632,14 +629,8 @@ async fn benchmark_expiry_storm(
         let mut clock_pair_span = report::ClockPairSpan::default();
 
         for _ in 0..config.worst_batches {
-            let result = run_storm_batch(
-                &clock,
-                backend,
-                config.storm_timers,
-                config.storm_lead,
-                config.peer_lead,
-            )
-            .await?;
+            let result =
+                run_storm_batch(&clock, backend, STORM_TIMERS, STORM_LEAD, PEER_LEAD).await?;
             first_dispatch.push(result.first_dispatch);
             full_drain.push(result.full_drain);
             peer_gap.push(result.peer_gap);
@@ -654,11 +645,11 @@ async fn benchmark_expiry_storm(
             "{}::expiry_storm/backend={} timers={} worker_threads=1",
             module_path!(),
             backend,
-            config.storm_timers,
+            STORM_TIMERS,
         );
         let accounting = report::format_sample_counts(
             config.worst_batches,
-            &[("timers_per_batch", config.storm_timers)],
+            &[("timers_per_batch", STORM_TIMERS)],
             &[
                 ("first_dispatch", first_dispatch.len()),
                 ("full_drain", full_drain.len()),
@@ -770,7 +761,7 @@ async fn run_storm_batch(
         if matches!(sleep.as_mut().poll(&mut task_context), Poll::Ready(())) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "storm timer expired during registration, increase --storm-lead-us",
+                "storm timer expired during registration, increase the STORM_LEAD benchmark constant",
             ));
         }
         sleeps.push(sleep);
@@ -779,7 +770,7 @@ async fn run_storm_batch(
     if Instant::now() >= deadlines.measurement_deadline {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "storm registration exceeded --storm-lead-us",
+            "storm registration exceeded the STORM_LEAD benchmark constant",
         ));
     }
 
@@ -811,7 +802,7 @@ async fn run_storm_batch(
         let _ = peer.await;
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "storm peer did not initialize before expiry, increase --peer-lead-us",
+            "storm peer did not initialize before expiry, increase the PEER_LEAD benchmark constant",
         ));
     }
     let peer_gap = peer
