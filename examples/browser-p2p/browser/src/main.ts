@@ -1,6 +1,7 @@
 import QRCode from "qrcode";
 import "./styles.css";
 import { createBrowserChat, type BrowserP2pSession, type ChatEvent, type ConnectionState } from "./bridge";
+import { connectionView } from "./connection-view";
 import { createInvite, inviteUrl, parseInvite, type Invite } from "./invite";
 import { loadWebRtcConfig, WebRtcPairing } from "./webrtc";
 
@@ -98,6 +99,7 @@ async function initialize(): Promise<void> {
       chat,
       iceServers: webRtcConfig.iceServers,
       onState: (label) => setConnectionState("connecting", label),
+      onDisconnect: handlePeerDisconnected,
     });
     await pairing.start();
   } catch (error) {
@@ -142,9 +144,13 @@ async function sendMessage(): Promise<void> {
 
 function handleChatEvent(event: ChatEvent): void {
   switch (event.type) {
-    case "connection":
-      setConnectionState(event.state, connectionLabel(event.state));
+    case "connection": {
+      const peerDisconnected = setConnectionState(event.state);
+      if (peerDisconnected) {
+        presentPeerDisconnected();
+      }
       return;
+    }
     case "peer":
       currentInviteUrl = undefined;
       elements.pairing.hidden = true;
@@ -167,14 +173,28 @@ function handleChatEvent(event: ChatEvent): void {
   }
 }
 
-function setConnectionState(nextState: ConnectionState, label = connectionLabel(nextState)): void {
+function handlePeerDisconnected(): void {
+  if (setConnectionState("disconnected")) {
+    presentPeerDisconnected();
+  }
+}
+
+function presentPeerDisconnected(): void {
+  elements.emptyTitle.textContent = "Peer disconnected";
+  elements.emptyDetail.textContent = "Create a new invite to start another private chat.";
+  showNotice("Peer disconnected", "The direct connection closed. Your message history is still here.");
+  elements.retryButton.hidden = false;
+}
+
+function setConnectionState(nextState: ConnectionState, label?: string): boolean {
+  const view = connectionView(state, nextState);
   state = nextState;
   elements.statusDot.dataset.state = nextState;
-  elements.statusText.textContent = label;
-  const canSend = nextState === "connected";
-  elements.messageInput.disabled = !canSend;
-  elements.sendButton.disabled = !canSend;
-  elements.messageInput.placeholder = canSend ? "Write a message" : "Connect to send a message";
+  elements.statusText.textContent = label ?? view.label;
+  elements.messageInput.disabled = !view.canSend;
+  elements.sendButton.disabled = !view.canSend;
+  elements.messageInput.placeholder = view.canSend ? "Write a message" : "Connect to send a message";
+  return view.peerDisconnected;
 }
 
 function appendMessage(message: {
@@ -252,15 +272,6 @@ function cleanup(): void {
   chat?.free();
   chat = undefined;
   currentInviteUrl = undefined;
-}
-
-function connectionLabel(connectionState: ConnectionState): string {
-  switch (connectionState) {
-    case "connecting": return "Connecting";
-    case "connected": return "Connected directly";
-    case "reconnecting": return "Reconnecting";
-    case "disconnected": return "Disconnected";
-  }
 }
 
 function formatFingerprint(publicKey: string): string {

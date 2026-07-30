@@ -15,6 +15,7 @@ export class WebRtcPairing {
   readonly #rendezvous: RendezvousClient;
   readonly #cipher: SignalingCipher;
   readonly #onState: (state: string) => void;
+  readonly #onDisconnect: () => void;
   readonly #pendingCandidates: RTCIceCandidateInit[] = [];
   readonly #attachmentBarrier = new AttachmentBarrier();
   #channel?: RTCDataChannel;
@@ -22,6 +23,7 @@ export class WebRtcPairing {
   #receiveChain = Promise.resolve();
   #sendChain = Promise.resolve();
   #attached = false;
+  #authenticated = false;
   #prepared = false;
   #signalingClosed = false;
   #closed = false;
@@ -34,11 +36,13 @@ export class WebRtcPairing {
     chat: BrowserP2pSession;
     iceServers: RTCIceServer[];
     onState: (state: string) => void;
+    onDisconnect: () => void;
   }) {
     this.#role = options.role;
     this.#invite = options.invite;
     this.#chat = options.chat;
     this.#onState = options.onState;
+    this.#onDisconnect = options.onDisconnect;
     this.#connection = new RTCPeerConnection({ iceServers: options.iceServers });
     this.#cipher = new SignalingCipher(
       options.invite.session,
@@ -203,6 +207,17 @@ export class WebRtcPairing {
     validateChannel(channel);
     channel.addEventListener("open", () => void this.#prepareAdapter());
     channel.addEventListener("error", () => this.#fail(new Error("The data channel failed.")));
+    channel.addEventListener("close", () => {
+      if (this.#closed) {
+        return;
+      }
+      if (!this.#authenticated) {
+        this.#fail(new Error("The data channel closed before authentication."));
+        return;
+      }
+      this.close();
+      this.#onDisconnect();
+    });
     if (channel.readyState === "open") {
       void this.#prepareAdapter();
     }
@@ -243,6 +258,7 @@ export class WebRtcPairing {
         this.#expectedPeer,
         this.#role === "responder",
       );
+      this.#authenticated = true;
       this.#signalingClosed = true;
       window.clearTimeout(this.#timeout);
       this.#offEvent();
