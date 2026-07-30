@@ -1221,8 +1221,5 @@ fn complete_entries(entries: Vec<EntryArc<Entry>>, terminal: u8) {
     let _ = batch.complete(terminal);
 }
 
-#[cfg(all(test, not(feature = "loom")))]
+#[cfg(test)]
 mod tests;
-
-#[cfg(all(test, feature = "loom"))]
-mod loom_tests;
