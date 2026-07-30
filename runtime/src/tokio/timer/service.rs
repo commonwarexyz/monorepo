@@ -1192,6 +1192,9 @@ impl Affinity {
             // so only the configured number of callbacks may claim worker slots.
             // Relaxed ordering is sufficient because this counter allocates
             // unique claims only.
+            //
+            // Loom's atomic implementation does not provide `try_update`.
+            #[allow(deprecated)]
             let Ok(index) = self.next_worker.fetch_update(
                 AtomicOrdering::Relaxed,
                 AtomicOrdering::Relaxed,
