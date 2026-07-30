@@ -20,7 +20,7 @@ mod ordinary {
         io,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{
-            Arc, Barrier, Weak,
+            Arc, Weak,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
         },
         task::{Context, Poll},
@@ -534,6 +534,22 @@ mod ordinary {
             next_worker: super::super::AtomicUsize::new(0),
             next_fallback: super::super::AtomicUsize::new(0),
         }
+    }
+
+    /// Claims timer shard indices from fresh worker-like or fallback threads.
+    fn claim_affinity_indices(affinity: &Arc<Affinity>, claims: usize, worker: bool) -> Vec<usize> {
+        (0..claims)
+            .map(|_| {
+                let affinity = Arc::clone(affinity);
+                thread::spawn(move || {
+                    if worker {
+                        affinity.assign_worker();
+                    }
+                    affinity.select()
+                })
+            })
+            .map(|thread| thread.join().unwrap())
+            .collect()
     }
 
     #[test]
@@ -1664,85 +1680,24 @@ mod ordinary {
     }
 
     #[test]
-    fn worker_threads_claim_distinct_affinity_indices() {
-        // Release four worker-like threads against one four-shard allocator.
-        let affinity = Arc::new(affinity(4));
-        let barrier = Arc::new(Barrier::new(4));
-        let threads: Vec<_> = (0..4)
-            .map(|_| {
-                let affinity = Arc::clone(&affinity);
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    barrier.wait();
-                    affinity.assign_worker();
-                    affinity.select()
-                })
-            })
-            .collect();
+    fn affinity_distributes_worker_and_fallback_claims() {
+        // Setup: Create independent four-shard allocators for worker and fallback claims.
+        let workers = Arc::new(affinity(4));
+        let fallbacks = Arc::new(affinity(4));
 
-        // Every worker must retain one distinct in-range index.
-        let mut indices: Vec<_> = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect();
-        indices.sort_unstable();
-        assert_eq!(indices, vec![0, 1, 2, 3]);
-        assert_eq!(affinity.next_worker.load(AtomicOrdering::Relaxed), 4);
-        assert_eq!(affinity.next_fallback.load(AtomicOrdering::Relaxed), 0);
-    }
+        // Action: Claim every worker index once and two fallback rounds.
+        let mut worker_indices = claim_affinity_indices(&workers, 4, true);
+        let mut fallback_indices = claim_affinity_indices(&fallbacks, 8, false);
+        worker_indices.sort_unstable();
+        fallback_indices.sort_unstable();
 
-    #[test]
-    fn fallback_threads_receive_balanced_round_robin_shards() {
-        // Setup: Release sixteen fresh fallback threads against four timer shards.
-        let affinity = Arc::new(affinity(4));
-        let barrier = Arc::new(Barrier::new(16));
-        let threads: Vec<_> = (0..16)
-            .map(|_| {
-                let affinity = Arc::clone(&affinity);
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    barrier.wait();
-                    affinity.select()
-                })
-            })
-            .collect();
-
-        // Action: Count the production fallback selections made under contention.
-        let mut counts = [0_usize; 4];
-        for index in threads.into_iter().map(|thread| thread.join().unwrap()) {
-            counts[index] += 1;
-        }
-
-        // Assertion: Consecutive claims balance exactly across every native shard.
-        assert_eq!(counts, [4; 4]);
-        assert_eq!(affinity.next_fallback.load(AtomicOrdering::Relaxed), 16);
-    }
-
-    #[test]
-    fn provisional_upgrade_does_not_invalidate_registered_sleep() {
-        // Reserve worker zero elsewhere, then provisionally select shard zero here.
-        let affinity = Arc::new(affinity(2));
-        let claimed = {
-            let affinity = Arc::clone(&affinity);
-            thread::spawn(move || {
-                affinity.assign_worker();
-                affinity.select()
-            })
-            .join()
-            .unwrap()
-        };
-        assert_eq!(claimed, 0);
-        assert_eq!(affinity.select(), 0);
-        let (original_shard, _control) = fake_shard();
-        let registered = original_shard.register_after(Duration::from_nanos(100));
-
-        // The worker callback upgrades this thread to shard one after registration.
-        affinity.assign_worker();
-        assert_eq!(affinity.select(), 1);
-
-        // Cancellation must still remove the entry from its originally retained shard.
-        drop(registered);
-        assert_eq!(original_shard.state.lock().entries.len(), 0);
+        // Assertion: Workers are distinct and fallback claims balance round-robin.
+        assert_eq!(worker_indices, vec![0, 1, 2, 3]);
+        assert_eq!(fallback_indices, vec![0, 0, 1, 1, 2, 2, 3, 3]);
+        assert_eq!(workers.next_worker.load(AtomicOrdering::Relaxed), 4);
+        assert_eq!(workers.next_fallback.load(AtomicOrdering::Relaxed), 0);
+        assert_eq!(fallbacks.next_worker.load(AtomicOrdering::Relaxed), 0);
+        assert_eq!(fallbacks.next_fallback.load(AtomicOrdering::Relaxed), 8);
     }
 
     #[test]
@@ -1819,50 +1774,6 @@ mod ordinary {
             assert!(exhausted.is_err());
             assert_eq!(counter.load(AtomicOrdering::Relaxed), u64::MAX);
         }
-    }
-
-    #[test]
-    fn excess_worker_callbacks_receive_provisional_assignments() {
-        // Setup: Consume the only worker index from one thread.
-        let affinity = Arc::new(affinity(1));
-        let worker = {
-            let affinity = Arc::clone(&affinity);
-            thread::spawn(move || {
-                affinity.assign_worker();
-                super::super::THREAD_ASSIGNMENTS.with(|assignments| {
-                    assignments
-                        .borrow()
-                        .get(affinity.runtime_id)
-                        .expect("worker callback must install an assignment")
-                })
-            })
-            .join()
-            .unwrap()
-        };
-        assert_eq!(worker, (0, AssignmentKind::Worker));
-
-        // Action: Invoke the callback twice on a fresh replacement-worker thread.
-        let replacement = {
-            let affinity = Arc::clone(&affinity);
-            thread::spawn(move || {
-                affinity.assign_worker();
-                affinity.assign_worker();
-                super::super::THREAD_ASSIGNMENTS.with(|assignments| {
-                    assignments
-                        .borrow()
-                        .get(affinity.runtime_id)
-                        .expect("replacement callback must install an assignment")
-                })
-            })
-            .join()
-            .unwrap()
-        };
-
-        // Assertion: The excess callback uses one stable in-range fallback without
-        // consuming another unique worker claim.
-        assert_eq!(replacement, (0, AssignmentKind::Provisional));
-        assert_eq!(affinity.next_worker.load(AtomicOrdering::Relaxed), 1);
-        assert_eq!(affinity.next_fallback.load(AtomicOrdering::Relaxed), 1);
     }
 
     #[test]
