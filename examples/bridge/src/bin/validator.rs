@@ -21,7 +21,8 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
-    Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
+    Connection as _, Dialer as _, Quota, Runner, Strategizer, Supervisor as _, TcpEndpoint,
+    buffer::paged::CacheRef, tokio,
 };
 use commonware_stream::encrypted::{Config as StreamConfig, dial};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
@@ -180,10 +181,11 @@ fn main() {
     // Start context
     executor.start(|context| async move {
         // Dial indexer
-        let (sink, stream) = context
-            .dial(indexer_address)
+        let connection = context
+            .dial(&TcpEndpoint::from(indexer_address))
             .await
             .expect("Failed to dial indexer");
+        let (sink, stream, _) = connection.split();
         let indexer = dial(context.child("dialer"), indexer_cfg, indexer, stream, sink)
             .await
             .expect("Failed to upgrade connection with indexer");

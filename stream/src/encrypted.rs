@@ -531,7 +531,7 @@ mod test {
     use commonware_codec::varint::UInt;
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{
-        BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
+        BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Scheduler as _,
         Supervisor as _, deterministic, mocks,
     };
     use commonware_utils::{NZU32, NZUsize, PlatformSend, sync::Mutex};

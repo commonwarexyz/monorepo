@@ -11,7 +11,9 @@ use crate::{
     utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Scheduler, telemetry::metrics::GaugeExt};
+use commonware_runtime::{
+    Clock, Metrics as RuntimeMetrics, Scheduler, telemetry::metrics::GaugeExt,
+};
 use commonware_utils::{PrioritySet, SystemTimeExt, ordered::Set as OrderedSet};
 use rand::{Rng, seq::IteratorRandom};
 use std::{

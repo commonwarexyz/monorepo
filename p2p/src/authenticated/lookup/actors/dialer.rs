@@ -16,7 +16,7 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, Metrics, SinkOf, Scheduler,
+    BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, Metrics, Scheduler, SinkOf,
     StreamOf, TcpEndpoint, TcpOrigin, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
@@ -130,7 +130,10 @@ where
                     };
                     let (sink, stream, info) = connection.split();
                     let Some(TcpOrigin { remote: address }) = info.origin else {
-                        debug!(transport = info.transport, "dialed connection without TCP origin");
+                        debug!(
+                            transport = info.transport,
+                            "dialed connection without TCP origin"
+                        );
                         return;
                     };
                     if !allow_private_ips && !IpAddrExt::is_global(&address.ip()) {

@@ -7,10 +7,10 @@ use chacha20poly1305::{
 use commonware_codec::DecodeExt as _;
 use commonware_cryptography::{Signer as _, ed25519};
 use commonware_math::algebra::Random as _;
-use commonware_p2p::authenticated::lookup::{
-    AttachmentConfig, AttachmentNetwork, PeerAdmission, Rejected,
+use commonware_p2p::{
+    Receiver as _, Recipients, Sender as _,
+    authenticated::lookup::{AttachmentConfig, AttachmentNetwork, PeerAdmission, Rejected},
 };
-use commonware_p2p::{Receiver as _, Recipients, Sender as _};
 use commonware_runtime::{ConnectionInfo, IoBuf, Quota, web::Runtime};
 use commonware_stream::encrypted;
 use commonware_utils::{NZUsize, sys_rng};

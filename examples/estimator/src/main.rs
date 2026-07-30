@@ -9,8 +9,8 @@ use commonware_p2p::{
     utils::codec::{WrappedReceiver, WrappedSender, wrap},
 };
 use commonware_runtime::{
-    BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
-    deterministic,
+    Acceptor, BufferPool, BufferPooler, Clock, Connection, Dialer, Handle, Metrics, Quota, Runner,
+    Spawner, TcpEndpoint, TcpOrigin, deterministic,
 };
 use commonware_utils::{
     NZUsize,
@@ -24,6 +24,7 @@ use futures::future::try_join_all;
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
     num::NonZeroU32,
     time::{Duration, SystemTime},
 };
@@ -290,14 +291,23 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNetwork + Rng>(
+async fn run_simulation_logic<C>(
     context: C,
     proposer_idx: usize,
     peers: usize,
     distribution: &Distribution,
     commands: &[(usize, Command)],
     latencies: &Latencies,
-) -> Steps {
+) -> Steps
+where
+    C: Acceptor<Bind = SocketAddr, Connection: Connection<Origin = TcpOrigin>>
+        + Dialer<Endpoint = TcpEndpoint, Connection: Connection<Origin = TcpOrigin>>
+        + Spawner
+        + BufferPooler
+        + Clock
+        + Metrics
+        + Rng,
+{
     let mut peer_addresses: Vec<(ed25519::PublicKey, String)> = Vec::with_capacity(peers);
     for (region, config) in distribution {
         for _ in 0..config.count {

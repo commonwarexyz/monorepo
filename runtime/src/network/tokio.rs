@@ -1,6 +1,4 @@
-use crate::{
-    Acceptor, BufferPool, ConnectionInfo, Dialer, Error, IoBufs, TcpEndpoint, TcpOrigin,
-};
+use crate::{Acceptor, BufferPool, ConnectionInfo, Dialer, Error, IoBufs, TcpEndpoint, TcpOrigin};
 use std::{convert::identity, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -221,7 +219,7 @@ impl crate::TcpListener for Listener {
     }
 }
 
-/// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
+/// Configuration for the tokio TCP transport.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Whether or not to disable Nagle's algorithm.
@@ -338,7 +336,7 @@ impl Default for Config {
 }
 
 #[derive(Clone)]
-/// [crate::Network] implementation that uses the [tokio] runtime.
+/// TCP transport that uses the [tokio] runtime.
 pub struct Network {
     cfg: Config,
     pool: BufferPool,
@@ -366,7 +364,6 @@ impl Acceptor for Network {
                 pool: self.pool.clone(),
             })
     }
-
 }
 
 impl Dialer for Network {
@@ -374,20 +371,30 @@ impl Dialer for Network {
     type Connection = Connection;
 
     async fn dial(&self, endpoint: &TcpEndpoint) -> Result<Self::Connection, crate::Error> {
-        let socket = match endpoint {
-            TcpEndpoint::Socket(socket) => *socket,
-            TcpEndpoint::Dns { host, port } => tokio::net::lookup_host((host.as_str(), *port))
+        let connect = async {
+            let addresses = match endpoint {
+                TcpEndpoint::Socket(socket) => vec![*socket],
+                TcpEndpoint::Dns { host, port } => {
+                    let addresses: Vec<_> = tokio::net::lookup_host((host.as_str(), *port))
+                        .await
+                        .map_err(|error| Error::ResolveFailed(error.to_string()))?
+                        .collect();
+                    if addresses.is_empty() {
+                        return Err(Error::ResolveFailed("no addresses returned".into()));
+                    }
+                    addresses
+                }
+            };
+
+            TcpStream::connect(addresses.as_slice())
                 .await
-                .map_err(|error| Error::ResolveFailed(error.to_string()))?
-                .next()
-                .ok_or_else(|| Error::ResolveFailed("no addresses returned".into()))?,
+                .map_err(|_| Error::ConnectionFailed)
         };
 
         // Create a new TCP stream
-        let stream = timeout(self.cfg.connect_timeout, TcpStream::connect(socket))
+        let stream = timeout(self.cfg.connect_timeout, connect)
             .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::ConnectionFailed)?;
+            .map_err(|_| Error::Timeout)??;
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
@@ -404,9 +411,10 @@ impl Dialer for Network {
         }
 
         // Return the sink and stream
+        let remote = stream.peer_addr().map_err(|_| Error::ConnectionFailed)?;
         let (stream, sink) = stream.into_split();
         Ok(Connection {
-            origin: TcpOrigin { remote: socket },
+            origin: TcpOrigin { remote },
             sink: Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,

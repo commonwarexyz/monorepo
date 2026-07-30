@@ -1,6 +1,4 @@
-use crate::{
-    Acceptor, ConnectionInfo, Dialer, Error, TcpEndpoint, TcpOrigin, mocks,
-};
+use crate::{Acceptor, ConnectionInfo, Dialer, Error, TcpEndpoint, TcpOrigin, mocks};
 use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
     collections::HashMap,
@@ -72,7 +70,7 @@ type Dialable = mpsc::UnboundedSender<(
     mocks::Stream, // Dialer -> Listener
 )>;
 
-/// Deterministic implementation of [crate::Network].
+/// Deterministic TCP transport.
 ///
 /// When a dialer connects to a listener, the listener is given a new ephemeral port
 /// from the range `32768..61000`. To keep things simple, it is not possible to
@@ -122,7 +120,6 @@ impl Acceptor for Network {
             listener: receiver,
         })
     }
-
 }
 
 impl Dialer for Network {

@@ -1,27 +1,28 @@
-use crate::{
-    Error, PlatformSend,
-    telemetry::metrics::raw::Gauge,
-    utils::supervision::Tree,
-};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::extract_panic_message;
-use commonware_utils::{
-    channel::oneshot,
-    sync::Once,
-};
+use crate::{Error, PlatformSend, telemetry::metrics::raw::Gauge, utils::supervision::Tree};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_utils::sync::Mutex;
+use commonware_utils::{channel::oneshot, sync::Once};
 use futures::stream::{AbortHandle, Abortable};
 #[cfg(not(target_arch = "wasm32"))]
-use futures::{FutureExt as _, future::{Either, select}, pin_mut, stream::Aborted};
+use futures::{
+    FutureExt as _,
+    future::{Either, select},
+    pin_mut,
+    stream::Aborted,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    any::Any,
+    panic::{AssertUnwindSafe, resume_unwind},
+};
 use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
-#[cfg(not(target_arch = "wasm32"))]
-use std::{any::Any, panic::{AssertUnwindSafe, resume_unwind}};
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::error;
 
@@ -421,7 +422,7 @@ impl Aborter {
 mod tests {
     use super::Handle;
     use crate::{
-        Error, Metrics as _, Runner, Scheduler, Supervisor as _, Spawner as _, deterministic,
+        Error, Metrics as _, Runner, Scheduler, Spawner as _, Supervisor as _, deterministic,
     };
     use commonware_utils::channel::oneshot;
     use futures::future;

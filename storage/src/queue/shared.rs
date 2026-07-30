@@ -303,7 +303,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        BufferPooler, Clock, Runner, Scheduler, Supervisor as _, buffer::paged::CacheRef,
         deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};

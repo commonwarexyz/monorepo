@@ -1,15 +1,15 @@
 //! Listener
 
 use crate::authenticated::{
-        Mailbox as SpawnerMailbox,
-        lookup::actors::{spawner, tracker},
+    Mailbox as SpawnerMailbox,
+    lookup::actors::{spawner, tracker},
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Acceptor, BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, KeyedRateLimiter,
-    Listener, Metrics, Quota, SinkOf, Scheduler, StreamOf, TcpOrigin, spawn_cell,
+    Listener, Metrics, Quota, Scheduler, SinkOf, StreamOf, TcpOrigin, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_stream::encrypted::{Config as StreamConfig, listen};

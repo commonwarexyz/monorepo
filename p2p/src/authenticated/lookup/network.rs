@@ -147,9 +147,7 @@ impl<
         );
         let mut spawner_task =
             spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
-        let mut attachment_task = self
-            .attachment
-            .start(self.tracker_mailbox, spawner_mailbox);
+        let mut attachment_task = self.attachment.start(self.tracker_mailbox, spawner_mailbox);
         let mut shutdown = self.context.stopped();
 
         info!("attachment network started");

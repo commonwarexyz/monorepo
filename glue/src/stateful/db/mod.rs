@@ -1637,7 +1637,7 @@ mod tests {
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
-        Clock, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
+        Clock, Runner as _, Scheduler as _, Supervisor as _, deterministic, reschedule,
     };
     use commonware_utils::channel::{mpsc, oneshot, ring};
     use futures::{FutureExt, SinkExt, pin_mut};

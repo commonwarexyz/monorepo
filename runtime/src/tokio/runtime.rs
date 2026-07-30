@@ -8,8 +8,7 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
     Acceptor, BufferPool, BufferPoolConfig, Clock, ConnectionOf, Dialer, Error, Execution, Handle,
-    METRICS_PREFIX, Name, Scheduler as _, Supervisor as _, TcpEndpoint, Spawner as _,
-    child_label,
+    METRICS_PREFIX, Name, Scheduler as _, Spawner as _, Supervisor as _, TcpEndpoint, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
@@ -539,9 +538,8 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Implementation of [crate::Scheduler], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `tokio`
-/// runtime.
+/// Implementation of [crate::Scheduler], [crate::Clock], [crate::Dialer],
+/// [crate::Acceptor], and [crate::Storage] for the `tokio` runtime.
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
@@ -853,11 +851,7 @@ mod tests {
         telemetry::metrics::raw::Counter, tokio::telemetry,
     };
     use bytes::Bytes;
-    use std::{
-        self,
-        collections::HashMap,
-        str::FromStr,
-    };
+    use std::{self, collections::HashMap, str::FromStr};
     use tracing::{Level, error};
 
     #[test]

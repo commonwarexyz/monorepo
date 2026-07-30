@@ -75,11 +75,15 @@ impl<C: crate::Connection> crate::Connection for Connection<C> {
     type Stream = Stream<C::Stream>;
     type Origin = C::Origin;
 
-    fn split(self) -> (Self::Sink, Self::Stream, crate::ConnectionInfo<Self::Origin>) {
+    fn split(
+        self,
+    ) -> (
+        Self::Sink,
+        Self::Stream,
+        crate::ConnectionInfo<Self::Origin>,
+    ) {
         let (sink, stream, info) = self.inner.split();
-        let remote = self
-            .remote
-            .unwrap_or_else(|| format!("{:?}", info.origin));
+        let remote = self.remote.unwrap_or_else(|| format!("{:?}", info.origin));
         (
             Sink {
                 auditor: Arc::clone(&self.auditor),

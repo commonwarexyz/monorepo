@@ -2,7 +2,7 @@
 
 use crate::{
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Scheduler, Storage, Supervisor, Spawner,
+    Scheduler, Spawner, Storage, Supervisor,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -1049,7 +1049,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clock, Runner, Sink, Scheduler, Stream, deterministic};
+    use crate::{Clock, Runner, Scheduler, Sink, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 

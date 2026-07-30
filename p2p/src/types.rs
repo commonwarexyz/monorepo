@@ -23,15 +23,7 @@ const REACHABILITY_OUTBOUND_ONLY_PREFIX: u8 = 1;
 
 /// An endpoint that can be advertised to and dialed by peers.
 pub trait PeerEndpoint:
-    Clone
-    + Debug
-    + Eq
-    + Hash
-    + Codec<Cfg = ()>
-    + EncodeSize
-    + PlatformSend
-    + PlatformSync
-    + 'static
+    Clone + Debug + Eq + Hash + Codec<Cfg = ()> + EncodeSize + PlatformSend + PlatformSync + 'static
 {
 }
 
@@ -66,10 +58,7 @@ impl<E: PeerEndpoint> Advertisement<E> {
                 ));
             }
             if !unique.insert(endpoint) {
-                return Err(CodecError::Invalid(
-                    "Advertisement",
-                    "duplicate endpoint",
-                ));
+                return Err(CodecError::Invalid("Advertisement", "duplicate endpoint"));
             }
         }
 
@@ -110,10 +99,7 @@ impl<E: PeerEndpoint> Read for Advertisement<E> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let endpoints = Vec::<E>::read_cfg(
-            buf,
-            &(RangeCfg::new(1..=Self::MAX_ENDPOINTS), ()),
-        )?;
+        let endpoints = Vec::<E>::read_cfg(buf, &(RangeCfg::new(1..=Self::MAX_ENDPOINTS), ()))?;
         Self::new(endpoints)
     }
 }
@@ -154,9 +140,7 @@ impl<E: PeerEndpoint> Read for Reachability<E> {
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            REACHABILITY_DIALABLE_PREFIX => {
-                Ok(Self::Dialable(Advertisement::<E>::read(buf)?))
-            }
+            REACHABILITY_DIALABLE_PREFIX => Ok(Self::Dialable(Advertisement::<E>::read(buf)?)),
             REACHABILITY_OUTBOUND_ONLY_PREFIX => Ok(Self::OutboundOnly),
             other => Err(CodecError::InvalidEnum(other)),
         }
@@ -201,15 +185,13 @@ impl Ingress {
     /// - `Socket` addresses must have a global IP (or `allow_private_ips` must be true).
     /// - `Dns` addresses are allowed only if `allow_dns` is `true`.
     ///
-    /// Note: For `Dns` addresses, private IP checks are performed after resolution in
-    /// [`resolve_filtered`](Self::resolve_filtered).
+    /// For `Dns` addresses, the TCP transport checks resolved addresses before connecting.
     pub fn is_valid(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         match self {
             Self::Socket(addr) => allow_private_ips || IpAddrExt::is_global(&addr.ip()),
             Self::Dns { .. } => allow_dns,
         }
     }
-
 }
 
 impl From<&Ingress> for TcpEndpoint {
@@ -477,8 +459,7 @@ mod tests {
             host: hostname!("fallback.example.com"),
             port: 443,
         };
-        let advertisement =
-            Advertisement::new(vec![preferred.clone(), fallback.clone()]).unwrap();
+        let advertisement = Advertisement::new(vec![preferred.clone(), fallback.clone()]).unwrap();
 
         let decoded = Advertisement::<Ingress>::decode(advertisement.encode()).unwrap();
         assert_eq!(decoded.endpoints(), &[preferred, fallback]);
@@ -496,8 +477,10 @@ mod tests {
         );
 
         let oversized_endpoint = vec![0; Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE];
-        assert!(TestEndpoint(oversized_endpoint.clone()).encode_size()
-            > Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE);
+        assert!(
+            TestEndpoint(oversized_endpoint.clone()).encode_size()
+                > Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE
+        );
         assert_invalid_advertisement(vec![TestEndpoint(oversized_endpoint)]);
 
         let endpoints = (0..5)
@@ -507,10 +490,10 @@ mod tests {
                 TestEndpoint(bytes)
             })
             .collect::<Vec<_>>();
-        assert!(endpoints
-            .iter()
-            .all(|endpoint| endpoint.encode_size()
-                <= Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE));
+        assert!(
+            endpoints.iter().all(|endpoint| endpoint.encode_size()
+                <= Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE)
+        );
         assert!(endpoints.encode_size() > Advertisement::<TestEndpoint>::MAX_SIZE);
         assert_invalid_advertisement(endpoints);
     }

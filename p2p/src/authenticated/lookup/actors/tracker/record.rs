@@ -5,7 +5,10 @@ use crate::{
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use rand_core::Rng;
-use std::{net::IpAddr, time::{Duration, SystemTime}};
+use std::{
+    net::IpAddr,
+    time::{Duration, SystemTime},
+};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]

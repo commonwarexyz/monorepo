@@ -19,8 +19,8 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Acceptor, Clock, Connection, ContextCell, Dialer, Handle, IoBuf, IoBufs, Listener as _, Metrics,
-    Quota, Scheduler, TcpEndpoint, TcpOrigin, spawn_cell,
+    Acceptor, Clock, Connection, ContextCell, Dialer, Handle, IoBuf, IoBufs, Listener as _,
+    Metrics, Quota, Scheduler, TcpEndpoint, TcpOrigin, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};

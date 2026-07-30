@@ -10,7 +10,7 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
 };
-use commonware_utils::channel::oneshot;
+use commonware_utils::{PlatformSend, channel::oneshot};
 use futures::FutureExt as _;
 use std::{collections::VecDeque, future::Future, num::NonZeroU64};
 
@@ -55,7 +55,11 @@ impl<DB, F: Family, Op, D: Digest> Default for Pending<DB, F, Op, D> {
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<DB, F, Op, D> {
+impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<DB, F, Op, D>
+where
+    Shared<DB>: PlatformSend,
+    Op: PlatformSend,
+{
     fn is_empty(&self) -> bool {
         self.database.is_none() && self.messages.is_empty()
     }
@@ -84,7 +88,11 @@ impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<D
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
+impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D>
+where
+    Shared<DB>: PlatformSend,
+    Op: PlatformSend,
+{
     type Overflow = Pending<DB, F, Op, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
@@ -102,11 +110,19 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
 }
 
 /// Client-facing resolver mailbox used by the QMDB sync engine.
-pub struct Mailbox<DB, F: Family, Op, D: Digest> {
+pub struct Mailbox<DB, F: Family, Op, D: Digest>
+where
+    Shared<DB>: PlatformSend,
+    Op: PlatformSend,
+{
     sender: Sender<Message<DB, F, Op, D>>,
 }
 
-impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D> {
+impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D>
+where
+    Shared<DB>: PlatformSend,
+    Op: PlatformSend,
+{
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -114,7 +130,11 @@ impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D> {
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Mailbox<DB, F, Op, D> {
+impl<DB, F: Family, Op, D: Digest> Mailbox<DB, F, Op, D>
+where
+    Shared<DB>: PlatformSend,
+    Op: PlatformSend,
+{
     pub(super) const fn new(sender: Sender<Message<DB, F, Op, D>>) -> Self {
         Self { sender }
     }

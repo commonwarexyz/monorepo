@@ -35,7 +35,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
+    Clock as _, Handle, Quota, Runner as _, Scheduler as _, Supervisor as _, deterministic,
     telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{

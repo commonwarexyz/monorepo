@@ -11,7 +11,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Scheduler, Stream, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Scheduler, Sink, Stream, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use rand_core::CryptoRng;
@@ -37,12 +37,8 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<
-    E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
-    Si: Sink,
-    St: Stream,
-    C: PublicKey,
-> Actor<E, Si, St, C>
+impl<E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics, Si: Sink, St: Stream, C: PublicKey>
+    Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");
@@ -65,19 +61,11 @@ impl<
         )
     }
 
-    pub fn start(
-        mut self,
-        tracker: tracker::Mailbox<C>,
-        router: router::Mailbox<C>,
-    ) -> Handle<()> {
+    pub fn start(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, router))
     }
 
-    async fn run(
-        mut self,
-        tracker: tracker::Mailbox<C>,
-        router: router::Mailbox<C>,
-    ) {
+    async fn run(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) {
         select_loop! {
             self.context,
             on_stopped => {

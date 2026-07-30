@@ -195,8 +195,10 @@ mod network;
 mod types;
 
 pub use crate::authenticated::channels::{Error, Receiver, Sender};
-pub use actors::tracker::Oracle;
-pub use actors::attachment::{Attachments, Error as AttachmentError, PeerAdmission, Rejected};
+pub use actors::{
+    attachment::{Attachments, Error as AttachmentError, PeerAdmission, Rejected},
+    tracker::Oracle,
+};
 pub use config::{AttachmentConfig, Config};
 pub use network::{AttachmentNetwork, Network};
 
@@ -216,8 +218,8 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        Acceptor, BufferPooler, Clock, Connection, Dialer, IoBuf, Metrics, Quota, Runner, Scheduler,
-        Supervisor as _, TcpEndpoint, TcpOrigin, deterministic,
+        Acceptor, BufferPooler, Clock, Connection, Dialer, IoBuf, Metrics, Quota, Runner,
+        Scheduler, Supervisor as _, TcpEndpoint, TcpOrigin, deterministic,
         telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_utils::{

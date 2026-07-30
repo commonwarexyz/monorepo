@@ -77,7 +77,13 @@ impl<C: crate::Connection> crate::Connection for Connection<C> {
     type Stream = Stream<C::Stream>;
     type Origin = C::Origin;
 
-    fn split(self) -> (Self::Sink, Self::Stream, crate::ConnectionInfo<Self::Origin>) {
+    fn split(
+        self,
+    ) -> (
+        Self::Sink,
+        Self::Stream,
+        crate::ConnectionInfo<Self::Origin>,
+    ) {
         let (sink, stream, info) = self.inner.split();
         (
             Sink {
@@ -125,8 +131,7 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
     }
 }
 
-/// A metered network implementation which wraps another
-/// [crate::Network] and tracks metrics for it.
+/// A metered transport that wraps another transport and tracks metrics for it.
 #[derive(Debug, Clone)]
 pub struct Network<N> {
     inner: N,

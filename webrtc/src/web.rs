@@ -1,8 +1,6 @@
 use super::{ConfigError, PROTOCOL, WebRtcConfig};
 use bytes::Bytes;
-use commonware_runtime::{
-    Connection, ConnectionInfo, Error, IoBuf, IoBufs, Sink, Stream,
-};
+use commonware_runtime::{Connection, ConnectionInfo, Error, IoBuf, IoBufs, Sink, Stream};
 use futures::{
     future::{Either, poll_fn, select},
     pin_mut,
@@ -34,10 +32,7 @@ pub struct WebRtcConnection {
 
 impl WebRtcConnection {
     /// Validate an established peer and data channel without taking ownership.
-    pub fn validate(
-        peer: &RtcPeerConnection,
-        channel: &RtcDataChannel,
-    ) -> Result<(), ConfigError> {
+    pub fn validate(peer: &RtcPeerConnection, channel: &RtcDataChannel) -> Result<(), ConfigError> {
         if peer.connection_state() != RtcPeerConnectionState::Connected {
             return Err(ConfigError::PeerNotConnected);
         }
@@ -335,11 +330,7 @@ struct Inner {
 }
 
 impl Inner {
-    fn new(
-        peer: RtcPeerConnection,
-        channel: RtcDataChannel,
-        config: WebRtcConfig,
-    ) -> Rc<Self> {
+    fn new(peer: RtcPeerConnection, channel: RtcDataChannel, config: WebRtcConfig) -> Rc<Self> {
         Rc::new(Self {
             peer,
             channel,
@@ -432,8 +423,10 @@ impl Inner {
 
         self.channel
             .set_onmessage(Some(message.as_ref().unchecked_ref()));
-        self.channel.set_onerror(Some(error.as_ref().unchecked_ref()));
-        self.channel.set_onclose(Some(close.as_ref().unchecked_ref()));
+        self.channel
+            .set_onerror(Some(error.as_ref().unchecked_ref()));
+        self.channel
+            .set_onclose(Some(close.as_ref().unchecked_ref()));
         self.channel
             .set_onbufferedamountlow(Some(buffered_amount_low.as_ref().unchecked_ref()));
         self.peer

@@ -42,8 +42,8 @@ impl<T: ?Sized> PlatformSync for T {}
 mod tests {
     use super::{PlatformSend, PlatformSync};
 
-    fn assert_send<T: Send + ?Sized>() {}
-    fn assert_sync<T: Sync + ?Sized>() {}
+    const fn assert_send<T: Send + ?Sized>() {}
+    const fn assert_sync<T: Sync + ?Sized>() {}
 
     #[test]
     fn native_platform_bounds_imply_thread_safety() {

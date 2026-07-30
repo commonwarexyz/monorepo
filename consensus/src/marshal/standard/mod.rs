@@ -95,7 +95,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
+        Clock, Metrics, Quota, Runner, Scheduler, Supervisor as _, buffer::paged::CacheRef,
         deterministic,
     };
     use commonware_storage::{

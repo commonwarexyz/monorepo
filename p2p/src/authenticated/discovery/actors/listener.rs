@@ -8,8 +8,8 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Acceptor, BufferPooler, Clock, Connection, ConnectionOf, ContextCell, Dialer, Handle,
-    KeyedRateLimiter, Listener, Metrics, Quota, SinkOf, Scheduler, StreamOf, TcpEndpoint, TcpOrigin,
-    spawn_cell,
+    KeyedRateLimiter, Listener, Metrics, Quota, Scheduler, SinkOf, StreamOf, TcpEndpoint,
+    TcpOrigin, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_stream::encrypted::{Config as StreamConfig, listen};

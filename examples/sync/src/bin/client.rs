@@ -7,7 +7,7 @@ use clap::{Arg, Command};
 use commonware_codec::{EncodeShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage, Supervisor as _,
+    BufferPooler, Clock, Dialer, Metrics, Runner, Spawner, Storage, Supervisor as _, TcpEndpoint,
     tokio as tokio_runtime,
 };
 use commonware_storage::{
@@ -126,7 +126,7 @@ async fn run_full_sync<DB, Op, E, SyncOnce, SyncFut>(
     label: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Dialer<Endpoint = TcpEndpoint> + Spawner,
     Op: Clone + Read + EncodeShared + 'static,
     Op::Cfg: commonware_codec::IsUnit,
     SyncOnce: Fn(
@@ -182,7 +182,7 @@ where
 #[boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Dialer<Endpoint = TcpEndpoint> + Spawner,
 {
     run_full_sync::<any::Database<_>, any::Operation, _, _, _>(
         context,
@@ -224,7 +224,7 @@ where
 #[boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Dialer<Endpoint = TcpEndpoint> + Spawner,
 {
     run_full_sync::<current::Database<_>, current::Operation, _, _, _>(
         context,
@@ -263,7 +263,7 @@ where
 /// Repeatedly sync an Immutable database to the server's state.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Dialer<Endpoint = TcpEndpoint> + Spawner,
 {
     run_full_sync::<immutable::Database<_>, immutable::Operation, _, _, _>(
         context,
@@ -303,7 +303,7 @@ where
 /// Repeatedly sync a Keyless database to the server's state.
 async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Dialer<Endpoint = TcpEndpoint> + Spawner,
 {
     run_full_sync::<keyless::Database<_>, keyless::Operation, _, _, _>(
         context,
@@ -346,7 +346,7 @@ async fn run_compact_sync<DB, Op, E, MakeConfig>(
     label: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Dialer<Endpoint = TcpEndpoint> + Spawner,
     DB: compact::Database<Family = mmr::Family, Context = E, Digest = Key, Op = Op>,
     Op: Clone + Read + EncodeShared + 'static,
     Op::Cfg: commonware_codec::IsUnit,
@@ -397,7 +397,7 @@ async fn run_immutable_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Dialer<Endpoint = TcpEndpoint> + Spawner,
 {
     run_compact_sync::<immutable_compact::Database<_>, immutable_compact::Operation, _, _>(
         context,
@@ -413,7 +413,7 @@ async fn run_keyless_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Dialer<Endpoint = TcpEndpoint> + Spawner,
 {
     run_compact_sync::<keyless_compact::Database<_>, keyless_compact::Operation, _, _>(
         context,

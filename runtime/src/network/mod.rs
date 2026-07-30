@@ -29,10 +29,12 @@ mod tests {
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
     const SERVER_SEND_DATA: &[u8] = b"server_send_data";
 
+    #[cfg(not(feature = "iouring-network"))]
     fn assert_send<T: Send>(_: &T) {}
 
     fn assert_send_sync<T: Send + Sync>() {}
 
+    #[cfg(not(feature = "iouring-network"))]
     #[test]
     fn native_network_types_remain_thread_safe() {
         assert_send_sync::<super::tokio::Network>();
@@ -50,6 +52,15 @@ mod tests {
         let address = SocketAddr::from(([127, 0, 0, 1], 0));
         let bind = network.bind(&address);
         assert_send(&bind);
+    }
+
+    #[cfg(feature = "iouring-network")]
+    #[test]
+    fn native_iouring_network_types_remain_thread_safe() {
+        assert_send_sync::<super::iouring::Network>();
+        assert_send_sync::<super::iouring::Connection>();
+        assert_send_sync::<super::iouring::Sink>();
+        assert_send_sync::<super::iouring::Stream>();
     }
 
     pub(super) async fn test_network_trait<N, F>(new_network: F)

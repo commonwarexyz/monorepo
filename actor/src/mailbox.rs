@@ -909,9 +909,9 @@ mod tests {
         }
     }
 
-    fn assert_send<T: Send>(_: &T) {}
+    const fn assert_send<T: Send>(_: &T) {}
 
-    fn assert_send_sync<T: Send + Sync>() {}
+    const fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]
     fn native_mailboxes_remain_thread_safe() {

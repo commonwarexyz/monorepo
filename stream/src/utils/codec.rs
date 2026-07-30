@@ -130,7 +130,7 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(usize, usize), Error>
 mod tests {
     use super::*;
     use commonware_runtime::{
-        BufMut, IoBufMut, Runner, Spawner, Supervisor as _, deterministic, mocks,
+        BufMut, IoBufMut, Runner, Scheduler as _, Supervisor as _, deterministic, mocks,
     };
     use rand::RngExt as _;
 

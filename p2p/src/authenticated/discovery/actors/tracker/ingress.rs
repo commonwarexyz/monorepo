@@ -14,7 +14,10 @@ use commonware_actor::{
     mailbox::{self, Policy},
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::{PlatformSend, channel::{mpsc, oneshot}};
+use commonware_utils::{
+    PlatformSend,
+    channel::{mpsc, oneshot},
+};
 use std::collections::VecDeque;
 
 /// Messages that can be sent to the tracker actor.

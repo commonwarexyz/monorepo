@@ -2,7 +2,7 @@ use super::{io, wire};
 use crate::net::request_id;
 use commonware_codec::{EncodeShared, IsUnit, Read};
 use commonware_cryptography::Digest;
-use commonware_runtime::{Network, Spawner};
+use commonware_runtime::{Connection as _, Dialer, Spawner, TcpEndpoint};
 use commonware_storage::{
     mmr::{self, Location},
     qmdb::sync::{self, compact, resolver::fetch_operation_range},
@@ -34,9 +34,10 @@ where
         server_addr: std::net::SocketAddr,
     ) -> Result<Self, commonware_runtime::Error>
     where
-        E: Network + Spawner,
+        E: Dialer<Endpoint = TcpEndpoint> + Spawner,
     {
-        let (sink, stream) = context.dial(server_addr).await?;
+        let connection = context.dial(&server_addr.into()).await?;
+        let (sink, stream, _) = connection.split();
         let (request_tx, _handle) = io::run(context, sink, stream)?;
         Ok(Self {
             request_id_generator: request_id::Generator::new(),

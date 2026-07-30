@@ -1,11 +1,11 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
-use crate::{CheckedSender, Receiver, Recipients, Sender};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::Blocker;
-use commonware_actor::{Feedback, Unreliable};
+use crate::{CheckedSender, Receiver, Recipients, Sender};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_actor::mailbox;
+use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Codec, Error};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_cryptography::PublicKey;
@@ -13,16 +13,14 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPool, iobuf::EncodeExt,
-};
+use commonware_runtime::{BufferPool, iobuf::EncodeExt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::{ContextCell, Handle, Metrics, Scheduler, spawn_cell};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_utils::{PlatformSend, futures::Pool};
+use std::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{collections::VecDeque, num::NonZeroUsize};
-use std::time::SystemTime;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(

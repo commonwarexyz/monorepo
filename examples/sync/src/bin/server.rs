@@ -8,8 +8,8 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::{boxed, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf, Spawner, Storage,
-    StreamOf, Supervisor as _,
+    Acceptor, BufferPooler, Clock, Connection, Listener, Metrics, Runner, Spawner, Storage,
+    Supervisor as _,
     telemetry::metrics::{Counter, MetricsExt as _},
     tokio as tokio_runtime,
 };
@@ -46,6 +46,9 @@ const MAX_BATCH_SIZE: u64 = 100;
 
 /// Size of the channel for responses.
 const RESPONSE_BUFFER_SIZE: usize = 64;
+
+type SinkOf<E> = <<E as Acceptor>::Connection as Connection>::Sink;
+type StreamOf<E> = <<E as Acceptor>::Connection as Connection>::Stream;
 
 /// Server configuration.
 #[derive(Debug)]
@@ -458,19 +461,18 @@ async fn recv_loop<DB, E, Mode>(
     state: Arc<State<DB>>,
     mut stream: StreamOf<E>,
     response_sender: mpsc::Sender<wire::Message<DB::Operation, Key>>,
-    client_addr: SocketAddr,
 ) where
     DB: ExampleDatabase<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Metrics + Network + Spawner,
+    E: Metrics + Acceptor<Bind = SocketAddr> + Spawner,
     Mode: ServeMode<DB> + 'static,
 {
     loop {
         let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
             Ok(data) => data,
             Err(err) => {
-                debug!(?err, client_addr = %client_addr, "client disconnected");
+                debug!(?err, "client disconnected");
                 return;
             }
         };
@@ -478,7 +480,7 @@ async fn recv_loop<DB, E, Mode>(
         let message = match wire::Message::decode(message_data.coalesce()) {
             Ok(msg) => msg,
             Err(err) => {
-                warn!(client_addr = %client_addr, ?err, "failed to parse message");
+                warn!(?err, "failed to parse message");
                 state.error_counter.inc();
                 continue;
             }
@@ -490,7 +492,7 @@ async fn recv_loop<DB, E, Mode>(
             move |_| async move {
                 let response = Mode::handle_message(state.as_ref(), message).await;
                 if let Err(err) = response_sender.send(response).await {
-                    warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
+                    warn!(?err, "failed to send response to main loop");
                 }
             }
         });
@@ -507,16 +509,15 @@ async fn handle_client<DB, E, Mode>(
     state: Arc<State<DB>>,
     mut sink: SinkOf<E>,
     stream: StreamOf<E>,
-    client_addr: SocketAddr,
 ) -> Result<(), BoxError>
 where
     DB: ExampleDatabase<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner,
+    E: Storage + Clock + Metrics + Acceptor<Bind = SocketAddr> + Spawner,
     Mode: ServeMode<DB> + 'static,
 {
-    info!(client_addr = %client_addr, "client connected");
+    info!("client connected");
 
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
@@ -524,9 +525,7 @@ where
     let recv_handle = context.child("recv").spawn({
         let state = state.clone();
         let response_sender = response_sender.clone();
-        move |context| {
-            recv_loop::<DB, E, Mode>(context, state, stream, response_sender, client_addr)
-        }
+        move |context| recv_loop::<DB, E, Mode>(context, state, stream, response_sender)
     });
 
     drop(response_sender);
@@ -534,7 +533,7 @@ where
     while let Some(response) = response_receiver.recv().await {
         let response_data = response.encode();
         if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
-            info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
+            info!(?err, "send failed (client likely disconnected)");
             state.error_counter.inc();
             break;
         }
@@ -618,12 +617,12 @@ where
     DB: ExampleDatabase<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: Storage + Clock + Metrics + Acceptor<Bind = SocketAddr> + Spawner + Rng + Send,
     Mode: ServeMode<DB> + 'static,
 {
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
-    let mut listener = context.child("listener").bind(addr).await?;
+    let mut listener = context.child("listener").bind(&addr).await?;
     info!(
         addr = %addr,
         op_interval = ?config.op_interval,
@@ -648,14 +647,12 @@ where
             next_op_time = context.current() + config.op_interval;
         },
         client_result = listener.accept() => match client_result {
-            Ok((client_addr, sink, stream)) => {
+            Ok(connection) => {
+                let (sink, stream, _) = connection.split();
                 let state = state.clone();
                 context.child("client").spawn(move |context| async move {
-                    if let Err(err) =
-                        handle_client::<DB, _, Mode>(context, state, sink, stream, client_addr)
-                            .await
-                    {
-                        error!(client_addr = %client_addr, ?err, "error handling client");
+                    if let Err(err) = handle_client::<DB, _, Mode>(context, state, sink, stream).await {
+                        error!(?err, "error handling client");
                     }
                 });
             }
@@ -674,7 +671,7 @@ where
     DB: Syncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: Storage + Clock + Metrics + Acceptor<Bind = SocketAddr> + Spawner + Rng + Send,
 {
     let database = initialize_database(database, &config, &mut context).await?;
     run_server::<DB, E, FullMode>(context, config, database).await
@@ -690,7 +687,7 @@ where
     DB: CompactSyncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: Storage + Clock + Metrics + Acceptor<Bind = SocketAddr> + Spawner + Rng + Send,
     Arc<AsyncRwLock<Option<DB>>>: compact::Resolver<
             Family = mmr::Family,
             Op = DB::Operation,
@@ -706,7 +703,14 @@ where
 #[boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler
+        + Storage
+        + Clock
+        + Metrics
+        + Acceptor<Bind = SocketAddr>
+        + Spawner
+        + Rng
+        + Send,
 {
     let db_config = any::create_config(&context);
     let database = any::Database::init(context.child("database"), db_config).await?;
@@ -718,7 +722,14 @@ where
 #[boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler
+        + Storage
+        + Clock
+        + Metrics
+        + Acceptor<Bind = SocketAddr>
+        + Spawner
+        + Rng
+        + Send,
 {
     let db_config = current::create_config(&context);
     let database = current::Database::init(context.child("database"), db_config).await?;
@@ -730,7 +741,14 @@ where
 #[boxed]
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler
+        + Storage
+        + Clock
+        + Metrics
+        + Acceptor<Bind = SocketAddr>
+        + Spawner
+        + Rng
+        + Send,
 {
     let db_config = immutable::create_config(&context);
     let database = immutable::Database::init(context.child("database"), db_config).await?;
@@ -745,7 +763,14 @@ async fn run_immutable_full_source<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler
+        + Storage
+        + Clock
+        + Metrics
+        + Acceptor<Bind = SocketAddr>
+        + Spawner
+        + Rng
+        + Send,
 {
     let db_config = immutable::create_config(&context);
     let database = immutable::Database::init(context.child("database"), db_config).await?;
@@ -757,7 +782,14 @@ where
 #[boxed]
 async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler
+        + Storage
+        + Clock
+        + Metrics
+        + Acceptor<Bind = SocketAddr>
+        + Spawner
+        + Rng
+        + Send,
 {
     let db_config = keyless::create_config(&context);
     let database = keyless::Database::init(context.child("database"), db_config).await?;
@@ -772,7 +804,14 @@ async fn run_keyless_full_source<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler
+        + Storage
+        + Clock
+        + Metrics
+        + Acceptor<Bind = SocketAddr>
+        + Spawner
+        + Rng
+        + Send,
 {
     let db_config = keyless::create_config(&context);
     let database = keyless::Database::init(context.child("database"), db_config).await?;
@@ -786,7 +825,14 @@ async fn run_immutable_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler
+        + Storage
+        + Clock
+        + Metrics
+        + Acceptor<Bind = SocketAddr>
+        + Spawner
+        + Rng
+        + Send,
 {
     let db_config = immutable_compact::create_config(&context);
     let database = immutable_compact::Database::init(context.child("database"), db_config).await?;
@@ -800,7 +846,14 @@ async fn run_keyless_compact<E>(
     config: Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + Rng + Send,
+    E: BufferPooler
+        + Storage
+        + Clock
+        + Metrics
+        + Acceptor<Bind = SocketAddr>
+        + Spawner
+        + Rng
+        + Send,
 {
     let db_config = keyless_compact::create_config(&context);
     let database = keyless_compact::Database::init(context.child("database"), db_config).await?;

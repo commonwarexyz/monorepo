@@ -13,8 +13,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Connection, ConnectionOf, ContextCell, Dialer, Handle, Metrics, SinkOf,
-    Scheduler, StreamOf, TcpEndpoint, TcpOrigin, spawn_cell,
+    BufferPooler, Clock, Connection, ConnectionOf, ContextCell, Dialer, Handle, Metrics, Scheduler,
+    SinkOf, StreamOf, TcpEndpoint, TcpOrigin, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::encrypted::{Config as StreamConfig, dial};

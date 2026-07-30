@@ -15,7 +15,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Scheduler, Stream, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Scheduler, Sink, Stream, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use rand_core::CryptoRng;

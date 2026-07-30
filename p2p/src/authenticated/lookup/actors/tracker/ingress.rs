@@ -161,10 +161,7 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn dial(
-        &self,
-        public_key: C,
-    ) -> Option<(Reservation<C>, Ingress)> {
+    pub(crate) async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dial {
             public_key,
@@ -200,11 +197,7 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn listen(
-        &self,
-        public_key: C,
-        source_ip: IpAddr,
-    ) -> Option<Reservation<C>> {
+    pub(crate) async fn listen(&self, public_key: C, source_ip: IpAddr) -> Option<Reservation<C>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Listen {
             public_key,

@@ -1,6 +1,9 @@
 //! Explicitly attached connections.
 
-use crate::authenticated::{Mailbox, lookup::actors::{spawner, tracker}};
+use crate::authenticated::{
+    Mailbox,
+    lookup::actors::{spawner, tracker},
+};
 use commonware_actor::mailbox::{self, UnreliablePolicy};
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_macros::select_loop;
@@ -95,14 +98,11 @@ impl<N: Connection, P: PublicKey> Clone for Attachments<N, P> {
 
 impl<N: Connection, P: PublicKey> Attachments<N, P> {
     /// Attach an outbound connection that is expected to authenticate as `expected_peer`.
-    pub async fn attach_outbound(
-        &self,
-        expected_peer: P,
-        connection: N,
-    ) -> Result<(), Error> {
+    pub async fn attach_outbound(&self, expected_peer: P, connection: N) -> Result<(), Error> {
         let (responder, receiver) = oneshot::channel();
         if !self
-            .mailbox.0
+            .mailbox
+            .0
             .enqueue(Message::Outbound {
                 expected_peer,
                 connection,
@@ -119,7 +119,8 @@ impl<N: Connection, P: PublicKey> Attachments<N, P> {
     pub async fn attach_inbound(&self, connection: N) -> Result<(), Error> {
         let (responder, receiver) = oneshot::channel();
         if !self
-            .mailbox.0
+            .mailbox
+            .0
             .enqueue(Message::Inbound {
                 connection,
                 responder,
@@ -239,15 +240,9 @@ impl<
         mut spawner: Mailbox<spawner::Message<N::Sink, N::Stream, C::PublicKey>>,
     ) -> Result<(), Error> {
         let (sink, stream, _) = connection.split();
-        let encrypted = encrypted::dial(
-            context,
-            stream_cfg,
-            expected_peer.clone(),
-            stream,
-            sink,
-        )
-        .await
-        .map_err(|_| Error::Handshake)?;
+        let encrypted = encrypted::dial(context, stream_cfg, expected_peer.clone(), stream, sink)
+            .await
+            .map_err(|_| Error::Handshake)?;
         let reservation = tracker
             .attach(expected_peer, false)
             .await
@@ -269,15 +264,10 @@ impl<
     ) -> Result<(), Error> {
         let (sink, stream, info) = connection.split();
         let permit = admission.pre_auth(&info).map_err(|_| Error::Rejected)?;
-        let (peer, sender, receiver) = encrypted::listen(
-            context,
-            |_| async { true },
-            stream_cfg,
-            stream,
-            sink,
-        )
-        .await
-        .map_err(|_| Error::Handshake)?;
+        let (peer, sender, receiver) =
+            encrypted::listen(context, |_| async { true }, stream_cfg, stream, sink)
+                .await
+                .map_err(|_| Error::Handshake)?;
         admission
             .post_auth(permit, &peer, &info)
             .await
@@ -300,9 +290,7 @@ mod tests {
     use crate::authenticated::lookup::actors::tracker;
     use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
-    use commonware_runtime::{
-        ConnectionInfo, Runner as _, Supervisor as _, deterministic, mocks,
-    };
+    use commonware_runtime::{ConnectionInfo, Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_utils::{NZUsize, sync::Mutex};
     use std::{sync::Arc, time::Duration};
 
@@ -387,7 +375,10 @@ mod tests {
     fn tracker(
         context: deterministic::Context,
         key: PrivateKey,
-    ) -> (tracker::Actor<deterministic::Context, PrivateKey>, tracker::Mailbox<PublicKey>) {
+    ) -> (
+        tracker::Actor<deterministic::Context, PrivateKey>,
+        tracker::Mailbox<PublicKey>,
+    ) {
         let (listener, _updates) = crate::authenticated::lookup::actors::listener::Mailbox::new();
         let (actor, mailbox, _oracle) = tracker::Actor::new(
             context,
@@ -422,15 +413,11 @@ mod tests {
                 admission,
                 NZUsize!(16),
             );
-            let (_tracker_sender, tracker_receiver) = mailbox::new(
-                context.child("tracker_mailbox"),
-                NZUsize!(1),
-            );
+            let (_tracker_sender, tracker_receiver) =
+                mailbox::new(context.child("tracker_mailbox"), NZUsize!(1));
             let tracker = tracker::Mailbox::new(_tracker_sender);
-            let (spawner, _spawner_receiver) = crate::authenticated::Mailbox::new(
-                context.child("spawner_mailbox"),
-                NZUsize!(1),
-            );
+            let (spawner, _spawner_receiver) =
+                crate::authenticated::Mailbox::new(context.child("spawner_mailbox"), NZUsize!(1));
             let _actor = actor.start(tracker, spawner);
 
             let remote_task = context.child("remote").spawn(move |context| async move {
@@ -472,10 +459,8 @@ mod tests {
                 admission,
                 NZUsize!(16),
             );
-            let (spawner, mut spawned) = crate::authenticated::Mailbox::new(
-                context.child("spawner_mailbox"),
-                NZUsize!(16),
-            );
+            let (spawner, mut spawned) =
+                crate::authenticated::Mailbox::new(context.child("spawner_mailbox"), NZUsize!(16));
             let _actor = actor.start(tracker, spawner);
 
             let dialer = context.child("remote").spawn(move |context| async move {
@@ -491,8 +476,11 @@ mod tests {
             });
             assert_eq!(attachments.attach_inbound(local_connection).await, Ok(()));
             let remote_connection = dialer.await.unwrap().expect("remote handshake failed");
-            let spawner::Message::Spawn { peer, connection, reservation: _reservation } =
-                spawned.recv().await.expect("connection was not spawned");
+            let spawner::Message::Spawn {
+                peer,
+                connection,
+                reservation: _reservation,
+            } = spawned.recv().await.expect("connection was not spawned");
             assert_eq!(peer, remote_public);
             assert_eq!(authenticated.lock().as_slice(), &[remote_public]);
             drop(remote_connection);

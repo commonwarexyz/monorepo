@@ -43,8 +43,6 @@
 //! ```
 
 pub use crate::storage::faulty::Config as FaultConfig;
-#[cfg(feature = "external")]
-use crate::{Blocker, Pacer};
 use crate::{
     Acceptor, BufferPool, BufferPoolConfig, Clock, ConnectionOf, Dialer, Error, Execution, Handle,
     IoBufs, METRICS_PREFIX, Name, Panicked, TcpEndpoint, child_label,
@@ -67,6 +65,8 @@ use crate::{
         supervision::Tree,
     },
 };
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -897,9 +897,8 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
-/// Implementation of [crate::Scheduler], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `deterministic`
-/// runtime.
+/// Implementation of [crate::Scheduler], [crate::Clock], [crate::Dialer],
+/// [crate::Acceptor], and [crate::Storage] for the `deterministic` runtime.
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
@@ -1512,8 +1511,8 @@ impl Dialer for Context {
     }
 
     async fn dial(&self, endpoint: &Self::Endpoint) -> Result<Self::Connection, Error> {
-        let endpoint = match endpoint {
-            TcpEndpoint::Socket(socket) => TcpEndpoint::Socket(*socket),
+        let sockets = match endpoint {
+            TcpEndpoint::Socket(socket) => vec![*socket],
             TcpEndpoint::Dns { host, port } => {
                 let executor = self.executor();
                 let result = executor.dns.lock().get(host).cloned();
@@ -1521,13 +1520,26 @@ impl Dialer for Context {
                     hasher.update(host.as_bytes());
                     hasher.update(result.encode());
                 });
-                let ip = result
-                    .and_then(|addresses| addresses.into_iter().next())
-                    .ok_or_else(|| Error::ResolveFailed(host.clone()))?;
-                TcpEndpoint::Socket(SocketAddr::new(ip, *port))
+                let mut addresses = result.ok_or_else(|| Error::ResolveFailed(host.clone()))?;
+                executor.auditor.event(b"rand", |hasher| {
+                    hasher.update(b"dns_shuffle");
+                });
+                addresses.shuffle(&mut **executor.rng.lock());
+                addresses
+                    .into_iter()
+                    .map(|ip| SocketAddr::new(ip, *port))
+                    .collect()
             }
         };
-        self.network.dial(&endpoint).await
+
+        let mut last_error = Error::ConnectionFailed;
+        for socket in sockets {
+            match self.network.dial(&TcpEndpoint::Socket(socket)).await {
+                Ok(connection) => return Ok(connection),
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error)
     }
 }
 

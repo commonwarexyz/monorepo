@@ -17,12 +17,12 @@ pub(crate) mod thread;
 
 mod handle;
 pub use handle::Handle;
+pub(crate) use handle::MetricHandle;
 #[commonware_macros::stability(ALPHA)]
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use handle::Panicked;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use handle::Panicker;
-pub(crate) use handle::MetricHandle;
 
 mod cell;
 pub use cell::Cell as ContextCell;

@@ -245,7 +245,7 @@ mod tests {
     use super::*;
     use crate::types::{Epoch, View};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
-    use commonware_runtime::{Runner, Spawner, deterministic};
+    use commonware_runtime::{Runner, Scheduler, deterministic};
     use std::future::ready;
 
     type D = Sha256Digest;
