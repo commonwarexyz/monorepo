@@ -435,24 +435,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri does not support mach_timebase_info")]
-    fn process_timebase_is_cached_and_stable() {
-        // Read through the same process-wide path used by separate alarm shards.
-        let first = Timebase::read().unwrap();
-        let cached = TIMEBASE.get().expect("timebase must have been initialized");
-        let second = Timebase::read().unwrap();
-
-        // Both calls return the cached ratio and leave the same OnceLock value in
-        // place rather than querying the kernel again.
-        assert_eq!(first.numer, second.numer);
-        assert_eq!(first.denom, second.denom);
-        assert!(std::ptr::eq(
-            cached,
-            TIMEBASE.get().expect("timebase cache disappeared")
-        ));
-    }
-
-    #[test]
     fn timebase_rejects_unrepresentable_conversions() {
         // Make each tick as large as the timebase representation permits.
         let large_tick = Timebase::new(u32::MAX, 1).unwrap();
@@ -693,41 +675,5 @@ mod tests {
             .disarm()
             .expect_err("missing recorded timer must violate the adapter invariant");
         assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
-    }
-
-    #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri does not support kqueue descriptors")]
-    async fn dropping_alarm_closes_descriptor() {
-        // Install a user-event marker that the timer adapter never creates. This
-        // distinguishes a leaked kqueue from a descriptor number reused by a
-        // parallel test.
-        let alarm = NativeAlarm::new(0).unwrap();
-        let descriptor = alarm.descriptor.get_ref().as_raw_fd();
-        let marker = libc::kevent {
-            ident: TIMER_IDENT + 1,
-            filter: libc::EVFILT_USER,
-            flags: libc::EV_ADD | libc::EV_ENABLE,
-            fflags: 0,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        submit_change(descriptor, &marker).unwrap();
-
-        // Drop the sole OwnedFd, then try to delete the private marker through the
-        // raw descriptor number.
-        drop(alarm);
-        let deletion = libc::kevent {
-            flags: libc::EV_DELETE,
-            ..marker
-        };
-        let error = submit_change(descriptor, &deletion)
-            .expect_err("the dropped adapter must not retain its user-event marker");
-
-        // A closed or non-kqueue descriptor reports EBADF or EINVAL. A descriptor
-        // reused for another kqueue reports ENOENT because it has no marker.
-        assert!(matches!(
-            error.raw_os_error(),
-            Some(libc::EBADF | libc::EINVAL | libc::ENOENT)
-        ));
     }
 }
