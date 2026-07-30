@@ -27,8 +27,7 @@ impl PeerGap {
         &mut self,
         now: Instant,
         callbacks_started: bool,
-        completed: usize,
-        target: usize,
+        callbacks_completed: bool,
     ) -> bool {
         if callbacks_started {
             self.maximum = self
@@ -36,7 +35,7 @@ impl PeerGap {
                 .max(now.saturating_duration_since(self.previous_run));
         }
         self.previous_run = now;
-        completed >= target
+        callbacks_completed
     }
 
     /// Returns the largest scheduling gap observed after callbacks began.

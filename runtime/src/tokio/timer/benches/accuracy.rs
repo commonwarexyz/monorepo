@@ -50,27 +50,35 @@ struct CommonDeadline {
     commonware_measurement: Instant,
     /// Measurement deadline corresponding exactly to the Tokio deadline.
     tokio_measurement: Instant,
+    /// Width of the monotonic bracket around the wall-clock observation.
+    clock_pair_span: Duration,
 }
 
 impl CommonDeadline {
     /// Publishes one deadline at the requested distance from barrier release.
     fn new(target: Duration) -> io::Result<Self> {
-        let commonware_measurement = Instant::now().checked_add(target).ok_or_else(|| {
+        // The two monotonic snapshots bracket the wall-clock observation without
+        // adding measurement work beyond the deadline forms already required.
+        let commonware_origin = Instant::now();
+        let wall_origin = SystemTime::now();
+        let tokio_origin = tokio::time::Instant::now();
+        let commonware_measurement = commonware_origin.checked_add(target).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "accuracy deadline overflow")
         })?;
-        let wall = SystemTime::now()
+        let wall = wall_origin
             .checked_add(target)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wall deadline overflow"))?;
-        let tokio = tokio::time::Instant::now()
-            .checked_add(target)
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "Tokio deadline overflow")
-            })?;
+        let tokio = tokio_origin.checked_add(target).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Tokio deadline overflow")
+        })?;
         Ok(Self {
             wall,
             tokio,
             commonware_measurement,
             tokio_measurement: tokio.into_std(),
+            clock_pair_span: tokio_origin
+                .into_std()
+                .saturating_duration_since(commonware_origin),
         })
     }
 
@@ -83,6 +91,14 @@ impl CommonDeadline {
     }
 }
 
+/// Measurements returned by one accuracy batch.
+struct AccuracyBatch {
+    /// Per-timer lateness observations.
+    lateness: Vec<Duration>,
+    /// Commonware wall-clock pairing uncertainty, when applicable.
+    clock_pair_span: Option<Duration>,
+}
+
 /// Runs the small production accuracy matrix for both backends.
 pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) -> io::Result<()> {
     println!(
@@ -90,6 +106,9 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
     );
     println!(
         "accuracy_note high-concurrency synchronized lateness includes barrier release, registration, and wake run-queue fan-out because a 100us deadline can pass before every task registers"
+    );
+    println!(
+        "accuracy_note commonware synchronized lateness is an upper bound and subtracting clock_pair_span_max_ns with saturation gives the lower bound"
     );
 
     let mut scenarios = vec![
@@ -121,18 +140,19 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
         for scenario in &scenarios {
             let observations = checked_observations(config.accuracy_batches, scenario.concurrency)?;
             let mut lateness = Vec::with_capacity(observations);
+            let mut clock_pair_span = report::ClockPairSpan::default();
 
             // A configured sample is a batch, so every slot contributes one value.
             for _ in 0..config.accuracy_batches {
-                lateness.extend(
-                    run_batch(
-                        Arc::clone(&clock),
-                        backend,
-                        *scenario,
-                        config.accuracy_spread,
-                    )
-                    .await?,
-                );
+                let batch = run_batch(
+                    Arc::clone(&clock),
+                    backend,
+                    *scenario,
+                    config.accuracy_spread,
+                )
+                .await?;
+                lateness.extend(batch.lateness);
+                clock_pair_span.observe(batch.clock_pair_span);
             }
             if lateness.len() != observations {
                 return Err(io::Error::other(format!(
@@ -149,6 +169,7 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
                 scenario.target.as_micros(),
                 scenario.concurrency,
             );
+            let clock_pair_span = clock_pair_span.label("lateness_bound");
             report::print_duration(
                 &name,
                 config.accuracy_batches,
@@ -156,6 +177,7 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
                 "lateness",
                 &lateness,
                 None,
+                Some(&clock_pair_span),
             )?;
         }
     }
@@ -168,7 +190,7 @@ async fn run_batch(
     backend: Backend,
     scenario: Scenario,
     spread: Duration,
-) -> io::Result<Vec<Duration>> {
+) -> io::Result<AccuracyBatch> {
     let ready = Arc::new(Barrier::new(scenario.concurrency + 1));
     let start = Arc::new(Barrier::new(scenario.concurrency + 1));
     let common_deadline = Arc::new(OnceLock::<CommonDeadline>::new());
@@ -221,16 +243,27 @@ async fn run_batch(
     }
 
     ready.wait().await;
-    match scenario.mode {
-        Mode::Synchronized => common_deadline
-            .set(CommonDeadline::new(scenario.target)?)
-            .map_err(|_| io::Error::other("common deadline initialized twice"))?,
-        Mode::Spread => spread_origin
-            .set(tokio::time::Instant::now())
-            .map_err(|_| io::Error::other("spread origin initialized twice"))?,
-    }
+    let clock_pair_span = match scenario.mode {
+        Mode::Synchronized => {
+            let deadline = CommonDeadline::new(scenario.target)?;
+            let span = (backend == Backend::Commonware).then_some(deadline.clock_pair_span);
+            common_deadline
+                .set(deadline)
+                .map_err(|_| io::Error::other("common deadline initialized twice"))?;
+            span
+        }
+        Mode::Spread => {
+            spread_origin
+                .set(tokio::time::Instant::now())
+                .map_err(|_| io::Error::other("spread origin initialized twice"))?;
+            None
+        }
+    };
     start.wait().await;
-    collect_handles(handles).await
+    Ok(AccuracyBatch {
+        lateness: collect_handles(handles).await?,
+        clock_pair_span,
+    })
 }
 
 /// Returns observed lateness while rejecting an early timer callback.

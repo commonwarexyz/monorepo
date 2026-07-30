@@ -73,22 +73,3 @@ fn cancellation_dominates_start() {
     // Assertion: Neither the prior nor repeated start hides cancellation.
     assert_eq!(release, super::ProducerRelease::Cancel);
 }
-
-#[test]
-fn join_all_waits_after_first_panic() {
-    // Setup: Put a panicking producer before one that publishes completion.
-    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let panicking = std::thread::spawn(|| panic!("injected producer panic"));
-    let completed_task = std::sync::Arc::clone(&completed);
-    let succeeding = std::thread::spawn(move || {
-        completed_task.store(true, std::sync::atomic::Ordering::Release);
-    });
-
-    // Action: Join both producers through the non-short-circuiting helper.
-    let results = super::join_all(vec![panicking, succeeding]);
-
-    // Assertion: The first panic is retained and the later producer was joined.
-    assert!(results[0].is_err());
-    assert!(results[1].is_ok());
-    assert!(completed.load(std::sync::atomic::Ordering::Acquire));
-}

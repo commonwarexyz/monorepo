@@ -68,6 +68,31 @@ fn peak_fd_count_tracks_available_maximum() {
 }
 
 #[test]
+fn clock_pair_span_reports_exact_and_bounded_measurements() {
+    // Setup: Start without paired wall-clock samples, then prepare two spans.
+    let mut span = super::ClockPairSpan::default();
+    let shorter = std::time::Duration::from_nanos(7);
+    let longer = std::time::Duration::from_nanos(11);
+
+    // Action: Format the exact state, then observe both bracket widths.
+    let exact = span.label("lateness_bound");
+    span.observe(Some(longer));
+    span.observe(None);
+    span.observe(Some(shorter));
+    let bounded = span.label("lateness_bound");
+
+    // Assertion: Missing pairs are ignored and the maximum bounds overstatement.
+    assert_eq!(
+        exact,
+        "clock_pair_span_samples=0 clock_pair_span_max_ns=0 lateness_bound=exact"
+    );
+    assert_eq!(
+        bounded,
+        "clock_pair_span_samples=2 clock_pair_span_max_ns=11 lateness_bound=upper"
+    );
+}
+
+#[test]
 fn sample_counts_distinguish_workload_size_from_metric_samples() {
     // Setup: Model two batches containing many timers and several distributions.
     let batches = 2;

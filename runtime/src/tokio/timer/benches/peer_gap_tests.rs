@@ -7,10 +7,10 @@ fn terminal_observation_records_suspended_peer_gap() {
     let before_callbacks = initialized + std::time::Duration::from_micros(5);
     let after_completion = before_callbacks + std::time::Duration::from_micros(20);
     let mut gap = super::PeerGap::new(initialized);
-    assert!(!gap.observe(before_callbacks, false, 0, 10));
+    assert!(!gap.observe(before_callbacks, false, false));
 
     // Action: Observe the peer only after every callback completed.
-    let completed = gap.observe(after_completion, true, 10, 10);
+    let completed = gap.observe(after_completion, true, true);
 
     // Assertion: Termination retains the entire interval the peer was suspended.
     assert!(completed);

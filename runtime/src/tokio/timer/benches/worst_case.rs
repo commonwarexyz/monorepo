@@ -4,7 +4,7 @@ use crate::{
     Backend, BenchSleep, Config, checked_observations,
     peer_gap::{PeerGap, dispatch_lateness},
     poll_once,
-    producer_gate::{ProducerGate, ProducerRelease, join_all},
+    producer_gate::{ProducerGate, ProducerRelease},
     report, sleep_until, sleep_until_wall,
 };
 use commonware_runtime::{Runner as _, tokio as commonware_tokio};
@@ -83,6 +83,7 @@ async fn benchmark_descending_registration(
             "registration",
             &elapsed,
             Some(&peak_live_fd_count),
+            None,
         )?;
     }
     Ok(())
@@ -163,19 +164,40 @@ async fn benchmark_cancellation(
             let mut peak_live_fd_count = report::PeakFdCount::default();
 
             for batch in 0..config.worst_batches {
-                let result = run_cancellation_batch(
+                let batch = u64::try_from(batch).unwrap_or(u64::MAX);
+                let latency = run_cancellation_batch(
                     Arc::clone(&clock),
                     backend,
                     config.cancellation_timers,
                     total_canceled,
                     producers,
-                    u64::try_from(batch).unwrap_or(u64::MAX),
+                    batch,
+                    CancellationPass::Latency,
                 )
                 .await?;
-                setup.extend(result.setup);
-                cancellation.extend(result.cancellation);
-                drain.push(result.drain);
-                peak_live_fd_count.observe(result.live_fd_count);
+                let throughput = run_cancellation_batch(
+                    Arc::clone(&clock),
+                    backend,
+                    config.cancellation_timers,
+                    total_canceled,
+                    producers,
+                    batch,
+                    CancellationPass::Throughput,
+                )
+                .await?;
+                if !throughput.cancellation.is_empty() {
+                    return Err(io::Error::other(
+                        "throughput cancellation pass produced latency samples",
+                    ));
+                }
+
+                // Per-timer latency and aggregate drain use separate passes so
+                // clock reads and sample writes cannot distort drain scaling.
+                setup.extend(latency.setup);
+                cancellation.extend(latency.cancellation);
+                drain.push(throughput.drain);
+                peak_live_fd_count.observe(latency.live_fd_count);
+                peak_live_fd_count.observe(throughput.live_fd_count);
             }
             if setup.len() != setup_samples
                 || cancellation.len() != cancellation_samples
@@ -226,8 +248,10 @@ async fn benchmark_cancellation(
                 "{name} {accounting} setup_p50_us={:.3} setup_p99_us={:.3} setup_max_us={:.3} \
                  cancellation_p50_us={:.3} cancellation_p99_us={:.3} \
                  cancellation_max_us={:.3} drain_p50_us={:.3} drain_p99_us={:.3} \
-                 drain_max_us={:.3} scaling_vs_one_producer={scaling} fd_count={} \
-                 peak_live_fd_count={} {shard_distribution}",
+                 drain_max_us={:.3} scaling_vs_one_producer={scaling} \
+                 measurement_passes=2 cancellation_measurement=instrumented \
+                 drain_measurement=uninstrumented setup_measurement=latency_pass \
+                 fd_count={} peak_live_fd_count={} {shard_distribution}",
                 report::micros(setup_distribution.p50),
                 report::micros(setup_distribution.p99),
                 report::micros(setup_distribution.max),
@@ -243,6 +267,15 @@ async fn benchmark_cancellation(
         }
     }
     Ok(())
+}
+
+/// Work isolated by one cancellation measurement pass.
+#[derive(Clone, Copy)]
+enum CancellationPass {
+    /// Measure every individual timer drop.
+    Latency,
+    /// Measure aggregate drain without per-drop instrumentation.
+    Throughput,
 }
 
 /// Returns drain scaling only when this run measured a one-producer baseline.
@@ -310,6 +343,8 @@ struct CancellationProducer {
     canceled: usize,
     /// Deterministic shuffle seed.
     seed: u64,
+    /// Measurement work performed after producer release.
+    pass: CancellationPass,
     /// Cancelable rendezvous shared with the coordinator.
     gate: Arc<ProducerGate>,
 }
@@ -322,6 +357,7 @@ async fn run_cancellation_batch(
     canceled: usize,
     producers: usize,
     batch: u64,
+    pass: CancellationPass,
 ) -> io::Result<CancellationBatch> {
     let wall_deadline = checked_system_deadline(LONG_DEADLINE)?;
     let tokio_deadline = tokio::time::Instant::now()
@@ -344,6 +380,7 @@ async fn run_cancellation_batch(
             canceled: local_canceled,
             seed: batch.wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15)
                 ^ u64::try_from(producer).unwrap_or(u64::MAX),
+            pass,
             gate: Arc::clone(&gate),
         };
         let unwind_gate = Arc::clone(&gate);
@@ -376,15 +413,25 @@ async fn run_cancellation_batch(
         io::Error::other(format!("cancellation coordinator task failed: {error}"))
     })??;
 
-    let mut setup = Vec::with_capacity(producers);
-    let mut cancellation = Vec::with_capacity(canceled);
-    let mut survivors = Vec::with_capacity(timers - canceled);
+    let retain_samples = matches!(pass, CancellationPass::Latency);
+    let mut setup = if retain_samples {
+        Vec::with_capacity(producers)
+    } else {
+        Vec::new()
+    };
+    let mut cancellation = if retain_samples {
+        Vec::with_capacity(canceled)
+    } else {
+        Vec::new()
+    };
     let mut completed_early = false;
     for mut result in coordinated.results {
-        setup.push(result.setup);
-        cancellation.append(&mut result.cancellation);
-        survivors.append(&mut result.survivors);
+        if retain_samples {
+            setup.push(result.setup);
+            cancellation.append(&mut result.cancellation);
+        }
         completed_early |= result.completed_early;
+        drop(result.survivors);
     }
     if completed_early {
         return Err(io::Error::new(
@@ -393,8 +440,7 @@ async fn run_cancellation_batch(
         ));
     }
 
-    // The uncanceled remainder is dropped only after measured drain is derived.
-    drop(survivors);
+    // Producer results retain uncanceled timers until after measured drain is derived.
     tokio::task::yield_now().await;
     Ok(CancellationBatch {
         setup,
@@ -409,7 +455,7 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
     // Setup: Enter the shared reactor and register this producer's partition.
     // Dedicated threads give Commonware deterministic round-robin shard claims.
     let _guard = input.runtime.enter();
-    let setup_start = Instant::now();
+    let setup_start = matches!(input.pass, CancellationPass::Latency).then(Instant::now);
     let mut sleeps = Vec::with_capacity(input.timers);
     let mut completed_early = false;
     for _ in 0..input.timers {
@@ -422,23 +468,29 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
         completed_early |= poll_once(&mut sleep).is_ready();
         sleeps.push(sleep);
     }
-    let setup = setup_start.elapsed();
+    let setup = setup_start.map_or(Duration::ZERO, |start| start.elapsed());
     shuffle(&mut sleeps, input.seed);
     let survivors = sleeps.split_off(input.canceled);
 
-    // Action: Wait for every producer, then measure individual cancellations.
+    // Pre-touch latency samples before release so allocation and page faults do
+    // not contribute to either cancellation measurement.
+    let mut cancellation = match input.pass {
+        CancellationPass::Latency => {
+            let samples = vec![Duration::MAX; input.canceled];
+            let _ = std::hint::black_box(samples.as_slice());
+            samples
+        }
+        CancellationPass::Throughput => Vec::new(),
+    };
+
+    // Action: Wait for every producer, then run the selected cancellation pass.
     if input.gate.arrive_and_wait() == ProducerRelease::Cancel {
         return None;
     }
-    let mut cancellation = Vec::with_capacity(input.canceled);
-    let mut last_cancellation = None;
-    for sleep in sleeps {
-        let start = Instant::now();
-        drop(sleep);
-        let finished = Instant::now();
-        cancellation.push(finished.saturating_duration_since(start));
-        last_cancellation = Some(finished);
-    }
+    let last_cancellation = match input.pass {
+        CancellationPass::Latency => measure_cancellation_latency(&mut sleeps, &mut cancellation),
+        CancellationPass::Throughput => drain_cancellations(&mut sleeps),
+    };
     Some(ProducerResult {
         setup,
         cancellation,
@@ -446,6 +498,36 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
         survivors,
         completed_early,
     })
+}
+
+/// Drops timers with per-cancellation latency instrumentation.
+#[inline(never)]
+fn measure_cancellation_latency(
+    sleeps: &mut Vec<BenchSleep>,
+    samples: &mut [Duration],
+) -> Option<Instant> {
+    debug_assert_eq!(sleeps.len(), samples.len());
+    let mut last_cancellation = None;
+    for (sleep, sample) in sleeps.drain(..).zip(samples) {
+        let start = Instant::now();
+        drop(sleep);
+        let finished = Instant::now();
+        *sample = finished.saturating_duration_since(start);
+        last_cancellation = Some(finished);
+    }
+    last_cancellation
+}
+
+/// Drops timers without per-cancellation instrumentation.
+#[inline(never)]
+fn drain_cancellations(sleeps: &mut Vec<BenchSleep>) -> Option<Instant> {
+    if sleeps.is_empty() {
+        return None;
+    }
+    for sleep in sleeps.drain(..) {
+        drop(sleep);
+    }
+    Some(Instant::now())
 }
 
 /// Waits for registration, releases cancellation, and joins every producer.
@@ -460,9 +542,12 @@ fn coordinate_cancellation(
         return Err(io::Error::other("cancellation producer setup was canceled"));
     }
     let live_fd_count = report::fd_count();
+    // Reserve result storage before release so coordinator allocation cannot
+    // contribute to the measured cancellation drain.
+    let mut results = Vec::with_capacity(handles.len());
     let drain_start = Instant::now();
     gate.start();
-    let results = collect_producers(handles)?;
+    collect_producers(handles, &mut results)?;
     if results
         .iter()
         .any(|result| result.last_cancellation.is_none())
@@ -485,11 +570,11 @@ fn coordinate_cancellation(
 /// Collects every cancellation producer and returns the first thread failure.
 fn collect_producers(
     handles: Vec<std::thread::JoinHandle<Option<ProducerResult>>>,
-) -> io::Result<Vec<ProducerResult>> {
-    let mut results = Vec::with_capacity(handles.len());
+    results: &mut Vec<ProducerResult>,
+) -> io::Result<()> {
     let mut first_error = None;
-    for outcome in join_all(handles) {
-        match outcome {
+    for handle in handles {
+        match handle.join() {
             Ok(Some(result)) => results.push(result),
             Ok(None) if first_error.is_none() => {
                 first_error = Some(io::Error::other("cancellation producer was canceled"));
@@ -500,7 +585,7 @@ fn collect_producers(
             Ok(None) | Err(_) => {}
         }
     }
-    first_error.map_or_else(|| Ok(results), Err)
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Joins producers released after setup could not complete.
@@ -541,6 +626,7 @@ async fn benchmark_expiry_storm(
         let mut full_drain = Vec::with_capacity(config.worst_batches);
         let mut peer_gap = Vec::with_capacity(config.worst_batches);
         let mut peak_live_fd_count = report::PeakFdCount::default();
+        let mut clock_pair_span = report::ClockPairSpan::default();
 
         for _ in 0..config.worst_batches {
             let result = run_storm_batch(
@@ -555,6 +641,7 @@ async fn benchmark_expiry_storm(
             full_drain.push(result.full_drain);
             peer_gap.push(result.peer_gap);
             peak_live_fd_count.observe(result.live_fd_count);
+            clock_pair_span.observe(result.clock_pair_span);
         }
 
         let first = report::Distribution::new(&first_dispatch)?;
@@ -575,12 +662,13 @@ async fn benchmark_expiry_storm(
                 ("peer_gap", peer_gap.len()),
             ],
         );
+        let clock_pair_span = clock_pair_span.label("first_dispatch_bound");
         println!(
             "{name} {accounting} first_dispatch_p50_us={:.3} first_dispatch_p99_us={:.3} \
              first_dispatch_max_us={:.3} full_drain_p50_us={:.3} \
              full_drain_p99_us={:.3} full_drain_max_us={:.3} \
              peer_gap_p50_us={:.3} peer_gap_p99_us={:.3} peer_gap_max_us={:.3} \
-             fd_count={} peak_live_fd_count={}",
+             fd_count={} peak_live_fd_count={} {clock_pair_span}",
             report::micros(first.p50),
             report::micros(first.p99),
             report::micros(first.max),
@@ -607,6 +695,8 @@ struct StormResult {
     peer_gap: Duration,
     /// Descriptor count while every storm timer remains resident.
     live_fd_count: Option<usize>,
+    /// Commonware wall-clock pairing uncertainty, when applicable.
+    clock_pair_span: Option<Duration>,
 }
 
 /// Backend deadlines paired with one monotonic measurement origin.
@@ -620,6 +710,8 @@ struct StormDeadlines {
     measurement_origin: Instant,
     /// Selected backend deadline used for setup and peer cutoffs.
     measurement_deadline: Instant,
+    /// Commonware wall-clock pairing uncertainty, when applicable.
+    clock_pair_span: Option<Duration>,
 }
 
 impl StormDeadlines {
@@ -635,9 +727,13 @@ impl StormDeadlines {
         let tokio = tokio_origin.checked_add(lead).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "Tokio deadline overflow")
         })?;
-        let measurement_origin = match backend {
-            Backend::Commonware => commonware_origin,
-            Backend::Tokio => tokio_origin.into_std(),
+        let tokio_origin = tokio_origin.into_std();
+        let (measurement_origin, clock_pair_span) = match backend {
+            Backend::Commonware => (
+                commonware_origin,
+                Some(tokio_origin.saturating_duration_since(commonware_origin)),
+            ),
+            Backend::Tokio => (tokio_origin, None),
         };
         let measurement_deadline = measurement_origin.checked_add(lead).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "storm deadline overflow")
@@ -647,6 +743,7 @@ impl StormDeadlines {
             tokio,
             measurement_origin,
             measurement_deadline,
+            clock_pair_span,
         })
     }
 }
@@ -660,7 +757,7 @@ async fn run_storm_batch(
     peer_lead: Duration,
 ) -> io::Result<StormResult> {
     let deadlines = StormDeadlines::new(backend, lead)?;
-    let recorder = Arc::new(Recorder::new(deadlines.measurement_origin));
+    let recorder = Arc::new(Recorder::new(deadlines.measurement_origin, timers));
     let waker = Waker::from(Arc::clone(&recorder));
     let mut task_context = Context::from_waker(&waker);
     let mut sleeps = Vec::with_capacity(timers);
@@ -695,15 +792,16 @@ async fn run_storm_batch(
     let peer = tokio::spawn(async move {
         // Initialize measurement before acknowledging that the peer is runnable.
         let initialized_at = Instant::now();
-        let callbacks_at_init = peer_recorder.completed.load(Ordering::Acquire);
+        let callbacks_at_init = peer_recorder.completed.load(Ordering::Relaxed);
         let mut gap = PeerGap::new(initialized_at);
         let _ = peer_ready_sender.send((initialized_at, callbacks_at_init));
         loop {
             tokio::task::yield_now().await;
             let now = Instant::now();
-            let completed = peer_recorder.completed.load(Ordering::Acquire);
-            let callbacks_started = peer_recorder.first_ns.load(Ordering::Acquire) != 0;
-            if gap.observe(now, callbacks_started, completed, timers) {
+            let callbacks_completed = peer_recorder.last_ns.load(Ordering::Acquire) != 0;
+            let callbacks_started =
+                callbacks_completed || peer_recorder.first_ns.load(Ordering::Acquire) != 0;
+            if gap.observe(now, callbacks_started, callbacks_completed) {
                 break;
             }
         }
@@ -735,6 +833,7 @@ async fn run_storm_batch(
         full_drain: last.saturating_sub(first),
         peer_gap,
         live_fd_count,
+        clock_pair_span: deadlines.clock_pair_span,
     })
 }
 
@@ -742,19 +841,22 @@ async fn run_storm_batch(
 struct Recorder {
     /// Batch origin used to encode callback times.
     origin: Instant,
+    /// Number of callbacks required to finish the batch.
+    target: usize,
     /// Number of callbacks observed so far.
     completed: AtomicUsize,
     /// First callback time plus one nanosecond, with zero meaning unset.
     first_ns: AtomicU64,
-    /// Most recent callback time plus one nanosecond.
+    /// Final callback time plus one nanosecond, with zero meaning unset.
     last_ns: AtomicU64,
 }
 
 impl Recorder {
     /// Creates an empty callback recorder.
-    const fn new(origin: Instant) -> Self {
+    const fn new(origin: Instant, target: usize) -> Self {
         Self {
             origin,
+            target,
             completed: AtomicUsize::new(0),
             first_ns: AtomicU64::new(0),
             last_ns: AtomicU64::new(0),
@@ -763,15 +865,23 @@ impl Recorder {
 
     /// Records one callback and publishes progress to the peer task.
     fn record(&self) {
+        // The dedicated one-worker fairness runtime makes this ordinal the
+        // callback execution order. Every callback performs only this one RMW.
+        let before = self.completed.fetch_add(1, Ordering::Relaxed);
+        let is_first = before == 0;
+        let is_final = before.checked_add(1) == Some(self.target);
+        if !is_first && !is_final {
+            return;
+        }
+
         let elapsed = u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX - 1);
         let encoded = elapsed.saturating_add(1);
-
-        // Callback timestamps are written before the release count publishes them.
-        let _ = self
-            .first_ns
-            .compare_exchange(0, encoded, Ordering::AcqRel, Ordering::Acquire);
-        self.last_ns.fetch_max(encoded, Ordering::Release);
-        self.completed.fetch_add(1, Ordering::Release);
+        if is_first {
+            self.first_ns.store(encoded, Ordering::Release);
+        }
+        if is_final {
+            self.last_ns.store(encoded, Ordering::Release);
+        }
     }
 
     /// Decodes the first callback time.

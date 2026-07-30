@@ -96,11 +96,6 @@ impl ProducerGate {
     }
 }
 
-/// Joins every producer without short-circuiting after one panic.
-pub(crate) fn join_all<T>(handles: Vec<std::thread::JoinHandle<T>>) -> Vec<std::thread::Result<T>> {
-    handles.into_iter().map(|handle| handle.join()).collect()
-}
-
 #[cfg(test)]
 #[path = "producer_gate_tests.rs"]
 mod tests;

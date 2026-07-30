@@ -60,6 +60,35 @@ impl PeakFdCount {
     }
 }
 
+/// Largest monotonic interval bracketing paired wall-clock observations.
+#[derive(Default)]
+pub(crate) struct ClockPairSpan {
+    /// Number of wall-clock pairs observed.
+    samples: usize,
+    /// Largest span between the surrounding monotonic observations.
+    maximum: Duration,
+}
+
+impl ClockPairSpan {
+    /// Includes one optional clock-pair span in the reported bound.
+    pub(crate) fn observe(&mut self, span: Option<Duration>) {
+        if let Some(span) = span {
+            self.samples = self.samples.saturating_add(1);
+            self.maximum = self.maximum.max(span);
+        }
+    }
+
+    /// Formats the span and whether the named latency is exact or an upper bound.
+    pub(crate) fn label(&self, bound_name: &str) -> String {
+        let bound = if self.samples == 0 { "exact" } else { "upper" };
+        format!(
+            "clock_pair_span_samples={} clock_pair_span_max_ns={} {bound_name}={bound}",
+            self.samples,
+            self.maximum.as_nanos(),
+        )
+    }
+}
+
 /// Prints the platform and every effective command-line setting.
 pub(crate) fn print_effective_config(config: &Config) {
     let shards = config
@@ -128,20 +157,24 @@ pub(crate) fn print_duration(
     metric: &str,
     samples: &[Duration],
     peak_live_fd_count: Option<&PeakFdCount>,
+    additional_fields: Option<&str>,
 ) -> io::Result<Distribution> {
     let distribution = Distribution::new(samples)?;
     let accounting = format_sample_counts(batches, dimensions, &[(metric, samples.len())]);
     let peak_live_fd_count = peak_live_fd_count.map_or_else(String::new, |peak| {
         format!(" peak_live_fd_count={}", peak.label())
     });
+    let additional_fields =
+        additional_fields.map_or_else(String::new, |fields| format!(" {fields}"));
     println!(
         "{name} {accounting} {metric}_p50_us={:.3} {metric}_p99_us={:.3} \
-         {metric}_max_us={:.3} fd_count={}{}",
+         {metric}_max_us={:.3} fd_count={}{}{}",
         micros(distribution.p50),
         micros(distribution.p99),
         micros(distribution.max),
         fd_count_label(),
         peak_live_fd_count,
+        additional_fields,
     );
     Ok(distribution)
 }
