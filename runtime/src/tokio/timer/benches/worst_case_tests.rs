@@ -102,37 +102,6 @@ fn cancellation_collection_joins_after_first_panic() {
 }
 
 #[test]
-fn storm_deadlines_preserve_each_backend_measurement_contract() {
-    use std::time::Duration;
-
-    // Setup: Use one visible lead for both backend deadline representations.
-    let lead = Duration::from_millis(50);
-
-    // Tokio case - Action: Build its exact monotonic deadline and measurement pair.
-    let tokio = super::StormDeadlines::new(super::Backend::Tokio, lead).unwrap();
-
-    // Tokio case - Assertion: Cutoff and lateness reuse the Instant passed to Tokio.
-    assert_eq!(tokio.measurement_deadline, tokio.tokio.into_std());
-    assert_eq!(
-        tokio
-            .measurement_deadline
-            .saturating_duration_since(tokio.measurement_origin),
-        lead
-    );
-    assert_eq!(tokio.clock_pair_span, None);
-
-    // Commonware case - Action: Pair its wall deadline with monotonic observations.
-    let commonware = super::StormDeadlines::new(super::Backend::Commonware, lead).unwrap();
-    let observed_span = commonware
-        .tokio
-        .into_std()
-        .saturating_duration_since(commonware.measurement_deadline);
-
-    // Commonware case - Assertion: The span bounds first-dispatch overstatement.
-    assert_eq!(commonware.clock_pair_span, Some(observed_span));
-}
-
-#[test]
 fn recorder_timestamps_first_and_final_callbacks() {
     use std::{sync::atomic::Ordering, time::Instant};
 

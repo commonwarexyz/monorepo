@@ -1,7 +1,9 @@
 //! Application-observed timer accuracy scenarios.
 
 use crate::{
-    Backend, Config, checked_observations,
+    Backend, Config,
+    backend::DeadlinePair,
+    checked_observations,
     config::{ACCURACY_CONCURRENCY, ACCURACY_SPREAD},
     report, sleep_for, sleep_until,
 };
@@ -9,7 +11,7 @@ use commonware_runtime::tokio as commonware_tokio;
 use std::{
     io,
     sync::{Arc, OnceLock},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use tokio::{sync::Barrier, task::JoinHandle};
 
@@ -41,58 +43,6 @@ struct Scenario {
     target: Duration,
     /// Registration topology.
     mode: Mode,
-}
-
-/// Backend-specific forms of one synchronized absolute deadline.
-#[derive(Clone, Copy)]
-struct CommonDeadline {
-    /// Wall-clock deadline consumed by the Commonware clock.
-    wall: SystemTime,
-    /// Monotonic deadline consumed directly by Tokio.
-    tokio: tokio::time::Instant,
-    /// Measurement deadline corresponding to the Commonware wall deadline.
-    commonware_measurement: Instant,
-    /// Measurement deadline corresponding exactly to the Tokio deadline.
-    tokio_measurement: Instant,
-    /// Width of the monotonic bracket around the wall-clock observation.
-    clock_pair_span: Duration,
-}
-
-impl CommonDeadline {
-    /// Publishes one deadline at the requested distance from barrier release.
-    fn new(target: Duration) -> io::Result<Self> {
-        // The two monotonic snapshots bracket the wall-clock observation without
-        // adding measurement work beyond the deadline forms already required.
-        let commonware_origin = Instant::now();
-        let wall_origin = SystemTime::now();
-        let tokio_origin = tokio::time::Instant::now();
-        let commonware_measurement = commonware_origin.checked_add(target).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "accuracy deadline overflow")
-        })?;
-        let wall = wall_origin
-            .checked_add(target)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wall deadline overflow"))?;
-        let tokio = tokio_origin.checked_add(target).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Tokio deadline overflow")
-        })?;
-        Ok(Self {
-            wall,
-            tokio,
-            commonware_measurement,
-            tokio_measurement: tokio.into_std(),
-            clock_pair_span: tokio_origin
-                .into_std()
-                .saturating_duration_since(commonware_origin),
-        })
-    }
-
-    /// Returns the standard-library deadline used to calculate lateness.
-    const fn measurement(self, backend: Backend) -> Instant {
-        match backend {
-            Backend::Commonware => self.commonware_measurement,
-            Backend::Tokio => self.tokio_measurement,
-        }
-    }
 }
 
 /// Measurements returned by one accuracy batch.
@@ -192,7 +142,7 @@ async fn run_batch(
 ) -> io::Result<AccuracyBatch> {
     let ready = Arc::new(Barrier::new(scenario.concurrency + 1));
     let start = Arc::new(Barrier::new(scenario.concurrency + 1));
-    let common_deadline = Arc::new(OnceLock::<CommonDeadline>::new());
+    let common_deadline = Arc::new(OnceLock::<DeadlinePair>::new());
     let spread_origin = Arc::new(OnceLock::<tokio::time::Instant>::new());
     let offsets = spread_offsets(scenario.concurrency, spread)?;
     let mut handles = Vec::with_capacity(scenario.concurrency);
@@ -214,7 +164,7 @@ async fn run_batch(
                         .get()
                         .expect("common deadline initialized before start barrier");
                     sleep_until(&clock, backend, deadline.wall, deadline.tokio).await;
-                    checked_lateness(Instant::now(), deadline.measurement(backend))
+                    checked_lateness(Instant::now(), deadline.measurement_deadline)
                 }
                 Mode::Spread => {
                     let origin = *spread_origin
@@ -244,8 +194,8 @@ async fn run_batch(
     ready.wait().await;
     let clock_pair_span = match scenario.mode {
         Mode::Synchronized => {
-            let deadline = CommonDeadline::new(scenario.target)?;
-            let span = (backend == Backend::Commonware).then_some(deadline.clock_pair_span);
+            let deadline = DeadlinePair::new(backend, scenario.target)?;
+            let span = deadline.clock_pair_span;
             common_deadline
                 .set(deadline)
                 .map_err(|_| io::Error::other("common deadline initialized twice"))?;

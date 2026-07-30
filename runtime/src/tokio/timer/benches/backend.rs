@@ -4,13 +4,65 @@ use crate::Backend;
 use commonware_runtime::{Clock as _, tokio as commonware_tokio};
 use std::{
     future::Future,
+    io,
     pin::Pin,
     task::{Context, Poll},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Heap-allocated sleep used to give both timer backends the same harness cost.
 pub(crate) type BenchSleep = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Backend deadline forms bracketed by monotonic clock observations.
+#[derive(Clone, Copy)]
+pub(crate) struct DeadlinePair {
+    /// Wall-clock deadline consumed by the Commonware clock.
+    pub(crate) wall: SystemTime,
+    /// Monotonic deadline consumed directly by Tokio.
+    pub(crate) tokio: tokio::time::Instant,
+    /// Exact Tokio origin or conservative Commonware lower bound.
+    pub(crate) measurement_origin: Instant,
+    /// Selected backend deadline used for lateness and scheduling cutoffs.
+    pub(crate) measurement_deadline: Instant,
+    /// Commonware wall-clock pairing uncertainty, when applicable.
+    pub(crate) clock_pair_span: Option<Duration>,
+}
+
+impl DeadlinePair {
+    /// Constructs both backend forms and retains the selected measurement pair.
+    pub(crate) fn new(backend: Backend, target: Duration) -> io::Result<Self> {
+        // The monotonic observations bracket the wall-clock snapshot. Using
+        // the preceding value for Commonware prevents valid callbacks from
+        // being classified early, while the span bounds its overstatement.
+        let commonware_origin = Instant::now();
+        let wall_origin = SystemTime::now();
+        let tokio_origin = tokio::time::Instant::now();
+        let wall = wall_origin
+            .checked_add(target)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wall deadline overflow"))?;
+        let tokio = tokio_origin.checked_add(target).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Tokio deadline overflow")
+        })?;
+        let tokio_origin = tokio_origin.into_std();
+        let (measurement_origin, measurement_deadline, clock_pair_span) = match backend {
+            Backend::Commonware => (
+                commonware_origin,
+                commonware_origin.checked_add(target).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "measurement deadline overflow")
+                })?,
+                Some(tokio_origin.saturating_duration_since(commonware_origin)),
+            ),
+            Backend::Tokio => (tokio_origin, tokio.into_std(), None),
+        };
+        Ok(Self {
+            wall,
+            tokio,
+            measurement_origin,
+            measurement_deadline,
+            clock_pair_span,
+        })
+    }
+}
 
 /// Constructs a relative sleep through the selected backend.
 pub(crate) fn sleep_for(
@@ -62,3 +114,7 @@ pub(crate) fn poll_once(sleep: &mut BenchSleep) -> Poll<()> {
     let mut context = Context::from_waker(waker);
     sleep.as_mut().poll(&mut context)
 }
+
+#[cfg(test)]
+#[path = "backend_tests.rs"]
+mod tests;

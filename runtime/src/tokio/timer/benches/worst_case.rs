@@ -1,7 +1,9 @@
 //! Workloads that protect production timer design decisions.
 
 use crate::{
-    Backend, BenchSleep, Config, checked_observations,
+    Backend, BenchSleep, Config,
+    backend::DeadlinePair,
+    checked_observations,
     config::{
         CANCEL_PERCENT, CANCELLATION_TIMERS, PEER_LEAD, REGISTRATION_STEP, REGISTRATION_TIMERS,
         STORM_LEAD, STORM_TIMERS,
@@ -693,55 +695,6 @@ struct StormResult {
     clock_pair_span: Option<Duration>,
 }
 
-/// Backend deadlines paired with one monotonic measurement origin.
-#[derive(Clone, Copy)]
-struct StormDeadlines {
-    /// Wall-clock deadline passed to Commonware.
-    wall: SystemTime,
-    /// Monotonic deadline passed directly to Tokio.
-    tokio: tokio::time::Instant,
-    /// Exact Tokio origin or conservative Commonware lower bound.
-    measurement_origin: Instant,
-    /// Selected backend deadline used for setup and peer cutoffs.
-    measurement_deadline: Instant,
-    /// Commonware wall-clock pairing uncertainty, when applicable.
-    clock_pair_span: Option<Duration>,
-}
-
-impl StormDeadlines {
-    /// Constructs both backend forms while retaining the selected measurement pair.
-    fn new(backend: Backend, lead: Duration) -> io::Result<Self> {
-        // Pair Commonware's wall-clock snapshot with the immediately preceding
-        // monotonic observation so valid callbacks cannot be classified early.
-        let commonware_origin = Instant::now();
-        let wall = SystemTime::now()
-            .checked_add(lead)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wall deadline overflow"))?;
-        let tokio_origin = tokio::time::Instant::now();
-        let tokio = tokio_origin.checked_add(lead).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Tokio deadline overflow")
-        })?;
-        let tokio_origin = tokio_origin.into_std();
-        let (measurement_origin, clock_pair_span) = match backend {
-            Backend::Commonware => (
-                commonware_origin,
-                Some(tokio_origin.saturating_duration_since(commonware_origin)),
-            ),
-            Backend::Tokio => (tokio_origin, None),
-        };
-        let measurement_deadline = measurement_origin.checked_add(lead).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "storm deadline overflow")
-        })?;
-        Ok(Self {
-            wall,
-            tokio,
-            measurement_origin,
-            measurement_deadline,
-            clock_pair_span,
-        })
-    }
-}
-
 /// Registers a common-deadline storm with a recording waker and runnable peer.
 async fn run_storm_batch(
     clock: &commonware_tokio::Context,
@@ -750,7 +703,7 @@ async fn run_storm_batch(
     lead: Duration,
     peer_lead: Duration,
 ) -> io::Result<StormResult> {
-    let deadlines = StormDeadlines::new(backend, lead)?;
+    let deadlines = DeadlinePair::new(backend, lead)?;
     let recorder = Arc::new(Recorder::new(deadlines.measurement_origin, timers));
     let waker = Waker::from(Arc::clone(&recorder));
     let mut task_context = Context::from_waker(&waker);

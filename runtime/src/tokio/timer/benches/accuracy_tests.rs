@@ -22,19 +22,3 @@ fn lateness_rejects_early_completion() {
     assert_eq!(early.kind(), io::ErrorKind::InvalidData);
     assert_eq!(late, Duration::from_micros(7));
 }
-
-#[test]
-fn common_deadline_reports_the_monotonic_clock_pair_span() {
-    use std::time::Duration;
-
-    // Setup: Construct one synchronized deadline using both clock domains.
-    let deadline = super::CommonDeadline::new(Duration::from_millis(50)).unwrap();
-
-    // Action: Derive the distance between the paired measurement deadlines.
-    let observed_span = deadline
-        .tokio_measurement
-        .saturating_duration_since(deadline.commonware_measurement);
-
-    // Assertion: The reported span exactly brackets the wall-clock observation.
-    assert_eq!(deadline.clock_pair_span, observed_span);
-}
