@@ -181,22 +181,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         self.covering_nullification(view)
     }
 
-    /// Returns whether a notarization's certification outcome is already
-    /// implied by the current floor.
-    pub fn notarization_resolved(&self, notarization: &Notarization<S, D>) -> bool {
-        let Some(floor) = &self.floor else {
-            return false;
-        };
-        if notarization.view() < floor.view() {
-            return true;
-        }
-        match floor {
-            Certificate::Notarization(certified) => notarization.proposal == certified.proposal,
-            Certificate::Finalization(finalized) => notarization.proposal == finalized.proposal,
-            Certificate::Nullification(_) => unreachable!("the floor is never a nullification"),
-        }
-    }
-
     /// Returns the stored nullification covering `view`, if any.
     ///
     /// Since a nullification covers the rest of its term, it may be keyed at

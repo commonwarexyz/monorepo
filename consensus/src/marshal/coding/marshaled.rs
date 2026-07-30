@@ -585,9 +585,11 @@ where
                 let verify_rx = marshaled
                     .deferred_verify(embedded_context, payload, Some(block), Stage::Certified)
                     .await;
-                if let Ok(GateOutcome::Ready(result)) = verify_rx.await {
-                    tx.send_lossy(result);
-                }
+                gates::forward(tx, verify_rx, |result| match result {
+                    GateOutcome::Ready(result) => Some(result),
+                    GateOutcome::Recover => None,
+                })
+                .await;
             }
             .instrument(info_span!(
                 "marshal.coding.certify.embedded",
@@ -1066,9 +1068,7 @@ where
                     .with_attribute("round", round);
                 context.spawn(move |_| {
                     async move {
-                        if validity_rx.await.is_ok() {
-                            tx.send_lossy(true);
-                        }
+                        gates::forward(tx, validity_rx, |()| Some(true)).await;
                     }
                     .instrument(info_span!(
                         "marshal.coding.verify.shard_validity",

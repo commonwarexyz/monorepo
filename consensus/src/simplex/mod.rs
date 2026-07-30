@@ -109,7 +109,8 @@
 //! Simplex keeps a certification request open until the application returns a verdict, a verified
 //! later notarization names the proposal as its parent, or a finalization at or above that view
 //! makes the request obsolete. A timeout or nullification does not establish that the payload is
-//! uncertifiable, so application work continues.
+//! uncertifiable, so application work continues. If dependent evidence arrives first, Simplex still
+//! invokes `certify` for application side effects but does not wait for its result.
 //!
 //! A live application must return a deterministic verdict when protocol evidence does not resolve
 //! the request. An unresolved request prevents the validator from voting on dependent proposals.
@@ -5629,13 +5630,13 @@ mod tests {
 
     test_for_all_fixtures!(split_views_no_lockup);
 
-    /// Heals a certified-notarization/nullification split before the holder leads.
+    /// Heals a certified-notarization/nullification split in a group-led view.
     ///
     /// One honest validator certifies Notarization(3), two hold Nullification(3), and
     /// the fourth Byzantine validator stays silent. A group leader builds on parent 2.
     /// Targeted repair supplies the missing nullification, so group-led view 11
-    /// finalizes before the notarization holder leads view 13.
-    fn certified_split_heals_without_lone_leader_turn<S, F, L>(mut fixture: F)
+    /// becomes the first new finalization.
+    fn certified_split_heals_in_group_led_view<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5671,7 +5672,6 @@ mod tests {
             let byzantine = leader_of(10);
             let group = [leader_of(11), leader_of(12)];
             let lone = leader_of(13);
-            let lone_leader_view = View::new(13);
             assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
 
             // Delivery roles, not the arbitrary quorum signers, define the split.
@@ -5846,7 +5846,7 @@ mod tests {
                 if *idx == lone {
                     assert!(notarizations.contains_key(&view_3));
                     assert!(!nullifications.contains_key(&view_3));
-                    assert!(reporter.certified.lock().contains(&view_3));
+                    assert!(reporter.certifications.lock().contains_key(&view_3));
                 } else {
                     assert!(nullifications.contains_key(&view_3), "reporter {idx}");
                     assert!(!notarizations.contains_key(&view_3), "reporter {idx}");
@@ -5874,7 +5874,7 @@ mod tests {
                 join_all(finalizers).await;
             }
 
-            // Group-led view 11 finalizes before `lone` leads.
+            // Group-led view 11 is the first new finalization.
             for (idx, reporter) in honest_reporters.iter() {
                 let first = {
                     let finalizations = reporter.finalizations.lock();
@@ -5891,8 +5891,6 @@ mod tests {
                     "reporter {idx} did not finalize the first honest-led view"
                 );
             }
-            assert!(View::new(11) < lone_leader_view);
-
             // Background repair considers view 3 complete, so this proves targeted delivery.
             assert!(
                 honest_reporters[&lone]
@@ -5913,14 +5911,14 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_certified_split_heals_without_lone_leader_turn() {
-        certified_split_heals_without_lone_leader_turn::<_, _, RoundRobin>(ed25519::fixture);
+    fn test_certified_split_heals_in_group_led_view() {
+        certified_split_heals_in_group_led_view::<_, _, RoundRobin>(ed25519::fixture);
     }
 
     /// Heals a certified-notarization/nullification split when the holder leads first.
     ///
     /// The group fetches and certifies Notarization(3) from the leader. The
-    /// recovered parent finalizes before the triggering proposal completes.
+    /// recovered parent becomes the first new finalization.
     fn certified_split_heals_when_lone_holder_leads_first<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -6131,7 +6129,7 @@ mod tests {
                 if *idx == lone {
                     assert!(notarizations.contains_key(&view_3));
                     assert!(!nullifications.contains_key(&view_3));
-                    assert!(reporter.certified.lock().contains(&view_3));
+                    assert!(reporter.certifications.lock().contains_key(&view_3));
                 } else {
                     assert!(nullifications.contains_key(&view_3), "reporter {idx}");
                     assert!(!notarizations.contains_key(&view_3), "reporter {idx}");
@@ -6159,7 +6157,7 @@ mod tests {
                 join_all(finalizers).await;
             }
 
-            // The recovered parent finalizes before the triggering proposal.
+            // The recovered parent is the first new finalization.
             for (idx, reporter) in honest_reporters.iter() {
                 let first = {
                     let finalizations = reporter.finalizations.lock();
@@ -6184,7 +6182,7 @@ mod tests {
                     "group reporter {idx} did not resolve Notarization(3) from lone"
                 );
                 assert!(
-                    reporter.certified.lock().contains(&view_3),
+                    reporter.certifications.lock().contains_key(&view_3),
                     "group reporter {idx} did not certify Notarization(3)"
                 );
             }
@@ -6245,7 +6243,6 @@ mod tests {
             let byzantine = leader_of(10);
             let group = [leader_of(11), leader_of(12)];
             let lone = leader_of(13);
-            let lone_leader_view = View::new(13);
             assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
 
             // Delivery roles, not the arbitrary quorum signers, define the split.
@@ -6420,7 +6417,7 @@ mod tests {
                 let nullifications = reporter.nullifications.lock();
                 if *idx == lone {
                     assert!(notarizations.contains_key(&view_5));
-                    assert!(reporter.certified.lock().contains(&view_5));
+                    assert!(reporter.certifications.lock().contains_key(&view_5));
                     for view in 3..=5 {
                         assert!(!nullifications.contains_key(&View::new(view)));
                     }
@@ -6456,7 +6453,7 @@ mod tests {
                 join_all(finalizers).await;
             }
 
-            // All three targeted recoveries complete before group-led view 11 finalizes.
+            // Group-led view 11 is the first new finalization after all three repairs.
             for (idx, reporter) in honest_reporters.iter() {
                 let first = {
                     let finalizations = reporter.finalizations.lock();
@@ -6473,8 +6470,6 @@ mod tests {
                     "reporter {idx} did not finalize the first honest-led view"
                 );
             }
-            assert!(View::new(11) < lone_leader_view);
-
             let lone_reporter = &honest_reporters[&lone];
             for view in 3..=5 {
                 assert!(

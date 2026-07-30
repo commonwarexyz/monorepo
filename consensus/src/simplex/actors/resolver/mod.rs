@@ -50,15 +50,14 @@
 //! notarization is cryptographically valid before application certification completes, but it
 //! cannot yet raise the local floor. Completing the fetch would incorrectly claim that the ancestry
 //! gap was repaired. Rejecting the response would incorrectly fault a peer that supplied valid
-//! evidence. The resolver therefore keeps the delivery pending until the application supplies its
-//! authoritative verdict.
+//! evidence. The resolver therefore keeps the delivery pending until the voter supplies a terminal
+//! verdict, either from the application or from a verified dependent notarization.
 //!
 //! Fetching from another peer is not a general termination mechanism. A covering nullification may
-//! not exist, and another honest peer may return the same or a higher valid notarization that still
-//! requires application certification. Resolver progress therefore composes with the
-//! [`CertifiableAutomaton`](crate::CertifiableAutomaton) liveness contract. Success raises the
-//! floor, failure retries certificate repair, and finalization makes the request obsolete. Later
-//! proposal demand attaches to the same parked fetch and does not bypass the certification wait.
+//! not exist, and another honest peer may return the same or a higher valid notarization whose
+//! certification remains unresolved. Success raises the floor, failure retries certificate repair,
+//! and finalization makes the request obsolete. Later proposal demand attaches to the same parked
+//! fetch and does not bypass the certification wait.
 //! See the certification section of [the Simplex overview](crate::simplex).
 //!
 //! Local fetch purposes govern retention. They do not affect response validity. A nullification

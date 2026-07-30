@@ -64,12 +64,15 @@ pub struct Round<S: Scheme, D: Digest> {
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
+    reported_notarization: bool,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
+    reported_nullification: bool,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
+    reported_finalization: bool,
     certify: CertifyState,
     // Last ancestry view requested from this round's leader. For a fixed
     // proposal, each view is either skipped or the named parent, never both.
@@ -93,12 +96,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
+            reported_notarization: false,
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
+            reported_nullification: false,
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
+            reported_finalization: false,
             certify: CertifyState::Ready,
             requested: None,
         }
@@ -562,40 +568,67 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         (true, equivocator)
     }
 
+    /// Stages a notarization for any publication work not already performed.
+    pub fn publish_notarization(
+        &mut self,
+        rebroadcast: Option<bool>,
+    ) -> Option<(Notarization<S, D>, bool, bool)> {
+        let notarization = self.notarization.as_ref()?.clone();
+        let (broadcast, report) = publication_actions(
+            &mut self.broadcast_notarization,
+            &mut self.reported_notarization,
+            rebroadcast,
+        )?;
+        Some((notarization, broadcast, report))
+    }
+
     /// Returns a notarization certificate for broadcast if we have one and haven't broadcast it yet.
+    #[cfg(test)]
     pub fn broadcast_notarization(&mut self) -> Option<Notarization<S, D>> {
-        if self.broadcast_notarization {
-            return None;
-        }
-        if let Some(notarization) = &self.notarization {
-            self.broadcast_notarization = true;
-            return Some(notarization.clone());
-        }
-        None
+        self.publish_notarization(None)
+            .map(|(notarization, _, _)| notarization)
+    }
+
+    /// Stages a nullification for any publication work not already performed.
+    pub fn publish_nullification(
+        &mut self,
+        rebroadcast: Option<bool>,
+    ) -> Option<(Nullification<S>, bool, bool)> {
+        let nullification = self.nullification.as_ref()?.clone();
+        let (broadcast, report) = publication_actions(
+            &mut self.broadcast_nullification,
+            &mut self.reported_nullification,
+            rebroadcast,
+        )?;
+        Some((nullification, broadcast, report))
     }
 
     /// Returns a nullification certificate for broadcast if we have one and haven't broadcast it yet.
+    #[cfg(test)]
     pub fn broadcast_nullification(&mut self) -> Option<Nullification<S>> {
-        if self.broadcast_nullification {
-            return None;
-        }
-        if let Some(nullification) = &self.nullification {
-            self.broadcast_nullification = true;
-            return Some(nullification.clone());
-        }
-        None
+        self.publish_nullification(None)
+            .map(|(nullification, _, _)| nullification)
+    }
+
+    /// Stages a finalization for any publication work not already performed.
+    pub fn publish_finalization(
+        &mut self,
+        rebroadcast: Option<bool>,
+    ) -> Option<(Finalization<S, D>, bool, bool)> {
+        let finalization = self.finalization.as_ref()?.clone();
+        let (broadcast, report) = publication_actions(
+            &mut self.broadcast_finalization,
+            &mut self.reported_finalization,
+            rebroadcast,
+        )?;
+        Some((finalization, broadcast, report))
     }
 
     /// Returns a finalization certificate for broadcast if we have one and haven't broadcast it yet.
+    #[cfg(test)]
     pub fn broadcast_finalization(&mut self) -> Option<Finalization<S, D>> {
-        if self.broadcast_finalization {
-            return None;
-        }
-        if let Some(finalization) = &self.finalization {
-            self.broadcast_finalization = true;
-            return Some(finalization.clone());
-        }
-        None
+        self.publish_finalization(None)
+            .map(|(finalization, _, _)| finalization)
     }
 
     /// Returns a proposal candidate for notarization if we're ready to vote.
@@ -701,12 +734,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             }
             Artifact::Notarization(_) => {
                 self.broadcast_notarization = true;
+                self.reported_notarization = true;
             }
             Artifact::Nullification(_) => {
                 self.broadcast_nullification = true;
+                self.reported_nullification = true;
             }
             Artifact::Finalization(_) => {
                 self.broadcast_finalization = true;
+                self.reported_finalization = true;
             }
             Artifact::Certification(_, success) => {
                 self.certified(*success);
@@ -715,9 +751,62 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 }
 
+/// Returns the broadcast and report work newly enabled by a certificate source.
+fn publication_actions(
+    broadcasted: &mut bool,
+    reported: &mut bool,
+    rebroadcast: Option<bool>,
+) -> Option<(bool, bool)> {
+    // An unreported certificate without a delivery source was assembled
+    // locally and needs normal publication.
+    let rebroadcast = rebroadcast.unwrap_or(!*reported);
+    let broadcast = rebroadcast && !*broadcasted;
+    let report = !*reported;
+    if !broadcast && !report {
+        return None;
+    }
+    *broadcasted |= broadcast;
+    *reported = true;
+    Some((broadcast, report))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_certificate_is_published() {
+        let mut broadcasted = false;
+        let mut reported = false;
+
+        assert_eq!(
+            publication_actions(&mut broadcasted, &mut reported, None),
+            Some((true, true))
+        );
+    }
+
+    #[test]
+    fn background_source_publishes_after_targeted_source() {
+        let mut broadcasted = false;
+        let mut reported = false;
+
+        assert_eq!(
+            publication_actions(&mut broadcasted, &mut reported, Some(false)),
+            Some((false, true))
+        );
+        assert_eq!(
+            publication_actions(&mut broadcasted, &mut reported, Some(false)),
+            None
+        );
+        assert_eq!(
+            publication_actions(&mut broadcasted, &mut reported, Some(true)),
+            Some((true, false))
+        );
+        assert_eq!(
+            publication_actions(&mut broadcasted, &mut reported, Some(true)),
+            None
+        );
+    }
     use crate::{
         simplex::{
             scheme::ed25519,
@@ -1070,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_message_sets_broadcast_flags() {
+    fn replay_message_sets_publication_flags() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1113,7 +1202,7 @@ mod tests {
             Finalization::from_finalizes(&verifier, finalize_votes.iter(), &Sequential)
                 .expect("finalization");
 
-        // Replay messages and verify broadcast flags
+        // Replay local votes and certificates.
         let mut round = Round::new(local_scheme, round, now);
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
@@ -1124,12 +1213,15 @@ mod tests {
         assert!(round.broadcast_finalize);
         round.replay(&Artifact::Notarization(notarization.clone()));
         assert!(round.broadcast_notarization);
+        assert!(round.reported_notarization);
         round.replay(&Artifact::Nullification(nullification.clone()));
         assert!(round.broadcast_nullification);
+        assert!(round.reported_nullification);
         round.replay(&Artifact::Finalization(finalization.clone()));
         assert!(round.broadcast_finalization);
+        assert!(round.reported_finalization);
 
-        // Replaying the certificate again should keep the flags set.
+        // Replaying the certificate again preserves the publication flags.
         round.replay(&Artifact::Notarization(notarization));
         assert!(round.broadcast_notarization);
         round.replay(&Artifact::Nullification(nullification));

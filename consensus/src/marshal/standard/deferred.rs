@@ -415,9 +415,11 @@ where
                 let verify_rx = marshaled
                     .deferred_verify(embedded_context, block, parent_request, Stage::Certified)
                     .await;
-                if let Ok(GateOutcome::Ready(result)) = verify_rx.await {
-                    tx.send_lossy(result);
-                }
+                gates::forward(tx, verify_rx, |result| match result {
+                    GateOutcome::Ready(result) => Some(result),
+                    GateOutcome::Recover => None,
+                })
+                .await;
             }
             .instrument(info_span!(
                 "marshal.deferred.certify.embedded",
@@ -816,19 +818,14 @@ where
                 // `task_tx` so `certify` observes the same result via the
                 // synchronously-registered `task_rx`.
                 //
-                // The awaits below are deliberately not guarded on `tx.closed()`.
-                // Once the optimistic verdict is delivered, the gate is the only
-                // remaining consumer, and certification can still want it after
-                // the view exits (nullification does not cancel certification
-                // work), so deferred verification must run to completion into
-                // the gate.
+                // Once the optimistic verdict is delivered, the certification
+                // gate owns the deferred work. Nullification keeps that gate
+                // alive, while inferred certification or finalization drops it.
                 let deferred_rx = marshaled
                     .deferred_verify(context, block, parent_request, Stage::Verified)
                     .await;
                 tx.send_lossy(true);
-                if let Ok(result) = deferred_rx.await {
-                    task_tx.send_lossy(result);
-                }
+                gates::forward(task_tx, deferred_rx, Some).await;
             }
             .instrument(info_span!(
                 "marshal.deferred.verify.optimistic",

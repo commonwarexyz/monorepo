@@ -106,7 +106,11 @@ pub(super) enum Certify<D: Digest> {
     /// Ask the application to certify the proposal.
     Application(Proposal<D>),
     /// Complete certification from a notarization that names this view as its parent.
-    Inferred(Rnd),
+    Inferred {
+        proposal: Proposal<D>,
+        /// Whether the application has not yet received this certification request.
+        notify_application: bool,
+    },
 }
 
 impl<D: Digest> Certify<D> {
@@ -114,7 +118,7 @@ impl<D: Digest> Certify<D> {
     pub const fn round(&self) -> Rnd {
         match self {
             Self::Application(proposal) => proposal.round,
-            Self::Inferred(round) => *round,
+            Self::Inferred { proposal, .. } => proposal.round,
         }
     }
 }
@@ -513,6 +517,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     .is_none_or(Round::can_infer_certification)
             {
                 self.implied_certifications.insert(parent);
+                if self.outstanding_certifications.contains(&parent) {
+                    self.certification_candidates.insert(parent);
+                }
             }
         }
         result
@@ -625,10 +632,22 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Construct a notarization certificate once the round has quorum.
+    #[cfg(test)]
     pub fn broadcast_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.broadcast_notarization())
+    }
+
+    /// Stage a notarization for any publication work enabled by its source.
+    pub fn publish_notarization(
+        &mut self,
+        view: View,
+        rebroadcast: Option<bool>,
+    ) -> Option<(Notarization<S, D>, bool, bool)> {
+        self.views
+            .get_mut(&view)
+            .and_then(|round| round.publish_notarization(rebroadcast))
     }
 
     /// Return a notarization certificate, if one exists.
@@ -658,17 +677,41 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Construct a nullification certificate once the round has quorum.
+    #[cfg(test)]
     pub fn broadcast_nullification(&mut self, view: View) -> Option<Nullification<S>> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.broadcast_nullification())
     }
 
+    /// Stage a nullification for any publication work enabled by its source.
+    pub fn publish_nullification(
+        &mut self,
+        view: View,
+        rebroadcast: Option<bool>,
+    ) -> Option<(Nullification<S>, bool, bool)> {
+        self.views
+            .get_mut(&view)
+            .and_then(|round| round.publish_nullification(rebroadcast))
+    }
+
     /// Construct a finalization certificate once the round has quorum.
+    #[cfg(test)]
     pub fn broadcast_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.broadcast_finalization())
+    }
+
+    /// Stage a finalization for any publication work enabled by its source.
+    pub fn publish_finalization(
+        &mut self,
+        view: View,
+        rebroadcast: Option<bool>,
+    ) -> Option<(Finalization<S, D>, bool, bool)> {
+        self.views
+            .get_mut(&view)
+            .and_then(|round| round.publish_finalization(rebroadcast))
     }
 
     /// Replays a journaled artifact into the appropriate round during recovery.
@@ -880,39 +923,24 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// descendant proves the gap, while the gap's own notarization proves its named parent.
     pub fn certify_candidates(&mut self) -> Vec<Certify<D>> {
         let candidates = take(&mut self.certification_candidates);
-
-        // A child notarization may arrive after the application request for its parent was
-        // dispatched. Replace that local work before starting any new application requests.
-        let inferred: Vec<_> = self
-            .implied_certifications
-            .intersection(&self.outstanding_certifications)
-            .copied()
-            .collect();
-        let mut ready = Vec::with_capacity(candidates.len() + inferred.len());
-        for view in inferred {
-            let can_infer = self
-                .views
-                .get(&view)
-                .is_some_and(Round::can_infer_certification);
-            if !can_infer {
-                continue;
-            }
-            self.implied_certifications.remove(&view);
-            ready.push(Certify::Inferred(Rnd::new(self.epoch, view)));
-        }
-
-        ready.extend(candidates.into_iter().filter_map(|view| {
-            if view <= self.last_finalized {
-                return None;
-            }
-            let candidate = self.views.get_mut(&view)?.try_certify()?;
-            if self.implied_certifications.remove(&view) {
-                return Some(Certify::Inferred(candidate.round));
-            }
-            Some(Certify::Application(candidate))
-        }));
-
-        ready
+        candidates
+            .into_iter()
+            .filter_map(|view| {
+                if view <= self.last_finalized {
+                    return None;
+                }
+                let round = self.views.get_mut(&view)?;
+                if self.implied_certifications.contains(&view) && round.can_infer_certification() {
+                    let proposal = round.notarization()?.proposal.clone();
+                    self.implied_certifications.remove(&view);
+                    return Some(Certify::Inferred {
+                        proposal,
+                        notify_application: !self.outstanding_certifications.contains(&view),
+                    });
+                }
+                round.try_certify().map(Certify::Application)
+            })
+            .collect()
     }
 
     /// Marks proposal certification as complete and returns the notarization.
@@ -3238,8 +3266,8 @@ mod tests {
             let candidates = parent_first.certify_candidates();
             assert!(matches!(
                 candidates.as_slice(),
-                [Certify::Inferred(round), Certify::Application(candidate)]
-                    if round.view() == parent_view && candidate == &child
+                [Certify::Inferred { proposal, notify_application: false }, Certify::Application(candidate)]
+                    if proposal == &parent && candidate == &child
             ));
 
             let mut child_first = State::new(context.child("child_first"), config());
@@ -3249,8 +3277,8 @@ mod tests {
             let candidates = child_first.certify_candidates();
             assert!(matches!(
                 candidates.as_slice(),
-                [Certify::Inferred(round), Certify::Application(candidate)]
-                    if round.view() == parent_view && candidate == &child
+                [Certify::Inferred { proposal, notify_application: true }, Certify::Application(candidate)]
+                    if proposal == &parent && candidate == &child
             ));
         });
     }
@@ -3327,12 +3355,13 @@ mod tests {
                 vec![ancestor_view, gap_view]
             );
             for candidate in candidates {
-                let Certify::Inferred(round) = candidate else {
+                let Certify::Inferred { proposal, .. } = candidate else {
                     panic!("late gap should not request application certification");
                 };
+                let view = proposal.view();
                 let handle = pool.push(futures::future::pending());
-                state.set_inferred_certify_handle(round.view(), handle);
-                assert!(state.certified(round.view(), true).is_some());
+                state.set_inferred_certify_handle(view, handle);
+                assert!(state.certified(view, true).is_some());
             }
 
             assert!(state.is_certified(ancestor_view).is_some());
@@ -3590,8 +3619,8 @@ mod tests {
             let candidates = state.certify_candidates();
             assert!(matches!(
                 candidates.as_slice(),
-                [Certify::Inferred(round), Certify::Application(candidate)]
-                    if round.view() == nullified_view && candidate == &good_proposal
+                [Certify::Inferred { proposal, .. }, Certify::Application(candidate)]
+                    if proposal.view() == nullified_view && candidate == &good_proposal
             ));
         });
     }

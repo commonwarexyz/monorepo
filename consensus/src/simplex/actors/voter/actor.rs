@@ -47,10 +47,6 @@ use std::{
 use tracing::{Instrument as _, Span, debug, info, info_span, trace, warn};
 
 /// Certificate accepted in the current iteration and whether to re-gossip it.
-///
-/// Accepted batcher certificates are forwarded to the resolver immediately.
-/// Resolver deliveries are already known there. This marker prevents either
-/// path from being forwarded again during certificate construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Received {
     #[default]
@@ -67,29 +63,34 @@ enum Received {
 }
 
 impl Received {
-    const fn is_notarization(self) -> bool {
-        matches!(self, Self::Notarization { .. })
+    const fn notarization(self) -> Option<bool> {
+        match self {
+            Self::Notarization { rebroadcast } => Some(rebroadcast),
+            _ => None,
+        }
     }
 
-    const fn is_nullification(self) -> bool {
-        matches!(self, Self::Nullification { .. })
+    const fn nullification(self) -> Option<bool> {
+        match self {
+            Self::Nullification { rebroadcast } => Some(rebroadcast),
+            _ => None,
+        }
     }
 
-    const fn is_finalization(self) -> bool {
-        matches!(self, Self::Finalization { .. })
+    const fn finalization(self) -> Option<bool> {
+        match self {
+            Self::Finalization { rebroadcast } => Some(rebroadcast),
+            _ => None,
+        }
     }
+}
 
-    const fn rebroadcast_notarization(self) -> bool {
-        !matches!(self, Self::Notarization { rebroadcast: false })
-    }
-
-    const fn rebroadcast_nullification(self) -> bool {
-        !matches!(self, Self::Nullification { rebroadcast: false })
-    }
-
-    const fn rebroadcast_finalization(self) -> bool {
-        !matches!(self, Self::Finalization { rebroadcast: false })
-    }
+/// Certificate work staged behind the journal sync barrier.
+struct Publication<T> {
+    certificate: T,
+    broadcast: bool,
+    report: bool,
+    update_resolver: bool,
 }
 
 /// Messages built and recorded during an event loop iteration, staged for
@@ -97,12 +98,11 @@ impl Received {
 /// [Actor::notify]).
 #[allow(clippy::type_complexity)]
 struct Staged<S: Scheme<D>, D: Digest> {
-    received: Received,
     notarize: Option<Notarize<S, D>>,
-    notarization: Option<Notarization<S, D>>,
-    nullification: Option<Nullification<S>>,
+    notarization: Option<Publication<Notarization<S, D>>>,
+    nullification: Option<Publication<Nullification<S>>>,
     finalize: Option<Finalize<S, D>>,
-    finalization: Option<Finalization<S, D>>,
+    finalization: Option<Publication<Finalization<S, D>>>,
 }
 
 /// An outstanding request to the automaton.
@@ -578,53 +578,59 @@ impl<
         (self, Some(notarize))
     }
 
-    /// Builds and records a notarization certificate once we can assemble it locally.
-    async fn prepare_notarization(
+    /// Stages a received notarization for publication.
+    fn prepare_notarization(
         mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         received: Received,
-    ) -> (Self, Option<Notarization<S, D>>) {
-        // Construct a notarization certificate
-        let Some(notarization) = self.state.broadcast_notarization(view) else {
+    ) -> (Self, Option<Publication<Notarization<S, D>>>) {
+        let rebroadcast = received.notarization();
+        let update_resolver = rebroadcast.is_none();
+        let Some((notarization, broadcast, report)) =
+            self.state.publish_notarization(view, rebroadcast)
+        else {
             return (self, None);
         };
 
         // Only the leader sees an unbiased latency sample, so record it now.
-        if let Some(elapsed) = self.leader_elapsed(view) {
+        if report && let Some(elapsed) = self.leader_elapsed(view) {
             self.notarization_latency.observe(elapsed);
         }
 
-        // Forward locally assembled certificates. Received certificates were
-        // already forwarded, or originated in the resolver.
-        if !received.is_notarization() {
-            resolver.updated(Certificate::Notarization(notarization.clone()));
-        }
-        // Update our local round with the certificate.
-        self = self.handle_notarization(notarization.clone()).await;
-        (self, Some(notarization))
+        (
+            self,
+            Some(Publication {
+                certificate: notarization,
+                broadcast,
+                report,
+                update_resolver,
+            }),
+        )
     }
 
-    /// Builds and records a nullification certificate if the round provides a candidate.
-    async fn prepare_nullification(
+    /// Stages a received nullification for publication.
+    fn prepare_nullification(
         mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         received: Received,
-    ) -> (Self, Option<Nullification<S>>) {
-        // Construct the nullification certificate.
-        let Some(nullification) = self.state.broadcast_nullification(view) else {
+    ) -> (Self, Option<Publication<Nullification<S>>>) {
+        let rebroadcast = received.nullification();
+        let update_resolver = rebroadcast.is_none();
+        let Some((nullification, broadcast, report)) =
+            self.state.publish_nullification(view, rebroadcast)
+        else {
             return (self, None);
         };
 
-        // Forward locally assembled certificates. Received certificates were
-        // already forwarded, or originated in the resolver.
-        if !received.is_nullification() {
-            resolver.updated(Certificate::Nullification(nullification.clone()));
-        }
-        // Track the certificate locally to avoid rebuilding it.
-        self = self.handle_nullification(nullification.clone()).await;
-        (self, Some(nullification))
+        (
+            self,
+            Some(Publication {
+                certificate: nullification,
+                broadcast,
+                report,
+                update_resolver,
+            }),
+        )
     }
 
     /// Builds and records a finalize vote if the round provides a candidate.
@@ -645,31 +651,34 @@ impl<
         (self, Some(finalize))
     }
 
-    /// Builds and records a finalization certificate if the round provides a candidate.
-    async fn prepare_finalization(
+    /// Stages a received finalization for publication.
+    fn prepare_finalization(
         mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         received: Received,
-    ) -> (Self, Option<Finalization<S, D>>) {
-        // Construct the finalization certificate.
-        let Some(finalization) = self.state.broadcast_finalization(view) else {
+    ) -> (Self, Option<Publication<Finalization<S, D>>>) {
+        let rebroadcast = received.finalization();
+        let update_resolver = rebroadcast.is_none();
+        let Some((finalization, broadcast, report)) =
+            self.state.publish_finalization(view, rebroadcast)
+        else {
             return (self, None);
         };
 
         // Only record latency if we are the current leader.
-        if let Some(elapsed) = self.leader_elapsed(view) {
+        if report && let Some(elapsed) = self.leader_elapsed(view) {
             self.finalization_latency.observe(elapsed);
         }
 
-        // Forward locally assembled certificates. Received certificates were
-        // already forwarded, or originated in the resolver.
-        if !received.is_finalization() {
-            resolver.updated(Certificate::Finalization(finalization.clone()));
-        }
-        // Advance the consensus core with the finalization proof.
-        self = self.handle_finalization(finalization.clone()).await;
-        (self, Some(finalization))
+        (
+            self,
+            Some(Publication {
+                certificate: finalization,
+                broadcast,
+                report,
+                update_resolver,
+            }),
+        )
     }
 
     /// Processes the automaton's response to a proposal request.
@@ -867,20 +876,18 @@ impl<
     async fn construct(
         mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         received: Received,
     ) -> (Self, Staged<S, D>) {
         let (notarize, notarization, nullification, finalize, finalization);
         (self, notarize) = self.prepare_notarize(batcher, view).await;
-        (self, notarization) = self.prepare_notarization(resolver, view, received).await;
-        (self, nullification) = self.prepare_nullification(resolver, view, received).await;
+        (self, notarization) = self.prepare_notarization(view, received);
+        (self, nullification) = self.prepare_nullification(view, received);
         (self, finalize) = self.prepare_finalize(batcher, view).await;
-        (self, finalization) = self.prepare_finalization(resolver, view, received).await;
+        (self, finalization) = self.prepare_finalization(view, received);
         (
             self,
             Staged {
-                received,
                 notarize,
                 notarization,
                 nullification,
@@ -930,39 +937,57 @@ impl<
             debug!(proposal=?notarize.proposal, "broadcasting notarize");
             self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
         }
-        if let Some(notarization) = staged.notarization {
-            if staged.received.rebroadcast_notarization() {
+        if let Some(publication) = staged.notarization {
+            let notarization = publication.certificate;
+            if publication.update_resolver {
+                resolver.updated(Certificate::Notarization(notarization.clone()));
+            }
+            if publication.broadcast {
                 debug!(proposal=?notarization.proposal, "broadcasting notarization");
                 self.broadcast_certificate(
                     certificate_sender,
                     Certificate::Notarization(notarization.clone()),
                 );
             }
-            self.reporter.report(Activity::Notarization(notarization));
+            if publication.report {
+                self.reporter.report(Activity::Notarization(notarization));
+            }
         }
-        if let Some(nullification) = staged.nullification {
-            if staged.received.rebroadcast_nullification() {
+        if let Some(publication) = staged.nullification {
+            let nullification = publication.certificate;
+            if publication.update_resolver {
+                resolver.updated(Certificate::Nullification(nullification.clone()));
+            }
+            if publication.broadcast {
                 debug!(round=?nullification.round(), "broadcasting nullification");
                 self.broadcast_certificate(
                     certificate_sender,
                     Certificate::Nullification(nullification.clone()),
                 );
             }
-            self.reporter.report(Activity::Nullification(nullification));
+            if publication.report {
+                self.reporter.report(Activity::Nullification(nullification));
+            }
         }
         if let Some(finalize) = staged.finalize {
             debug!(proposal=?finalize.proposal, "broadcasting finalize");
             self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
         }
-        if let Some(finalization) = staged.finalization {
-            if staged.received.rebroadcast_finalization() {
+        if let Some(publication) = staged.finalization {
+            let finalization = publication.certificate;
+            if publication.update_resolver {
+                resolver.updated(Certificate::Finalization(finalization.clone()));
+            }
+            if publication.broadcast {
                 debug!(proposal=?finalization.proposal, "broadcasting finalization");
                 self.broadcast_certificate(
                     certificate_sender,
                     Certificate::Finalization(finalization.clone()),
                 );
             }
-            self.reporter.report(Activity::Finalization(finalization));
+            if publication.report {
+                self.reporter.report(Activity::Finalization(finalization));
+            }
         }
     }
 
@@ -1184,8 +1209,20 @@ impl<
                             self.state
                                 .set_application_certify_handle(view, handle);
                         }
-                        Certify::Inferred(_) => {
+                        Certify::Inferred {
+                            proposal,
+                            notify_application,
+                        } => {
                             debug!(%view, "inferring certification from dependent notarization");
+                            if notify_application {
+                                #[allow(clippy::async_yields_async)]
+                                let receiver = async {
+                                    self.automaton.certify(round, proposal.payload).await
+                                }
+                                .instrument(span.clone())
+                                .await;
+                                drop(receiver);
+                            }
                             let handle = certify_pool.push(async move {
                                 (round, span, Ok::<_, oneshot::error::RecvError>(true))
                             });
@@ -1299,9 +1336,7 @@ impl<
                 self = async {
                     // Build and record everything that became available for `view`.
                     let staged;
-                    (self, staged) = self
-                        .construct(&mut batcher, &mut resolver, view, received)
-                        .await;
+                    (self, staged) = self.construct(&mut batcher, view, received).await;
 
                     // Sync everything appended this iteration (during message
                     // processing and construction) in a single coalesced sync.
@@ -1366,23 +1401,23 @@ mod tests {
     use super::Received;
 
     #[test]
-    fn targeted_resolution_suppresses_only_matching_immediate_broadcast() {
+    fn received_source_applies_only_to_matching_certificate() {
         let notarization = Received::Notarization { rebroadcast: false };
-        assert!(!notarization.rebroadcast_notarization());
-        assert!(notarization.rebroadcast_nullification());
-        assert!(notarization.rebroadcast_finalization());
+        assert_eq!(notarization.notarization(), Some(false));
+        assert_eq!(notarization.nullification(), None);
+        assert_eq!(notarization.finalization(), None);
 
         let nullification = Received::Nullification { rebroadcast: false };
-        assert!(nullification.rebroadcast_notarization());
-        assert!(!nullification.rebroadcast_nullification());
-        assert!(nullification.rebroadcast_finalization());
+        assert_eq!(nullification.notarization(), None);
+        assert_eq!(nullification.nullification(), Some(false));
+        assert_eq!(nullification.finalization(), None);
 
         let finalization = Received::Finalization { rebroadcast: false };
-        assert!(finalization.rebroadcast_notarization());
-        assert!(finalization.rebroadcast_nullification());
-        assert!(!finalization.rebroadcast_finalization());
+        assert_eq!(finalization.notarization(), None);
+        assert_eq!(finalization.nullification(), None);
+        assert_eq!(finalization.finalization(), Some(false));
 
         let background = Received::Notarization { rebroadcast: true };
-        assert!(background.rebroadcast_notarization());
+        assert_eq!(background.notarization(), Some(true));
     }
 }

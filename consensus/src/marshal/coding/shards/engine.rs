@@ -4320,7 +4320,6 @@ mod tests {
                     matches!(digest_sub.try_recv(), Err(TryRecvError::Empty)),
                     "digest subscription should survive failed reconstruction"
                 );
-
                 // Now verify the engine is not stuck: send valid shards for block1's real
                 // commitment and confirm reconstruction succeeds.
                 let real_commitment1 = coded_block1.commitment();
