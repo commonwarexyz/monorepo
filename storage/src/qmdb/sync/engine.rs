@@ -1085,12 +1085,8 @@ mod tests {
         deterministic::Runner::default().start(|_context| async move {
             let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
             let id = requests.next_id();
-            requests.insert(
-                id,
-                Location::new(5),
-                Location::new(5),
-                std::future::pending(),
-            );
+            let request = Request::new(Location::new(6), Location::new(5), NZU64!(1));
+            requests.insert(id, request, std::future::pending());
             requests.remove_before(Location::new(10));
             assert!(matches!(requests.next_completed().await, Err(Aborted)));
         });

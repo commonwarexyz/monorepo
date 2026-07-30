@@ -10,7 +10,7 @@ use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_storage::{
-    merkle::{Family, Location, MAX_PROOF_DIGESTS_PER_ELEMENT},
+    merkle::{Family, Location},
     qmdb::{
         self,
         sync::{
@@ -27,11 +27,7 @@ use tracing::info;
 
 /// Decoding bound for a compact response: exactly one operation, the final commit. The proof and
 /// pin limits follow from it inside [`Response`]'s codec.
-const COMPACT_RESPONSE_CFG: ResponseConfig<()> = ResponseConfig {
-    max_ops: 1,
-    max_proof_digests: MAX_PROOF_DIGESTS_PER_ELEMENT,
-    op: (),
-};
+const COMPACT_RESPONSE_CFG: ResponseConfig<()> = ResponseConfig::request_bounded(1, ());
 
 /// The operation type the local database serves compact state in.
 type DbOp<DB, F, D> = <Shared<DB> as Source<compact::Target<F, D>>>::Op;

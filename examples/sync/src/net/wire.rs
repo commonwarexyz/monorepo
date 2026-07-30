@@ -5,7 +5,7 @@ use commonware_codec::{
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
-    merkle::{MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
+    merkle::MAX_PINNED_NODES,
     mmr::{self, Location, Proof},
     qmdb::sync::{
         Target, compact,
@@ -531,11 +531,7 @@ where
         // Compact state is exactly one operation, the final commit.
         let response = Response::<mmr::Family, Op, D>::read_cfg(
             buf,
-            &ResponseConfig {
-                max_ops: 1,
-                max_proof_digests: MAX_PROOF_DIGESTS_PER_ELEMENT,
-                op: Op::Cfg::default(),
-            },
+            &ResponseConfig::request_bounded(1, Op::Cfg::default()),
         )?;
         Ok(Self {
             request_id,

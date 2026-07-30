@@ -1878,14 +1878,14 @@ enum Tamper {
 ///
 /// The tampered response carries an injected validity channel so the test can observe the
 /// engine's verdict.
-struct TamperFirstResolver<R> {
+struct TamperFirstSource<R> {
     inner: R,
     tamper: Tamper,
     done: Arc<std::sync::atomic::AtomicBool>,
     verdict_rx: Arc<Mutex<Option<oneshot::Receiver<bool>>>>,
 }
 
-impl<R, F> Source<Request<F>> for TamperFirstResolver<R>
+impl<R, F> Source<Request<F>> for TamperFirstSource<R>
 where
     F: crate::merkle::Family,
     R: Source<Request<F>, Family = F, Digest = Digest>,
@@ -1900,26 +1900,32 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
-        let (mut response, validity_tx) = self.inner.serve(request).await?;
         let applies = match self.tamper {
             Tamper::OversizeBatch => true,
             Tamper::UnsolicitedPins => request.retain_from.is_none(),
             Tamper::StripPins => request.retain_from.is_some(),
         };
-        if applies && !self.done.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            match self.tamper {
-                Tamper::OversizeBatch => {
-                    let dup = response.operations.last().unwrap().clone();
-                    response.operations.push(dup);
-                }
-                Tamper::UnsolicitedPins => response.pinned_nodes = Some(vec![]),
-                Tamper::StripPins => response.pinned_nodes = None,
-            }
-            let (tx, rx) = oneshot::channel();
-            *self.verdict_rx.lock() = Some(rx);
-            return Ok((response, Some(tx)));
+        if !applies || self.done.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return self.inner.serve(request).await;
         }
-        Ok((response, validity_tx))
+        let served = match self.tamper {
+            // Answer a larger request honestly: the batch proves, so only the
+            // per-request bound can reject it.
+            Tamper::OversizeBatch => Request {
+                max_ops: request.max_ops.checked_add(1).unwrap(),
+                ..request
+            },
+            _ => request,
+        };
+        let (mut response, _) = self.inner.serve(served).await?;
+        match self.tamper {
+            Tamper::OversizeBatch => {}
+            Tamper::UnsolicitedPins => response.pinned_nodes = Some(vec![]),
+            Tamper::StripPins => response.pinned_nodes = None,
+        }
+        let (tx, rx) = oneshot::channel();
+        *self.verdict_rx.lock() = Some(rx);
+        Ok((response, Some(tx)))
     }
 }
 
@@ -1946,7 +1952,7 @@ where
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let verdict_rx = Arc::new(Mutex::new(None));
-        let resolver = TamperFirstResolver {
+        let source = TamperFirstSource {
             inner: Arc::new(target_db),
             tamper,
             done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1961,7 +1967,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
-            resolver,
+            source,
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,

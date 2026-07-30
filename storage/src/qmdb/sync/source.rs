@@ -50,10 +50,9 @@ impl<F: Family> Request<F> {
         self
     }
 
-    /// Validate a request that may have been constructed programmatically.
+    /// Check the field invariants the codec enforces at decode.
     pub fn validate(&self) -> Result<(), &'static str> {
         if !self.size.is_valid()
-            || self.size == 0
             || self.start >= self.size
             || self
                 .retain_from
@@ -124,7 +123,7 @@ impl<F: Family> std::fmt::Display for Request<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Request(size={}, start={}, max={}, retain_from=",
+            "Request(size={}, start={}, max_ops={}, retain_from=",
             self.size, self.start, self.max_ops,
         )?;
         match self.retain_from {
@@ -543,6 +542,7 @@ pub(crate) mod tests {
         merkle::mmr,
         translator::{OneCap, TwoCap},
     };
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_parallel::Rayon;
     use commonware_runtime::{Runner as _, deterministic};
@@ -719,6 +719,34 @@ pub(crate) mod tests {
         assert_source_variants!(ImmutableVariable);
         assert_source_variants!(KeylessFixed);
         assert_source_variants!(KeylessVariable);
+    }
+
+    /// The codec rejects requests whose fields contradict each other.
+    #[test]
+    fn test_request_decode_rejects_contradictions() {
+        let valid = Request::<mmr::Family>::new(Location::new(128), Location::new(64), NZU64!(16));
+        assert_eq!(Request::<mmr::Family>::decode(valid.encode()).unwrap(), valid);
+
+        // start >= size
+        let mut bad = valid;
+        bad.start = Location::new(128);
+        assert!(Request::<mmr::Family>::decode(bad.encode()).is_err());
+
+        // retain_from > size
+        let bad = valid.retaining_from(Location::new(129));
+        assert!(Request::<mmr::Family>::decode(bad.encode()).is_err());
+
+        // retain_from at the tip is allowed
+        let tip = valid.retaining_from(Location::new(128));
+        assert_eq!(Request::<mmr::Family>::decode(tip.encode()).unwrap(), tip);
+
+        // max_ops = 0 is unrepresentable via the constructor, so reject it at the byte level
+        let mut zero_max = Vec::new();
+        valid.size.write(&mut zero_max);
+        valid.start.write(&mut zero_max);
+        0u64.write(&mut zero_max);
+        valid.retain_from.write(&mut zero_max);
+        assert!(Request::<mmr::Family>::decode(zero_max.as_slice()).is_err());
     }
 
     /// A source behind a lock reaches the source and reports its error.
