@@ -37,7 +37,7 @@ type ActorMailbox<DB, F, H> = Mailbox<DB, F, DbOp<DB, F, <H as Hasher>::Digest>,
 type MailboxReceiver<DB, F, H> = actor_mailbox::Receiver<
     mailbox::Message<DB, F, DbOp<DB, F, <H as Hasher>::Digest>, <H as Hasher>::Digest>,
 >;
-type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<mailbox::Delivery<F, Op, D>>>;
+type PendingSubs<F, Op, D> = BTreeMap<compact::Target<F, D>, Vec<mailbox::Delivery<F, Op, D>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -84,8 +84,8 @@ enum State<DB> {
 
 enum MailboxAction<F: Family, D: commonware_cryptography::Digest> {
     None,
-    Fetch(handler::Request<F, D>),
-    Cancel(handler::Request<F, D>),
+    Fetch(compact::Target<F, D>),
+    Cancel(compact::Target<F, D>),
 }
 
 /// Runs a compact QMDB sync resolver service over P2P.
@@ -249,7 +249,7 @@ where
         }
     }
 
-    fn should_cancel_request(&mut self, request: &handler::Request<F, H::Digest>) -> bool {
+    fn should_cancel_request(&mut self, request: &compact::Target<F, H::Digest>) -> bool {
         let Some(subscribers) = self.pending.get_mut(request) else {
             return false;
         };
@@ -263,7 +263,7 @@ where
 
     async fn handle_deliver(
         &mut self,
-        key: handler::Request<F, H::Digest>,
+        key: compact::Target<F, H::Digest>,
         value: bytes::Bytes,
         response: oneshot::Sender<bool>,
     ) {
@@ -320,10 +320,10 @@ where
     /// subscribers. Compact state is exactly one operation, the final commit, plus the pins at
     /// the tip; the proof is what makes the pins believable.
     fn valid_compact_state(
-        key: &handler::Request<F, H::Digest>,
+        key: &compact::Target<F, H::Digest>,
         state: &Response<F, DbOp<DB, F, H::Digest>, H::Digest>,
     ) -> bool {
-        let target = key.to_target();
+        let target = key;
         if state.proof.leaves != target.leaf_count || target.leaf_count == Location::new(0) {
             return false;
         }
@@ -347,13 +347,13 @@ where
 
     async fn handle_produce(
         &mut self,
-        key: handler::Request<F, H::Digest>,
+        key: compact::Target<F, H::Digest>,
         response: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             return;
         };
-        let Ok((state, _)) = database.serve(key.to_target()).await else {
+        let Ok((state, _)) = database.serve(key).await else {
             return;
         };
         response.send_lossy(state.encode());
@@ -492,7 +492,7 @@ mod tests {
                 root: sha256::Digest::from([7; 32]),
                 leaf_count: mmr::Location::new(1),
             };
-            let request = handler::Request::from_target(target);
+            let request = target;
             let (pending_tx, _pending_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![pending_tx]);
 
@@ -521,7 +521,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, mut state) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = target;
             let (pending_tx, _pending_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![pending_tx]);
             state
@@ -545,7 +545,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, state) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = target;
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![subscriber_tx]);
 
@@ -594,7 +594,7 @@ mod tests {
             let target = db.target();
             let db = Shared::new("test", db);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
-            let request = handler::Request::from_target(target.clone());
+            let request = target.clone();
             let (response_tx, response_rx) = oneshot::channel();
 
             actor.handle_produce(request, response_tx).await;
@@ -614,7 +614,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, state) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = target;
 
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![subscriber_tx]);
@@ -642,7 +642,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, state) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = target;
 
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![subscriber_tx]);
@@ -667,7 +667,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, _) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = target;
 
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
             drop(subscriber_rx);
@@ -687,7 +687,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, _) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = target;
 
             let (stale_tx, stale_rx) = oneshot::channel();
             drop(stale_rx);

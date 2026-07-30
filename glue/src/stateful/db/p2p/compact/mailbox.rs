@@ -1,6 +1,5 @@
 //! Mailbox for the compact QMDB P2P resolver.
 
-use super::handler;
 use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel::CancelGuard};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, Hasher};
@@ -27,11 +26,11 @@ pub(super) type Delivery<F, Op, D> =
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     AttachDatabase(Shared<DB>),
     GetState {
-        request: handler::Request<F, D>,
+        request: compact::Target<F, D>,
         response: Delivery<F, Op, D>,
     },
     CancelState {
-        request: handler::Request<F, D>,
+        request: compact::Target<F, D>,
     },
 }
 
@@ -145,7 +144,7 @@ where
         &self,
         target: compact::Target<Self::Family, Self::Digest>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
-        let request = handler::Request::from_target(target);
+        let request = target;
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetState {
             request: request.clone(),
@@ -197,7 +196,7 @@ mod tests {
                 let Message::GetState { request, response } = message else {
                     panic!("unexpected attach message");
                 };
-                assert_eq!(request.to_target(), target);
+                assert_eq!(request, target);
                 drop(response);
             };
 
@@ -228,12 +227,12 @@ mod tests {
             let Message::GetState { request, response } = message else {
                 panic!("unexpected attach message");
             };
-            assert_eq!(request.to_target(), target);
+            assert_eq!(request, target);
             drop(response);
 
             match receiver.recv().await.expect("cancel should be queued") {
                 Message::CancelState { request } => {
-                    assert_eq!(request.to_target(), target);
+                    assert_eq!(request, target);
                 }
                 Message::AttachDatabase(_) => panic!("unexpected attach message"),
                 Message::GetState { .. } => panic!("unexpected duplicate request"),

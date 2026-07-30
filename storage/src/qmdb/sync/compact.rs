@@ -196,20 +196,47 @@ where
 
 /// Compact state that has been validated against a target root.
 ///
-/// `validate_compact_state` is what produces one: the frontier pins and the final commit have
-/// both been authenticated against `root`, so construction can treat them as trusted.
+/// Only successful validation produces one: the frontier pins and the final commit have both
+/// been authenticated against `root`, so construction can treat them as trusted.
 #[derive(Clone, Debug)]
 pub struct ValidatedState<F: Family, Op, D: Digest> {
     /// Total committed operations, taken from the proof rather than sent alongside it.
-    pub leaf_count: Location<F>,
+    pub(crate) leaf_count: Location<F>,
     /// Pinned Merkle nodes for the committed frontier.
-    pub pinned_nodes: Vec<D>,
+    pub(crate) pinned_nodes: Vec<D>,
     /// The final commit operation at `leaf_count - 1`.
-    pub last_commit_op: Op,
+    pub(crate) last_commit_op: Op,
     /// Proof authenticating `last_commit_op` against `root`.
-    pub last_commit_proof: Proof<F, D>,
+    pub(crate) last_commit_proof: Proof<F, D>,
     /// The target root this state was validated against.
-    pub root: D,
+    pub(crate) root: D,
+}
+
+impl<F: Family, Op, D: Digest> ValidatedState<F, Op, D> {
+    /// Total committed operations.
+    pub const fn leaf_count(&self) -> Location<F> {
+        self.leaf_count
+    }
+
+    /// Pinned Merkle nodes for the committed frontier.
+    pub fn pinned_nodes(&self) -> &[D] {
+        &self.pinned_nodes
+    }
+
+    /// The final commit operation at `leaf_count - 1`.
+    pub const fn last_commit_op(&self) -> &Op {
+        &self.last_commit_op
+    }
+
+    /// Proof authenticating the final commit against `root`.
+    pub const fn last_commit_proof(&self) -> &Proof<F, D> {
+        &self.last_commit_proof
+    }
+
+    /// The target root this state was validated against.
+    pub const fn root(&self) -> D {
+        self.root
+    }
 }
 
 /// A [`Source`] of compact state whose associated types match a specific [`Database`].
@@ -450,7 +477,7 @@ where
 
         // The peer response has already authenticated the final commit and frontier. From here,
         // construction should only fail for local database/storage reasons; a root mismatch is a
-        // bug in this path.
+        // local defect, terminal and never persisted, and no fault of the peer.
         let db = DB::from_validated_state(
             context.child("compact").with_attribute("attempt", attempt),
             db_config.clone(),
@@ -458,11 +485,13 @@ where
         )
         .await
         .map_err(Error::Database)?;
-        assert_eq!(
-            db.root(),
-            target.root,
-            "validated compact state reconstructed unexpected root",
-        );
+        let actual = db.root();
+        if actual != target.root {
+            return Err(Error::Engine(EngineError::RootMismatch {
+                expected: target.root,
+                actual,
+            }));
+        }
 
         if let Some(validity_tx) = validity_tx {
             let _ = validity_tx.send(true);
@@ -921,6 +950,48 @@ mod tests {
             assert!(good_rx.await.expect("valid feedback should arrive"));
             assert_eq!(constructions.load(Ordering::SeqCst), 1);
             assert_eq!(db.root(), target.root);
+        });
+    }
+
+    #[test]
+    fn test_compact_sync_reconstruction_mismatch_is_terminal() {
+        deterministic::Runner::default().start(|context| async move {
+            let (state, target) = valid_state_and_target();
+            let (validity_tx, validity_rx) = commonware_utils::channel::oneshot::channel();
+            let constructions = Arc::new(AtomicUsize::new(0));
+            let wrong_root = Sha256::hash(&[b"wrong root"]);
+
+            // The database reconstructs to a root other than the validated target: a local
+            // defect, so sync must fail without retrying or judging the peer.
+            let result = super::sync::<TestDb, _>(Config {
+                context,
+                resolver: SequenceSource {
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([(
+                        state,
+                        Some(validity_tx),
+                    )]))),
+                },
+                target: target.clone(),
+                db_config: (wrong_root, constructions.clone()),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await;
+
+            match result {
+                Err(super::Error::Engine(super::EngineError::RootMismatch {
+                    expected,
+                    actual,
+                })) => {
+                    assert_eq!(expected, target.root);
+                    assert_eq!(actual, wrong_root);
+                }
+                Err(other) => panic!("expected RootMismatch, got {other:?}"),
+                Ok(_) => panic!("expected RootMismatch, sync succeeded"),
+            }
+            assert_eq!(constructions.load(Ordering::SeqCst), 1);
+            assert!(validity_rx.await.is_err(), "peer must not be judged");
         });
     }
 }
