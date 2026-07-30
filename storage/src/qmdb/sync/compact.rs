@@ -502,6 +502,43 @@ where
 }
 
 /// Validate the peer-provided compact state before constructing local database storage.
+/// Whether a response has the shape and commit proof of compact state for `target`.
+///
+/// The cheap prefix of full validation: exactly one operation, the pins at the tip, a proof
+/// sized to the target, and the commit proof verifying against the target root. It does not
+/// verify the frontier pins, which requires rebuilding the tip; only [`ValidatedState`]
+/// certifies those. Use it to reject malformed responses before fanning them out.
+pub fn admissible<H, F, Op>(
+    target: &Target<F, H::Digest>,
+    response: &Response<F, Op, H::Digest>,
+) -> bool
+where
+    H: Hasher,
+    F: Family,
+    Op: Encode,
+{
+    let Some(last_commit_loc) = (*target.leaf_count).checked_sub(1) else {
+        return false;
+    };
+    let [last_commit_op] = &response.operations[..] else {
+        return false;
+    };
+    let Some(pinned_nodes) = &response.pinned_nodes else {
+        return false;
+    };
+    if response.proof.leaves != target.leaf_count
+        || pinned_nodes.len() != F::nodes_to_pin(target.leaf_count).count()
+    {
+        return false;
+    }
+    verify_proof::<H, _, _>(
+        &response.proof,
+        Location::new(last_commit_loc),
+        std::slice::from_ref(last_commit_op),
+        &target.root,
+    )
+}
+
 pub(crate) fn validate_compact_state<DB>(
     target: &Target<DB::Family, DB::Digest>,
     response: Response<DB::Family, DB::Op, DB::Digest>,
@@ -509,34 +546,16 @@ pub(crate) fn validate_compact_state<DB>(
 where
     DB: Database,
 {
-    // Compact state is exactly one operation: the final commit. The tree size comes from the
-    // proof, so there is no separately transmitted count that could disagree with it.
+    if !admissible::<DB::Hasher, _, _>(target, &response) {
+        return Err(EngineError::InvalidProof);
+    }
     let Response {
         proof: last_commit_proof,
         mut operations,
         pinned_nodes,
     } = response;
-    if operations.len() != 1 {
-        return Err(EngineError::InvalidProof);
-    }
-    let last_commit_op = operations.pop().expect("checked length");
-    let Some(pinned_nodes) = pinned_nodes else {
-        return Err(EngineError::InvalidProof);
-    };
-    if last_commit_proof.leaves != target.leaf_count {
-        return Err(EngineError::InvalidProof);
-    }
-
-    let last_commit_loc = Location::new(*target.leaf_count - 1);
-    if !verify_proof::<DB::Hasher, _, _>(
-        &last_commit_proof,
-        last_commit_loc,
-        std::slice::from_ref(&last_commit_op),
-        &target.root,
-    ) {
-        return Err(EngineError::InvalidProof);
-    }
-
+    let last_commit_op = operations.pop().expect("admissible checked length");
+    let pinned_nodes = pinned_nodes.expect("admissible checked pins");
     validate_compact_frontier::<DB>(target, pinned_nodes, last_commit_op, last_commit_proof)
 }
 

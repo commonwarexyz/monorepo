@@ -10,13 +10,10 @@ use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_storage::{
-    merkle::{Family, Location},
-    qmdb::{
-        self,
-        sync::{
-            compact,
-            source::{Response, ResponseConfig, Source},
-        },
+    merkle::Family,
+    qmdb::sync::{
+        compact,
+        source::{Response, ResponseConfig, Source},
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
@@ -284,7 +281,7 @@ where
             }
         };
 
-        if !Self::valid_compact_state(&key, &state) {
+        if !compact::admissible::<H, _, _>(&key, &state) {
             self.pending.insert(key, subscribers);
             response.send_lossy(false);
             return;
@@ -314,35 +311,6 @@ where
             }
         }
         response.send_lossy(peer_valid);
-    }
-
-    /// Check a peer's compact state against the requested target before handing it to
-    /// subscribers. Compact state is exactly one operation, the final commit, plus the pins at
-    /// the tip; the proof is what makes the pins believable.
-    fn valid_compact_state(
-        key: &compact::Target<F, H::Digest>,
-        state: &Response<F, DbOp<DB, F, H::Digest>, H::Digest>,
-    ) -> bool {
-        let target = key;
-        if state.proof.leaves != target.leaf_count || target.leaf_count == Location::new(0) {
-            return false;
-        }
-        let [last_commit_op] = &state.operations[..] else {
-            return false;
-        };
-        let Some(pinned_nodes) = &state.pinned_nodes else {
-            return false;
-        };
-        if pinned_nodes.len() != F::nodes_to_pin(target.leaf_count).count() {
-            return false;
-        }
-
-        qmdb::verify_proof::<H, _, _>(
-            &state.proof,
-            Location::new(*target.leaf_count - 1),
-            std::slice::from_ref(last_commit_op),
-            &target.root,
-        )
     }
 
     async fn handle_produce(
@@ -536,6 +504,37 @@ mod tests {
                 .await;
 
             assert!(!valid_rx.await.expect("validation response should arrive"));
+            assert!(actor.pending.contains_key(&request));
+        });
+    }
+
+    #[test]
+    fn shape_violations_are_rejected_before_fan_out() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (target, state) = compact_state(context.child("state")).await;
+            let request = target;
+            let (subscriber_tx, _subscriber_rx) = oneshot::channel();
+            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+
+            // More than one operation.
+            let mut two_ops = state.clone();
+            two_ops.operations.push(two_ops.operations[0].clone());
+            let (tx, rx) = oneshot::channel();
+            actor
+                .handle_deliver(request.clone(), two_ops.encode(), tx)
+                .await;
+            assert!(!rx.await.expect("oversized state should be rejected"));
+            assert!(actor.pending.contains_key(&request));
+
+            // Missing the tip pins.
+            let mut no_pins = state.clone();
+            no_pins.pinned_nodes = None;
+            let (tx, rx) = oneshot::channel();
+            actor
+                .handle_deliver(request.clone(), no_pins.encode(), tx)
+                .await;
+            assert!(!rx.await.expect("pinless state should be rejected"));
             assert!(actor.pending.contains_key(&request));
         });
     }
