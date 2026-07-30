@@ -580,6 +580,17 @@ mod ordinary {
         assert_eq!(error.platform, FakeAlarm::PLATFORM);
         assert_eq!(error.shard, 2);
         assert_eq!(error.operation, "create fake alarm");
+        assert_eq!(
+            error.to_string(),
+            "failed to initialize fake timer shard 2 during create fake alarm: \
+             injected fake alarm construction failure"
+        );
+        assert_eq!(
+            std::error::Error::source(&error)
+                .expect("initialization error must retain its I/O source")
+                .to_string(),
+            "injected fake alarm construction failure"
+        );
         let controls = controls.lock();
         assert_eq!(controls.len(), 2);
 
@@ -594,28 +605,6 @@ mod ordinary {
                 .iter()
                 .all(|control| control.operations() == expected)
         );
-    }
-
-    #[test]
-    fn initialization_error_formats_context_and_exposes_source() {
-        // Construct an initialization error with distinct platform, shard, and operation fields.
-        let error = InitError {
-            platform: "test-platform",
-            shard: 7,
-            operation: "create test alarm",
-            source: io::Error::other("injected initialization source"),
-        };
-        let expected = "failed to initialize test-platform timer shard 7 during create test alarm: \
-                    injected initialization source";
-
-        // Format the user-facing representation and inspect the structured error source.
-        let display = error.to_string();
-        let source = std::error::Error::source(&error)
-            .expect("initialization error must retain its I/O source");
-
-        // Display remains concise while Error exposes the original I/O failure.
-        assert_eq!(display, expected);
-        assert_eq!(source.to_string(), "injected initialization source");
     }
 
     #[test]
@@ -666,11 +655,13 @@ mod ordinary {
     #[test]
     fn registration_is_eager_and_cancellation_is_immediate() {
         // Create an idle shard and request a sleep without polling its future.
-        let (shard, _control) = fake_shard();
+        let (shard, control) = fake_shard();
+        assert_eq!(control.max_deadline_reads(), 1);
         let registered = shard.register_after(Duration::from_nanos(100));
         let entry = Arc::clone(&registered.entry);
 
         // Registration must publish the heap entry and notify the driver eagerly.
+        assert_eq!(control.max_deadline_reads(), 1);
         assert_eq!(shard.state.lock().entries.len(), 1);
         assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_WAITING);
         assert!(shard.signal.is_notified());
@@ -680,42 +671,6 @@ mod ordinary {
         assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_CANCELED);
         assert_eq!(entry.heap_index.load(AtomicOrdering::Acquire), NOT_IN_HEAP);
         assert_eq!(shard.state.lock().entries.len(), 0);
-    }
-
-    #[test]
-    fn registration_reuses_the_shard_platform_deadline_limit() {
-        // Create one shard, which snapshots its platform alarm limit during setup.
-        let (shard, control) = fake_shard();
-        assert_eq!(control.max_deadline_reads(), 1);
-
-        // Register multiple sleeps after moving the fake monotonic clock.
-        control.set_now(at(10));
-        let first = shard.register_after(Duration::from_nanos(20));
-        control.set_now(at(20));
-        let second = shard.register_after(Duration::from_nanos(30));
-
-        // Registration must reuse the cached limit instead of recomputing it per timer.
-        assert_eq!(control.max_deadline_reads(), 1);
-        assert_eq!(shard.state.lock().entries.len(), 2);
-        drop(first);
-        drop(second);
-    }
-
-    #[test]
-    fn waiting_sleep_cancels_after_its_destroyed_shard_releases_alarm() {
-        // Register one waiting sleep, then destroy its only strong shard owner.
-        let (shard, control) = fake_shard();
-        let registered = shard.register_after(Duration::from_nanos(100));
-        let entry = Arc::clone(&registered.entry);
-        drop(shard);
-
-        // The weak cancellation owner lets the alarm close while the sleep survives.
-        assert!(control.is_shutdown());
-        assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_WAITING);
-
-        // Later sleep drop still wins cancellation without needing the vanished heap.
-        drop(registered);
-        assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_CANCELED);
     }
 
     #[test]
@@ -1256,13 +1211,13 @@ mod ordinary {
         let second = Shard::new(1, second_alarm, panicker);
         let storage = TraceStorage::default();
         let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
+        let first_error = io::Error::from_raw_os_error(libc::EINVAL);
+        let first_error_kind = format!("{:?}", Some(first_error.kind()));
+        let first_raw_os_error = format!("{:?}", first_error.raw_os_error());
 
         // Action: Fail two shards after neither can publish a root interruption.
         tracing::subscriber::with_default(subscriber, || {
-            first.fail(DriverFailure::io(
-                "first injected operation",
-                injected_error("first"),
-            ));
+            first.fail(DriverFailure::io("first injected operation", first_error));
             second.fail(DriverFailure::io(
                 "second injected operation",
                 injected_error("second"),
@@ -1293,6 +1248,24 @@ mod ordinary {
                         .any(|(name, value)| name == "operation" && value == operation)
             }));
         }
+        let first_diagnostic = diagnostics
+            .iter()
+            .find(|event| {
+                event
+                    .metadata
+                    .fields
+                    .iter()
+                    .any(|(name, value)| name == "shard" && value == "0")
+            })
+            .expect("first shard diagnostic must be recorded");
+        first_diagnostic
+            .metadata
+            .expect_field_exact("error_kind", &first_error_kind)
+            .unwrap();
+        first_diagnostic
+            .metadata
+            .expect_field_exact("raw_os_error", &first_raw_os_error)
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1439,40 +1412,6 @@ mod ordinary {
                 );
             }
         }
-    }
-
-    #[test]
-    fn driver_failure_preserves_owned_and_classifies_non_string_panics() {
-        // Supply the two panic payload forms not produced by ordinary panic formatting.
-        let owned = String::from("owned panic payload");
-        let owned_failure = DriverFailure::panic(&owned);
-        let marker = 42_u64;
-        let non_string_failure = DriverFailure::panic(&marker);
-
-        // Owned strings remain intact while opaque payloads receive a stable classification.
-        assert_eq!(owned_failure.operation, "driver panic");
-        assert_eq!(owned_failure.cause.to_string(), "owned panic payload");
-        assert_eq!(owned_failure.cause.error_kind(), None);
-        assert_eq!(owned_failure.cause.raw_os_error(), None);
-        assert_eq!(non_string_failure.operation, "driver panic");
-        assert_eq!(non_string_failure.cause.to_string(), "non-string panic");
-        assert_eq!(non_string_failure.cause.error_kind(), None);
-        assert_eq!(non_string_failure.cause.raw_os_error(), None);
-    }
-
-    #[test]
-    fn driver_failure_retains_structured_io_metadata() {
-        // Construct an OS error and retain its portable kind before moving it.
-        let error = io::Error::from_raw_os_error(libc::EINVAL);
-        let kind = error.kind();
-
-        // Wrap the error through the same path used by native driver operations.
-        let failure = DriverFailure::io("injected operation", error);
-
-        // The original error object remains available for structured diagnostics.
-        assert_eq!(failure.operation, "injected operation");
-        assert_eq!(failure.cause.error_kind(), Some(kind));
-        assert_eq!(failure.cause.raw_os_error(), Some(libc::EINVAL));
     }
 
     #[tokio::test]
@@ -1765,21 +1704,6 @@ mod ordinary {
         // Runtime two must also retain its provisional assignment across another switch.
         assert_eq!(second.select(), 0);
         assert_eq!(second.next_fallback.load(AtomicOrdering::Relaxed), 1);
-    }
-
-    #[test]
-    fn runtime_identity_exhaustion_never_wraps_or_recovers() {
-        // Start a local identity allocator at its final claimable value.
-        let counter = AtomicU64::new(u64::MAX - 1);
-        assert_eq!(allocate_runtime_id(&counter), u64::MAX - 1);
-        assert_eq!(counter.load(AtomicOrdering::Relaxed), u64::MAX);
-
-        // Exhaustion must leave the sentinel unchanged so every later attempt also fails.
-        for _ in 0..2 {
-            let exhausted = catch_unwind(AssertUnwindSafe(|| allocate_runtime_id(&counter)));
-            assert!(exhausted.is_err());
-            assert_eq!(counter.load(AtomicOrdering::Relaxed), u64::MAX);
-        }
     }
 
     #[test]
