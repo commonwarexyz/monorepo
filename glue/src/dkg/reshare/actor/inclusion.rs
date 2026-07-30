@@ -66,6 +66,10 @@ impl<V: BlsVariant, C: Signer> Default for ArtifactWaiters<V, C> {
 }
 
 impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
+    /// Queues a response for an exact effective log view.
+    ///
+    /// Requests for an existing view are coalesced so they share one
+    /// verification result.
     fn push(
         &mut self,
         logs: PendingLogs<V, C::PublicKey>,
@@ -82,6 +86,7 @@ impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
         });
     }
 
+    /// Removes closed responses and log views that no longer have a waiter.
     fn retain_open(&mut self) {
         self.inner.retain_mut(|waiter| {
             waiter.responses.retain(|response| !response.is_closed());
@@ -89,6 +94,7 @@ impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
         });
     }
 
+    /// Removes and returns the live responses for an exact effective log view.
     fn take(
         &mut self,
         logs: &PendingLogs<V, C::PublicKey>,
@@ -101,6 +107,7 @@ impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
         responses
     }
 
+    /// Selects the oldest live requested view, or lazily computes a fallback.
     fn next_target<F>(&mut self, fallback: F) -> PendingLogs<V, C::PublicKey>
     where
         F: FnOnce() -> PendingLogs<V, C::PublicKey>,
@@ -152,6 +159,7 @@ struct Verification<V: BlsVariant, C: Signer> {
 }
 
 impl<V: BlsVariant, C: Signer> Verification<V, C> {
+    /// Creates an idle verifier for the selected effective log view.
     fn new(target: PendingLogs<V, C::PublicKey>) -> Self {
         Self {
             target,
@@ -174,6 +182,9 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
         true
     }
 
+    /// Retargets only when no verification task is running.
+    ///
+    /// This preserves active waiter-driven work at the epoch boundary.
     fn retarget_if_idle(&mut self, target: PendingLogs<V, C::PublicKey>) -> bool {
         if self.task.is_some() {
             return false;
@@ -181,6 +192,7 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
         self.retarget(target)
     }
 
+    /// Installs the sole active task for the selected effective log view.
     fn start(&mut self, task: Handle<VerifiedLogs<V, C>>) {
         assert!(self.task.is_none(), "verification task already running");
         assert!(
