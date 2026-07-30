@@ -1,7 +1,11 @@
 //! Shared percentile calculation and benchmark reporting.
 
-use crate::Config;
-use std::{io, time::Duration};
+use crate::{Backend, Config};
+use std::{
+    fmt::Write as _,
+    io,
+    time::{Duration, Instant},
+};
 
 /// Nearest-rank summary for a nonempty duration sample.
 #[derive(Clone, Copy)]
@@ -92,18 +96,21 @@ pub(crate) fn print_effective_config(config: &Config) {
 
 /// Prints the fixed topology used by the cooperative fairness subrun.
 pub(crate) fn print_fairness_config(config: &Config) {
+    let accounting = format_sample_counts(
+        config.worst_batches,
+        &[("timers_per_batch", config.storm_timers)],
+        &[
+            ("first_dispatch", config.worst_batches),
+            ("full_drain", config.worst_batches),
+            ("peer_gap", config.worst_batches),
+        ],
+    );
     println!(
         "fairness_config requested_worker_threads={} worker_threads=1 shards={} \
-         batches={} concurrency={} observations={} storm_lead_us={} peer_lead_us={} \
-         fd_count={}",
+         {} storm_lead_us={} peer_lead_us={} fd_count={}",
         config.worker_threads,
         fairness_shards_label(),
-        config.worst_batches,
-        config.storm_timers,
-        config
-            .worst_batches
-            .checked_mul(config.storm_timers)
-            .expect("configuration validates storm observation count"),
+        accounting,
         config.storm_lead.as_micros(),
         config.peer_lead.as_micros(),
         fd_count_label(),
@@ -117,20 +124,19 @@ pub(crate) fn print_fairness_config(config: &Config) {
 pub(crate) fn print_duration(
     name: &str,
     batches: usize,
-    concurrency: usize,
-    observations: usize,
+    dimensions: &[(&str, usize)],
     metric: &str,
     samples: &[Duration],
     peak_live_fd_count: Option<&PeakFdCount>,
 ) -> io::Result<Distribution> {
     let distribution = Distribution::new(samples)?;
+    let accounting = format_sample_counts(batches, dimensions, &[(metric, samples.len())]);
     let peak_live_fd_count = peak_live_fd_count.map_or_else(String::new, |peak| {
         format!(" peak_live_fd_count={}", peak.label())
     });
     println!(
-        "{name} batches={batches} concurrency={concurrency} observations={observations} \
-         {metric}_p50_us={:.3} {metric}_p99_us={:.3} {metric}_max_us={:.3} \
-         fd_count={}{}",
+        "{name} {accounting} {metric}_p50_us={:.3} {metric}_p99_us={:.3} \
+         {metric}_max_us={:.3} fd_count={}{}",
         micros(distribution.p50),
         micros(distribution.p99),
         micros(distribution.max),
@@ -138,6 +144,69 @@ pub(crate) fn print_duration(
         peak_live_fd_count,
     );
     Ok(distribution)
+}
+
+/// Formats workload dimensions and the sample count for each metric.
+pub(crate) fn format_sample_counts(
+    batches: usize,
+    dimensions: &[(&str, usize)],
+    metrics: &[(&str, usize)],
+) -> String {
+    let mut output = format!("batches={batches}");
+    for (name, value) in dimensions {
+        write!(output, " {name}={value}").expect("writing to a string cannot fail");
+    }
+    for (name, samples) in metrics {
+        write!(output, " {name}_samples={samples}").expect("writing to a string cannot fail");
+    }
+    output
+}
+
+/// Describes deterministic producer placement across native timer shards.
+pub(crate) fn cancellation_shard_distribution(
+    backend: Backend,
+    shards: Option<usize>,
+    producers: usize,
+) -> String {
+    let Backend::Commonware = backend else {
+        return "effective_timer_shards=backend-managed \
+                producers_per_timer_shard_min=unavailable \
+                producers_per_timer_shard_max=unavailable"
+            .to_owned();
+    };
+    let Some(shards) = shards else {
+        return "effective_timer_shards=tokio-fallback \
+                producers_per_timer_shard_min=unavailable \
+                producers_per_timer_shard_max=unavailable"
+            .to_owned();
+    };
+
+    // Dedicated producer threads receive consecutive round-robin claims.
+    let effective = producers.min(shards);
+    let minimum = if producers < shards {
+        1
+    } else {
+        producers / shards
+    };
+    let maximum = producers.div_ceil(shards);
+    format!(
+        "effective_timer_shards={effective} producers_per_timer_shard_min={minimum} \
+         producers_per_timer_shard_max={maximum}"
+    )
+}
+
+/// Measures from release through the final recorded operation completion.
+pub(crate) fn elapsed_through_last(
+    start: Instant,
+    completions: impl IntoIterator<Item = Instant>,
+) -> io::Result<Duration> {
+    let last = completions.into_iter().max().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot measure drain without a completed operation",
+        )
+    })?;
+    Ok(last.saturating_duration_since(start))
 }
 
 /// Converts a duration to fractional microseconds for compact output.

@@ -6,100 +6,47 @@
 //! well represented by a Criterion iteration loop.
 
 mod accuracy;
+mod backend;
 mod config;
+mod peer_gap;
+mod producer_gate;
 mod report;
 mod worst_case;
 
-use commonware_runtime::{Clock as _, Runner as _, tokio as commonware_tokio};
+pub(crate) use backend::{BenchSleep, poll_once, sleep_for, sleep_until, sleep_until_wall};
+use commonware_runtime::{Runner as _, tokio as commonware_tokio};
 pub(crate) use config::{Backend, Config, checked_observations};
-use std::{
-    error::Error,
-    future::Future,
-    io,
-    pin::Pin,
-    task::{Context, Poll},
-    time::{Duration, SystemTime},
-};
-
-/// Heap-allocated sleep used to give both timer backends the same harness cost.
-pub(crate) type BenchSleep = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-
-/// Constructs a relative sleep through the selected backend.
-pub(crate) fn sleep_for(
-    clock: &commonware_tokio::Context,
-    backend: Backend,
-    duration: Duration,
-) -> BenchSleep {
-    match backend {
-        Backend::Commonware => Box::pin(clock.sleep(duration)),
-        Backend::Tokio => Box::pin(tokio::time::sleep(duration)),
-    }
-}
-
-/// Constructs an absolute sleep through the selected backend.
-pub(crate) fn sleep_until(
-    clock: &commonware_tokio::Context,
-    backend: Backend,
-    wall_deadline: SystemTime,
-    tokio_deadline: tokio::time::Instant,
-) -> BenchSleep {
-    match backend {
-        Backend::Commonware => Box::pin(clock.sleep_until(wall_deadline)),
-        Backend::Tokio => Box::pin(tokio::time::sleep_until(tokio_deadline)),
-    }
-}
-
-/// Constructs a wall-clock sleep while preserving equivalent backend work.
-pub(crate) fn sleep_until_wall(
-    clock: &commonware_tokio::Context,
-    backend: Backend,
-    wall_deadline: SystemTime,
-) -> BenchSleep {
-    match backend {
-        Backend::Commonware => Box::pin(clock.sleep_until(wall_deadline)),
-        Backend::Tokio => {
-            // Mirror Commonware's wall-clock snapshot before delegating to the
-            // relative Tokio sleep constructor.
-            let duration = wall_deadline
-                .duration_since(SystemTime::now())
-                .unwrap_or_default();
-            Box::pin(tokio::time::sleep(duration))
-        }
-    }
-}
-
-/// Polls a sleep once so lazy backends register before timing continues.
-pub(crate) fn poll_once(sleep: &mut BenchSleep) -> Poll<()> {
-    let waker = futures::task::noop_waker_ref();
-    let mut context = Context::from_waker(waker);
-    sleep.as_mut().poll(&mut context)
-}
+use std::{error::Error, io};
 
 /// Parses configuration and runs the selected production timer workloads.
 fn main() -> Result<(), Box<dyn Error>> {
     let Some(config) = Config::parse()? else {
         return Ok(());
     };
-    let runtime = commonware_tokio::Runner::new(
-        commonware_tokio::Config::default().with_worker_threads(config.worker_threads),
-    );
+    if config.scenario.runs_accuracy() || config.scenario.runs_contention() {
+        let runtime = commonware_tokio::Runner::new(
+            commonware_tokio::Config::default().with_worker_threads(config.worker_threads),
+        );
+        runtime.start(|context| async {
+            report::print_effective_config(&config);
+            let clock = std::sync::Arc::new(context);
 
-    runtime.start(|context| async {
+            if config.scenario.runs_accuracy() {
+                accuracy::run(&config, std::sync::Arc::clone(&clock)).await?;
+            }
+            if config.scenario.runs_contention() {
+                worst_case::run_contention(&config, clock).await?;
+            }
+            Ok::<_, io::Error>(())
+        })?;
+    } else {
+        // Expiry owns a separate one-worker runtime below.
         report::print_effective_config(&config);
-        let clock = std::sync::Arc::new(context);
-
-        if config.scenario.runs_accuracy() {
-            accuracy::run(&config, std::sync::Arc::clone(&clock)).await?;
-        }
-        if config.scenario.runs_worst_case() {
-            worst_case::run_contention(&config, clock).await?;
-        }
-        Ok::<_, io::Error>(())
-    })?;
+    }
 
     // Fairness uses one worker so the timer driver and runnable peer must
     // cooperate on the same executor regardless of the main configuration.
-    if config.scenario.runs_worst_case() {
+    if config.scenario.runs_expiry() {
         worst_case::run_fairness(&config)?;
     }
     Ok(())

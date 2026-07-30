@@ -152,8 +152,7 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
             report::print_duration(
                 &name,
                 config.accuracy_batches,
-                scenario.concurrency,
-                observations,
+                &[("concurrency", scenario.concurrency)],
                 "lateness",
                 &lateness,
                 None,
@@ -194,9 +193,7 @@ async fn run_batch(
                         .get()
                         .expect("common deadline initialized before start barrier");
                     sleep_until(&clock, backend, deadline.wall, deadline.tokio).await;
-                    Ok::<_, io::Error>(
-                        Instant::now().saturating_duration_since(deadline.measurement(backend)),
-                    )
+                    checked_lateness(Instant::now(), deadline.measurement(backend))
                 }
                 Mode::Spread => {
                     let origin = *spread_origin
@@ -217,7 +214,7 @@ async fn run_batch(
                             )
                         })?;
                     sleep_for(&clock, backend, scenario.target).await;
-                    Ok(Instant::now().saturating_duration_since(requested))
+                    checked_lateness(Instant::now(), requested)
                 }
             }
         }));
@@ -234,6 +231,16 @@ async fn run_batch(
     }
     start.wait().await;
     collect_handles(handles).await
+}
+
+/// Returns observed lateness while rejecting an early timer callback.
+fn checked_lateness(observed: Instant, deadline: Instant) -> io::Result<Duration> {
+    observed.checked_duration_since(deadline).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "accuracy timer completed before its requested deadline",
+        )
+    })
 }
 
 /// Builds offsets that include both endpoints of the configured spread.
@@ -284,3 +291,7 @@ async fn collect_handles(
     }
     first_error.map_or(Ok(samples), Err)
 }
+
+#[cfg(test)]
+#[path = "accuracy_tests.rs"]
+mod tests;

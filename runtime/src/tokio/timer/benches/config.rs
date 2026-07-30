@@ -78,8 +78,18 @@ pub(crate) enum ScenarioSelection {
     All,
     /// Run only application-observed timer accuracy.
     Accuracy,
-    /// Run only workloads that protect timer design decisions.
+    /// Run every workload that protects timer design decisions.
     WorstCase,
+    /// Run only descending timer registration.
+    Registration,
+    /// Run cancellation at every configured producer level.
+    Cancellation,
+    /// Run cancellation with one producer.
+    CancellationSingle,
+    /// Run cancellation with every producer level greater than one.
+    CancellationMulti,
+    /// Run only the common-deadline expiry storm.
+    Expiry,
 }
 
 impl ScenarioSelection {
@@ -89,10 +99,16 @@ impl ScenarioSelection {
             "all" => Ok(Self::All),
             "accuracy" => Ok(Self::Accuracy),
             "worst-case" => Ok(Self::WorstCase),
+            "registration" => Ok(Self::Registration),
+            "cancellation" => Ok(Self::Cancellation),
+            "cancellation-single" => Ok(Self::CancellationSingle),
+            "cancellation-multi" => Ok(Self::CancellationMulti),
+            "expiry" => Ok(Self::Expiry),
             _ => Err(invalid_value(
                 "--scenario",
                 value,
-                "expected all, accuracy, or worst-case",
+                "expected all, accuracy, worst-case, registration, cancellation, \
+                 cancellation-single, cancellation-multi, or expiry",
             )),
         }
     }
@@ -102,9 +118,47 @@ impl ScenarioSelection {
         matches!(self, Self::All | Self::Accuracy)
     }
 
-    /// Returns whether the worst-case scenarios should run.
-    pub(crate) const fn runs_worst_case(self) -> bool {
-        matches!(self, Self::All | Self::WorstCase)
+    /// Returns whether descending registration should run.
+    pub(crate) const fn runs_registration(self) -> bool {
+        matches!(self, Self::All | Self::WorstCase | Self::Registration)
+    }
+
+    /// Returns whether any cancellation workload should run.
+    pub(crate) const fn runs_cancellation(self) -> bool {
+        matches!(
+            self,
+            Self::All
+                | Self::WorstCase
+                | Self::Cancellation
+                | Self::CancellationSingle
+                | Self::CancellationMulti
+        )
+    }
+
+    /// Returns whether cancellation should include one producer.
+    const fn runs_single_producer(self) -> bool {
+        matches!(
+            self,
+            Self::All | Self::WorstCase | Self::Cancellation | Self::CancellationSingle
+        )
+    }
+
+    /// Returns whether cancellation should include contending producers.
+    const fn runs_multiple_producers(self) -> bool {
+        matches!(
+            self,
+            Self::All | Self::WorstCase | Self::Cancellation | Self::CancellationMulti
+        )
+    }
+
+    /// Returns whether the common-deadline expiry storm should run.
+    pub(crate) const fn runs_expiry(self) -> bool {
+        matches!(self, Self::All | Self::WorstCase | Self::Expiry)
+    }
+
+    /// Returns whether the main runtime has a selected worst-case workload.
+    pub(crate) const fn runs_contention(self) -> bool {
+        self.runs_registration() || self.runs_cancellation()
     }
 }
 
@@ -114,6 +168,11 @@ impl fmt::Display for ScenarioSelection {
             Self::All => formatter.write_str("all"),
             Self::Accuracy => formatter.write_str("accuracy"),
             Self::WorstCase => formatter.write_str("worst-case"),
+            Self::Registration => formatter.write_str("registration"),
+            Self::Cancellation => formatter.write_str("cancellation"),
+            Self::CancellationSingle => formatter.write_str("cancellation-single"),
+            Self::CancellationMulti => formatter.write_str("cancellation-multi"),
+            Self::Expiry => formatter.write_str("expiry"),
         }
     }
 }
@@ -238,7 +297,7 @@ impl Config {
                     config.storm_lead = Duration::from_micros(parse_nonzero_u64(option, &value)?);
                 }
                 "--peer-lead-us" => {
-                    config.peer_lead = Duration::from_micros(parse_u64(option, &value)?);
+                    config.peer_lead = Duration::from_micros(parse_nonzero_u64(option, &value)?);
                 }
                 _ => {
                     return Err(io::Error::new(
@@ -255,55 +314,69 @@ impl Config {
 
     /// Validates relationships and sample counts before starting the runtime.
     fn validate(&self) -> io::Result<()> {
-        if self.cancel_percent > 100 {
-            return Err(invalid_value(
-                "--cancel-percent",
-                &self.cancel_percent.to_string(),
-                "expected a value from 1 through 100",
-            ));
+        // Validate only selected workloads so profiling can ignore unrelated settings.
+        if self.scenario.runs_accuracy() {
+            for &concurrency in &self.accuracy_concurrency {
+                checked_observations(self.accuracy_batches, concurrency)?;
+                concurrency.checked_add(1).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "accuracy concurrency cannot be represented by a barrier",
+                    )
+                })?;
+            }
         }
-        if self.peer_lead >= self.storm_lead {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "--peer-lead-us must be smaller than --storm-lead-us",
-            ));
+        if self.scenario.runs_registration() {
+            checked_observations(self.worst_batches, self.registration_timers)?;
         }
-
-        // Validate every multiplication here so scenario allocation cannot wrap.
-        for &concurrency in &self.accuracy_concurrency {
-            checked_observations(self.accuracy_batches, concurrency)?;
-            concurrency.checked_add(1).ok_or_else(|| {
-                io::Error::new(
+        if self.scenario.runs_cancellation() {
+            if self.cancel_percent > 100 {
+                return Err(invalid_value(
+                    "--cancel-percent",
+                    &self.cancel_percent.to_string(),
+                    "expected a value from 1 through 100",
+                ));
+            }
+            checked_observations(self.worst_batches, self.cancellation_timers)?;
+            let maximum_producers = *self
+                .cancellation_producer_counts_checked()?
+                .iter()
+                .max()
+                .expect("selected cancellation includes a producer count");
+            if self.cancellation_timers < maximum_producers {
+                return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "accuracy concurrency cannot be represented by a barrier",
-                )
-            })?;
+                    format!(
+                        "--cancellation-timers must be at least {maximum_producers} so every \
+                         producer registers a timer"
+                    ),
+                ));
+            }
+            let canceled = self
+                .cancellation_timers
+                .checked_mul(self.cancel_percent)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "cancel count overflow")
+                })?
+                / 100;
+            if canceled < maximum_producers {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "--cancellation-timers and --cancel-percent must select at least \
+                         {maximum_producers} canceled timers so every producer cancels a timer"
+                    ),
+                ));
+            }
         }
-        checked_observations(self.worst_batches, self.registration_timers)?;
-        checked_observations(self.worst_batches, self.cancellation_timers)?;
-        checked_observations(self.worst_batches, self.storm_timers)?;
-        let maximum_producers = self.worker_threads.checked_mul(4).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "four times --worker-threads exceeds usize",
-            )
-        })?;
-        maximum_producers.checked_add(1).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "producer count cannot be represented by a barrier",
-            )
-        })?;
-        let canceled = self
-            .cancellation_timers
-            .checked_mul(self.cancel_percent)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cancel count overflow"))?
-            / 100;
-        if canceled == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "--cancellation-timers and --cancel-percent select no timers",
-            ));
+        if self.scenario.runs_expiry() {
+            if self.peer_lead >= self.storm_lead {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--peer-lead-us must be smaller than --storm-lead-us",
+                ));
+            }
+            checked_observations(self.worst_batches, self.storm_timers)?;
         }
         Ok(())
     }
@@ -315,11 +388,31 @@ impl Config {
             .filter(|backend| self.backend.includes(*backend))
     }
 
-    /// Returns one, worker-count, and four-times-worker producer levels.
-    pub(crate) fn producer_counts(&self) -> Vec<usize> {
-        let mut counts = vec![1, self.worker_threads, self.worker_threads * 4];
+    /// Returns the producer levels selected for cancellation.
+    pub(crate) fn cancellation_producer_counts(&self) -> Vec<usize> {
+        self.cancellation_producer_counts_checked()
+            .expect("selected cancellation topology was validated")
+    }
+
+    /// Computes selected cancellation producer levels with checked arithmetic.
+    fn cancellation_producer_counts_checked(&self) -> io::Result<Vec<usize>> {
+        let mut counts = Vec::with_capacity(3);
+        if self.scenario.runs_single_producer() {
+            counts.push(1);
+        }
+        if self.scenario.runs_multiple_producers() {
+            counts.push(self.worker_threads);
+            counts.push(self.worker_threads.checked_mul(4).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "four times --worker-threads exceeds usize",
+                )
+            })?);
+        }
+        counts.sort_unstable();
         counts.dedup();
-        counts
+        counts.retain(|count| self.scenario.runs_single_producer() || *count > 1);
+        Ok(counts)
     }
 
     /// Returns the native shard count when this platform uses native timers.
@@ -403,7 +496,9 @@ fn print_help() {
 Usage: cargo bench -p commonware-runtime --bench timer -- [OPTIONS]
 
 Options:
-  --scenario <all|accuracy|worst-case>   Scenario group [default: all]
+  --scenario <SCENARIO>                  all, accuracy, worst-case, registration,
+                                         cancellation, cancellation-single,
+                                         cancellation-multi, or expiry [default: all]
   --backend <all|commonware|tokio>       Timer backend [default: all]
   --worker-threads <N>                   Tokio workers and native shards [default: 4]
   --accuracy-batches <N>                 Batches per accuracy case [default: 10]
