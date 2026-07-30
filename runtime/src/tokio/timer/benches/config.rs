@@ -184,7 +184,7 @@ impl Config {
     }
 
     /// Parses an explicit argument stream for production and unit tests.
-    fn parse_from<I, T>(arguments: I) -> Result<Option<Self>, clap::Error>
+    pub(crate) fn parse_from<I, T>(arguments: I) -> Result<Option<Self>, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
@@ -227,7 +227,11 @@ impl Config {
                 checked_observations(self.accuracy_batches, concurrency)?;
             }
         }
+        if self.scenario.runs_registration() {
+            checked_observations(self.worst_batches, REGISTRATION_TIMERS)?;
+        }
         if self.scenario.runs_cancellation() {
+            checked_observations(self.worst_batches, CANCELLATION_TIMERS)?;
             let maximum_producers = *self
                 .cancellation_producer_counts_checked()?
                 .iter()
@@ -243,6 +247,9 @@ impl Config {
                     ),
                 ));
             }
+        }
+        if self.scenario.runs_expiry() {
+            checked_observations(self.worst_batches, STORM_TIMERS)?;
         }
         Ok(())
     }
@@ -320,12 +327,12 @@ fn parse_positive(value: &str) -> Result<usize, String> {
     Ok(value)
 }
 
-/// Computes a checked observation count for one scenario.
-pub(crate) fn checked_observations(batches: usize, concurrency: usize) -> io::Result<usize> {
-    batches.checked_mul(concurrency).ok_or_else(|| {
+/// Computes a checked derived count for one benchmark workload.
+pub(crate) fn checked_observations(batches: usize, items_per_batch: usize) -> io::Result<usize> {
+    batches.checked_mul(items_per_batch).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "batches times concurrency exceeds usize",
+            "batches times workload size exceeds usize",
         )
     })
 }

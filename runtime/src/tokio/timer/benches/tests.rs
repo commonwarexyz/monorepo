@@ -14,12 +14,25 @@ mod producer_gate;
 mod report;
 mod worst_case;
 
+use clap::error::ErrorKind;
 use commonware_runtime::{Runner as _, tokio as commonware_tokio};
 use std::{
     io,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
+
+#[test]
+fn worst_batch_overflow_is_rejected_before_allocation() {
+    let worst_batches = usize::MAX.to_string();
+
+    for scenario in ["registration", "cancellation", "expiry"] {
+        let error = Config::parse_from(["--scenario", scenario, "--worst-batches", &worst_batches])
+            .expect_err("overflowing workload reached benchmark execution");
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{scenario}");
+    }
+}
 
 #[test]
 fn deadline_pair_preserves_each_backend_measurement_contract() {
