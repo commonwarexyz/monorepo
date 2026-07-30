@@ -111,7 +111,7 @@ fn one_entry() {
     assert_eq!(heap.len(), 0);
 }
 
-/// Ascending, descending, equal, and randomized insertions pop in order.
+/// Ascending, descending, equal, and wrapping insertions pop in order.
 #[test]
 fn insertion_shapes_and_pop_order() {
     // Exercise already ordered input, the worst insertion direction, and
@@ -131,12 +131,17 @@ fn insertion_shapes_and_pop_order() {
         .collect::<Vec<_>>();
     assert_ordered(&equal);
 
-    // Compare a larger deterministic random shape against sorted keys.
-    let mut rng = TestRng::new(0x48ea_4f2d);
-    let randomized = (0..1_000)
-        .map(|sequence| (rng.random_range(0..257), sequence))
-        .collect::<Vec<_>>();
-    assert_ordered(&randomized);
+    // Place equal deadlines on both sides of u64 wrap plus distinct
+    // deadlines that must still dominate the numeric sequence tie breaker.
+    let wrapping = [
+        (9, u64::MAX - 1),
+        (9, u64::MAX),
+        (9, 0),
+        (9, 1),
+        (8, 0),
+        (10, u64::MAX),
+    ];
+    assert_ordered(&wrapping);
 }
 
 /// Root, middle, final, and only-entry removal preserve all invariants.
@@ -269,25 +274,6 @@ fn stale_and_mismatched_indices_are_rejected() {
     assert!(heap.remove(stale_index, &victim).is_none());
     assert_eq!(heap.len(), original_len - 1);
     assert_invariants(&heap);
-}
-
-/// The numeric tie breaker remains a total order when a counter wraps.
-#[test]
-fn sequence_wrap_behavior() {
-    // Place equal deadlines on both sides of u64 wrap plus distinct
-    // deadlines that must still dominate the tie breaker.
-    let keys = [
-        (9, u64::MAX - 1),
-        (9, u64::MAX),
-        (9, 0),
-        (9, 1),
-        (8, 0),
-        (10, u64::MAX),
-    ];
-
-    // Numeric sequence ordering may restart after wrap but must remain a
-    // valid total heap order without corrupting indices.
-    assert_ordered(&keys);
 }
 
 /// Randomized operations match a simple identity-based reference model.

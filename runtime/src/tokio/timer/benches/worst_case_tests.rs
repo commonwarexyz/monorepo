@@ -102,90 +102,77 @@ fn cancellation_collection_joins_after_first_panic() {
 }
 
 #[test]
-fn tokio_storm_measurement_reuses_the_passed_deadline() {
+fn storm_deadlines_preserve_each_backend_measurement_contract() {
     use std::time::Duration;
 
-    // Setup: Construct one Tokio storm deadline from a visible lead duration.
+    // Setup: Use one visible lead for both backend deadline representations.
     let lead = Duration::from_millis(50);
 
-    // Action: Build the backend deadline and its measurement pair.
-    let deadlines = super::StormDeadlines::new(super::Backend::Tokio, lead).unwrap();
+    // Tokio case - Action: Build its exact monotonic deadline and measurement pair.
+    let tokio = super::StormDeadlines::new(super::Backend::Tokio, lead).unwrap();
 
-    // Assertion: Cutoff and lateness use the exact Instant passed to Tokio.
-    assert_eq!(deadlines.measurement_deadline, deadlines.tokio.into_std());
+    // Tokio case - Assertion: Cutoff and lateness reuse the Instant passed to Tokio.
+    assert_eq!(tokio.measurement_deadline, tokio.tokio.into_std());
     assert_eq!(
-        deadlines
+        tokio
             .measurement_deadline
-            .saturating_duration_since(deadlines.measurement_origin),
+            .saturating_duration_since(tokio.measurement_origin),
         lead
     );
-    assert_eq!(deadlines.clock_pair_span, None);
-}
+    assert_eq!(tokio.clock_pair_span, None);
 
-#[test]
-fn commonware_storm_brackets_the_wall_clock_snapshot() {
-    use std::time::Duration;
-
-    // Setup: Construct one Commonware storm deadline from a visible lead.
-    let lead = Duration::from_millis(50);
-
-    // Action: Compare the conservative deadline with the later monotonic sample.
-    let deadlines = super::StormDeadlines::new(super::Backend::Commonware, lead).unwrap();
-    let observed_span = deadlines
+    // Commonware case - Action: Pair its wall deadline with monotonic observations.
+    let commonware = super::StormDeadlines::new(super::Backend::Commonware, lead).unwrap();
+    let observed_span = commonware
         .tokio
         .into_std()
-        .saturating_duration_since(deadlines.measurement_deadline);
+        .saturating_duration_since(commonware.measurement_deadline);
 
-    // Assertion: The reported span bounds Commonware first-dispatch overstatement.
-    assert_eq!(deadlines.clock_pair_span, Some(observed_span));
+    // Commonware case - Assertion: The span bounds first-dispatch overstatement.
+    assert_eq!(commonware.clock_pair_span, Some(observed_span));
 }
 
 #[test]
-fn recorder_timestamps_only_first_and_final_callbacks() {
+fn recorder_timestamps_first_and_final_callbacks() {
     use std::{sync::atomic::Ordering, time::Instant};
 
-    // Setup: Create a three-callback recorder with both boundaries unset.
-    let recorder = super::Recorder::new(Instant::now(), 3);
+    // Multiple-callback case - Setup: Start with both boundaries unset.
+    let multiple = super::Recorder::new(Instant::now(), 3);
 
-    // Action: Record the first callback and then one interior callback.
-    recorder.record();
-    let first = recorder.first_ns.load(Ordering::Acquire);
-    let last_after_first = recorder.last_ns.load(Ordering::Acquire);
-    recorder.record();
-    let first_after_middle = recorder.first_ns.load(Ordering::Acquire);
-    let last_after_middle = recorder.last_ns.load(Ordering::Acquire);
+    // Multiple-callback case - Action: Record the first and one interior callback.
+    multiple.record();
+    let first = multiple.first_ns.load(Ordering::Acquire);
+    let last_after_first = multiple.last_ns.load(Ordering::Acquire);
+    multiple.record();
+    let first_after_middle = multiple.first_ns.load(Ordering::Acquire);
+    let last_after_middle = multiple.last_ns.load(Ordering::Acquire);
 
-    // Assertion: Only the first boundary is timestamped before completion.
+    // Multiple-callback case - Assertion: Only the first boundary is timestamped.
     assert_ne!(first, 0);
     assert_eq!(last_after_first, 0);
     assert_eq!(first_after_middle, first);
     assert_eq!(last_after_middle, 0);
 
-    // Action: Record the final callback.
-    recorder.record();
-    let last = recorder.last_ns.load(Ordering::Acquire);
+    // Multiple-callback case - Action: Record the final callback.
+    multiple.record();
+    let last = multiple.last_ns.load(Ordering::Acquire);
 
-    // Assertion: The final boundary is timestamped after one RMW per callback.
-    assert_eq!(recorder.completed.load(Ordering::Relaxed), 3);
+    // Multiple-callback case - Assertion: The final boundary is timestamped.
+    assert_eq!(multiple.completed.load(Ordering::Relaxed), 3);
     assert!(last >= first);
-}
 
-#[test]
-fn single_callback_recorder_uses_one_boundary_timestamp() {
-    use std::{sync::atomic::Ordering, time::Instant};
+    // Single-callback case - Setup: The first callback is also the final callback.
+    let single = super::Recorder::new(Instant::now(), 1);
 
-    // Setup: Create a recorder whose first callback is also its final callback.
-    let recorder = super::Recorder::new(Instant::now(), 1);
+    // Single-callback case - Action: Record the sole callback.
+    single.record();
+    let first = single.first_ns.load(Ordering::Acquire);
+    let last = single.last_ns.load(Ordering::Acquire);
 
-    // Action: Record that sole callback.
-    recorder.record();
-    let first = recorder.first_ns.load(Ordering::Acquire);
-    let last = recorder.last_ns.load(Ordering::Acquire);
-
-    // Assertion: One timestamp supports both boundaries and a zero drain.
+    // Single-callback case - Assertion: One timestamp supports both boundaries.
     assert_ne!(first, 0);
     assert_eq!(last, first);
-    assert_eq!(recorder.completed.load(Ordering::Relaxed), 1);
+    assert_eq!(single.completed.load(Ordering::Relaxed), 1);
 }
 
 #[test]
