@@ -238,9 +238,9 @@ impl Runtime<()> {
     pub fn new() -> Result<Self, Error> {
         let window = web_sys::window()
             .ok_or_else(|| Error::TransportFailed("browser window unavailable".into()))?;
-        let performance = window
-            .performance()
-            .ok_or_else(|| Error::TransportFailed("browser performance clock unavailable".into()))?;
+        let performance = window.performance().ok_or_else(|| {
+            Error::TransportFailed("browser performance clock unavailable".into())
+        })?;
 
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(crate::telemetry::metrics::METRICS_PREFIX);
@@ -259,20 +259,20 @@ impl Runtime<()> {
             waker: RefCell::new(None),
         });
         let executor = Rc::new(Executor {
-                registry,
-                metrics,
-                shutdown: RefCell::new(Stopper::default()),
-                window,
-                wall_anchor: SystemTime::now(),
-                monotonic_anchor_ms: performance.now(),
-                performance,
-                network_buffer_pool,
-                storage_buffer_pool,
-                lifecycle,
-                lifecycle_taken: Cell::new(false),
+            registry,
+            metrics,
+            shutdown: RefCell::new(Stopper::default()),
+            window,
+            wall_anchor: browser_wall_time()?,
+            monotonic_anchor_ms: performance.now(),
+            performance,
+            network_buffer_pool,
+            storage_buffer_pool,
+            lifecycle,
+            lifecycle_taken: Cell::new(false),
             lifecycle_handlers: RefCell::new(None),
             roots: RefCell::new(Vec::new()),
-            });
+        });
         let handlers = LifecycleHandlers::install(&executor)?;
         *executor.lifecycle_handlers.borrow_mut() = Some(handlers);
 
@@ -289,7 +289,20 @@ impl Runtime<()> {
             dialer: Rc::new(dialer),
         }
     }
+}
 
+fn browser_wall_time() -> Result<SystemTime, Error> {
+    let epoch_millis = js_sys::Date::now();
+    if !epoch_millis.is_finite() || epoch_millis < 0.0 {
+        return Err(Error::TransportFailed(
+            "browser wall clock unavailable".into(),
+        ));
+    }
+
+    let elapsed = Duration::from_secs_f64(epoch_millis / 1_000.0);
+    SystemTime::UNIX_EPOCH
+        .checked_add(elapsed)
+        .ok_or_else(|| Error::TransportFailed("browser wall clock out of range".into()))
 }
 
 impl<D: 'static> Runtime<D> {
@@ -329,13 +342,15 @@ impl<D: 'static> Runtime<D> {
                 .clone(),
         );
         let tree = Tree::root();
+        let (context_tree, aborted) = Tree::child(&tree);
+        debug_assert!(!aborted, "new root supervision tree is already aborted");
         self.executor.roots.borrow_mut().push(Arc::downgrade(&tree));
         let context = Context {
             name: label.name(),
             attributes: Vec::new(),
             executor: Rc::clone(&self.executor),
             dialer: Rc::clone(&self.dialer),
-            tree: Arc::clone(&tree),
+            tree: context_tree,
             execution: Execution::default(),
         };
         let (task, handle) = Handle::init_local(f(context), metric, Arc::clone(&tree));
@@ -460,7 +475,8 @@ impl<D: 'static> Metrics for Context<D> {
 
 impl<D: 'static> Clock for Context<D> {
     fn current(&self) -> SystemTime {
-        let elapsed_ms = (self.executor.performance.now() - self.executor.monotonic_anchor_ms).max(0.0);
+        let elapsed_ms =
+            (self.executor.performance.now() - self.executor.monotonic_anchor_ms).max(0.0);
         self.executor.wall_anchor + Duration::from_secs_f64(elapsed_ms / 1_000.0)
     }
 

@@ -1,12 +1,40 @@
 #![cfg(target_arch = "wasm32")]
 
-use commonware_runtime::{Clock, Error, web::Runtime};
+use commonware_runtime::{Clock, Error, Spawner, web::Runtime};
 use js_sys::Promise;
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, SystemTime},
+};
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 wasm_bindgen_test_configure!(run_in_browser);
+
+#[wasm_bindgen_test(async)]
+async fn wall_clock_is_anchored_without_std_time_support() {
+    let runtime = Runtime::new().unwrap();
+    let current = runtime.spawn_root(|context| async move { context.current() });
+
+    assert!(
+        current
+            .await
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            > Duration::from_secs(50 * 365 * 24 * 60 * 60)
+    );
+}
+
+#[wasm_bindgen_test(async)]
+async fn root_supervises_spawned_children() {
+    let runtime = Runtime::new().unwrap();
+    let root = runtime
+        .spawn_root(|context| async move { context.spawn(|_| async { 7_u8 }).await.unwrap() });
+
+    assert_eq!(root.await.unwrap(), 7);
+}
 
 #[wasm_bindgen_test(async)]
 async fn spawns_browser_local_futures() {
