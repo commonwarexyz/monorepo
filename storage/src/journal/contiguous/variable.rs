@@ -2426,10 +2426,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// a data sync.
     ///
     /// `min_position` is clamped down to the proven-durable frontier: only already-synced data is
-    /// reclaimed, so no data fsync is needed. A request beyond the frontier is clamped rather than
-    /// rejected; use [`Self::prune`] to prune data not yet synced. As with
-    /// `prune`, blob boundaries are preserved, so slightly fewer items than requested may be
-    /// pruned.
+    /// reclaimed, so no data fsync is needed. Data made durable only by [`Self::commit`] is not
+    /// reclaimable here: `commit` persists the data blobs but not the offsets journal, so the
+    /// proven-durable frontier does not advance until [`Self::sync`]. Use `sync` (or [`Self::prune`],
+    /// which syncs) to reclaim committed-but-unsynced data. A request beyond the frontier is clamped
+    /// rather than rejected. As with `prune`, blob boundaries are preserved, so slightly fewer items
+    /// than requested may be pruned.
     ///
     /// The boundary is recorded by a pipelined write to the offsets journal's checkpoint (which
     /// also advances the recovery watermark to the frontier), and the freed data and offsets blobs
@@ -4634,6 +4636,51 @@ mod tests {
 
             // The retained (unsynced) tail above the boundary is still readable.
             for i in 15..20u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `commit` alone does not let `start_prune` advance past the offsets (sync) frontier: `commit`
+    /// makes the data durable but not the offsets journal, so the proven-durable frontier does not
+    /// move, and committed-but-unsynced data stays reclaimable only after a `sync`.
+    #[test_traced]
+    fn test_variable_start_prune_does_not_reclaim_committed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-start-prune-committed".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+            assert_eq!(journal.0.offsets.recovery_watermark(), 10);
+
+            // Append past the synced frontier and commit (not sync): the data becomes durable but
+            // the offsets journal does not, so the proven-durable frontier stays at 10.
+            for i in 10..15u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let journal = journal.commit().await.unwrap();
+            assert_eq!(journal.0.offsets.recovery_watermark(), 10);
+
+            // Pruning past the frontier clamps to the synced frontier (10), not the commit frontier
+            // (15): the committed-but-unsynced data is retained, not reclaimed.
+            let (journal, handle) = journal.start_prune(15).await.unwrap();
+            assert_eq!(journal.bounds(), 10..15);
+            assert_eq!(journal.0.offsets.recovery_watermark(), 10);
+            handle.await.unwrap();
+            for i in 10..15u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i);
             }
             journal.destroy().await.unwrap();
