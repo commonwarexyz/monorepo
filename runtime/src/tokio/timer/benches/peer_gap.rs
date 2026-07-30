@@ -53,7 +53,3 @@ pub(crate) fn dispatch_lateness(observed: Duration, target: Duration) -> io::Res
         )
     })
 }
-
-#[cfg(test)]
-#[path = "peer_gap_tests.rs"]
-mod tests;

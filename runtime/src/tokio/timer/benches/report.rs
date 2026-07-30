@@ -285,7 +285,3 @@ const fn fairness_shards_label() -> &'static str {
         "tokio-fallback"
     }
 }
-
-#[cfg(test)]
-#[path = "report_tests.rs"]
-mod tests;

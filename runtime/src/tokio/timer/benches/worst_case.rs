@@ -275,7 +275,7 @@ async fn benchmark_cancellation(
 
 /// Work isolated by one cancellation measurement pass.
 #[derive(Clone, Copy)]
-enum CancellationPass {
+pub(super) enum CancellationPass {
     /// Measure every individual timer drop.
     Latency,
     /// Measure aggregate drain without per-drop instrumentation.
@@ -294,11 +294,11 @@ fn cancellation_scaling(baseline: Option<Duration>, current: Duration) -> Option
 }
 
 /// Result of one cancellation batch across all producers.
-struct CancellationBatch {
+pub(super) struct CancellationBatch {
     /// Per-producer construction and initial-poll durations.
-    setup: Vec<Duration>,
+    pub(super) setup: Vec<Duration>,
     /// Per-timer cancellation durations.
-    cancellation: Vec<Duration>,
+    pub(super) cancellation: Vec<Duration>,
     /// Wall time from producer release through the final cancellation.
     drain: Duration,
     /// Descriptor count before cancellation releases any registered timer.
@@ -354,7 +354,7 @@ struct CancellationProducer {
 }
 
 /// Registers partitioned timers and releases every producer through a gate.
-async fn run_cancellation_batch(
+pub(super) async fn run_cancellation_batch(
     clock: Arc<commonware_tokio::Context>,
     backend: Backend,
     timers: usize,
@@ -802,22 +802,22 @@ async fn measure_peer_gap(
 }
 
 /// Atomically records callback progress without scheduling timer tasks.
-struct Recorder {
+pub(super) struct Recorder {
     /// Batch origin used to encode callback times.
     origin: Instant,
     /// Number of callbacks required to finish the batch.
     target: usize,
     /// Number of callbacks observed so far.
-    completed: AtomicUsize,
+    pub(super) completed: AtomicUsize,
     /// First callback time plus one nanosecond, with zero meaning unset.
-    first_ns: AtomicU64,
+    pub(super) first_ns: AtomicU64,
     /// Final callback time plus one nanosecond, with zero meaning unset.
-    last_ns: AtomicU64,
+    pub(super) last_ns: AtomicU64,
 }
 
 impl Recorder {
     /// Creates an empty callback recorder.
-    const fn new(origin: Instant, target: usize) -> Self {
+    pub(super) const fn new(origin: Instant, target: usize) -> Self {
         Self {
             origin,
             target,
@@ -828,7 +828,7 @@ impl Recorder {
     }
 
     /// Records one callback and publishes progress to the peer task.
-    fn record(&self) {
+    pub(super) fn record(&self) {
         // The dedicated one-worker fairness runtime makes this ordinal the
         // callback execution order. Every callback performs only this one RMW.
         let before = self.completed.fetch_add(1, Ordering::Relaxed);
@@ -899,7 +899,3 @@ fn checked_step(step: Duration, positions: usize) -> io::Result<Duration> {
         )
     })
 }
-
-#[cfg(test)]
-#[path = "worst_case_tests.rs"]
-mod tests;

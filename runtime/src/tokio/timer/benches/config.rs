@@ -211,7 +211,7 @@ impl Config {
     }
 
     /// Parses an explicit argument stream for production and unit tests.
-    fn parse_from<I, T>(arguments: I) -> Result<Option<Self>, clap::Error>
+    pub(super) fn parse_from<I, T>(arguments: I) -> Result<Option<Self>, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
@@ -367,7 +367,3 @@ pub(crate) fn checked_observations(batches: usize, concurrency: usize) -> io::Re
         )
     })
 }
-
-#[cfg(test)]
-#[path = "config_tests.rs"]
-mod tests;

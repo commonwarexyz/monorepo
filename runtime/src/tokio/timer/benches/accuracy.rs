@@ -216,7 +216,7 @@ async fn run_batch(
 }
 
 /// Returns observed lateness while rejecting an early timer callback.
-fn checked_lateness(observed: Instant, deadline: Instant) -> io::Result<Duration> {
+pub(super) fn checked_lateness(observed: Instant, deadline: Instant) -> io::Result<Duration> {
     observed.checked_duration_since(deadline).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -273,7 +273,3 @@ async fn collect_handles(
     }
     first_error.map_or(Ok(samples), Err)
 }
-
-#[cfg(test)]
-#[path = "accuracy_tests.rs"]
-mod tests;

@@ -114,7 +114,3 @@ pub(crate) fn poll_once(sleep: &mut BenchSleep) -> Poll<()> {
     let mut context = Context::from_waker(waker);
     sleep.as_mut().poll(&mut context)
 }
-
-#[cfg(test)]
-#[path = "backend_tests.rs"]
-mod tests;
