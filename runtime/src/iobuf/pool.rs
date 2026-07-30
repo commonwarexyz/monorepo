@@ -53,22 +53,25 @@
 //! batch back to the global freelist if needed.
 
 use super::{IoBufMut, freelist::Freelist, page_size};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::telemetry::metrics::{Register, raw};
 use crate::{
     iobuf::buffer::{PooledBufMut, PooledBuffer},
-    telemetry::metrics::{Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register, raw},
+    telemetry::metrics::{Counter, CounterFamily, EncodeLabelSet, GaugeFamily},
 };
 use commonware_utils::{NZU32, NZUsize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     alloc::Layout,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+use std::{
     cell::{Cell, UnsafeCell},
     collections::BTreeMap,
     mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
     ptr,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Arc,
 };
 
 /// Minimum thread-local cache capacity required before refill/spill batches.
@@ -606,6 +609,7 @@ impl BufferPoolConfig {
     /// - `alignment` is not a power of two
     /// - the smallest enabled class is smaller than `alignment`
     /// - `pool_min_size` is larger than the smallest enabled class
+    #[cfg(not(target_arch = "wasm32"))]
     fn validate(&self) {
         assert!(
             self.alignment.is_power_of_two(),
@@ -632,6 +636,7 @@ impl BufferPoolConfig {
     /// parallelism so cross-thread reuse remains effective. Small class limits
     /// may resolve to zero. An explicit capacity replaces the derivation and
     /// clamps to the class limit.
+    #[cfg(not(target_arch = "wasm32"))]
     fn resolve_thread_cache_capacity(&self, class_limit: NonZeroU32) -> usize {
         let class_limit = class_limit.get() as usize;
         match self.thread_cache_config {
@@ -662,6 +667,7 @@ struct PoolMetrics {
 }
 
 impl PoolMetrics {
+    #[cfg(not(target_arch = "wasm32"))]
     fn new(registry: &mut impl Register) -> Self {
         Self {
             created: registry.register(
@@ -794,6 +800,7 @@ impl SizeClassToken {
     /// still represents one strong reference. The caller must wrap it in an
     /// owning type, such as [`SizeClassHandle`], or otherwise arrange for that
     /// strong reference to be released.
+    #[cfg(not(target_arch = "wasm32"))]
     fn new(class: SizeClass) -> Self {
         let ptr = Arc::into_raw(Arc::new(class)).cast_mut();
         // SAFETY: `Arc::into_raw` never returns null.
@@ -865,6 +872,7 @@ impl SizeClassHandle {
     ///
     /// If `prefill` is true, the global freelist creates `max` buffers upfront
     /// and makes them immediately available for reuse.
+    #[cfg(not(target_arch = "wasm32"))]
     fn new(
         class_id: usize,
         size: usize,
@@ -1737,6 +1745,7 @@ impl std::fmt::Debug for BufferPool {
 ///
 /// Relaxed ordering is sufficient: the atomic operation is only used to assign
 /// unique ids, not to publish any associated size-class state.
+#[cfg(not(target_arch = "wasm32"))]
 static NEXT_SIZE_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl BufferPool {
@@ -1745,6 +1754,7 @@ impl BufferPool {
     /// # Panics
     ///
     /// Panics if the configuration is invalid.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new(config: BufferPoolConfig, registry: &mut impl Register) -> Self {
         config.validate();
         let metrics = PoolMetrics::new(registry);

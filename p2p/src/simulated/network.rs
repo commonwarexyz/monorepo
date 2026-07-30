@@ -19,13 +19,13 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner, spawn_cell,
+    Acceptor, Clock, Connection, ContextCell, Dialer, Handle, IoBuf, IoBufs, Listener as _,
+    Metrics, Quota, Spawner, TcpEndpoint, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
-    NZUsize, TryCollect,
+    NZUsize, PlatformSend, PlatformSync, TryCollect,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
 };
@@ -83,14 +83,18 @@ pub enum SplitOrigin {
 
 /// A function that forwards messages from [SplitOrigin] to [Recipients].
 pub trait SplitForwarder<P: PublicKey>:
-    Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>> + Send + Sync + Clone + 'static
+    Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>>
+    + PlatformSend
+    + PlatformSync
+    + Clone
+    + 'static
 {
 }
 
 impl<P: PublicKey, F> SplitForwarder<P> for F where
     F: Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>>
-        + Send
-        + Sync
+        + PlatformSend
+        + PlatformSync
         + Clone
         + 'static
 {
@@ -98,12 +102,12 @@ impl<P: PublicKey, F> SplitForwarder<P> for F where
 
 /// A function that routes incoming [NetworkMessage]s to a [SplitTarget].
 pub trait SplitRouter<P: PublicKey>:
-    Fn(&NetworkMessage<P>) -> SplitTarget + Send + Sync + 'static
+    Fn(&NetworkMessage<P>) -> SplitTarget + PlatformSend + PlatformSync + 'static
 {
 }
 
 impl<P: PublicKey, F> SplitRouter<P> for F where
-    F: Fn(&NetworkMessage<P>) -> SplitTarget + Send + Sync + 'static
+    F: Fn(&NetworkMessage<P>) -> SplitTarget + PlatformSend + PlatformSync + 'static
 {
 }
 
@@ -132,7 +136,15 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
+pub struct Network<
+    E: Acceptor<Bind = SocketAddr, Connection: Connection>
+        + Dialer<Endpoint = TcpEndpoint, Connection: Connection>
+        + Spawner
+        + Rng
+        + Clock
+        + Metrics,
+    P: PublicKey,
+> {
     context: ContextCell<E>,
 
     // Maximum size of a message that can be sent over the network
@@ -185,7 +197,16 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     sent_messages: CounterFamily<metrics::Message>,
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+impl<
+    E: Acceptor<Bind = SocketAddr, Connection: Connection>
+        + Dialer<Endpoint = TcpEndpoint, Connection: Connection>
+        + Spawner
+        + Rng
+        + Clock
+        + Metrics,
+    P: PublicKey,
+> Network<E, P>
+{
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -667,7 +688,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+impl<
+    E: Acceptor<Bind = SocketAddr, Connection: Connection>
+        + Dialer<Endpoint = TcpEndpoint, Connection: Connection>
+        + Spawner
+        + Rng
+        + Clock
+        + Metrics,
+    P: PublicKey,
+> Network<E, P>
+{
     /// Process completions from the transmitter.
     fn process_completions(&mut self, completions: Vec<Completion<P>>) {
         for completion in completions {
@@ -957,7 +987,7 @@ impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
     fn send(
         &mut self,
         recipients: Recipients<P>,
-        message: impl Into<IoBufs> + Send,
+        message: impl Into<IoBufs> + PlatformSend,
         priority: bool,
     ) -> Unreliable<Feedback> {
         let message = message.into().coalesce();
@@ -1140,7 +1170,11 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
         crate::CheckedSender::recipients(&self.checked)
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send(
+        self,
+        message: impl Into<IoBufs> + PlatformSend,
+        priority: bool,
+    ) -> Unreliable<Feedback> {
         // Convert to IoBuf here since forwarder needs to inspect the message
         let message = message.into().coalesce();
 
@@ -1252,7 +1286,12 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    async fn new<E: Spawner + RNetwork + Metrics + Clock>(
+    async fn new<
+        E: Spawner
+            + Acceptor<Bind = SocketAddr, Connection: Connection>
+            + Metrics
+            + Clock,
+    >(
         context: E,
         public_key: P,
         socket: SocketAddr,
@@ -1313,11 +1352,13 @@ impl<P: PublicKey> Peer<P> {
         let (ready_tx, ready_rx) = oneshot::channel();
         context.child("listener").spawn(move |context| async move {
             // Initialize listener
-            let mut listener = context.bind(socket).await.unwrap();
+            let mut listener = context.bind(&socket).await.unwrap();
             let _ = ready_tx.send(());
 
             // Continually accept new connections
-            while let Ok((_, _, mut stream)) = listener.accept().await {
+            while let Ok(connection) = listener.accept().await {
+                let (_, mut stream, _) = connection.split();
+
                 // New connection accepted. Spawn a task for this connection
                 context.child("receiver").spawn({
                     let inbox_sender = inbox_sender.clone();
@@ -1393,7 +1434,13 @@ struct Link {
 /// Buffered payload waiting for earlier messages on the same link to complete.
 impl Link {
     #[allow(clippy::too_many_arguments)]
-    fn new<E: Spawner + RNetwork + Clock + Metrics, P: PublicKey>(
+    fn new<
+        E: Spawner
+            + Dialer<Endpoint = TcpEndpoint, Connection: Connection>
+            + Clock
+            + Metrics,
+        P: PublicKey,
+    >(
         context: &mut E,
         dialer: P,
         receiver: P,
@@ -1408,7 +1455,9 @@ impl Link {
         let (inbox, mut outbox) = mpsc::unbounded_channel::<(Channel, IoBuf, SystemTime)>();
         context.child("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
-            let (mut sink, _) = context.dial(socket).await.unwrap();
+            let endpoint = TcpEndpoint::Socket(socket);
+            let connection = context.dial(&endpoint).await.unwrap();
+            let (mut sink, _, _) = connection.split();
             if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_size).await {
                 error!(?err, "failed to send public key to listener");
                 return;

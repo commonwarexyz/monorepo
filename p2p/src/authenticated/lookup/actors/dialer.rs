@@ -1,9 +1,9 @@
-//! Actor responsible for dialing peers and establishing connections.
+//! Dials advertised endpoints and establishes authenticated peer connections.
 
 use crate::{
-    Ingress,
+    Advertisement, PeerEndpoint,
     authenticated::{
-        Mailbox,
+        Mailbox, attachment,
         lookup::{
             actors::{
                 spawner,
@@ -16,160 +16,143 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
-    StreamOf, spawn_cell,
+    BufferPooler, Clock, ContextCell, Dialer, Handle, Metrics, Scheduler, SinkOf, StreamOf,
+    spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::encrypted::{Config as StreamConfig, dial};
-use rand::seq::{IndexedRandom, SliceRandom};
+use commonware_stream::encrypted::Config as StreamConfig;
+use rand::seq::SliceRandom;
 use rand_core::CryptoRng;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tracing::debug;
 
-// Mailbox for the spawner actor.
-type SupervisorMailbox<E, C> =
-    Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, <C as Signer>::PublicKey>>;
+type SupervisorMailbox<D, C> = Mailbox<
+    spawner::Message<SinkOf<D>, StreamOf<D>, <C as Signer>::PublicKey, <D as Dialer>::Endpoint>,
+>;
 
 /// Configuration for the dialer actor.
 pub struct Config<C: Signer> {
-    /// Configuration for the stream.
     pub stream_cfg: StreamConfig<C>,
-
-    /// Maximum duration of an outbound dial attempt.
     pub dial_timeout: Duration,
-
-    /// The frequency at which to dial a single peer from the queue. This also limits the rate at
-    /// which we attempt to dial peers in general.
     pub dial_frequency: Duration,
-
-    /// The maximum interval between tracker queries when the queue is empty. This tracks the
-    /// configured peer connection cooldown, since that is the soonest any peer could become
-    /// reservable again.
     pub peer_connection_cooldown: Duration,
-
-    /// Whether to allow dialing private IP addresses after DNS resolution.
-    pub allow_private_ips: bool,
 }
 
-/// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, C: Signer> {
-    context: ContextCell<E>,
-
-    // ---------- State ----------
-    /// The list of peers to dial.
+/// Actor responsible for dialing peers with an explicitly supplied transport.
+pub struct Actor<R, C, D>
+where
+    R: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
+    C: Signer,
+    D: Dialer,
+    D::Endpoint: PeerEndpoint,
+{
+    context: ContextCell<R>,
+    dialer: Arc<D>,
     queue: Vec<C::PublicKey>,
-
-    // ---------- Configuration ----------
     stream_cfg: StreamConfig<C>,
     dial_timeout: Duration,
     dial_frequency: Duration,
     peer_connection_cooldown: Duration,
-    allow_private_ips: bool,
-
-    // ---------- Metrics ----------
-    /// The number of dial attempts made to each peer.
     attempts: CounterFamily<metrics::Peer<C::PublicKey>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, C: Signer>
-    Actor<E, C>
+impl<R, C, D> Actor<R, C, D>
+where
+    R: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
+    C: Signer,
+    D: Dialer,
+    D::Endpoint: PeerEndpoint,
 {
-    pub fn new(context: E, cfg: Config<C>) -> Self {
+    pub fn new(context: R, dialer: D, cfg: Config<C>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");
         Self {
             context: ContextCell::new(context),
+            dialer: Arc::new(dialer),
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
             dial_timeout: cfg.dial_timeout,
             dial_frequency: cfg.dial_frequency,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
-            allow_private_ips: cfg.allow_private_ips,
             attempts,
         }
     }
 
-    /// Dial a peer for which we have a reservation.
     fn dial_peer(
         &mut self,
-        reservation: Reservation<C::PublicKey>,
-        ingress: Ingress,
-        supervisor: &mut SupervisorMailbox<E, C>,
+        reservation: Reservation<C::PublicKey, D::Endpoint>,
+        advertisement: Advertisement<D::Endpoint>,
+        supervisor: &SupervisorMailbox<D, C>,
     ) {
-        // Extract metadata from the reservation
         let Metadata::Dialer(peer) = reservation.metadata().clone() else {
             unreachable!("unexpected reservation metadata");
         };
-
-        // Increment metrics.
         self.attempts.get_or_create_by(&peer).inc();
 
-        // Spawn dialer to connect to peer
-        self.context.child("dialer").spawn({
-            let config = self.stream_cfg.clone();
-            let mut supervisor = supervisor.clone();
-            let allow_private_ips = self.allow_private_ips;
-            let dial_timeout = self.dial_timeout;
-            move |mut context| async move {
+        let dialer = self.dialer.clone();
+        let config = self.stream_cfg.clone();
+        let mut supervisor = supervisor.clone();
+        let dial_timeout = self.dial_timeout;
+        self.context
+            .child("dialer")
+            .spawn(move |context| async move {
                 let timeout = context.sleep(dial_timeout);
-                let dial = async {
-                    // Resolve ingress to socket addresses (filtered by private IP policy)
-                    let addresses: Vec<_> = ingress
-                        .resolve_filtered(&context, allow_private_ips)
+                let attempt = async {
+                    for endpoint in advertisement.endpoints() {
+                        if !dialer.supports(endpoint) {
+                            continue;
+                        }
+                        let connection = match dialer.dial(endpoint).await {
+                            Ok(connection) => connection,
+                            Err(error) => {
+                                debug!(?peer, ?endpoint, ?error, "failed to dial endpoint");
+                                continue;
+                            }
+                        };
+                        let (connection, info) = match attachment::authenticate_outbound(
+                            context.child("handshake"),
+                            config.clone(),
+                            peer.clone(),
+                            connection,
+                        )
                         .await
-                        .map(Iterator::collect)
-                        .unwrap_or_default();
-                    let Some(&address) = addresses.choose(&mut context) else {
-                        debug!(?ingress, "failed to resolve or no valid addresses");
+                        {
+                            Ok(connection) => connection,
+                            Err(error) => {
+                                debug!(?peer, ?endpoint, ?error, "failed to authenticate endpoint");
+                                continue;
+                            }
+                        };
+                        debug!(
+                            ?peer,
+                            ?endpoint,
+                            transport = info.transport,
+                            "authenticated endpoint"
+                        );
+                        let _ = supervisor.spawn(connection, reservation);
                         return;
-                    };
-
-                    // Attempt to dial peer
-                    let (sink, stream) = match context.dial(address).await {
-                        Ok(stream) => stream,
-                        Err(err) => {
-                            debug!(?err, "failed to dial peer");
-                            return;
-                        }
-                    };
-                    debug!(?peer, ?address, "dialed peer");
-
-                    // Upgrade connection
-                    let connection = match dial(context, config, peer.clone(), stream, sink).await {
-                        Ok(instance) => instance,
-                        Err(err) => {
-                            debug!(?err, "failed to upgrade connection");
-                            return;
-                        }
-                    };
-                    debug!(?peer, ?address, "upgraded connection");
-
-                    // Start peer to handle messages
-                    let _ = supervisor.spawn(connection, reservation);
+                    }
+                    debug!(?peer, "all advertised endpoints failed");
                 };
 
                 select! {
-                    _ = dial => {},
-                    _ = timeout => {
-                        debug!(?peer, ?ingress, "dial attempt timed out");
-                    },
+                    _ = attempt => {},
+                    _ = timeout => debug!(?peer, "dial attempt timed out"),
                 }
-            }
-        });
+            });
     }
 
-    /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        supervisor: SupervisorMailbox<E, C>,
+        tracker: tracker::Mailbox<C::PublicKey, D::Endpoint>,
+        supervisor: SupervisorMailbox<D, C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        mut supervisor: SupervisorMailbox<E, C>,
+        tracker: tracker::Mailbox<C::PublicKey, D::Endpoint>,
+        supervisor: SupervisorMailbox<D, C>,
     ) {
         let mut dial_deadline = self.context.current();
         select_loop! {
@@ -178,7 +161,6 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                 debug!("context shutdown, stopping dialer");
             },
             _ = self.context.sleep_until(dial_deadline) => {
-                // Refill the queue if empty.
                 let now = self.context.current();
                 let mut next_query_at = None;
                 if self.queue.is_empty() {
@@ -188,7 +170,6 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                     next_query_at = dialable.next_query_at;
                 }
 
-                // Set next deadline.
                 dial_deadline = if self.queue.is_empty() {
                     let min = now + self.dial_frequency;
                     let max = (now + self.peer_connection_cooldown).max(min);
@@ -197,12 +178,19 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                     now + self.dial_frequency
                 };
 
-                // Pop through peers until we can reserve and dial one.
                 while let Some(peer) = self.queue.pop() {
-                    if let Some((reservation, ingress)) = tracker.dial(peer).await {
-                        self.dial_peer(reservation, ingress, &mut supervisor);
-                        break;
+                    let Some((reservation, advertisement)) = tracker.dial(peer).await else {
+                        continue;
+                    };
+                    if !advertisement
+                        .endpoints()
+                        .iter()
+                        .any(|endpoint| self.dialer.supports(endpoint))
+                    {
+                        continue;
                     }
+                    self.dial_peer(reservation, advertisement, &supervisor);
+                    break;
                 }
             },
         }
@@ -219,13 +207,55 @@ mod tests {
     use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
-    use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Acceptor as _, Clock, Runner, Supervisor as _, TcpEndpoint, deterministic,
+    };
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, sync::Mutex};
     use std::{
         net::{Ipv4Addr, SocketAddr},
+        sync::Arc,
         time::Duration,
     };
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    enum TestEndpoint {
+        Unsupported,
+        Socket(SocketAddr),
+        Failing(u8),
+    }
+
+    impl PeerEndpoint for TestEndpoint {}
+
+    struct TestDialer {
+        context: deterministic::Context,
+        attempts: Arc<Mutex<Vec<TestEndpoint>>>,
+    }
+
+    impl commonware_runtime::Dialer for TestDialer {
+        type Endpoint = TestEndpoint;
+        type Connection = <deterministic::Context as commonware_runtime::Dialer>::Connection;
+
+        fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+            *endpoint != TestEndpoint::Unsupported
+        }
+
+        async fn dial(
+            &self,
+            endpoint: &Self::Endpoint,
+        ) -> Result<Self::Connection, commonware_runtime::Error> {
+            self.attempts.lock().push(*endpoint);
+            match endpoint {
+                TestEndpoint::Unsupported => Err(commonware_runtime::Error::UnsupportedEndpoint),
+                TestEndpoint::Socket(address) => {
+                    self.context.dial(&TcpEndpoint::Socket(*address)).await
+                }
+                TestEndpoint::Failing(_) => Err(commonware_runtime::Error::ConnectionFailed),
+            }
+        }
+    }
+
+    type TestActor = Actor<deterministic::Context, PrivateKey, TestDialer>;
 
     fn test_stream_config(signing_key: PrivateKey) -> StreamConfig<PrivateKey> {
         StreamConfig {
@@ -236,6 +266,37 @@ mod tests {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
         }
+    }
+
+    fn test_dialer(
+        context: &deterministic::Context,
+        config: Config<PrivateKey>,
+    ) -> (TestActor, Arc<Mutex<Vec<TestEndpoint>>>) {
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let transport = TestDialer {
+            context: context.child("transport"),
+            attempts: attempts.clone(),
+        };
+        let actor = Actor::new(context.child("dialer"), transport, config);
+        (actor, attempts)
+    }
+
+    fn advertisement(endpoint: TestEndpoint) -> Advertisement<TestEndpoint> {
+        Advertisement::new(vec![endpoint]).expect("test advertisement should be valid")
+    }
+
+    fn supervisor(
+        context: &deterministic::Context,
+    ) -> SupervisorMailbox<TestDialer, PrivateKey> {
+        let (supervisor, mut receiver) =
+            Mailbox::<spawner::Message<_, _, PublicKey, TestEndpoint>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
+        context
+            .child("supervisor")
+            .spawn(|_| async move { while receiver.recv().await.is_some() {} });
+        supervisor
     }
 
     #[test]
@@ -250,33 +311,38 @@ mod tests {
             // The deterministic network completes the transport dial immediately, but retaining
             // the listener without accepting leaves the encrypted handshake pending.
             let _listener = context
-                .bind(address)
+                .bind(&address)
                 .await
                 .expect("Failed to bind listener");
-            let mut dialer = Actor::new(
-                context.child("dialer"),
+            let (mut dialer, _) = test_dialer(
+                &context,
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_timeout,
                     dial_frequency: Duration::from_secs(1),
                     peer_connection_cooldown: Duration::from_secs(60),
-                    allow_private_ips: true,
                 },
             );
 
             let (releaser, mut releases) =
-                mailbox::new::<tracker::Message<PublicKey>>(context.child("releaser"), NZUsize!(1));
-            let ingress = Ingress::from(address);
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("releaser"),
+                    NZUsize!(1),
+                );
             let reservation =
                 Reservation::new(Metadata::Dialer(peer.clone()), Releaser::new(releaser));
-            let (mut supervisor, _supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+            let (supervisor, _supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey, TestEndpoint>>::new(
                     context.child("supervisor_mailbox"),
                     NZUsize!(1),
                 );
 
             let start = context.current();
-            dialer.dial_peer(reservation, ingress, &mut supervisor);
+            dialer.dial_peer(
+                reservation,
+                advertisement(TestEndpoint::Socket(address)),
+                &supervisor,
+            );
 
             // The outer dial timeout must cancel the pending handshake and drop its reservation
             // before the much longer handshake timeout can fire.
@@ -303,27 +369,26 @@ mod tests {
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
             let dial_frequency = Duration::from_millis(100);
-
             let dialer_cfg = Config {
                 stream_cfg: test_stream_config(signer),
                 dial_timeout: Duration::from_secs(15),
                 dial_frequency,
                 peer_connection_cooldown: Duration::from_secs(60),
-                allow_private_ips: true,
             };
 
-            let dialer = Actor::new(context.child("dialer"), dialer_cfg);
-
-            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("tracker_mailbox"),
-                NZUsize!(1024),
-            );
+            let (dialer, _) = test_dialer(&context, dialer_cfg);
+            let (tracker_mailbox, mut tracker_rx) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("tracker_mailbox"),
+                    NZUsize!(1024),
+                );
 
             // Create a releaser for reservations
-            let (sender, _receiver) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("releaser"),
-                NZUsize!(1024),
-            );
+            let (sender, _receiver) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("releaser"),
+                    NZUsize!(1024),
+                );
             let releaser = Releaser::new(sender);
 
             // Generate 10 peers
@@ -332,13 +397,7 @@ mod tests {
                 .collect();
 
             // Create a supervisor that just drops spawn messages
-            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
-                context.child("supervisor_mailbox"),
-                NZUsize!(100),
-            );
-            context
-                .child("supervisor")
-                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+            let supervisor = supervisor(&context);
 
             // Start the dialer
             let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
@@ -362,9 +421,10 @@ mod tests {
                             dial_count += 1;
                             let metadata = Metadata::Dialer(public_key);
                             let res = tracker::Reservation::new(metadata, releaser.clone());
-                            let ingress: Ingress =
-                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                            let _ = reservation.send(Some((res, ingress)));
+                            let advertisement = advertisement(TestEndpoint::Socket(
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000),
+                            ));
+                            let _ = reservation.send(Some((res, advertisement)));
                         }
                         _ => {}
                     },
@@ -382,36 +442,97 @@ mod tests {
     }
 
     #[test]
+    fn test_unsupported_peer_does_not_consume_dial_tick() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (dialer, _) = test_dialer(
+                &context,
+                Config {
+                    stream_cfg: test_stream_config(PrivateKey::from_seed(0)),
+                    dial_timeout: Duration::from_secs(1),
+                    dial_frequency: Duration::from_secs(1),
+                    peer_connection_cooldown: Duration::from_secs(60),
+                },
+            );
+            let (tracker_mailbox, mut tracker_rx) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("tracker_mailbox"),
+                    NZUsize!(16),
+                );
+            let (releaser, _releases) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("releaser"),
+                    NZUsize!(16),
+                );
+            let releaser = Releaser::new(releaser);
+            let peers = vec![
+                PrivateKey::from_seed(1).public_key(),
+                PrivateKey::from_seed(2).public_key(),
+            ];
+            let _dialer = dialer.start(
+                tracker::Mailbox::new(tracker_mailbox),
+                supervisor(&context),
+            );
+
+            let deadline = context.current() + Duration::from_millis(100);
+            let mut reservations = 0;
+            loop {
+                select! {
+                    message = tracker_rx.recv() => match message {
+                        Some(tracker::Message::Dialable { responder }) => {
+                            let _ = responder.send(Dialable {
+                                peers: peers.clone(),
+                                next_query_at: None,
+                            });
+                        }
+                        Some(tracker::Message::Dial { public_key, reservation }) => {
+                            let endpoint = if reservations == 0 {
+                                TestEndpoint::Unsupported
+                            } else {
+                                TestEndpoint::Failing(1)
+                            };
+                            reservations += 1;
+                            let value = Reservation::new(
+                                Metadata::Dialer(public_key),
+                                releaser.clone(),
+                            );
+                            let _ = reservation.send(Some((value, advertisement(endpoint))));
+                            if reservations == 2 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(reservations, 2);
+        });
+    }
+
+    #[test]
     fn test_dialer_uses_tracker_next_query_deadline() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
 
             let dial_frequency = Duration::from_millis(500);
-
-            let dialer = Actor::new(
-                context.child("dialer"),
+            let (dialer, _) = test_dialer(
+                &context,
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: dial_frequency,
-                    allow_private_ips: true,
                 },
             );
-
-            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("tracker_mailbox"),
-                NZUsize!(1024),
-            );
-            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
-                context.child("supervisor_mailbox"),
-                NZUsize!(100),
-            );
-            context
-                .child("supervisor")
-                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-
+            let (tracker_mailbox, mut tracker_rx) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("tracker_mailbox"),
+                    NZUsize!(1024),
+                );
+            let supervisor = supervisor(&context);
             let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             // Tracker reports next_query_at=100ms, which is shorter than
@@ -448,43 +569,33 @@ mod tests {
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
             let dial_frequency = Duration::from_millis(100);
-
-            let dialer = Actor::new(
-                context.child("dialer"),
+            let (dialer, _) = test_dialer(
+                &context,
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: Duration::from_secs(60),
-                    allow_private_ips: true,
                 },
             );
+            let (tracker_mailbox, mut tracker_rx) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("tracker_mailbox"),
+                    NZUsize!(1024),
+                );
 
-            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("tracker_mailbox"),
-                NZUsize!(1024),
-            );
-
-            let (sender, _receiver) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("releaser"),
-                NZUsize!(1024),
-            );
+            let (sender, _receiver) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("releaser"),
+                    NZUsize!(1024),
+                );
             let releaser = Releaser::new(sender);
-
             let peers: Vec<PublicKey> = (0..3)
                 .map(|i| PrivateKey::from_seed(i).public_key())
                 .collect();
 
-            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
-                context.child("supervisor_mailbox"),
-                NZUsize!(100),
-            );
-            context
-                .child("supervisor")
-                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-
+            let supervisor = supervisor(&context);
             let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
-
             let mut dial_count = 0;
             let deadline = context.current() + Duration::from_millis(250);
             loop {
@@ -503,9 +614,10 @@ mod tests {
                             dial_count += 1;
                             let metadata = Metadata::Dialer(public_key);
                             let res = tracker::Reservation::new(metadata, releaser.clone());
-                            let ingress: Ingress =
-                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                            let _ = reservation.send(Some((res, ingress)));
+                            let advertisement = advertisement(TestEndpoint::Socket(
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000),
+                            ));
+                            let _ = reservation.send(Some((res, advertisement)));
                         }
                         _ => {}
                     },
@@ -527,32 +639,22 @@ mod tests {
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
             let dial_frequency = Duration::from_millis(200);
-
-            let dialer = Actor::new(
-                context.child("dialer"),
+            let (dialer, _) = test_dialer(
+                &context,
                 Config {
                     stream_cfg: test_stream_config(signer),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: Duration::from_millis(50),
-                    allow_private_ips: true,
                 },
             );
-
-            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("tracker_mailbox"),
-                NZUsize!(1024),
-            );
-            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
-                context.child("supervisor_mailbox"),
-                NZUsize!(100),
-            );
-            context
-                .child("supervisor")
-                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-
+            let (tracker_mailbox, mut tracker_rx) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("tracker_mailbox"),
+                    NZUsize!(1024),
+                );
+            let supervisor = supervisor(&context);
             let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
-
             let mut refresh_count = 0;
             let deadline = context.current() + Duration::from_millis(350);
             loop {
@@ -574,6 +676,54 @@ mod tests {
                 refresh_count, 2,
                 "expected 2 refreshes at dial_frequency without panicking, got {}",
                 refresh_count
+            );
+        });
+    }
+
+    #[test]
+    fn test_dialer_skips_unsupported_endpoints_and_preserves_supported_order() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let peer = PrivateKey::from_seed(1).public_key();
+            let (mut dialer, attempts) = test_dialer(
+                &context,
+                Config {
+                    stream_cfg: test_stream_config(signer),
+                    dial_timeout: Duration::from_secs(1),
+                    dial_frequency: Duration::from_secs(1),
+                    peer_connection_cooldown: Duration::from_secs(60),
+                },
+            );
+            let (releaser, mut releases) =
+                mailbox::new::<tracker::Message<PublicKey, TestEndpoint>>(
+                    context.child("releaser"),
+                    NZUsize!(1),
+                );
+            let reservation =
+                Reservation::new(Metadata::Dialer(peer.clone()), Releaser::new(releaser));
+            let (supervisor, _supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey, TestEndpoint>>::new(
+                    context.child("supervisor_mailbox"),
+                    NZUsize!(1),
+                );
+            let advertisement = Advertisement::new(vec![
+                TestEndpoint::Unsupported,
+                TestEndpoint::Failing(1),
+                TestEndpoint::Failing(2),
+            ])
+            .expect("test advertisement should be valid");
+
+            dialer.dial_peer(reservation, advertisement, &supervisor);
+
+            let message = releases.recv().await.expect("reservation should be released");
+            let tracker::Message::Release { metadata } = message else {
+                panic!("Unexpected releaser message");
+            };
+            assert_eq!(metadata.public_key(), &peer);
+            assert_eq!(
+                *attempts.lock(),
+                vec![TestEndpoint::Failing(1), TestEndpoint::Failing(2)]
             );
         });
     }

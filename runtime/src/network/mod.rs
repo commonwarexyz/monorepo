@@ -1,10 +1,39 @@
 use commonware_macros::stability_scope;
 
-stability_scope!(ALPHA {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    async fn resolve_tcp_endpoint(
+        endpoint: &crate::TcpEndpoint,
+    ) -> Result<Vec<std::net::SocketAddr>, crate::Error> {
+        use commonware_utils::IpAddrExt;
+        use rand::seq::SliceRandom as _;
+
+        let (host, port, allow_private_ips) = match endpoint {
+            crate::TcpEndpoint::Socket(address) => return Ok(vec![*address]),
+            crate::TcpEndpoint::Dns {
+                host,
+                port,
+                allow_private_ips,
+            } => (host, port, allow_private_ips),
+        };
+
+        let mut addresses: Vec<_> = ::tokio::net::lookup_host((host.as_str(), *port))
+            .await
+            .map_err(|error| crate::Error::ResolveFailed(error.to_string()))?
+            .filter(|address| *allow_private_ips || IpAddrExt::is_global(&address.ip()))
+            .collect();
+        if addresses.is_empty() {
+            return Err(crate::Error::ResolveFailed("no addresses returned".into()));
+        }
+        addresses.shuffle(&mut commonware_utils::sys_rng());
+        Ok(addresses)
+    }
+});
+
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod audited;
     pub(crate) mod deterministic;
 });
-stability_scope!(BETA {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod metered;
 });
 stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network"))) {
@@ -16,7 +45,10 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-
 
 #[cfg(test)]
 mod tests {
-    use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
+    use crate::{
+        Acceptor, Connection, Dialer, IoBuf, IoBufs, Listener, Sink, Stream, TcpEndpoint,
+        TcpListener,
+    };
     use commonware_macros::select;
     use commonware_utils::sync::Barrier;
     use futures::{FutureExt, join};
@@ -26,10 +58,45 @@ mod tests {
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
     const SERVER_SEND_DATA: &[u8] = b"server_send_data";
 
+    #[cfg(not(feature = "iouring-network"))]
+    fn assert_send<T: Send>(_: &T) {}
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[cfg(not(feature = "iouring-network"))]
+    #[test]
+    fn native_network_types_remain_thread_safe() {
+        assert_send_sync::<super::tokio::Network>();
+        assert_send_sync::<super::tokio::Connection>();
+        assert_send_sync::<super::tokio::Sink>();
+        assert_send_sync::<super::tokio::Stream>();
+
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_network(), &mut registry);
+        let network = super::tokio::Network::new(super::tokio::Config::default(), pool);
+        let endpoint = TcpEndpoint::Socket(SocketAddr::from(([127, 0, 0, 1], 1)));
+        let dial = network.dial(&endpoint);
+        assert_send(&dial);
+
+        let address = SocketAddr::from(([127, 0, 0, 1], 0));
+        let bind = network.bind(&address);
+        assert_send(&bind);
+    }
+
+    #[cfg(feature = "iouring-network")]
+    #[test]
+    fn native_iouring_network_types_remain_thread_safe() {
+        assert_send_sync::<super::iouring::Network>();
+        assert_send_sync::<super::iouring::Connection>();
+        assert_send_sync::<super::iouring::Sink>();
+        assert_send_sync::<super::iouring::Stream>();
+    }
+
     pub(super) async fn test_network_trait<N, F>(new_network: F)
     where
         F: Fn() -> N,
-        N: crate::Network,
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
     {
         test_network_bind_and_dial(new_network()).await;
         test_network_vectored_send(new_network()).await;
@@ -44,10 +111,14 @@ mod tests {
     }
 
     // Basic network connectivity test
-    async fn test_network_bind_and_dial<N: crate::Network>(network: N) {
+    async fn test_network_bind_and_dial<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         // Start a server
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
 
@@ -58,7 +129,8 @@ mod tests {
         // join handles are awaited below.
         let server = tokio::spawn(async move {
             // Server accepts a client, verifies the payload, and sends a reply.
-            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let (mut sink, mut stream, _) =
+                listener.accept().await.expect("Failed to accept").split();
             let received = stream
                 .recv(CLIENT_SEND_DATA.len())
                 .await
@@ -76,10 +148,11 @@ mod tests {
         let client = tokio::spawn(async move {
             // Client connects to the server, sends a payload, and reads the reply.
             // Connect to the server
-            let (mut sink, mut stream) = network
-                .dial(listener_addr)
+            let (mut sink, mut stream, _) = network
+                .dial(&TcpEndpoint::Socket(listener_addr))
                 .await
-                .expect("Failed to dial server");
+                .expect("Failed to dial server")
+                .split();
 
             sink.send(IoBuf::from(CLIENT_SEND_DATA))
                 .await
@@ -99,10 +172,14 @@ mod tests {
     }
 
     // Test sending a multi-buffer payload.
-    async fn test_network_vectored_send<N: crate::Network>(network: N) {
+    async fn test_network_vectored_send<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         // Start a server
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
 
@@ -122,7 +199,7 @@ mod tests {
         // side should observe the same byte stream regardless of send chunking.
         let server = tokio::spawn(async move {
             // Server receives the vectored payload as one logical byte stream.
-            let (_, sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let (sink, mut stream, _) = listener.accept().await.expect("Failed to accept").split();
             let received = stream
                 .recv(expected.len())
                 .await
@@ -135,10 +212,11 @@ mod tests {
         let client = tokio::spawn(async move {
             // Client connects and sends the pre-built vectored message.
             // Connect to the server
-            let (mut sink, stream) = network
-                .dial(listener_addr)
+            let (mut sink, stream, _) = network
+                .dial(&TcpEndpoint::Socket(listener_addr))
                 .await
-                .expect("Failed to dial server");
+                .expect("Failed to dial server")
+                .split();
 
             // Send the pre-built vectored message.
             sink.send(message).await.expect("Failed to send data");
@@ -152,13 +230,17 @@ mod tests {
     }
 
     // Test handling multiple clients
-    async fn test_network_multiple_clients<N: crate::Network>(network: N) {
+    async fn test_network_multiple_clients<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         const NUM_CLIENTS: usize = 3;
 
         // Start a server
         let network = Arc::new(network);
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
@@ -172,7 +254,8 @@ mod tests {
             // Handle multiple clients
             let mut set = JoinSet::new();
             for _ in 0..NUM_CLIENTS {
-                let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+                let (mut sink, mut stream, _) =
+                    listener.accept().await.expect("Failed to accept").split();
                 let barrier = server_barrier.clone();
                 set.spawn(async move {
                     let received = stream
@@ -200,10 +283,11 @@ mod tests {
             let barrier = barrier.clone();
             set.spawn(async move {
                 // Connect to the server
-                let (mut sink, mut stream) = network
-                    .dial(listener_addr)
+                let (mut sink, mut stream, _) = network
+                    .dial(&TcpEndpoint::Socket(listener_addr))
                     .await
-                    .expect("Failed to dial server");
+                    .expect("Failed to dial server")
+                    .split();
 
                 // Send a message to the server
                 sink.send(IoBuf::from(CLIENT_SEND_DATA))
@@ -232,13 +316,17 @@ mod tests {
     }
 
     // Test large data transfer
-    async fn test_network_large_data<N: crate::Network>(network: N) {
+    async fn test_network_large_data<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         const NUM_CHUNKS: usize = 1_000;
         const CHUNK_SIZE: usize = 8 * 1024; // 8 KB
 
         // Start a server
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
@@ -246,7 +334,8 @@ mod tests {
         // Spawn server. Returning the socket halves keeps them alive until both
         // join handles are awaited below.
         let server = tokio::spawn(async move {
-            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let (mut sink, mut stream, _) =
+                listener.accept().await.expect("Failed to accept").split();
 
             // Receive and echo large data in chunks
             for _ in 0..NUM_CHUNKS {
@@ -263,10 +352,11 @@ mod tests {
         // join handles are awaited below.
         let client = tokio::spawn(async move {
             // Connect to the server
-            let (mut sink, mut stream) = network
-                .dial(listener_addr)
+            let (mut sink, mut stream, _) = network
+                .dial(&TcpEndpoint::Socket(listener_addr))
                 .await
-                .expect("Failed to dial server");
+                .expect("Failed to dial server")
+                .split();
 
             // Create a pattern of data
             let pattern = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect::<Vec<_>>();
@@ -292,37 +382,45 @@ mod tests {
     }
 
     // Tests dialing and binding errors
-    async fn test_network_connection_errors<N: crate::Network>(network: N) {
+    async fn test_network_connection_errors<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         // Test dialing an invalid address
         let invalid_addr = SocketAddr::from(([127, 0, 0, 1], 1));
-        let result = network.dial(invalid_addr).await;
+        let result = network.dial(&TcpEndpoint::Socket(invalid_addr)).await;
         assert!(matches!(result, Err(crate::Error::ConnectionFailed)));
 
         // Test binding to an already bound address
         let listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         // Try to bind to the same address
-        let result = network.bind(listener_addr).await;
+        let result = network.bind(&listener_addr).await;
         assert!(matches!(result, Err(crate::Error::BindFailed)));
     }
 
     // Tests peek functionality
-    async fn test_network_peek<N: crate::Network>(network: N) {
+    async fn test_network_peek<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         const DATA: &[u8] = b"hello world - peek test data";
 
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         // Server sends data
         let server = tokio::spawn(async move {
-            let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
+            let (mut sink, stream, _) = listener.accept().await.expect("Failed to accept").split();
             sink.send(IoBuf::from(DATA)).await.expect("Failed to send");
             (sink, stream)
         });
@@ -330,10 +428,11 @@ mod tests {
         // Client receives and tests peek
         let client = tokio::spawn(async move {
             // Connect to the server
-            let (sink, mut stream) = network
-                .dial(listener_addr)
+            let (sink, mut stream, _) = network
+                .dial(&TcpEndpoint::Socket(listener_addr))
                 .await
-                .expect("Failed to dial server");
+                .expect("Failed to dial server")
+                .split();
 
             // Receive partial data to fill the buffer
             let first = stream.recv(5).await.expect("Failed to receive");
@@ -371,15 +470,20 @@ mod tests {
         client_result.expect("Client task failed");
     }
 
-    async fn test_network_canceled_recv_poisons_stream<N: crate::Network>(network: N) {
+    async fn test_network_canceled_recv_poisons_stream<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         let server = tokio::spawn(async move {
-            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let (mut sink, mut stream, _) =
+                listener.accept().await.expect("Failed to accept").split();
 
             // Cancel a recv mid-flight
             select! {
@@ -401,10 +505,11 @@ mod tests {
         });
 
         let client = tokio::spawn(async move {
-            let (sink, mut stream) = network
-                .dial(listener_addr)
+            let (sink, mut stream, _) = network
+                .dial(&TcpEndpoint::Socket(listener_addr))
                 .await
-                .expect("Failed to dial server");
+                .expect("Failed to dial server")
+                .split();
 
             let received = stream.recv(2).await.expect("Failed to receive response");
             assert_eq!(received.coalesce(), b"ok");
@@ -418,7 +523,11 @@ mod tests {
         client_result.expect("Client task failed");
     }
 
-    async fn test_network_canceled_send_poisons_sink<N: crate::Network>(network: N) {
+    async fn test_network_canceled_send_poisons_sink<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         // Windows IOCP completes TCP writes without yielding, so send
         // cancellation cannot be easily triggered on that platform.
         if cfg!(target_os = "windows") {
@@ -426,14 +535,15 @@ mod tests {
         }
 
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
         let (canceled_sender, canceled_receiver) = oneshot::channel();
 
         let server = tokio::spawn(async move {
-            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let (mut sink, mut stream, _) =
+                listener.accept().await.expect("Failed to accept").split();
 
             // Poll multiple sends until backpressure makes one pending, then
             // drop that pending future to simulate cancellation.
@@ -467,10 +577,11 @@ mod tests {
         });
 
         let client = tokio::spawn(async move {
-            let (mut sink, stream) = network
-                .dial(listener_addr)
+            let (mut sink, stream, _) = network
+                .dial(&TcpEndpoint::Socket(listener_addr))
                 .await
-                .expect("Failed to dial server");
+                .expect("Failed to dial server")
+                .split();
 
             canceled_receiver
                 .await
@@ -487,9 +598,13 @@ mod tests {
         client_result.expect("Client task failed");
     }
 
-    async fn test_network_recv_error_poisons_stream<N: crate::Network>(network: N) {
+    async fn test_network_recv_error_poisons_stream<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
@@ -497,7 +612,8 @@ mod tests {
         // Server triggers a recv error after a partial read, then verifies the
         // stream is poisoned while the sink remains usable.
         let server = tokio::spawn(async move {
-            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let (mut sink, mut stream, _) =
+                listener.accept().await.expect("Failed to accept").split();
 
             let err = stream
                 .recv(100)
@@ -516,10 +632,11 @@ mod tests {
         // Client sends a partial payload, half-closes its write direction, and
         // still receives the server's response on the read half.
         let client = tokio::spawn(async move {
-            let (mut sink, mut stream) = network
-                .dial(listener_addr)
+            let (mut sink, mut stream, _) = network
+                .dial(&TcpEndpoint::Socket(listener_addr))
                 .await
-                .expect("Failed to dial server");
+                .expect("Failed to dial server")
+                .split();
 
             sink.send(vec![1u8; 50])
                 .await
@@ -538,11 +655,15 @@ mod tests {
         client_result.expect("Client task failed");
     }
 
-    async fn test_network_send_error_poisons_sink<N: crate::Network>(network: N) {
+    async fn test_network_send_error_poisons_sink<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         const DATA: &[u8] = b"okay";
 
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
@@ -552,7 +673,7 @@ mod tests {
         // Server sends a response, waits for the client to buffer it, then
         // closes the connection so the client's next send eventually fails.
         let server = tokio::spawn(async move {
-            let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
+            let (mut sink, stream, _) = listener.accept().await.expect("Failed to accept").split();
 
             sink.send(IoBuf::from(DATA))
                 .await
@@ -573,10 +694,11 @@ mod tests {
         // Client confirms the read half remains usable after the server closes,
         // then verifies the sink is poisoned after the first send error.
         let client = tokio::spawn(async move {
-            let (mut sink, mut stream) = network
-                .dial(listener_addr)
+            let (mut sink, mut stream, _) = network
+                .dial(&TcpEndpoint::Socket(listener_addr))
                 .await
-                .expect("Failed to dial server");
+                .expect("Failed to dial server")
+                .split();
 
             let prefix = stream.recv(2).await.expect("Failed to receive response");
             assert_eq!(prefix.coalesce(), &DATA[..2]);
@@ -630,10 +752,10 @@ mod tests {
     /// pending rather than completing. Other operating systems may clamp the backlog to a
     /// different value or handle an overflowing accept queue differently.
     #[cfg(target_os = "linux")]
-    pub(super) async fn test_network_connect_timeout<N: crate::Network>(
-        network: N,
-        connect_timeout: Duration,
-    ) {
+    pub(super) async fn test_network_connect_timeout<N>(network: N, connect_timeout: Duration)
+    where
+        N: Dialer<Endpoint = TcpEndpoint>,
+    {
         // Create a loopback listener with the smallest possible accept queue.
         let socket = tokio::net::TcpSocket::new_v4().expect("Failed to create TCP socket");
         socket
@@ -650,9 +772,12 @@ mod tests {
             .expect("Failed to fill listener accept queue");
 
         let start = std::time::Instant::now();
-        let result = tokio::time::timeout(connect_timeout * 2, network.dial(listener_addr))
-            .await
-            .expect("Dial did not honor connect timeout");
+        let result = tokio::time::timeout(
+            connect_timeout * 2,
+            network.dial(&TcpEndpoint::Socket(listener_addr)),
+        )
+        .await
+        .expect("Dial did not honor connect timeout");
 
         assert!(matches!(result, Err(crate::Error::Timeout)));
 
@@ -664,21 +789,26 @@ mod tests {
     pub(super) async fn stress_test_network_trait<N, F>(new_network: F)
     where
         F: Fn() -> N,
-        N: crate::Network,
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
     {
         stress_concurrent_streams(new_network()).await;
     }
 
     /// Creates a large number of concurrent streams and sends messages
     /// back and forth between them.
-    async fn stress_concurrent_streams<N: crate::Network>(network: N) {
+    async fn stress_concurrent_streams<N>(network: N)
+    where
+        N: Dialer<Endpoint = TcpEndpoint> + Acceptor<Bind = SocketAddr>,
+        <N as Acceptor>::Listener: TcpListener,
+    {
         const NUM_CLIENTS: usize = 96;
         const NUM_MESSAGES: usize = 16_384;
         const MESSAGE_SIZE: usize = 4096;
 
         let network = Arc::new(network);
         let mut listener = network
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
@@ -691,7 +821,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut set = JoinSet::new();
             for _ in 0..NUM_CLIENTS {
-                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                let (mut sink, mut stream, _) = listener.accept().await.unwrap().split();
                 let barrier = server_barrier.clone();
                 set.spawn(async move {
                     // Echo every message back to the connected client.
@@ -716,7 +846,11 @@ mod tests {
             let barrier = barrier.clone();
             set.spawn(async move {
                 // Dial the server and repeatedly verify the echoed payload.
-                let (mut sink, mut stream) = network.dial(addr).await.unwrap();
+                let (mut sink, mut stream, _) = network
+                    .dial(&TcpEndpoint::Socket(addr))
+                    .await
+                    .unwrap()
+                    .split();
                 let payload = vec![42u8; MESSAGE_SIZE];
                 for _ in 0..NUM_MESSAGES {
                     sink.send(payload.clone()).await.unwrap();

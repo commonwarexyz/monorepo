@@ -1,5 +1,4 @@
-//! This module provides an io_uring-based implementation of the [crate::Network] trait,
-//! offering fast, high-throughput network operations on Linux systems.
+//! This module provides an io_uring-based TCP transport for Linux systems.
 //!
 //! ## Architecture
 //!
@@ -22,7 +21,8 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
-    Buf, BufferPool, Error, IoBufMut, IoBufs,
+    Acceptor, Buf, BufferPool, ConnectionInfo, Dialer, Error, IoBufMut, IoBufs, TcpEndpoint,
+    TcpOrigin,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
@@ -91,7 +91,7 @@ impl Default for Config {
     }
 }
 
-/// [crate::Network] implementation that uses io_uring to do async I/O.
+/// TCP transport that uses io_uring for asynchronous I/O.
 #[derive(Clone)]
 pub struct Network {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
@@ -162,11 +162,13 @@ impl Network {
     }
 }
 
-impl crate::Network for Network {
+impl Acceptor for Network {
+    type Bind = SocketAddr;
+    type Connection = Connection;
     type Listener = Listener;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        let listener = TcpListener::bind(socket)
+    async fn bind(&self, socket: &SocketAddr) -> Result<Self::Listener, Error> {
+        let listener = TcpListener::bind(*socket)
             .await
             .map_err(|_| Error::BindFailed)?;
         Ok(Listener {
@@ -180,15 +182,23 @@ impl crate::Network for Network {
             pool: self.pool.clone(),
         })
     }
+}
 
-    async fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
-        let stream = timeout(self.connect_timeout, TcpStream::connect(socket))
+impl Dialer for Network {
+    type Endpoint = TcpEndpoint;
+    type Connection = Connection;
+
+    async fn dial(&self, endpoint: &TcpEndpoint) -> Result<Self::Connection, Error> {
+        let connect = async {
+            let addresses = super::resolve_tcp_endpoint(endpoint).await?;
+
+            TcpStream::connect(addresses.as_slice())
+                .await
+                .map_err(|_| Error::ConnectionFailed)
+        };
+        let stream = timeout(self.connect_timeout, connect)
             .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::ConnectionFailed)?;
+            .map_err(|_| Error::Timeout)??;
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay
@@ -204,6 +214,8 @@ impl crate::Network for Network {
             warn!(?err, "failed to set SO_LINGER");
         }
 
+        let remote = stream.peer_addr().map_err(|_| Error::ConnectionFailed)?;
+
         // Convert the stream to a std::net::TcpStream
         let stream = stream.into_std().map_err(|_| Error::ConnectionFailed)?;
 
@@ -213,20 +225,45 @@ impl crate::Network for Network {
             .map_err(|_| Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
-        Ok((
-            Sink::new(
+        Ok(Connection {
+            origin: TcpOrigin { remote },
+            sink: Sink::new(
                 fd.clone(),
                 self.send_handle.clone(),
                 self.read_write_timeout,
             ),
-            Stream::new(
+            stream: Stream::new(
                 fd,
                 self.recv_handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
             ),
-        ))
+        })
+    }
+}
+
+/// An established io_uring TCP connection.
+pub struct Connection {
+    origin: TcpOrigin,
+    sink: Sink,
+    stream: Stream,
+}
+
+impl crate::Connection for Connection {
+    type Sink = Sink;
+    type Stream = Stream;
+    type Origin = TcpOrigin;
+
+    fn split(self) -> (Self::Sink, Self::Stream, ConnectionInfo<Self::Origin>) {
+        (
+            self.sink,
+            self.stream,
+            ConnectionInfo {
+                origin: Some(self.origin),
+                transport: "tcp",
+            },
+        )
     }
 }
 
@@ -251,10 +288,9 @@ pub struct Listener {
 }
 
 impl crate::Listener for Listener {
-    type Stream = Stream;
-    type Sink = Sink;
+    type Connection = Connection;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+    async fn accept(&mut self) -> Result<Self::Connection, Error> {
         let (stream, remote_addr) = self
             .inner
             .accept()
@@ -285,23 +321,27 @@ impl crate::Listener for Listener {
 
         let fd = Arc::new(OwnedFd::from(stream));
 
-        Ok((
-            remote_addr,
-            Sink::new(
+        Ok(Connection {
+            origin: TcpOrigin {
+                remote: remote_addr,
+            },
+            sink: Sink::new(
                 fd.clone(),
                 self.send_handle.clone(),
                 self.read_write_timeout,
             ),
-            Stream::new(
+            stream: Stream::new(
                 fd,
                 self.recv_handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
             ),
-        ))
+        })
     }
+}
 
+impl crate::TcpListener for Listener {
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
         self.inner.local_addr()
     }
@@ -573,8 +613,9 @@ impl crate::Stream for Stream {
 mod tests {
     use super::{Sink, Stream};
     use crate::{
-        BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
-        Sink as _, Stream as _, iouring,
+        Acceptor as _, BufferPool, BufferPoolConfig, Connection as _, Dialer as _, Error, IoBuf,
+        IoBufMut, IoBufs, Listener as _, Sink as _, Stream as _, TcpEndpoint, TcpListener as _,
+        iouring,
         network::{
             iouring::{Config, Network},
             tests,
@@ -659,19 +700,21 @@ mod tests {
         let network = test_network(Config::default()).expect("Failed to start io_uring");
 
         // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         // Spawn a task to accept and read
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let connection = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = connection.split();
 
             // Read a small message (much smaller than the 64KB buffer)
             stream.recv(10).await.unwrap()
         });
 
         // Connect and send a small message
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let connection = network.dial(&TcpEndpoint::from(addr)).await.unwrap();
+        let (mut sink, _stream, _) = connection.split();
         let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         sink.send(msg.clone()).await.unwrap();
 
@@ -694,11 +737,12 @@ mod tests {
         .expect("Failed to start io_uring");
 
         // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let connection = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = connection.split();
 
             // Try to read 100 bytes, but only 5 will be sent
             let start = Instant::now();
@@ -709,7 +753,8 @@ mod tests {
         });
 
         // Connect and send only partial data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let connection = network.dial(&TcpEndpoint::from(addr)).await.unwrap();
+        let (mut sink, _stream, _) = connection.split();
         sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
 
         // Wait for the reader to complete
@@ -733,13 +778,14 @@ mod tests {
         .expect("Failed to start io_uring");
 
         // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         // Accept one connection and verify that peeking never observes buffered
         // bytes because the wrapper should not retain any internal read state.
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let connection = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = connection.split();
 
             // In unbuffered mode, peek should always return empty
             assert!(stream.peek(100).is_empty());
@@ -757,7 +803,8 @@ mod tests {
         });
 
         // Send two independent messages so the reader exercises repeated direct recvs.
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let connection = network.dial(&TcpEndpoint::from(addr)).await.unwrap();
+        let (mut sink, _stream, _) = connection.split();
         sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
         sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
@@ -782,11 +829,13 @@ mod tests {
         })
         .expect("Failed to start io_uring");
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let (client_sink, mut client_stream) = network.dial(addr).await.unwrap();
-        let (_addr, _server_sink, _server_stream) = listener.accept().await.unwrap();
+        let connection = network.dial(&TcpEndpoint::from(addr)).await.unwrap();
+        let (client_sink, mut client_stream, _) = connection.split();
+        let connection = listener.accept().await.unwrap();
+        let (_server_sink, _server_stream, _) = connection.split();
 
         // Sink + stream + our clone.
         let fd = client_stream.fd.clone();
@@ -817,11 +866,12 @@ mod tests {
         // Use default buffer size to enable buffering
         let network = test_network(Config::default()).expect("Failed to start io_uring");
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let connection = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = connection.split();
 
             // Initially peek should be empty (no data received yet)
             assert!(stream.peek(100).is_empty());
@@ -850,7 +900,8 @@ mod tests {
         });
 
         // Connect and send data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let connection = network.dial(&TcpEndpoint::from(addr)).await.unwrap();
+        let (mut sink, _stream, _) = connection.split();
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();
@@ -956,20 +1007,22 @@ mod tests {
         })
         .expect("Failed to start io_uring");
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let expected = *b"abcdefgh";
 
         // Accept one connection and issue a recv that exactly matches the
         // internal buffer size, forcing the direct-recv branch.
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let connection = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = connection.split();
             let received = stream.recv(expected.len()).await.unwrap();
             assert!(stream.peek(1).is_empty());
             received
         });
 
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let connection = network.dial(&TcpEndpoint::from(addr)).await.unwrap();
+        let (mut sink, _stream, _) = connection.split();
         sink.send(expected.to_vec()).await.unwrap();
 
         assert_eq!(reader.await.unwrap().coalesce(), expected);
@@ -985,16 +1038,18 @@ mod tests {
         })
         .expect("Failed to start io_uring");
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         // Accepting the connection covers the listener-side option setters.
         let accepter = tokio::spawn(async move {
-            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+            let connection = listener.accept().await.unwrap();
+            let (_sink, _stream, _) = connection.split();
         });
 
         // Dialing the listener covers the client-side option setters.
-        let (_sink, _stream) = network.dial(addr).await.unwrap();
+        let connection = network.dial(&TcpEndpoint::from(addr)).await.unwrap();
+        let (_sink, _stream, _) = connection.split();
         accepter.await.unwrap();
     }
 
@@ -1008,14 +1063,16 @@ mod tests {
         })
         .expect("Failed to start io_uring");
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let accepter = tokio::spawn(async move {
-            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+            let connection = listener.accept().await.unwrap();
+            let (_sink, _stream, _) = connection.split();
         });
 
-        let (_sink, _stream) = network.dial(addr).await.unwrap();
+        let connection = network.dial(&TcpEndpoint::from(addr)).await.unwrap();
+        let (_sink, _stream, _) = connection.split();
         accepter.await.unwrap();
     }
 

@@ -1745,7 +1745,7 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
+        Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Scheduler as _, Storage,
         Supervisor as _,
         buffer::paged::Writer,
         deterministic::{self, Context},

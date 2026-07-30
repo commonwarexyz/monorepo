@@ -374,6 +374,12 @@ jobs:
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_utils.wasm"
     - name: Build runtime
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
+    - name: Check portable P2P stack
+      run: |
+        cargo check --target wasm32-unknown-unknown -p commonware-runtime
+        cargo check --target wasm32-unknown-unknown -p commonware-actor
+        cargo check --target wasm32-unknown-unknown -p commonware-stream
+        cargo check --target wasm32-unknown-unknown -p commonware-p2p
     - name: Build consensus
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_consensus.wasm"
     - name: Build storage

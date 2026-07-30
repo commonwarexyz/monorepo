@@ -336,7 +336,7 @@ mod tests {
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        ContextCell, Runner as _, Spawner as _, Supervisor as _,
+        ContextCell, Runner as _, Scheduler as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},

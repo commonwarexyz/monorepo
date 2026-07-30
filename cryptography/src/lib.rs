@@ -10,7 +10,15 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-#[cfg(not(feature = "std"))]
+#[cfg_attr(
+    any(
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    ),
+    allow(unused_extern_crates)
+)]
 extern crate alloc;
 
 // Modules containing #[macro_export] macros must use verbose cfg.
@@ -80,7 +88,6 @@ commonware_macros::stability_scope!(BETA {
     #[cfg(feature = "std")]
     pub use crate::crc32::Crc32;
 
-    #[cfg(feature = "std")]
     pub mod handshake;
 
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].

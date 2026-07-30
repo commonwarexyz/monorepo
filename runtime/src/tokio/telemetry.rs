@@ -4,7 +4,7 @@ use super::{
     Context,
     tracing::{Config, export},
 };
-use crate::{Metrics as _, Spawner, Supervisor as _};
+use crate::{Metrics as _, Scheduler, Supervisor as _};
 use axum::{
     Extension, Router,
     body::Body,
@@ -115,7 +115,7 @@ pub fn init(context: Context, logs: Logs, metrics: Option<SocketAddr>, traces: O
             // Serve the metrics over HTTP.
             //
             // `serve` will spawn its own tasks using `tokio::spawn` (and there is no way to specify
-            // it to do otherwise). These tasks will not be tracked like metrics spawned using `Spawner`.
+            // it to do otherwise). These tasks will not be tracked like metrics spawned using `Scheduler`.
             serve(listener, app.into_make_service())
                 .await
                 .expect("Could not serve metrics");

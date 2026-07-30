@@ -1,35 +1,39 @@
 use super::Reservation;
 use crate::{
-    AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
+    Advertisement, PeerEndpoint, PeerSetSubscription, Reachability, ReachableTrackedPeers,
+    TrackedPeers,
     authenticated::{
         dialing::Dialable,
         lookup::actors::{peer, tracker::Metadata},
     },
-    types::Address,
 };
 use commonware_actor::{
     Feedback,
     mailbox::{self, Policy},
 };
 use commonware_cryptography::PublicKey;
+use commonware_macros::stability;
 use commonware_utils::{
+    PlatformSend,
     channel::{mpsc, oneshot},
     ordered::Map,
 };
-use std::{collections::VecDeque, net::IpAddr};
+use std::collections::VecDeque;
+
+type DialReservation<C, E> = Option<(Reservation<C, E>, Advertisement<E>)>;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
-pub enum Message<C: PublicKey> {
+pub enum Message<C: PublicKey, E: PeerEndpoint = crate::Ingress> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
     Register {
         index: u64,
-        peers: AddressableTrackedPeers<C>,
+        peers: ReachableTrackedPeers<C, E>,
     },
 
     /// Update addresses for multiple peers without creating a new peer set.
-    Overwrite { peers: Map<C, Address> },
+    Overwrite { peers: Map<C, Reachability<E>> },
 
     // ---------- Used by peer set provider ----------
     /// Fetch primary and secondary peers for a given ID.
@@ -77,7 +81,17 @@ pub enum Message<C: PublicKey> {
         public_key: C,
 
         /// Sender to respond with the reservation and ingress address.
-        reservation: oneshot::Sender<Option<(Reservation<C>, Ingress)>>,
+        reservation: oneshot::Sender<DialReservation<C, E>>,
+    },
+
+    /// Reserve a connection established outside the autonomous transport actors.
+    Attach {
+        /// Authenticated peer identity.
+        public_key: C,
+        /// Whether the connection was accepted inbound.
+        inbound: bool,
+        /// Sender to respond with a reservation.
+        reservation: oneshot::Sender<Option<Reservation<C, E>>>,
     },
 
     // ---------- Used by listener ----------
@@ -85,9 +99,6 @@ pub enum Message<C: PublicKey> {
     Acceptable {
         /// The public key of the peer to check.
         public_key: C,
-
-        /// The IP address the peer connected from.
-        source_ip: IpAddr,
 
         /// The sender to respond with whether the peer is acceptable.
         responder: oneshot::Sender<bool>,
@@ -102,11 +113,8 @@ pub enum Message<C: PublicKey> {
         /// The public key of the peer to reserve.
         public_key: C,
 
-        /// The IP address the peer connected from.
-        source_ip: IpAddr,
-
         /// The sender to respond with the reservation.
-        reservation: oneshot::Sender<Option<Reservation<C>>>,
+        reservation: oneshot::Sender<Option<Reservation<C, E>>>,
     },
 
     // ---------- Used by reservation ----------
@@ -117,7 +125,7 @@ pub enum Message<C: PublicKey> {
     },
 }
 
-impl<C: PublicKey> Policy for Message<C> {
+impl<C: PublicKey, E: PeerEndpoint> Policy for Message<C, E> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
@@ -127,10 +135,10 @@ impl<C: PublicKey> Policy for Message<C> {
 
 /// Mailbox for sending messages to the tracker actor.
 #[derive(Clone, Debug)]
-pub struct Mailbox<C: PublicKey>(mailbox::Sender<Message<C>>);
+pub struct Mailbox<C: PublicKey, E: PeerEndpoint = crate::Ingress>(mailbox::Sender<Message<C, E>>);
 
-impl<C: PublicKey> Mailbox<C> {
-    pub(crate) const fn new(sender: mailbox::Sender<Message<C>>) -> Self {
+impl<C: PublicKey, E: PeerEndpoint> Mailbox<C, E> {
+    pub(crate) const fn new(sender: mailbox::Sender<Message<C, E>>) -> Self {
         Self(sender)
     }
 
@@ -151,7 +159,10 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
+    pub(crate) async fn dial(
+        &self,
+        public_key: C,
+    ) -> Option<(Reservation<C, E>, Advertisement<E>)> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dial {
             public_key,
@@ -160,14 +171,24 @@ impl<C: PublicKey> Mailbox<C> {
         receiver.await.ok().flatten()
     }
 
+    /// Reserve an externally established connection.
+    pub(crate) async fn attach(&self, public_key: C, inbound: bool) -> Option<Reservation<C, E>> {
+        let (reservation, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Attach {
+            public_key,
+            inbound,
+            reservation,
+        });
+        receiver.await.ok().flatten()
+    }
+
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
-    pub(crate) async fn acceptable(&self, public_key: C, source_ip: IpAddr) -> bool {
+    pub(crate) async fn acceptable(&self, public_key: C) -> bool {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Acceptable {
             public_key,
-            source_ip,
             responder,
         });
         receiver.await.unwrap_or(false)
@@ -176,11 +197,10 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn listen(&self, public_key: C, source_ip: IpAddr) -> Option<Reservation<C>> {
+    pub(crate) async fn listen(&self, public_key: C) -> Option<Reservation<C, E>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Listen {
             public_key,
-            source_ip,
             reservation,
         });
         receiver.await.ok().flatten()
@@ -189,13 +209,13 @@ impl<C: PublicKey> Mailbox<C> {
 
 /// Allows releasing reservations
 #[derive(Clone, Debug)]
-pub struct Releaser<C: PublicKey> {
-    sender: mailbox::Sender<Message<C>>,
+pub struct Releaser<C: PublicKey, E: PeerEndpoint = crate::Ingress> {
+    sender: mailbox::Sender<Message<C, E>>,
 }
 
-impl<C: PublicKey> Releaser<C> {
+impl<C: PublicKey, E: PeerEndpoint> Releaser<C, E> {
     /// Create a new releaser.
-    pub(crate) const fn new(sender: mailbox::Sender<Message<C>>) -> Self {
+    pub(crate) const fn new(sender: mailbox::Sender<Message<C, E>>) -> Self {
         Self { sender }
     }
 
@@ -210,17 +230,17 @@ impl<C: PublicKey> Releaser<C> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Debug, Clone)]
-pub struct Oracle<C: PublicKey> {
-    sender: mailbox::Sender<Message<C>>,
+pub struct Oracle<C: PublicKey, E: PeerEndpoint = crate::Ingress> {
+    sender: mailbox::Sender<Message<C, E>>,
 }
 
-impl<C: PublicKey> Oracle<C> {
-    pub(super) const fn new(sender: mailbox::Sender<Message<C>>) -> Self {
+impl<C: PublicKey, E: PeerEndpoint> Oracle<C, E> {
+    pub(super) const fn new(sender: mailbox::Sender<Message<C, E>>) -> Self {
         Self { sender }
     }
 }
 
-impl<C: PublicKey> crate::Provider for Oracle<C> {
+impl<C: PublicKey, E: PeerEndpoint> crate::Provider for Oracle<C, E> {
     type PublicKey = C;
 
     async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
@@ -242,10 +262,13 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
+#[stability(ALPHA)]
+impl<C: PublicKey, E: PeerEndpoint> crate::ReachabilityManager for Oracle<C, E> {
+    type Endpoint = E;
+
     fn track<R>(&mut self, index: u64, peers: R) -> Feedback
     where
-        R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
+        R: Into<ReachableTrackedPeers<Self::PublicKey, E>> + PlatformSend,
     {
         self.sender.enqueue(Message::Register {
             index,
@@ -253,12 +276,44 @@ impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
         })
     }
 
-    fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Feedback {
+    fn overwrite(&mut self, peers: Map<Self::PublicKey, Reachability<E>>) -> Feedback {
         self.sender.enqueue(Message::Overwrite { peers })
     }
 }
 
-impl<C: PublicKey> crate::Blocker for Oracle<C> {
+impl<C: PublicKey> crate::AddressableManager for Oracle<C, crate::Ingress> {
+    fn track<R>(&mut self, index: u64, peers: R) -> Feedback
+    where
+        R: Into<crate::AddressableTrackedPeers<Self::PublicKey>> + PlatformSend,
+    {
+        let peers = peers.into();
+        self.sender.enqueue(Message::Register {
+            index,
+            peers: ReachableTrackedPeers::new(
+                legacy_reachability(peers.primary),
+                legacy_reachability(peers.secondary),
+            ),
+        })
+    }
+
+    fn overwrite(&mut self, peers: Map<Self::PublicKey, crate::Address>) -> Feedback {
+        self.sender.enqueue(Message::Overwrite {
+            peers: legacy_reachability(peers),
+        })
+    }
+}
+
+fn legacy_reachability<C: PublicKey>(
+    peers: Map<C, crate::Address>,
+) -> Map<C, Reachability<crate::Ingress>> {
+    Map::from_iter_dedup(peers.into_iter().map(|(peer, address)| {
+        let advertisement = Advertisement::new(vec![address.ingress()])
+            .expect("a single endpoint is a valid advertisement");
+        (peer, Reachability::Dialable(advertisement))
+    }))
+}
+
+impl<C: PublicKey, E: PeerEndpoint> crate::Blocker for Oracle<C, E> {
     type PublicKey = C;
 
     fn block(&mut self, public_key: Self::PublicKey) -> Feedback {

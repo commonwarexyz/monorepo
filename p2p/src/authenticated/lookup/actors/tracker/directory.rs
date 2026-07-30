@@ -1,20 +1,20 @@
 use super::{Metadata, Reservation, metrics::Metrics, record::Record};
 use crate::{
-    AddressableTrackedPeers, Ingress, PeerSetUpdate, TrackedPeers,
+    Advertisement, PeerEndpoint, PeerSetUpdate, Reachability, ReachableTrackedPeers, TrackedPeers,
     authenticated::{
         dialing::{DialStatus, Dialable, ReserveResult, earliest},
         lookup::actors::tracker::ingress::Releaser,
     },
-    types::Address,
     utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::metrics::GaugeExt};
-use commonware_utils::{IpAddrExt, PrioritySet, SystemTimeExt, ordered::Set};
+use commonware_runtime::{
+    Clock, Metrics as RuntimeMetrics, Scheduler, telemetry::metrics::GaugeExt,
+};
+use commonware_utils::{PrioritySet, SystemTimeExt, ordered::Set};
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
-    net::IpAddr,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
@@ -25,15 +25,6 @@ type PeerSetsAtIndex<C> = PeerSetsAtIndexBase<Set<C>, Set<C>>;
 
 /// Configuration for the [Directory].
 pub struct Config {
-    /// Whether private IPs are connectable.
-    pub allow_private_ips: bool,
-
-    /// Whether DNS-based ingress addresses are allowed.
-    pub allow_dns: bool,
-
-    /// Whether to skip IP verification for incoming connections (allows unknown IPs).
-    pub bypass_ip_check: bool,
-
     /// The maximum number of peer sets to track.
     pub max_sets: NonZeroUsize,
 
@@ -45,21 +36,12 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
-    context: E,
+pub struct Directory<R: Rng + Clock + RuntimeMetrics, C: PublicKey, E: PeerEndpoint> {
+    context: R,
 
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: NonZeroUsize,
-
-    /// Whether private IPs are connectable.
-    pub allow_private_ips: bool,
-
-    /// Whether DNS-based ingress addresses are allowed.
-    allow_dns: bool,
-
-    /// Whether to skip IP verification for incoming connections (allows unknown IPs).
-    bypass_ip_check: bool,
 
     /// Duration after which a blocked peer is allowed to reconnect.
     block_duration: Duration,
@@ -69,7 +51,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
     // ---------- State ----------
     /// The records of all peers.
-    peers: HashMap<C, Record>,
+    peers: HashMap<C, Record<E>>,
 
     /// Primary and secondary peer sets indexed by peer set ID.
     peer_sets: BTreeMap<u64, PeerSetsAtIndex<C>>,
@@ -80,16 +62,18 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
     // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
-    releaser: Releaser<C>,
+    releaser: Releaser<C, E>,
 
     // ---------- Metrics ----------
     /// The metrics for the records.
     metrics: Metrics<C>,
 }
 
-impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<R: Scheduler + Rng + Clock + RuntimeMetrics, C: PublicKey, E: PeerEndpoint>
+    Directory<R, C, E>
+{
     /// Create a new set of records using the given local node information.
-    pub fn init(context: E, myself: C, cfg: Config, releaser: Releaser<C>) -> Self {
+    pub fn init(context: R, myself: C, cfg: Config, releaser: Releaser<C, E>) -> Self {
         // Create the list of peers and add myself.
         let mut peers = HashMap::new();
         peers.insert(myself, Record::myself());
@@ -100,9 +84,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Self {
             context,
             max_sets: cfg.max_sets,
-            allow_private_ips: cfg.allow_private_ips,
-            allow_dns: cfg.allow_dns,
-            bypass_ip_check: cfg.bypass_ip_check,
             block_duration: cfg.block_duration,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
@@ -154,7 +135,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// tracked peer sets or had their address changed.
     ///
     /// Returns `None` if the index is invalid.
-    pub fn track(&mut self, index: u64, peers: AddressableTrackedPeers<C>) -> Option<Set<C>> {
+    pub fn track(&mut self, index: u64, peers: ReachableTrackedPeers<C, E>) -> Option<Set<C>> {
         // Check if peer set already exists
         if self.peer_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -260,11 +241,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `false` if the peer has no record, is ourselves, or the
     /// new address is identical to the existing one.
-    pub fn overwrite(&mut self, peer: &C, address: Address) -> bool {
+    pub fn overwrite(&mut self, peer: &C, reachability: Reachability<E>) -> bool {
         let Some(record) = self.peers.get_mut(peer) else {
             return false;
         };
-        record.update(address)
+        record.update(reachability)
     }
 
     /// Gets the peer set (primary and secondary) at the given index.
@@ -294,23 +275,39 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C>, Ingress)> {
+    pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C, E>, Advertisement<E>)> {
         let record = self.peers.get(peer)?;
         if !record.is_outbound_target() {
             return None;
         }
-        let ingress = record.ingress()?;
+        let advertisement = record.advertisement()?;
         let reservation = self.reserve(Metadata::Dialer(peer.clone()))?;
-        Some((reservation, ingress))
+        Some((reservation, advertisement))
+    }
+
+    /// Reserve a peer whose transport connection was established outside the dialer or listener.
+    pub fn attach(&mut self, peer: C, metadata: Metadata<C>) -> Option<Reservation<C, E>> {
+        if metadata.public_key() != &peer || self.is_blocked(&peer) {
+            return None;
+        }
+
+        let inserted = !self.peers.contains_key(&peer);
+        if inserted {
+            self.metrics.tracked.inc();
+            self.peers.insert(peer.clone(), Record::undialable());
+        }
+        let reservation = self.reserve_record(metadata);
+        if reservation.is_none() && inserted {
+            self.delete_if_needed(&peer);
+        }
+        reservation
     }
 
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C, source_ip: IpAddr) -> Option<Reservation<C>> {
-        // Re-check the source IP when reserving: the handshake's earlier
-        // acceptability check may be stale if the peer address changed.
-        if !self.acceptable(peer, source_ip) {
+    pub fn listen(&mut self, peer: &C) -> Option<Reservation<C, E>> {
+        if !self.acceptable(peer) {
             return None;
         }
         self.reserve(Metadata::Listener(peer.clone()))
@@ -381,6 +378,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
+    /// Returns peers eligible to begin inbound authentication.
+    pub fn admissible(&self) -> HashSet<C> {
+        self.peers
+            .iter()
+            .filter(|(peer, record)| !self.is_blocked(peer) && record.eligible())
+            .map(|(peer, _)| peer.clone())
+            .collect()
+    }
+
     /// Returns dialable peers and the next time another peer may become dialable.
     pub fn dialable(&self) -> Dialable<C> {
         let now = self.context.current();
@@ -391,7 +397,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 next_query_at = earliest(next_query_at, blocked_until);
                 continue;
             }
-            match record.dialable(now, self.allow_private_ips, self.allow_dns) {
+            match record.dialable(now) {
                 DialStatus::Now => peers.push(peer.clone()),
                 DialStatus::After(t) => {
                     next_query_at = earliest(next_query_at, t);
@@ -409,28 +415,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
     ///
-    /// Checks eligibility (peer set membership), blocked status, egress IP match (if not bypass_ip_check),
-    /// and connection status.
-    pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
-        !self.is_blocked(peer)
-            && self
-                .peers
-                .get(peer)
-                .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check))
-    }
-
-    /// Return egress IPs we should listen for (accept incoming connections from).
-    ///
-    /// Only includes IPs from peers that are:
-    /// - Currently eligible (not blocked, in a peer set)
-    /// - Have a valid egress IP (global, or private IPs are allowed)
-    pub fn listenable(&self) -> HashSet<IpAddr> {
-        self.peers
-            .iter()
-            .filter(|(peer, r)| !self.is_blocked(peer) && r.eligible())
-            .filter_map(|(_, r)| r.egress_ip())
-            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
-            .collect()
+    /// Origin and endpoint admission policies are enforced before this tracker is queried.
+    pub fn acceptable(&self, peer: &C) -> bool {
+        !self.is_blocked(peer) && self.peers.get(peer).is_some_and(Record::acceptable)
     }
 
     /// Unblock all peers whose block has expired.
@@ -473,7 +460,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer.
     ///
     /// Returns `Some(Reservation)` if the peer was successfully reserved, `None` otherwise.
-    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C>> {
+    fn reserve(&mut self, metadata: Metadata<C>) -> Option<Reservation<C, E>> {
         let peer = metadata.public_key();
 
         // Not reservable (must be in a peer set)
@@ -481,6 +468,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return None;
         }
 
+        self.reserve_record(metadata)
+    }
+
+    fn reserve_record(&mut self, metadata: Metadata<C>) -> Option<Reservation<C, E>> {
+        let peer = metadata.public_key();
         // Reserve
         let record = self.peers.get_mut(peer).unwrap();
         match record.reserve(&mut self.context, self.peer_connection_cooldown) {
@@ -532,14 +524,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AddressableTrackedPeers, Ingress,
-        authenticated::lookup::actors::tracker::directory::Directory, types::Address,
+        Advertisement, PeerEndpoint, Reachability, ReachableTrackedPeers,
+        authenticated::lookup::actors::tracker::directory::Directory,
     };
     use commonware_actor::mailbox;
     use commonware_cryptography::{Signer, ed25519};
     use commonware_runtime::{Clock, Metrics as _, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        NZUsize, SystemTimeExt, hostname,
+        NZUsize, SystemTimeExt,
         ordered::{Map, Set},
     };
     use std::{
@@ -547,14 +539,23 @@ mod tests {
         time::Duration,
     };
 
-    fn addr(socket: SocketAddr) -> Address {
-        Address::Symmetric(socket)
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct Endpoint(SocketAddr);
+
+    impl PeerEndpoint for Endpoint {}
+
+    fn advertisement(socket: SocketAddr) -> Advertisement<Endpoint> {
+        Advertisement::new(vec![Endpoint(socket)]).unwrap()
+    }
+
+    fn dialable(socket: SocketAddr) -> Reachability<Endpoint> {
+        Reachability::Dialable(advertisement(socket))
     }
 
     fn primary(
-        map: Map<ed25519::PublicKey, Address>,
-    ) -> AddressableTrackedPeers<ed25519::PublicKey> {
-        AddressableTrackedPeers::from(map)
+        map: Map<ed25519::PublicKey, Reachability<Endpoint>>,
+    ) -> ReachableTrackedPeers<ed25519::PublicKey, Endpoint> {
+        ReachableTrackedPeers::from(map)
     }
 
     fn metric_value(metrics: &str, name: &str, peer: &str) -> Option<i64> {
@@ -567,9 +568,59 @@ mod tests {
 
     fn new_releaser<C: commonware_cryptography::PublicKey>(
         metrics: impl commonware_runtime::Metrics,
-    ) -> super::Releaser<C> {
+    ) -> super::Releaser<C, Endpoint> {
         let (tx, _rx) = mailbox::new(metrics, NZUsize!(1024));
         super::Releaser::new(tx)
+    }
+
+    #[test]
+    fn test_rejected_attachment_does_not_retain_unknown_peer() {
+        deterministic::Runner::default().start(|context| async move {
+            let myself = ed25519::PrivateKey::from_seed(0).public_key();
+            let peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let config = super::Config {
+                max_sets: NZUsize!(1),
+                peer_connection_cooldown: Duration::ZERO,
+                block_duration: Duration::from_secs(100),
+            };
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(context, myself, config, releaser);
+
+            let reservation = directory
+                .attach(peer.clone(), super::Metadata::Listener(peer.clone()))
+                .expect("unknown peer should be provisionally reservable");
+            let metadata = reservation.metadata().clone();
+            std::mem::forget(reservation);
+            directory.release(metadata);
+
+            assert!(!directory.peers.contains_key(&peer));
+        });
+    }
+
+    #[test]
+    fn test_connected_attachment_retains_unknown_peer() {
+        deterministic::Runner::default().start(|context| async move {
+            let myself = ed25519::PrivateKey::from_seed(0).public_key();
+            let peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let config = super::Config {
+                max_sets: NZUsize!(1),
+                peer_connection_cooldown: Duration::ZERO,
+                block_duration: Duration::from_secs(100),
+            };
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(context, myself, config, releaser);
+
+            let reservation = directory
+                .attach(peer.clone(), super::Metadata::Listener(peer.clone()))
+                .expect("unknown peer should be provisionally reservable");
+            let metadata = reservation.metadata().clone();
+            std::mem::forget(reservation);
+            assert!(directory.connect(&peer));
+            directory.release(metadata);
+
+            assert!(directory.peers.contains_key(&peer));
+            assert!(directory.eligible(&peer));
+        });
     }
 
     #[test]
@@ -577,9 +628,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(1),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -600,9 +648,12 @@ mod tests {
                 .track(
                     0,
                     primary(
-                        [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
-                            .try_into()
-                            .unwrap(),
+                        [
+                            (pk_1.clone(), dialable(addr_1)),
+                            (pk_2.clone(), dialable(addr_2)),
+                        ]
+                        .try_into()
+                        .unwrap(),
                     ),
                 )
                 .unwrap();
@@ -615,9 +666,12 @@ mod tests {
                 .track(
                     1,
                     primary(
-                        [(pk_2.clone(), addr(addr_2)), (pk_3.clone(), addr(addr_3))]
-                            .try_into()
-                            .unwrap(),
+                        [
+                            (pk_2.clone(), dialable(addr_2)),
+                            (pk_3.clone(), dialable(addr_3)),
+                        ]
+                        .try_into()
+                        .unwrap(),
                     ),
                 )
                 .unwrap();
@@ -629,7 +683,7 @@ mod tests {
             let kill_peers = directory
                 .track(
                     2,
-                    primary([(pk_3.clone(), addr(addr_3))].try_into().unwrap()),
+                    primary([(pk_3.clone(), dialable(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
             assert!(
@@ -640,7 +694,7 @@ mod tests {
             let kill_peers = directory
                 .track(
                     3,
-                    primary([(pk_3.clone(), addr(addr_3))].try_into().unwrap()),
+                    primary([(pk_3.clone(), dialable(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
             assert!(kill_peers.is_empty(), "No peers should be killed");
@@ -652,9 +706,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(1),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -672,18 +723,16 @@ mod tests {
             directory
                 .track(
                     0,
-                    primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                    primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
                 )
                 .unwrap();
-            let reservation = directory
-                .listen(&pk_1, addr_1.ip())
-                .expect("peer should reserve");
+            let reservation = directory.listen(&pk_1).expect("peer should reserve");
             directory.connect(&pk_1);
 
             let kill_peers = directory
                 .track(
                     1,
-                    primary([(pk_2.clone(), addr(addr_2))].try_into().unwrap()),
+                    primary([(pk_2.clone(), dialable(addr_2))].try_into().unwrap()),
                 )
                 .unwrap();
 
@@ -701,9 +750,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(2),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -728,9 +774,9 @@ mod tests {
                 directory
                     .track(
                         0,
-                        AddressableTrackedPeers::new(
-                            [(primary_0, addr(primary_0_addr))].try_into().unwrap(),
-                            [(secondary_0.clone(), addr(secondary_0_addr))]
+                        ReachableTrackedPeers::new(
+                            [(primary_0, dialable(primary_0_addr))].try_into().unwrap(),
+                            [(secondary_0.clone(), dialable(secondary_0_addr))]
                                 .try_into()
                                 .unwrap(),
                         ),
@@ -743,9 +789,9 @@ mod tests {
                 directory
                     .track(
                         1,
-                        AddressableTrackedPeers::new(
-                            [(primary_1, addr(primary_1_addr))].try_into().unwrap(),
-                            [(secondary_1.clone(), addr(secondary_1_addr))]
+                        ReachableTrackedPeers::new(
+                            [(primary_1, dialable(primary_1_addr))].try_into().unwrap(),
+                            [(secondary_1.clone(), dialable(secondary_1_addr))]
                                 .try_into()
                                 .unwrap(),
                         ),
@@ -759,7 +805,7 @@ mod tests {
                 directory
                     .track(
                         2,
-                        primary([(primary_2, addr(primary_2_addr))].try_into().unwrap(),),
+                        primary([(primary_2, dialable(primary_2_addr))].try_into().unwrap(),),
                     )
                     .is_some()
             );
@@ -774,9 +820,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -801,19 +844,29 @@ mod tests {
             directory.track(
                 0,
                 primary(
-                    [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
-                        .try_into()
-                        .unwrap(),
+                    [
+                        (pk_1.clone(), dialable(addr_1)),
+                        (pk_2.clone(), dialable(addr_2)),
+                    ]
+                    .try_into()
+                    .unwrap(),
                 ),
             );
-            assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
-            assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(addr_1))
+            assert!(
+                directory
+                    .peers
+                    .get(&my_pk)
+                    .unwrap()
+                    .advertisement()
+                    .is_none()
             );
             assert_eq!(
-                directory.peers.get(&pk_2).unwrap().ingress(),
-                Some(Ingress::Socket(addr_2))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(addr_1))
+            );
+            assert_eq!(
+                directory.peers.get(&pk_2).unwrap().advertisement(),
+                Some(advertisement(addr_2))
             );
             assert!(!directory.peers.contains_key(&pk_3));
             assert_eq!(
@@ -827,16 +880,23 @@ mod tests {
 
             directory.track(
                 1,
-                primary([(pk_1.clone(), addr(addr_4))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_4))].try_into().unwrap()),
             );
-            assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
-            assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(addr_4))
+            assert!(
+                directory
+                    .peers
+                    .get(&my_pk)
+                    .unwrap()
+                    .advertisement()
+                    .is_none()
             );
             assert_eq!(
-                directory.peers.get(&pk_2).unwrap().ingress(),
-                Some(Ingress::Socket(addr_2))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(addr_4))
+            );
+            assert_eq!(
+                directory.peers.get(&pk_2).unwrap().advertisement(),
+                Some(advertisement(addr_2))
             );
             assert!(!directory.peers.contains_key(&pk_3));
             assert_eq!(
@@ -850,23 +910,30 @@ mod tests {
 
             directory.track(
                 2,
-                primary([(my_pk.clone(), addr(addr_3))].try_into().unwrap()),
+                primary([(my_pk.clone(), dialable(addr_3))].try_into().unwrap()),
             );
-            assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
-            assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(addr_4))
+            assert!(
+                directory
+                    .peers
+                    .get(&my_pk)
+                    .unwrap()
+                    .advertisement()
+                    .is_none()
             );
             assert_eq!(
-                directory.peers.get(&pk_2).unwrap().ingress(),
-                Some(Ingress::Socket(addr_2))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(addr_4))
+            );
+            assert_eq!(
+                directory.peers.get(&pk_2).unwrap().advertisement(),
+                Some(advertisement(addr_2))
             );
             assert!(!directory.peers.contains_key(&pk_3));
 
             let kill_peers = directory
                 .track(
                     3,
-                    primary([(my_pk.clone(), addr(my_addr))].try_into().unwrap()),
+                    primary([(my_pk.clone(), dialable(my_addr))].try_into().unwrap()),
                 )
                 .unwrap();
             assert!(kill_peers.is_empty());
@@ -874,7 +941,7 @@ mod tests {
             let kill_peers = directory
                 .track(
                     4,
-                    primary([(my_pk.clone(), addr(addr_3))].try_into().unwrap()),
+                    primary([(my_pk.clone(), dialable(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
             assert!(kill_peers.is_empty());
@@ -882,9 +949,12 @@ mod tests {
             let result = directory.track(
                 0,
                 primary(
-                    [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
-                        .try_into()
-                        .unwrap(),
+                    [
+                        (pk_1.clone(), dialable(addr_1)),
+                        (pk_2.clone(), dialable(addr_2)),
+                    ]
+                    .try_into()
+                    .unwrap(),
                 ),
             );
             assert!(result.is_none());
@@ -892,13 +962,10 @@ mod tests {
     }
 
     #[test]
-    fn test_track_updates_metric_for_secondary_address_change() {
+    fn test_track_updates_metric_for_secondary_reachability_change() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -919,9 +986,9 @@ mod tests {
             directory
                 .track(
                     0,
-                    AddressableTrackedPeers::new(
+                    ReachableTrackedPeers::new(
                         Map::default(),
-                        [(pk_1.clone(), addr(addr_1))].try_into().unwrap(),
+                        [(pk_1.clone(), dialable(addr_1))].try_into().unwrap(),
                     ),
                 )
                 .unwrap();
@@ -937,9 +1004,9 @@ mod tests {
             directory
                 .track(
                     1,
-                    AddressableTrackedPeers::new(
+                    ReachableTrackedPeers::new(
                         Map::default(),
-                        [(pk_1.clone(), addr(addr_2))].try_into().unwrap(),
+                        [(pk_1.clone(), dialable(addr_2))].try_into().unwrap(),
                     ),
                 )
                 .unwrap();
@@ -959,9 +1026,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -979,9 +1043,11 @@ mod tests {
             let kill_peers = directory
                 .track(
                     0,
-                    AddressableTrackedPeers::new(
-                        [(pk_1.clone(), addr(primary_addr))].try_into().unwrap(),
-                        [(pk_1.clone(), addr(secondary_addr))].try_into().unwrap(),
+                    ReachableTrackedPeers::new(
+                        [(pk_1.clone(), dialable(primary_addr))].try_into().unwrap(),
+                        [(pk_1.clone(), dialable(secondary_addr))]
+                            .try_into()
+                            .unwrap(),
                     ),
                 )
                 .unwrap();
@@ -996,8 +1062,8 @@ mod tests {
             );
             assert!(directory.eligible(&pk_1));
             assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(primary_addr))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(primary_addr))
             );
             assert_eq!(directory.all().primary, [pk_1.clone()].try_into().unwrap());
             assert!(directory.all().secondary.is_empty());
@@ -1013,9 +1079,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(2),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -1034,9 +1097,9 @@ mod tests {
             directory
                 .track(
                     0,
-                    AddressableTrackedPeers::new(
-                        [(pk_x.clone(), addr(addr_x))].try_into().unwrap(),
-                        [(pk_y.clone(), addr(addr_y))].try_into().unwrap(),
+                    ReachableTrackedPeers::new(
+                        [(pk_x.clone(), dialable(addr_x))].try_into().unwrap(),
+                        [(pk_y.clone(), dialable(addr_y))].try_into().unwrap(),
                     ),
                 )
                 .unwrap();
@@ -1049,9 +1112,9 @@ mod tests {
             directory
                 .track(
                     1,
-                    AddressableTrackedPeers::new(
-                        [(pk_y.clone(), addr(addr_y))].try_into().unwrap(),
-                        [(pk_x.clone(), addr(addr_x))].try_into().unwrap(),
+                    ReachableTrackedPeers::new(
+                        [(pk_y.clone(), dialable(addr_y))].try_into().unwrap(),
+                        [(pk_x.clone(), dialable(addr_x))].try_into().unwrap(),
                     ),
                 )
                 .unwrap();
@@ -1074,9 +1137,9 @@ mod tests {
             directory
                 .track(
                     2,
-                    AddressableTrackedPeers::new(
-                        [(pk_y.clone(), addr(addr_y))].try_into().unwrap(),
-                        [(pk_x.clone(), addr(addr_x))].try_into().unwrap(),
+                    ReachableTrackedPeers::new(
+                        [(pk_y.clone(), dialable(addr_y))].try_into().unwrap(),
+                        [(pk_x.clone(), dialable(addr_x))].try_into().unwrap(),
                     ),
                 )
                 .unwrap();
@@ -1099,13 +1162,10 @@ mod tests {
     }
 
     #[test]
-    fn test_track_primary_wins_conflicting_overlap_when_updating_existing_address() {
+    fn test_track_primary_wins_conflicting_overlap_when_updating_reachability() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::ZERO,
             block_duration: Duration::from_secs(100),
@@ -1122,21 +1182,19 @@ mod tests {
             let initial_kill = directory
                 .track(
                     0,
-                    primary([(pk_1.clone(), addr(old_addr))].try_into().unwrap()),
+                    primary([(pk_1.clone(), dialable(old_addr))].try_into().unwrap()),
                 )
                 .unwrap();
             assert!(initial_kill.is_empty());
-            let reservation = directory
-                .listen(&pk_1, old_addr.ip())
-                .expect("peer should reserve");
+            let reservation = directory.listen(&pk_1).expect("peer should reserve");
             directory.connect(&pk_1);
 
             let kill_peers = directory
                 .track(
                     1,
-                    AddressableTrackedPeers::new(
-                        [(pk_1.clone(), addr(new_addr))].try_into().unwrap(),
-                        [(pk_1.clone(), addr(old_addr))].try_into().unwrap(),
+                    ReachableTrackedPeers::new(
+                        [(pk_1.clone(), dialable(new_addr))].try_into().unwrap(),
+                        [(pk_1.clone(), dialable(old_addr))].try_into().unwrap(),
                     ),
                 )
                 .unwrap();
@@ -1148,15 +1206,13 @@ mod tests {
                 [pk_1.clone()].try_into().unwrap()
             );
             assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(new_addr))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(new_addr))
             );
             assert_eq!(directory.all().primary, [pk_1.clone()].try_into().unwrap());
             directory.release(reservation.metadata().clone());
             assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
-            assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(new_addr));
-            assert!(directory.listenable().contains(&new_addr.ip()));
-            assert!(!directory.listenable().contains(&old_addr.ip()));
+            assert_eq!(directory.dial(&pk_1).unwrap().1, advertisement(new_addr));
         });
     }
 
@@ -1165,9 +1221,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -1185,7 +1238,7 @@ mod tests {
         let addr_sec = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)), 4004);
 
         runtime.start(|context| async move {
-            // pk_overlap: primary in set 0 (address addr_overlap_p), secondary in set 1 (addr_overlap_s).
+            // pk_overlap: primary in set 0, secondary in set 1.
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
@@ -1195,8 +1248,8 @@ mod tests {
                         10,
                         primary(
                             [
-                                (pk_a.clone(), addr(addr_a)),
-                                (pk_overlap.clone(), addr(addr_overlap_p)),
+                                (pk_a.clone(), dialable(addr_a)),
+                                (pk_overlap.clone(), dialable(addr_overlap_p)),
                             ]
                             .try_into()
                             .unwrap(),
@@ -1208,11 +1261,11 @@ mod tests {
                 directory
                     .track(
                         11,
-                        AddressableTrackedPeers::new(
-                            [(pk_b.clone(), addr(addr_b))].try_into().unwrap(),
+                        ReachableTrackedPeers::new(
+                            [(pk_b.clone(), dialable(addr_b))].try_into().unwrap(),
                             [
-                                (pk_overlap.clone(), addr(addr_overlap_s)),
-                                (pk_sec.clone(), addr(addr_sec)),
+                                (pk_overlap.clone(), dialable(addr_overlap_s)),
+                                (pk_sec.clone(), dialable(addr_sec)),
                             ]
                             .try_into()
                             .unwrap(),
@@ -1242,9 +1295,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(1),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -1263,13 +1313,11 @@ mod tests {
             directory
                 .track(
                     0,
-                    primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                    primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
                 )
                 .unwrap();
 
-            let _reservation = directory
-                .listen(&pk_1, addr_1.ip())
-                .expect("peer should reserve");
+            let _reservation = directory.listen(&pk_1).expect("peer should reserve");
             let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
             directory.connect(&pk_1);
 
@@ -1297,9 +1345,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1319,355 +1364,128 @@ mod tests {
 
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
             directory.block(&pk_1);
             assert!(
                 directory.blocked.contains(&pk_1),
                 "Peer should be blocked after call to block"
             );
-            // Address is preserved (blocking is tracked in PrioritySet)
+            // Reachability is preserved (blocking is tracked in PrioritySet)
             let record = directory.peers.get(&pk_1).unwrap();
             assert_eq!(
-                record.ingress(),
-                Some(Ingress::Socket(addr_1)),
-                "Record still has address (blocking is at Directory level)"
+                record.advertisement(),
+                Some(advertisement(addr_1)),
+                "Record still has reachability (blocking is at Directory level)"
             );
 
-            // Update the address while blocked
+            // Update the reachability while blocked
             directory.track(
                 1,
-                primary([(pk_1.clone(), addr(addr_2))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_2))].try_into().unwrap()),
             );
             assert!(
                 directory.blocked.contains(&pk_1),
                 "Blocked peer should remain blocked after update"
             );
-            // Address is updated
+            // Reachability is updated
             let record = directory.peers.get(&pk_1).unwrap();
             assert_eq!(
-                record.ingress(),
-                Some(Ingress::Socket(addr_2)),
-                "Record has updated address"
+                record.advertisement(),
+                Some(advertisement(addr_2)),
+                "Record has updated reachability"
             );
 
             // Advance time past block duration and unblock
             context.sleep(block_duration + Duration::from_secs(1)).await;
             directory.unblock_expired();
 
-            // Verify the peer is unblocked with the UPDATED address
+            // Verify the peer is unblocked with the updated reachability.
             assert!(
                 !directory.blocked.contains(&pk_1),
                 "Peer should be unblocked after expiry"
             );
             let record = directory.peers.get(&pk_1).unwrap();
             assert_eq!(
-                record.ingress(),
-                Some(Ingress::Socket(addr_2)),
-                "Unblocked peer should have the updated address"
+                record.advertisement(),
+                Some(advertisement(addr_2)),
+                "Unblocked peer should have the updated reachability"
             );
         });
     }
 
     #[test]
-    fn test_asymmetric_addresses() {
+    fn test_multiple_endpoint_advertisement() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
-            max_sets: NZUsize!(3),
-            peer_connection_cooldown: Duration::from_millis(100),
-            block_duration: Duration::from_secs(100),
-        };
-
-        // Create asymmetric address where ingress differs from egress
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
-        let ingress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-        let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
-        let asymmetric_addr = Address::Asymmetric {
-            ingress: Ingress::Socket(ingress_socket),
-            egress: egress_socket,
-        };
-
-        // Create another peer with DNS-based ingress
-        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
-        let egress_socket_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 9090);
-        let dns_addr = Address::Asymmetric {
-            ingress: Ingress::Dns {
-                host: hostname!("node.example.com"),
-                port: 8080,
-            },
-            egress: egress_socket_2,
-        };
-
-        runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser"));
-            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
-
-            // Add set with asymmetric addresses
-            let kill_peers = directory
-                .track(
-                    0,
-                    primary(
-                        [
-                            (pk_1.clone(), asymmetric_addr.clone()),
-                            (pk_2.clone(), dns_addr.clone()),
-                        ]
-                        .try_into()
-                        .unwrap(),
-                    ),
-                )
-                .unwrap();
-            assert!(kill_peers.is_empty());
-
-            // Verify peer 1 has correct ingress and egress
-            let record_1 = directory.peers.get(&pk_1).unwrap();
-            assert_eq!(
-                record_1.ingress(),
-                Some(Ingress::Socket(ingress_socket)),
-                "Ingress should match the asymmetric address's ingress"
-            );
-            assert_eq!(
-                record_1.egress_ip(),
-                Some(egress_socket.ip()),
-                "Egress IP should be from the egress socket"
-            );
-
-            // Verify peer 2 has DNS ingress and correct egress
-            let record_2 = directory.peers.get(&pk_2).unwrap();
-            assert_eq!(
-                record_2.ingress(),
-                Some(Ingress::Dns {
-                    host: hostname!("node.example.com"),
-                    port: 8080
-                }),
-                "Ingress should be DNS address"
-            );
-            assert_eq!(
-                record_2.egress_ip(),
-                Some(egress_socket_2.ip()),
-                "Egress IP should be from the egress socket"
-            );
-
-            // Verify listenable() returns egress IPs for IP filtering
-            let listenable = directory.listenable();
-            assert!(
-                listenable.contains(&egress_socket.ip()),
-                "Listenable should contain peer 1's egress IP"
-            );
-            assert!(
-                listenable.contains(&egress_socket_2.ip()),
-                "Listenable should contain peer 2's egress IP"
-            );
-            assert!(
-                !listenable.contains(&ingress_socket.ip()),
-                "Listenable should NOT contain peer 1's ingress IP"
-            );
-        });
-    }
-
-    #[test]
-    fn test_dns_addresses_registered_but_not_dialable_when_disabled() {
-        let runtime = deterministic::Runner::default();
-        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-
-        // DNS is disabled
+        let preferred = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        let fallback = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
+        let advertisement =
+            Advertisement::new(vec![Endpoint(preferred), Endpoint(fallback)]).unwrap();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: false,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
-        };
-
-        // Create peers with different address types
-        let pk_socket = ed25519::PrivateKey::from_seed(1).public_key();
-        let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-        let socket_peer_addr = Address::Symmetric(socket_addr);
-
-        let pk_dns = ed25519::PrivateKey::from_seed(2).public_key();
-        let egress_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
-        let dns_peer_addr = Address::Asymmetric {
-            ingress: Ingress::Dns {
-                host: hostname!("node.example.com"),
-                port: 8080,
-            },
-            egress: egress_socket,
         };
 
         runtime.start(|context| async move {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            // Add set with both socket and DNS addresses
             let kill_peers = directory
                 .track(
                     0,
                     primary(
-                        [
-                            (pk_socket.clone(), socket_peer_addr.clone()),
-                            (pk_dns.clone(), dns_peer_addr.clone()),
-                        ]
-                        .try_into()
-                        .unwrap(),
+                        [(pk_1.clone(), Reachability::Dialable(advertisement.clone()))]
+                            .try_into()
+                            .unwrap(),
                     ),
                 )
                 .unwrap();
             assert!(kill_peers.is_empty());
-
-            // Both peers should be in the peer set (for consistency)
-            assert!(
-                directory.peers.contains_key(&pk_socket),
-                "Socket peer should be in the peer set"
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement.clone())
             );
-            assert!(
-                directory.peers.contains_key(&pk_dns),
-                "DNS peer should be in the peer set for consistency"
-            );
-
-            // Only socket peer should be dialable (DNS ingress invalid when disabled)
-            let dialable = directory.dialable();
-            assert_eq!(dialable.peers.len(), 1);
-            assert_eq!(dialable.peers[0], pk_socket);
+            assert_eq!(directory.dial(&pk_1).unwrap().1, advertisement);
         });
     }
 
     #[test]
-    fn test_private_egress_ip_in_peer_set_but_not_dialable_or_tracked() {
+    fn test_outbound_only_peer_is_tracked_but_not_dialable() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-
-        // Private IPs are NOT allowed
+        let dialable_pk = ed25519::PrivateKey::from_seed(1).public_key();
+        let outbound_only_pk = ed25519::PrivateKey::from_seed(2).public_key();
+        let dialable_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
         let config = super::Config {
-            allow_private_ips: false,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
-
-        // Create peer with public egress IP
-        let pk_public = ed25519::PrivateKey::from_seed(1).public_key();
-        let public_addr =
-            Address::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080));
-
-        // Create peer with private egress IP
-        let pk_private = ed25519::PrivateKey::from_seed(2).public_key();
-        let private_addr = Address::Symmetric(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            8080,
-        ));
 
         runtime.start(|context| async move {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
-
-            // Add set with both public and private egress IPs
-            let kill_peers = directory
+            directory
                 .track(
                     0,
                     primary(
                         [
-                            (pk_public.clone(), public_addr.clone()),
-                            (pk_private.clone(), private_addr.clone()),
+                            (dialable_pk.clone(), dialable(dialable_addr)),
+                            (outbound_only_pk.clone(), Reachability::OutboundOnly),
                         ]
                         .try_into()
                         .unwrap(),
                     ),
                 )
                 .unwrap();
-            assert!(kill_peers.is_empty());
 
-            // Both peers should be in the peer set (for consistency)
-            assert!(
-                directory.peers.contains_key(&pk_public),
-                "Public peer should be in the peer set"
-            );
-            assert!(
-                directory.peers.contains_key(&pk_private),
-                "Private peer should be in the peer set for consistency"
-            );
-
-            // Only public peer should be dialable (private ingress IP not allowed)
-            let dialable = directory.dialable();
-            assert_eq!(dialable.peers.len(), 1);
-            assert_eq!(dialable.peers[0], pk_public);
-
-            // Verify listenable() only returns public IP (private IP excluded from filter)
-            let listenable = directory.listenable();
-            assert!(listenable.contains(&Ipv4Addr::new(8, 8, 8, 8).into()));
-            assert!(!listenable.contains(&Ipv4Addr::new(10, 0, 0, 1).into()));
-        });
-    }
-
-    #[test]
-    fn test_listenable_ip_collision_eligible_wins() {
-        let runtime = deterministic::Runner::default();
-        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
-            max_sets: NZUsize!(3),
-            peer_connection_cooldown: Duration::from_millis(100),
-            block_duration: Duration::from_secs(100),
-        };
-
-        // Two peers with the same egress IP (simulating NAT scenario)
-        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
-        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
-        let shared_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
-        let addr_1 = Address::Symmetric(SocketAddr::new(shared_ip, 8080));
-        let addr_2 = Address::Symmetric(SocketAddr::new(shared_ip, 8081));
-
-        runtime.start(|context| async move {
-            let mut directory = Directory::init(
-                context.child("directory"),
-                my_pk,
-                config,
-                new_releaser(context.child("releaser")),
-            );
-
-            // Add both peers with the same IP
-            directory.track(
-                0,
-                primary(
-                    [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
-                        .try_into()
-                        .unwrap(),
-                ),
-            );
-
-            // Both peers eligible: IP should be in listenable set
-            let listenable = directory.listenable();
-            assert!(
-                listenable.contains(&shared_ip),
-                "IP should be listenable when both peers are eligible"
-            );
-
-            // Block one peer
-            directory.block(&pk_1);
-
-            // One eligible, one blocked: IP should still be listenable
-            let listenable = directory.listenable();
-            assert!(
-                listenable.contains(&shared_ip),
-                "IP should be listenable when at least one peer is eligible"
-            );
-
-            // Block the other peer
-            directory.block(&pk_2);
-
-            // Both blocked: IP should NOT be in listenable set
-            let listenable = directory.listenable();
-            assert!(
-                !listenable.contains(&shared_ip),
-                "IP should not be listenable when all peers are blocked"
-            );
+            assert!(directory.eligible(&outbound_only_pk));
+            assert!(directory.acceptable(&outbound_only_pk));
+            assert_eq!(directory.dialable().peers, vec![dialable_pk]);
+            assert!(directory.dial(&outbound_only_pk).is_none());
         });
     }
 
@@ -1677,9 +1495,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1698,17 +1513,11 @@ mod tests {
 
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             // Block the peer
             directory.block(&pk_1);
-
-            // Verify peer is blocked and not listenable
-            assert!(
-                !directory.listenable().contains(&addr_1.ip()),
-                "Blocked peer should not be listenable"
-            );
 
             // Verify peer is blocked
             assert_eq!(directory.blocked(), 1, "Should have one blocked peer");
@@ -1730,12 +1539,6 @@ mod tests {
 
             // Now unblock_expired should unblock the peer
             assert!(directory.unblock_expired(), "Should have unblocked a peer");
-
-            // Verify peer is now listenable
-            assert!(
-                directory.listenable().contains(&addr_1.ip()),
-                "Unblocked peer should be listenable"
-            );
 
             // Verify no more blocked peers
             assert_eq!(directory.blocked(), 0, "No more blocked peers");
@@ -1762,9 +1565,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(1), // Only keep 1 set so we can evict peers
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1792,7 +1592,7 @@ mod tests {
             // Add pk_1 and block it
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
             directory.block(&pk_1);
             assert!(directory.blocked.contains(&pk_1));
@@ -1805,7 +1605,7 @@ mod tests {
             // The blocked metric should remain since the block persists
             directory.track(
                 1,
-                primary([(pk_2.clone(), addr(addr_2))].try_into().unwrap()),
+                primary([(pk_2.clone(), dialable(addr_2))].try_into().unwrap()),
             );
             assert!(
                 !directory.peers.contains_key(&pk_1),
@@ -1819,7 +1619,7 @@ mod tests {
             // Re-add pk_1 - should still be blocked because block persists
             directory.track(
                 2,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
             assert!(
                 directory.blocked.contains(&pk_1),
@@ -1852,9 +1652,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1880,9 +1677,9 @@ mod tests {
                 0,
                 primary(
                     [
-                        (pk_1.clone(), addr(addr_1)),
-                        (pk_2.clone(), addr(addr_2)),
-                        (pk_3.clone(), addr(addr_3)),
+                        (pk_1.clone(), dialable(addr_1)),
+                        (pk_2.clone(), dialable(addr_2)),
+                        (pk_3.clone(), dialable(addr_3)),
                     ]
                     .try_into()
                     .unwrap(),
@@ -1919,9 +1716,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1963,9 +1757,6 @@ mod tests {
         let unknown_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9999);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -2001,7 +1792,7 @@ mod tests {
             directory.track(
                 0,
                 primary(
-                    [(unknown_pk.clone(), addr(unknown_addr))]
+                    [(unknown_pk.clone(), dialable(unknown_addr))]
                         .try_into()
                         .unwrap(),
                 ),
@@ -2052,9 +1843,6 @@ mod tests {
         let registered_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5050);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -2072,7 +1860,7 @@ mod tests {
             directory.track(
                 0,
                 primary(
-                    [(registered_pk.clone(), addr(registered_addr))]
+                    [(registered_pk.clone(), dialable(registered_addr))]
                         .try_into()
                         .unwrap(),
                 ),
@@ -2130,9 +1918,6 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -2149,7 +1934,7 @@ mod tests {
             // Add peer to a set
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             // Peer should be dialable before blocking
@@ -2187,9 +1972,6 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
         let cooldown = Duration::from_secs(1);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
@@ -2204,7 +1986,7 @@ mod tests {
             );
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             // First reservation succeeds.
@@ -2227,10 +2009,10 @@ mod tests {
             // After the jitter window (up to 2x interval), peer becomes dialable again.
             context.sleep(cooldown * 2).await;
             assert!(directory.dialable().peers.contains(&pk_1));
-            let (_reservation, ingress) = directory
+            let (_reservation, dial_advertisement) = directory
                 .dial(&pk_1)
                 .expect("should succeed after interval");
-            assert_eq!(ingress, Ingress::Socket(addr_1));
+            assert_eq!(dial_advertisement, advertisement(addr_1));
         });
     }
 
@@ -2242,9 +2024,6 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
         let cooldown = Duration::from_secs(1);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
@@ -2259,7 +2038,7 @@ mod tests {
             );
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             // Reserve and release.
@@ -2284,9 +2063,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let cooldown = Duration::from_millis(200);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
@@ -2314,9 +2090,6 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
         let cooldown = Duration::from_millis(200);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(3600),
@@ -2331,7 +2104,7 @@ mod tests {
             );
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             // Block the only peer. No peers are immediately dialable, but
@@ -2355,9 +2128,6 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
         let block_duration = Duration::from_secs(1);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
@@ -2372,7 +2142,7 @@ mod tests {
             );
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             directory.block(&pk_1);
@@ -2407,9 +2177,6 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
         let block_duration = Duration::from_secs(1);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
@@ -2424,7 +2191,7 @@ mod tests {
             );
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             directory.block(&pk_1);
@@ -2454,9 +2221,6 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: true, // Bypass IP check to simplify test
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -2473,12 +2237,12 @@ mod tests {
             // Add peer to a set
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             // Peer should be acceptable before blocking
             assert!(
-                directory.acceptable(&pk_1, addr_1.ip()),
+                directory.acceptable(&pk_1),
                 "Peer should be acceptable before blocking"
             );
 
@@ -2487,7 +2251,7 @@ mod tests {
 
             // Peer should NOT be acceptable while blocked
             assert!(
-                !directory.acceptable(&pk_1, addr_1.ip()),
+                !directory.acceptable(&pk_1),
                 "Blocked peer should not be acceptable"
             );
 
@@ -2497,65 +2261,8 @@ mod tests {
 
             // Peer should be acceptable again after unblock
             assert!(
-                directory.acceptable(&pk_1, addr_1.ip()),
+                directory.acceptable(&pk_1),
                 "Peer should be acceptable after unblock"
-            );
-        });
-    }
-
-    #[test]
-    fn test_blocked_peer_not_listenable() {
-        let runtime = deterministic::Runner::default();
-        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
-        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let block_duration = Duration::from_secs(100);
-        let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
-            max_sets: NZUsize!(3),
-            peer_connection_cooldown: Duration::from_millis(100),
-            block_duration,
-        };
-
-        runtime.start(|context| async move {
-            let mut directory = Directory::init(
-                context.child("directory"),
-                my_pk,
-                config,
-                new_releaser(context.child("releaser")),
-            );
-
-            // Add peer to a set
-            directory.track(
-                0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
-            );
-
-            // Peer's IP should be listenable before blocking
-            assert!(
-                directory.listenable().contains(&addr_1.ip()),
-                "Peer's IP should be listenable before blocking"
-            );
-
-            // Block the peer
-            directory.block(&pk_1);
-
-            // Peer's IP should NOT be listenable while blocked
-            assert!(
-                !directory.listenable().contains(&addr_1.ip()),
-                "Blocked peer's IP should not be listenable"
-            );
-
-            // Advance time and unblock
-            context.sleep(block_duration + Duration::from_secs(1)).await;
-            directory.unblock_expired();
-
-            // Peer's IP should be listenable again after unblock
-            assert!(
-                directory.listenable().contains(&addr_1.ip()),
-                "Peer's IP should be listenable after unblock"
             );
         });
     }
@@ -2568,9 +2275,6 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -2587,7 +2291,7 @@ mod tests {
             // Add peer to a set
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             // Peer should be eligible before blocking
@@ -2622,9 +2326,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -2640,19 +2341,19 @@ mod tests {
 
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
             assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(addr_1))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(addr_1))
             );
 
-            let success = directory.overwrite(&pk_1, addr(addr_2));
+            let success = directory.overwrite(&pk_1, dialable(addr_2));
             assert!(success);
             assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(addr_2))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(addr_2))
             );
         });
     }
@@ -2662,9 +2363,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -2677,7 +2375,7 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let success = directory.overwrite(&pk_1, addr(addr_1));
+            let success = directory.overwrite(&pk_1, dialable(addr_1));
             assert!(!success);
         });
     }
@@ -2687,9 +2385,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(1),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -2707,14 +2402,14 @@ mod tests {
 
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
             directory.track(
                 1,
-                primary([(pk_2.clone(), addr(addr_2))].try_into().unwrap()),
+                primary([(pk_2.clone(), dialable(addr_2))].try_into().unwrap()),
             );
 
-            let success = directory.overwrite(&pk_1, addr(addr_3));
+            let success = directory.overwrite(&pk_1, dialable(addr_3));
             assert!(!success);
         });
     }
@@ -2725,9 +2420,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -2747,23 +2439,23 @@ mod tests {
 
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
             directory.block(&pk_1);
 
-            let success = directory.overwrite(&pk_1, addr(addr_2));
+            let success = directory.overwrite(&pk_1, dialable(addr_2));
             assert!(success);
             assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(addr_2))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(addr_2))
             );
 
             context.sleep(block_duration + Duration::from_secs(1)).await;
             directory.unblock_expired();
 
             assert_eq!(
-                directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(addr_2))
+                directory.peers.get(&pk_1).unwrap().advertisement(),
+                Some(advertisement(addr_2))
             );
             assert!(directory.dialable().peers.contains(&pk_1));
         });
@@ -2774,9 +2466,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -2788,19 +2477,16 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
-            let success = directory.overwrite(&my_pk, addr(addr_1));
+            let success = directory.overwrite(&my_pk, dialable(addr_1));
             assert!(!success);
         });
     }
 
     #[test]
-    fn test_overwrite_same_address() {
+    fn test_overwrite_same_reachability() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
             max_sets: NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -2815,19 +2501,19 @@ mod tests {
 
             directory.track(
                 0,
-                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                primary([(pk_1.clone(), dialable(addr_1))].try_into().unwrap()),
             );
 
-            // First update with different address should succeed
+            // First update with different reachability should succeed
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
-            assert!(directory.overwrite(&pk_1, addr(addr_2)));
+            assert!(directory.overwrite(&pk_1, dialable(addr_2)));
 
-            // Update with same address should return false (no change)
-            assert!(!directory.overwrite(&pk_1, addr(addr_2)));
+            // Update with same reachability should return false (no change)
+            assert!(!directory.overwrite(&pk_1, dialable(addr_2)));
 
-            // Update with different address should succeed again
+            // Update with different reachability should succeed again
             let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
-            assert!(directory.overwrite(&pk_1, addr(addr_3)));
+            assert!(directory.overwrite(&pk_1, dialable(addr_3)));
         });
     }
 }

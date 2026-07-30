@@ -34,7 +34,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Clock, IoBuf, Runner, Scheduler as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
 use futures::future::join_all;

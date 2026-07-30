@@ -1,4 +1,7 @@
-use crate::authenticated::{Mailbox, lookup::actors::tracker::Reservation};
+use crate::{
+    PeerEndpoint,
+    authenticated::{Mailbox, lookup::actors::tracker::Reservation},
+};
 use commonware_actor::{Feedback, Unreliable, mailbox::UnreliablePolicy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
@@ -6,7 +9,7 @@ use commonware_stream::encrypted::{Receiver, Sender};
 use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
-pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
+pub enum Message<Si: Sink, St: Stream, P: PublicKey, E: PeerEndpoint = crate::Ingress> {
     /// Notify the spawner to create a new task for the given peer.
     Spawn {
         /// The peer's public key.
@@ -14,11 +17,13 @@ pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
         /// The connection to the peer.
         connection: (Sender<Si>, Receiver<St>),
         /// The reservation for the peer.
-        reservation: Reservation<P>,
+        reservation: Reservation<P, E>,
     },
 }
 
-impl<Si: Sink, St: Stream, P: PublicKey> UnreliablePolicy for Message<Si, St, P> {
+impl<Si: Sink, St: Stream, P: PublicKey, E: PeerEndpoint> UnreliablePolicy
+    for Message<Si, St, P, E>
+{
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -29,7 +34,7 @@ impl<Si: Sink, St: Stream, P: PublicKey> UnreliablePolicy for Message<Si, St, P>
     }
 }
 
-impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
+impl<Si: Sink, St: Stream, P: PublicKey, E: PeerEndpoint> Mailbox<Message<Si, St, P, E>> {
     /// Send a message to the actor to spawn a new task for the given peer.
     ///
     /// This may be rejected when the spawner is backlogged, or return closed after shutdown, which
@@ -37,7 +42,7 @@ impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
     pub fn spawn(
         &mut self,
         connection: (Sender<Si>, Receiver<St>),
-        reservation: Reservation<P>,
+        reservation: Reservation<P, E>,
     ) -> Unreliable<Feedback> {
         self.0.enqueue(Message::Spawn {
             peer: reservation.metadata().public_key().clone(),
@@ -56,7 +61,7 @@ mod tests {
         Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
+    use commonware_runtime::{Runner as _, Scheduler as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::encrypted::{
         Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
         listen,

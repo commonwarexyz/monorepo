@@ -1182,7 +1182,7 @@ impl<B: Blob> Writer<B> {
 mod tests {
     use super::*;
     use crate::{
-        Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
+        Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Scheduler as _,
         Storage as _, Supervisor as _,
         buffer::{paged::CHECKSUM_SLOT_LEN_SIZE, tests::SyncTrackingBlob},
         deterministic,

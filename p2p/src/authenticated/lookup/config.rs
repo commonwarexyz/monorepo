@@ -1,5 +1,8 @@
 use commonware_cryptography::Signer;
+use commonware_macros::stability;
 use commonware_runtime::Quota;
+#[stability(ALPHA)]
+use commonware_stream::encrypted;
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -111,6 +114,90 @@ pub struct Config<C: Signer> {
 
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
+}
+
+/// Configuration for an authenticated network using explicitly attached connections.
+#[stability(ALPHA)]
+pub struct AttachmentConfig<C: Signer, A> {
+    /// Configuration for encrypted streams.
+    ///
+    /// `max_message_size` includes authenticated-network framing overhead. The maximum application
+    /// message size is derived from it.
+    pub stream: encrypted::Config<C>,
+
+    /// Application policy for admitting inbound connections.
+    pub admission: A,
+
+    /// Message backlog allowed for internal actors.
+    pub mailbox_size: NonZeroUsize,
+
+    /// Maximum number of connection handshakes in progress.
+    pub max_concurrent_handshakes: NonZeroU32,
+
+    /// Maximum number of queued outbound messages combined into one write.
+    pub send_batch_size: NonZeroUsize,
+
+    /// Frequency at which connected peers are pinged.
+    pub ping_frequency: Duration,
+
+    /// Number of peer sets retained by the tracker.
+    pub tracked_peer_sets: NonZeroUsize,
+
+    /// Minimum time between reservations for a single peer.
+    pub peer_connection_cooldown: Duration,
+
+    /// Duration after which a blocked peer may reconnect.
+    pub block_duration: Duration,
+}
+
+/// Transport-neutral configuration for endpoint-generic lookup networks.
+#[stability(ALPHA)]
+#[derive(Clone)]
+pub struct GenericConfig<C: Signer> {
+    /// Configuration for authenticated streams.
+    pub stream: encrypted::Config<C>,
+    /// Message backlog allowed for internal actors.
+    pub mailbox_size: NonZeroUsize,
+    /// Maximum queued messages combined into one write.
+    pub send_batch_size: NonZeroUsize,
+    /// Maximum duration for trying all endpoints advertised by one peer.
+    pub dial_timeout: Duration,
+    /// Minimum time between connection reservations for one peer.
+    pub peer_connection_cooldown: Duration,
+    /// Frequency at which one peer is selected for dialing.
+    pub dial_frequency: Duration,
+    /// Frequency at which connected peers are pinged.
+    pub ping_frequency: Duration,
+    /// Number of peer sets retained by the tracker.
+    pub tracked_peer_sets: NonZeroUsize,
+    /// Duration after which a blocked peer may reconnect.
+    pub block_duration: Duration,
+}
+
+#[stability(ALPHA)]
+impl<C: Signer> From<Config<C>> for GenericConfig<C> {
+    fn from(cfg: Config<C>) -> Self {
+        Self {
+            stream: encrypted::Config {
+                signing_key: cfg.crypto,
+                namespace: commonware_utils::union(&cfg.namespace, b"_STREAM"),
+                max_message_size: cfg
+                    .max_message_size
+                    .saturating_add(crate::authenticated::data::MAX_PAYLOAD_DATA_OVERHEAD),
+                synchrony_bound: cfg.synchrony_bound,
+                max_handshake_age: cfg.max_handshake_age,
+                handshake_timeout: cfg.handshake_timeout,
+            },
+            mailbox_size: cfg.mailbox_size,
+            send_batch_size: cfg.send_batch_size,
+            dial_timeout: cfg.dial_timeout,
+            peer_connection_cooldown: cfg.peer_connection_cooldown,
+            dial_frequency: cfg.dial_frequency,
+            ping_frequency: cfg.ping_frequency,
+            tracked_peer_sets: cfg.tracked_peer_sets,
+            block_duration: cfg.block_duration,
+        }
+    }
 }
 
 impl<C: Signer> Config<C> {

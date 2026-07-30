@@ -5,14 +5,14 @@
 
 use crate::Fetch;
 use commonware_actor::mailbox::{Overflow, Policy};
-use commonware_utils::vec::NonEmptyVec;
+use commonware_utils::{PlatformSend, vec::NonEmptyVec};
 use std::collections::VecDeque;
 
 /// Predicate used to retain subscribers for resolver keys.
 pub type Predicate<K, S> = Box<dyn Fn(&K, &S) -> bool + Send>;
 
 /// Metadata carried by a coalesced fetch.
-pub(crate) trait Metadata {
+pub(crate) trait Metadata: PlatformSend {
     /// Merge metadata from a duplicate fetch into the retained fetch.
     fn merge(&mut self, incoming: Self);
 }
@@ -21,7 +21,7 @@ impl Metadata for () {
     fn merge(&mut self, _incoming: Self) {}
 }
 
-impl<T: Eq> Metadata for Option<NonEmptyVec<T>> {
+impl<T: Eq + PlatformSend> Metadata for Option<NonEmptyVec<T>> {
     fn merge(&mut self, incoming: Self) {
         // `None` means unrestricted. It dominates targeted metadata because a
         // non-targeted fetch should clear existing target restrictions.
@@ -95,7 +95,12 @@ impl<K, S, M> Default for Pending<K, S, M> {
     }
 }
 
-impl<K, S, M> Overflow<Message<K, S, M>> for Pending<K, S, M> {
+impl<K, S, M> Overflow<Message<K, S, M>> for Pending<K, S, M>
+where
+    K: PlatformSend,
+    S: PlatformSend,
+    M: PlatformSend,
+{
     fn is_empty(&self) -> bool {
         self.modifications.is_empty() && self.fetches.is_empty()
     }
@@ -164,8 +169,8 @@ fn merge_subscribers<S: Eq>(
 
 impl<K, S, M> Policy for Message<K, S, M>
 where
-    K: Clone + Eq,
-    S: Eq,
+    K: Clone + Eq + PlatformSend,
+    S: Eq + PlatformSend,
     M: Metadata,
 {
     type Overflow = Pending<K, S, M>;

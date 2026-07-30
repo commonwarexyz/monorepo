@@ -195,7 +195,7 @@ pub use commonware_macros_impl::select;
 /// ```rust,ignore
 /// use commonware_macros::select_loop;
 ///
-/// async fn run(context: impl commonware_runtime::Spawner, mut receiver: Receiver<Message>) {
+/// async fn run(context: impl commonware_runtime::Scheduler, mut receiver: Receiver<Message>) {
 ///     let mut counter = 0;
 ///     commonware_macros::select_loop! {
 ///         context,

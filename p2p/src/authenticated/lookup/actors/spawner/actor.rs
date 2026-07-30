@@ -1,17 +1,20 @@
 use super::{Config, ingress::Message};
-use crate::authenticated::{
-    Mailbox,
-    lookup::{
-        actors::{peer, tracker},
-        metrics,
+use crate::{
+    PeerEndpoint,
+    authenticated::{
+        Mailbox,
+        lookup::{
+            actors::{peer, tracker},
+            metrics,
+        },
+        router,
     },
-    router,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Scheduler, Sink, Stream, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use rand_core::CryptoRng;
@@ -19,10 +22,11 @@ use std::num::NonZeroUsize;
 use tracing::debug;
 
 pub struct Actor<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
+    E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
     Si: Sink,
     St: Stream,
     C: PublicKey,
+    P: PeerEndpoint,
 > {
     context: ContextCell<E>,
 
@@ -30,17 +34,22 @@ pub struct Actor<
     send_batch_size: NonZeroUsize,
     ping_frequency: std::time::Duration,
 
-    receiver: mailbox::UnreliableReceiver<Message<Si, St, C>>,
+    receiver: mailbox::UnreliableReceiver<Message<Si, St, C, P>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, Si: Sink, St: Stream, C: PublicKey>
-    Actor<E, Si, St, C>
+impl<
+    E: Scheduler + BufferPooler + Clock + CryptoRng + Metrics,
+    Si: Sink,
+    St: Stream,
+    C: PublicKey,
+    P: PeerEndpoint,
+> Actor<E, Si, St, C, P>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C, P>>) {
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
         let rate_limited = context.family("messages_rate_limited", "messages rate limited");
@@ -61,11 +70,15 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, Si: Sink, St: Stre
         )
     }
 
-    pub fn start(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) -> Handle<()> {
+    pub fn start(
+        mut self,
+        tracker: tracker::Mailbox<C, P>,
+        router: router::Mailbox<C>,
+    ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, router))
     }
 
-    async fn run(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) {
+    async fn run(mut self, tracker: tracker::Mailbox<C, P>, router: router::Mailbox<C>) {
         select_loop! {
             self.context,
             on_stopped => {

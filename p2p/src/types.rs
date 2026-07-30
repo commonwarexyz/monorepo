@@ -1,7 +1,10 @@
 //! Shared address types for p2p networking.
 
+#[stability(ALPHA)]
+pub use crate::reachability::{Advertisement, PeerEndpoint, Reachability};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Resolver};
+use commonware_macros::stability;
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Resolver, TcpEndpoint};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
 
@@ -12,7 +15,7 @@ const ADDRESS_SYMMETRIC_PREFIX: u8 = 0;
 const ADDRESS_ASYMMETRIC_PREFIX: u8 = 1;
 
 /// What we dial to connect to a peer.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Ingress {
     /// IP-based ingress address.
     Socket(SocketAddr),
@@ -24,6 +27,8 @@ pub enum Ingress {
         port: u16,
     },
 }
+
+impl crate::reachability::PeerEndpoint for Ingress {}
 
 impl Ingress {
     /// Returns the port number for this ingress address.
@@ -47,47 +52,60 @@ impl Ingress {
     /// - `Socket` addresses must have a global IP (or `allow_private_ips` must be true).
     /// - `Dns` addresses are allowed only if `allow_dns` is `true`.
     ///
-    /// Note: For `Dns` addresses, private IP checks are performed after resolution in
-    /// [`resolve_filtered`](Self::resolve_filtered).
+    /// For `Dns` addresses, the TCP transport checks resolved addresses before connecting.
     pub fn is_valid(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         match self {
             Self::Socket(addr) => allow_private_ips || IpAddrExt::is_global(&addr.ip()),
             Self::Dns { .. } => allow_dns,
         }
     }
+}
 
-    /// Resolve this ingress address to socket addresses.
-    ///
-    /// For `Socket` variants, returns a single-element iterator.
-    /// For `Dns` variants, performs DNS resolution and returns all resolved addresses.
+impl Ingress {
+    /// Resolves this ingress address to socket addresses.
     pub async fn resolve(
         &self,
         resolver: &impl Resolver,
     ) -> Result<impl Iterator<Item = SocketAddr>, RuntimeError> {
         match self {
-            Self::Socket(addr) => Ok(vec![*addr].into_iter()),
+            Self::Socket(address) => Ok(vec![*address].into_iter()),
             Self::Dns { host, port } => {
-                let ips = resolver.resolve(host.as_str()).await?;
-                if ips.is_empty() {
+                let addresses = resolver.resolve(host.as_str()).await?;
+                if addresses.is_empty() {
                     return Err(RuntimeError::ResolveFailed(host.to_string()));
                 }
-                Ok(ips
+                Ok(addresses
                     .into_iter()
-                    .map(move |ip| SocketAddr::new(ip, *port))
+                    .map(|ip| SocketAddr::new(ip, *port))
                     .collect::<Vec<_>>()
                     .into_iter())
             }
         }
     }
 
-    /// [`resolve`](Self::resolve) and filter by private IP policy.
+    /// Resolves this ingress and filters addresses according to the private-IP policy.
     pub async fn resolve_filtered(
         &self,
         resolver: &impl Resolver,
         allow_private_ips: bool,
     ) -> Option<impl Iterator<Item = SocketAddr>> {
-        let addrs = self.resolve(resolver).await.ok()?;
-        Some(addrs.filter(move |addr| allow_private_ips || IpAddrExt::is_global(&addr.ip())))
+        let addresses = self.resolve(resolver).await.ok()?;
+        Some(
+            addresses
+                .filter(move |address| allow_private_ips || IpAddrExt::is_global(&address.ip())),
+        )
+    }
+
+    /// Converts this advertised ingress into a TCP dial attempt.
+    pub(crate) fn tcp_endpoint(&self, allow_private_ips: bool) -> TcpEndpoint {
+        match self {
+            Self::Socket(address) => TcpEndpoint::Socket(*address),
+            Self::Dns { host, port } => TcpEndpoint::Dns {
+                host: host.to_string(),
+                port: *port,
+                allow_private_ips,
+            },
+        }
     }
 }
 
@@ -267,10 +285,212 @@ impl arbitrary::Arbitrary<'_> for Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
-    use commonware_runtime::IoBuf;
+    use commonware_codec::{DecodeExt, Encode, config::RangeCfg};
+    use commonware_runtime::{IoBuf, Runner as _, deterministic};
     use commonware_utils::hostname;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::{
+        net::{Ipv4Addr, Ipv6Addr},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct TestEndpoint(Vec<u8>);
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct IdentityOnlyEndpoint(u8);
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct RemainingEndpoint;
+
+    #[cfg(feature = "arbitrary")]
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct SingletonEndpoint;
+
+    static ENDPOINT_REMAINING: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    #[cfg(feature = "arbitrary")]
+    static SINGLETON_ENDPOINT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(feature = "arbitrary")]
+    const SINGLETON_ENDPOINT_CALL_LIMIT: usize = 32;
+
+    impl PeerEndpoint for IdentityOnlyEndpoint {}
+
+    impl PeerEndpoint for RemainingEndpoint {}
+
+    impl Read for RemainingEndpoint {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+            ENDPOINT_REMAINING.store(buf.remaining(), Ordering::Relaxed);
+            Ok(Self)
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    impl PeerEndpoint for SingletonEndpoint {}
+
+    #[cfg(feature = "arbitrary")]
+    impl arbitrary::Arbitrary<'_> for SingletonEndpoint {
+        fn arbitrary(_u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let calls = SINGLETON_ENDPOINT_CALLS.fetch_add(1, Ordering::Relaxed);
+            if calls >= SINGLETON_ENDPOINT_CALL_LIMIT {
+                return Err(arbitrary::Error::NotEnoughData);
+            }
+
+            Ok(Self)
+        }
+    }
+
+    impl Write for TestEndpoint {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl EncodeSize for TestEndpoint {
+        fn encode_size(&self) -> usize {
+            self.0.encode_size()
+        }
+    }
+
+    impl Read for TestEndpoint {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+            Vec::<u8>::read_cfg(buf, &(RangeCfg::new(..), ())).map(Self)
+        }
+    }
+
+    impl PeerEndpoint for TestEndpoint {}
+
+    fn assert_invalid_advertisement(endpoints: Vec<TestEndpoint>) {
+        assert!(Advertisement::new(endpoints.clone()).is_err());
+        assert!(Advertisement::<TestEndpoint>::decode(endpoints.encode()).is_err());
+    }
+
+    fn assert_invalid_encoded_advertisement(endpoints: Vec<TestEndpoint>) {
+        let advertisement = Advertisement::new(endpoints.clone()).unwrap();
+        assert!(advertisement.validate_encoded().is_err());
+        assert!(Advertisement::new_encoded(endpoints.clone()).is_err());
+        assert!(Advertisement::<TestEndpoint>::decode(endpoints.encode()).is_err());
+    }
+
+    #[test]
+    fn test_advertisement_does_not_require_endpoint_codec() {
+        let advertisement =
+            Advertisement::new(vec![IdentityOnlyEndpoint(1), IdentityOnlyEndpoint(2)]).unwrap();
+
+        assert_eq!(
+            advertisement.endpoints(),
+            &[IdentityOnlyEndpoint(1), IdentityOnlyEndpoint(2)]
+        );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn test_advertisement_arbitrary_rejects_insufficient_unique_endpoints() {
+        use arbitrary::Arbitrary;
+
+        SINGLETON_ENDPOINT_CALLS.store(0, Ordering::Relaxed);
+        // Select two endpoints, leaving no input for the endpoint generator to consume.
+        let mut input = arbitrary::Unstructured::new(&[1]);
+
+        let result = Advertisement::<SingletonEndpoint>::arbitrary(&mut input);
+
+        assert_eq!(result, Err(arbitrary::Error::IncorrectFormat));
+        assert!(SINGLETON_ENDPOINT_CALLS.load(Ordering::Relaxed) < SINGLETON_ENDPOINT_CALL_LIMIT);
+    }
+
+    #[test]
+    fn test_advertisement_roundtrip_preserves_preference() {
+        let preferred = Ingress::Socket(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080));
+        let fallback = Ingress::Dns {
+            host: hostname!("fallback.example.com"),
+            port: 443,
+        };
+        let advertisement = Advertisement::new(vec![preferred.clone(), fallback.clone()]).unwrap();
+
+        let decoded = Advertisement::<Ingress>::decode(advertisement.encode()).unwrap();
+        assert_eq!(decoded.endpoints(), &[preferred, fallback]);
+        assert_eq!(decoded, advertisement);
+    }
+
+    #[test]
+    fn test_advertisement_rejects_invalid_endpoints() {
+        assert_invalid_advertisement(Vec::new());
+        assert_invalid_advertisement(vec![TestEndpoint(vec![0]); 2]);
+        assert_invalid_advertisement(
+            (0..=Advertisement::<TestEndpoint>::MAX_ENDPOINTS)
+                .map(|value| TestEndpoint(vec![value as u8]))
+                .collect(),
+        );
+    }
+
+    #[test]
+    fn test_advertisement_rejects_oversized_encoded_endpoint() {
+        let endpoint = TestEndpoint(vec![0; Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE]);
+        assert!(endpoint.encode_size() > Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE);
+
+        assert_invalid_encoded_advertisement(vec![endpoint]);
+    }
+
+    #[test]
+    fn test_advertisement_limits_endpoint_decoder_input() {
+        let mut payload = 1usize.encode().to_vec();
+        payload.resize(
+            payload.len() + Advertisement::<RemainingEndpoint>::MAX_ENDPOINT_SIZE + 1,
+            0,
+        );
+
+        let _ = Advertisement::<RemainingEndpoint>::decode(payload.as_slice());
+
+        let remaining = ENDPOINT_REMAINING.load(Ordering::Relaxed);
+        assert!(
+            remaining <= Advertisement::<RemainingEndpoint>::MAX_ENDPOINT_SIZE,
+            "endpoint decoder saw {remaining} bytes, maximum is {}",
+            Advertisement::<RemainingEndpoint>::MAX_ENDPOINT_SIZE,
+        );
+    }
+
+    #[test]
+    fn test_advertisement_rejects_oversized_encoded_payload() {
+        let endpoints = (0..5)
+            .map(|value| {
+                let mut bytes = vec![0; 2_045];
+                bytes[0] = value;
+                TestEndpoint(bytes)
+            })
+            .collect::<Vec<_>>();
+        assert!(endpoints.iter().all(|endpoint| {
+            endpoint.encode_size() <= Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE
+        }));
+        assert!(endpoints.encode_size() > Advertisement::<TestEndpoint>::MAX_SIZE);
+
+        assert_invalid_encoded_advertisement(endpoints);
+    }
+
+    #[test]
+    fn test_reachability_roundtrip() {
+        let endpoint = Ingress::Socket(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080));
+        let cases = [
+            Reachability::Dialable(Advertisement::new(vec![endpoint]).unwrap()),
+            Reachability::OutboundOnly,
+        ];
+
+        for reachability in cases {
+            let decoded = Reachability::<Ingress>::decode(reachability.encode()).unwrap();
+            assert_eq!(decoded, reachability);
+        }
+    }
+
+    #[test]
+    fn test_reachability_rejects_invalid_prefix() {
+        assert!(matches!(
+            Reachability::<Ingress>::decode([2].as_slice()),
+            Err(CodecError::InvalidEnum(2))
+        ));
+    }
 
     #[test]
     fn test_ingress_socket_roundtrip() {
@@ -460,6 +680,32 @@ mod tests {
         assert!(dns.is_valid(true, true));
     }
 
+    #[test]
+    fn test_ingress_resolve_compatibility() {
+        deterministic::Runner::default().start(|context| async move {
+            let public = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+            let private = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            context.resolver_register("example.com", Some(vec![public, private]));
+            let ingress = Ingress::Dns {
+                host: hostname!("example.com"),
+                port: 443,
+            };
+
+            let resolved = ingress.resolve(&context).await.unwrap().collect::<Vec<_>>();
+            assert_eq!(
+                resolved,
+                vec![SocketAddr::new(public, 443), SocketAddr::new(private, 443)]
+            );
+
+            let filtered = ingress
+                .resolve_filtered(&context, false)
+                .await
+                .unwrap()
+                .collect::<Vec<_>>();
+            assert_eq!(filtered, vec![SocketAddr::new(public, 443)]);
+        });
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
@@ -468,6 +714,8 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Ingress>,
             CodecConformance<Address>,
+            CodecConformance<Advertisement<Ingress>>,
+            CodecConformance<Reachability<Ingress>>,
         }
     }
 }

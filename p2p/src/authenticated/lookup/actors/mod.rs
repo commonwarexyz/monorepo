@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod dialer;
 pub mod listener;
 pub mod peer;

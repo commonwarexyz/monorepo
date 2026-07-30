@@ -149,7 +149,7 @@ stability_scope!(BETA {
         pub(crate) const fn data_offset(self) -> u64 {
             match self {
                 Self::V0 => Header::PRELUDE_SIZE as u64,
-                Self::V1 => 4096,
+                Self::V1 => super::V1_BLOB_DATA_OFFSET,
             }
         }
 

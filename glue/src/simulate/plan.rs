@@ -15,7 +15,7 @@ use commonware_p2p::{
     Manager as _,
     simulated::{self, Link, Network},
 };
-use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, deterministic};
+use commonware_runtime::{Clock, Runner as _, Scheduler, Supervisor as _, deterministic};
 use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set};
 use rand::seq::IndexedRandom;
 use std::{
@@ -848,7 +848,7 @@ mod tests {
     use super::*;
     use commonware_consensus::types::{Epoch, Round, View};
     use commonware_cryptography::{Signer as _, ed25519};
-    use commonware_runtime::{Clock, Handle, Quota, Spawner};
+    use commonware_runtime::{Clock, Handle, Quota};
     use std::{
         future::Future,
         pin::Pin,
