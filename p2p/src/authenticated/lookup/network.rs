@@ -15,8 +15,8 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Acceptor, BufferPooler, Clock, Connection, ContextCell, Dialer, Handle, Metrics, Quota,
+    Spawner, TcpEndpoint, TcpOrigin, spawn_cell,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
@@ -27,7 +27,18 @@ use tracing::{debug, info};
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, C: Signer> {
+pub struct Network<
+    E: Spawner
+        + BufferPooler
+        + Clock
+        + CryptoRng
+        + Acceptor<Bind = std::net::SocketAddr>
+        + Dialer<Endpoint = TcpEndpoint, Connection = <E as Acceptor>::Connection>
+        + Metrics,
+    C: Signer,
+> where
+    <E as Acceptor>::Connection: Connection<Origin = TcpOrigin>,
+{
     context: ContextCell<E>,
     cfg: Config<C>,
 
@@ -39,8 +50,18 @@ pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Me
     listener: listener::Updates,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
-    Network<E, C>
+impl<
+    E: Spawner
+        + BufferPooler
+        + Clock
+        + CryptoRng
+        + Acceptor<Bind = std::net::SocketAddr>
+        + Dialer<Endpoint = TcpEndpoint, Connection = <E as Acceptor>::Connection>
+        + Metrics,
+    C: Signer,
+> Network<E, C>
+where
+    <E as Acceptor>::Connection: Connection<Origin = TcpOrigin>,
 {
     /// Create a new instance of an `authenticated` network.
     ///

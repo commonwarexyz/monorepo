@@ -5,8 +5,7 @@ use crate::{
         dialing::{DialStatus, Dialable, ReserveResult, earliest},
         lookup::actors::tracker::ingress::Releaser,
     },
-    types::Address,
-    utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
+    types::Address, utils::PeerSetsAtIndex as PeerSetsAtIndexBase,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::metrics::GaugeExt};
@@ -154,7 +153,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// tracked peer sets or had their address changed.
     ///
     /// Returns `None` if the index is invalid.
-    pub fn track(&mut self, index: u64, peers: AddressableTrackedPeers<C>) -> Option<Set<C>> {
+    pub fn track(
+        &mut self,
+        index: u64,
+        peers: AddressableTrackedPeers<C>,
+    ) -> Option<Set<C>> {
         // Check if peer set already exists
         if self.peer_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -307,7 +310,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C, source_ip: IpAddr) -> Option<Reservation<C>> {
+    pub fn listen(
+        &mut self,
+        peer: &C,
+        source_ip: IpAddr,
+    ) -> Option<Reservation<C>> {
         // Re-check the source IP when reserving: the handshake's earlier
         // acceptability check may be stale if the peer address changed.
         if !self.acceptable(peer, source_ip) {

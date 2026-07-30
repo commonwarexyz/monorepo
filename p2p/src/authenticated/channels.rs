@@ -9,6 +9,7 @@ use commonware_actor::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Metrics, Quota};
+use commonware_utils::PlatformSend;
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
@@ -50,7 +51,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: impl Into<IoBufs> + Send,
+        message: impl Into<IoBufs> + PlatformSend,
         priority: bool,
     ) -> Unreliable<Feedback> {
         let message = message.into();
@@ -100,7 +101,7 @@ impl<P: PublicKey, C: Clock> Sender<P, C> {
 impl<P, C> crate::LimitedSender for Sender<P, C>
 where
     P: PublicKey,
-    C: Clock + Send + 'static,
+    C: Clock + PlatformSend + 'static,
 {
     type PublicKey = P;
     type Checked<'a>

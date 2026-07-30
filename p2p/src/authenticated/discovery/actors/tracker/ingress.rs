@@ -14,7 +14,7 @@ use commonware_actor::{
     mailbox::{self, Policy},
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::{PlatformSend, channel::{mpsc, oneshot}};
 use std::collections::VecDeque;
 
 /// Messages that can be sent to the tracker actor.
@@ -301,7 +301,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 impl<C: PublicKey> crate::Manager for Oracle<C> {
     fn track<R>(&mut self, index: u64, peers: R) -> Feedback
     where
-        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+        R: Into<TrackedPeers<Self::PublicKey>> + PlatformSend,
     {
         self.sender.enqueue(Message::Register {
             index,

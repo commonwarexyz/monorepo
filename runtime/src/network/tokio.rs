@@ -1,9 +1,11 @@
-use crate::{BufferPool, Error, IoBufs};
+use crate::{
+    Acceptor, BufferPool, ConnectionInfo, Dialer, Error, IoBufs, TcpEndpoint, TcpOrigin,
+};
 use std::{convert::identity, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
-        TcpListener, TcpStream,
+        TcpListener as TokioTcpListener, TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     time::timeout,
@@ -143,18 +145,40 @@ impl crate::Stream for Stream {
     }
 }
 
-/// Implementation of [crate::Listener] using the [tokio] runtime.
+pub struct Connection {
+    sink: Sink,
+    stream: Stream,
+    origin: TcpOrigin,
+}
+
+impl crate::Connection for Connection {
+    type Sink = Sink;
+    type Stream = Stream;
+    type Origin = TcpOrigin;
+
+    fn split(self) -> (Self::Sink, Self::Stream, ConnectionInfo<Self::Origin>) {
+        (
+            self.sink,
+            self.stream,
+            ConnectionInfo {
+                origin: Some(self.origin),
+                transport: "tcp",
+            },
+        )
+    }
+}
+
+/// Implementation of [crate::Listener] using the Tokio runtime.
 pub struct Listener {
     cfg: Config,
-    listener: TcpListener,
+    listener: TokioTcpListener,
     pool: BufferPool,
 }
 
 impl crate::Listener for Listener {
-    type Sink = Sink;
-    type Stream = Stream;
+    type Connection = Connection;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+    async fn accept(&mut self) -> Result<Self::Connection, Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
 
@@ -174,22 +198,24 @@ impl crate::Listener for Listener {
 
         // Return the sink and stream
         let (stream, sink) = stream.into_split();
-        Ok((
-            addr,
-            Sink {
+        Ok(Connection {
+            origin: TcpOrigin { remote: addr },
+            sink: Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,
                 state: SinkState::Open,
             },
-            Stream {
+            stream: Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
                 pool: self.pool.clone(),
                 poisoned: false,
             },
-        ))
+        })
     }
+}
 
+impl crate::TcpListener for Listener {
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
         self.listener.local_addr()
     }
@@ -325,11 +351,13 @@ impl Network {
     }
 }
 
-impl crate::Network for Network {
+impl Acceptor for Network {
+    type Bind = SocketAddr;
+    type Connection = Connection;
     type Listener = Listener;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, crate::Error> {
-        TcpListener::bind(socket)
+    async fn bind(&self, socket: &SocketAddr) -> Result<Self::Listener, crate::Error> {
+        TokioTcpListener::bind(*socket)
             .await
             .map_err(|_| Error::BindFailed)
             .map(|listener| Listener {
@@ -339,10 +367,22 @@ impl crate::Network for Network {
             })
     }
 
-    async fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
+}
+
+impl Dialer for Network {
+    type Endpoint = TcpEndpoint;
+    type Connection = Connection;
+
+    async fn dial(&self, endpoint: &TcpEndpoint) -> Result<Self::Connection, crate::Error> {
+        let socket = match endpoint {
+            TcpEndpoint::Socket(socket) => *socket,
+            TcpEndpoint::Dns { host, port } => tokio::net::lookup_host((host.as_str(), *port))
+                .await
+                .map_err(|error| Error::ResolveFailed(error.to_string()))?
+                .next()
+                .ok_or_else(|| Error::ResolveFailed("no addresses returned".into()))?,
+        };
+
         // Create a new TCP stream
         let stream = timeout(self.cfg.connect_timeout, TcpStream::connect(socket))
             .await
@@ -365,26 +405,28 @@ impl crate::Network for Network {
 
         // Return the sink and stream
         let (stream, sink) = stream.into_split();
-        Ok((
-            Sink {
+        Ok(Connection {
+            origin: TcpOrigin { remote: socket },
+            sink: Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,
                 state: SinkState::Open,
             },
-            Stream {
+            stream: Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
                 pool: self.pool.clone(),
                 poisoned: false,
             },
-        ))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
+        Acceptor as _, BufferPool, BufferPoolConfig, Connection as _, Dialer as _, Listener as _,
+        Sink as _, Stream as _, TcpEndpoint, TcpListener as _,
         network::{tests, tokio as TokioNetwork},
         telemetry::metrics::Registry,
     };
@@ -447,12 +489,12 @@ mod tests {
         );
 
         // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         // Spawn a task to accept and read
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = listener.accept().await.unwrap().split();
 
             // Read a small message (much smaller than the 64KB buffer)
             let start = Instant::now();
@@ -463,7 +505,11 @@ mod tests {
         });
 
         // Connect and send a small message
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let (mut sink, _stream, _) = network
+            .dial(&TcpEndpoint::Socket(addr))
+            .await
+            .unwrap()
+            .split();
         let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         sink.send(msg.clone()).await.unwrap();
 
@@ -490,11 +536,11 @@ mod tests {
         );
 
         // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = listener.accept().await.unwrap().split();
 
             // Try to read 100 bytes, but only 5 will be sent
             let start = Instant::now();
@@ -505,7 +551,11 @@ mod tests {
         });
 
         // Connect and send only partial data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let (mut sink, _stream, _) = network
+            .dial(&TcpEndpoint::Socket(addr))
+            .await
+            .unwrap()
+            .split();
         sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
 
         // Wait for the reader to complete
@@ -530,12 +580,12 @@ mod tests {
         );
 
         // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         // Spawn a task to accept and read
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = listener.accept().await.unwrap().split();
 
             // In unbuffered mode, peek should always return empty
             assert!(stream.peek(100).is_empty());
@@ -553,7 +603,11 @@ mod tests {
         });
 
         // Connect and send two messages
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let (mut sink, _stream, _) = network
+            .dial(&TcpEndpoint::Socket(addr))
+            .await
+            .unwrap()
+            .split();
         sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
         sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
@@ -575,11 +629,11 @@ mod tests {
             test_pool(),
         );
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let mut listener = network.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (_sink, mut stream, _) = listener.accept().await.unwrap().split();
 
             // Initially peek should be empty (no data received yet)
             assert!(stream.peek(100).is_empty());
@@ -608,7 +662,11 @@ mod tests {
         });
 
         // Connect and send data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let (mut sink, _stream, _) = network
+            .dial(&TcpEndpoint::Socket(addr))
+            .await
+            .unwrap()
+            .split();
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();

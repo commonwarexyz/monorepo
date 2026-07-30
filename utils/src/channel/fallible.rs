@@ -20,6 +20,7 @@ use super::{
     mpsc, oneshot,
     reservation::{Reservation, ReservationExt},
 };
+use crate::PlatformSend;
 use std::future::Future;
 
 /// Extension trait for channel operations that may fail due to disconnection.
@@ -48,39 +49,39 @@ pub trait FallibleExt<T> {
     ///     .request(|tx| Message::Dialable { responder: tx })
     ///     .await;
     /// ```
-    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + Send
+    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + PlatformSend
     where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+        R: PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend;
 
     /// Send a request and return the provided default on failure.
     ///
     /// This is a convenience wrapper around [`request`](Self::request) for cases
     /// where you have a sensible default value.
-    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + Send
+    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + PlatformSend
     where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+        R: PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend;
 
     /// Send a request and return `R::default()` on failure.
     ///
     /// This is a convenience wrapper around [`request`](Self::request) for types
     /// that implement [`Default`].
-    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + Send
+    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + PlatformSend
     where
-        R: Default + Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+        R: Default + PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend;
 }
 
-impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
+impl<T: PlatformSend> FallibleExt<T> for mpsc::UnboundedSender<T> {
     fn send_lossy(&self, msg: T) -> bool {
         self.send(msg).is_ok()
     }
 
     async fn request<R, F>(&self, make_msg: F) -> Option<R>
     where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+        R: PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend,
     {
         let (tx, rx) = oneshot::channel();
         if self.send(make_msg(tx)).is_err() {
@@ -91,16 +92,16 @@ impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
 
     async fn request_or<R, F>(&self, make_msg: F, default: R) -> R
     where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+        R: PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend,
     {
         self.request(make_msg).await.unwrap_or(default)
     }
 
     async fn request_or_default<R, F>(&self, make_msg: F) -> R
     where
-        R: Default + Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+        R: Default + PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend,
     {
         self.request(make_msg).await.unwrap_or_default()
     }
@@ -116,7 +117,7 @@ pub trait AsyncFallibleExt<T> {
     /// may have been dropped during shutdown. The return value can
     /// be ignored if the caller doesn't need to know whether the
     /// send succeeded.
-    fn send_lossy(&self, msg: T) -> impl Future<Output = bool> + Send;
+    fn send_lossy(&self, msg: T) -> impl Future<Output = bool> + PlatformSend;
 
     /// Try to send a message without blocking, returning `true` if successful.
     ///
@@ -138,25 +139,25 @@ pub trait AsyncFallibleExt<T> {
     /// Returns `None` if:
     /// - The receiver has been dropped (send fails)
     /// - The responder is dropped without sending (receive fails)
-    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + Send
+    fn request<R, F>(&self, make_msg: F) -> impl Future<Output = Option<R>> + PlatformSend
     where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+        R: PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend;
 
     /// Send a request and return the provided default on failure.
-    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + Send
+    fn request_or<R, F>(&self, make_msg: F, default: R) -> impl Future<Output = R> + PlatformSend
     where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+        R: PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend;
 
     /// Send a request and return `R::default()` on failure.
-    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + Send
+    fn request_or_default<R, F>(&self, make_msg: F) -> impl Future<Output = R> + PlatformSend
     where
-        R: Default + Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send;
+        R: Default + PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend;
 }
 
-impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
+impl<T: PlatformSend> AsyncFallibleExt<T> for mpsc::Sender<T> {
     async fn send_lossy(&self, msg: T) -> bool {
         self.send(msg).await.is_ok()
     }
@@ -174,8 +175,8 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
 
     async fn request<R, F>(&self, make_msg: F) -> Option<R>
     where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+        R: PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend,
     {
         let (tx, rx) = oneshot::channel();
         if self.send(make_msg(tx)).await.is_err() {
@@ -186,16 +187,16 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
 
     async fn request_or<R, F>(&self, make_msg: F, default: R) -> R
     where
-        R: Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+        R: PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend,
     {
         self.request(make_msg).await.unwrap_or(default)
     }
 
     async fn request_or_default<R, F>(&self, make_msg: F) -> R
     where
-        R: Default + Send,
-        F: FnOnce(oneshot::Sender<R>) -> T + Send,
+        R: Default + PlatformSend,
+        F: FnOnce(oneshot::Sender<R>) -> T + PlatformSend,
     {
         self.request(make_msg).await.unwrap_or_default()
     }

@@ -1,5 +1,5 @@
 use super::{
-    Config,
+    Config, Metadata,
     directory::{self, Directory},
     ingress::{Mailbox, Message, Oracle},
 };
@@ -217,13 +217,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let _ = self.listener.set(self.directory.listenable());
             }
             Message::Release { metadata } => {
-                // Clear the peer handle if it exists
-                self.mailboxes.remove(metadata.public_key());
-
-                // Release the peer
-                self.directory.release(metadata);
+                self.release(metadata);
             }
         }
+    }
+
+    fn release(&mut self, metadata: Metadata<C::PublicKey>) {
+        self.mailboxes.remove(metadata.public_key());
+        self.directory.release(metadata);
     }
 
     fn kill_peer(&mut self, public_key: &C::PublicKey) {

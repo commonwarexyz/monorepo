@@ -1,4 +1,6 @@
-use crate::{Error, mocks};
+use crate::{
+    Acceptor, ConnectionInfo, Dialer, Error, TcpEndpoint, TcpOrigin, mocks,
+};
 use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
     collections::HashMap,
@@ -16,6 +18,29 @@ pub type Sink = mocks::Sink;
 /// Implementation of [crate::Stream] for a deterministic [Network].
 pub type Stream = mocks::Stream;
 
+pub struct Connection {
+    sink: Sink,
+    stream: Stream,
+    origin: TcpOrigin,
+}
+
+impl crate::Connection for Connection {
+    type Sink = Sink;
+    type Stream = Stream;
+    type Origin = TcpOrigin;
+
+    fn split(self) -> (Self::Sink, Self::Stream, ConnectionInfo<Self::Origin>) {
+        (
+            self.sink,
+            self.stream,
+            ConnectionInfo {
+                origin: Some(self.origin),
+                transport: "deterministic_tcp",
+            },
+        )
+    }
+}
+
 /// Implementation of [crate::Listener] for a deterministic [Network].
 pub struct Listener {
     address: SocketAddr,
@@ -23,14 +48,19 @@ pub struct Listener {
 }
 
 impl crate::Listener for Listener {
-    type Sink = Sink;
-    type Stream = Stream;
+    type Connection = Connection;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+    async fn accept(&mut self) -> Result<Self::Connection, Error> {
         let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
-        Ok((socket, sender, receiver))
+        Ok(Connection {
+            sink: sender,
+            stream: receiver,
+            origin: TcpOrigin { remote: socket },
+        })
     }
+}
 
+impl crate::TcpListener for Listener {
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
         Ok(self.address)
     }
@@ -63,10 +93,13 @@ impl Default for Network {
     }
 }
 
-impl crate::Network for Network {
+impl Acceptor for Network {
+    type Bind = SocketAddr;
+    type Connection = Connection;
     type Listener = Listener;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+    async fn bind(&self, socket: &SocketAddr) -> Result<Self::Listener, Error> {
+        let socket = *socket;
         // If the IP is localhost, ensure the port is not in the ephemeral range
         // so that it can be used for binding in the dial method
         if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
@@ -90,7 +123,21 @@ impl crate::Network for Network {
         })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+}
+
+impl Dialer for Network {
+    type Endpoint = TcpEndpoint;
+    type Connection = Connection;
+
+    fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+        matches!(endpoint, TcpEndpoint::Socket(_))
+    }
+
+    async fn dial(&self, endpoint: &TcpEndpoint) -> Result<Self::Connection, Error> {
+        let TcpEndpoint::Socket(socket) = endpoint else {
+            return Err(Error::UnsupportedEndpoint);
+        };
+        let socket = *socket;
         // Assign dialer a port from the ephemeral range
         let dialer = {
             let mut ephemeral = self.ephemeral.lock();
@@ -114,7 +161,11 @@ impl crate::Network for Network {
         sender
             .send((dialer, dialer_sender, listener_receiver))
             .map_err(|_| Error::ConnectionFailed)?;
-        Ok((listener_sender, dialer_receiver))
+        Ok(Connection {
+            sink: listener_sender,
+            stream: dialer_receiver,
+            origin: TcpOrigin { remote: socket },
+        })
     }
 }
 

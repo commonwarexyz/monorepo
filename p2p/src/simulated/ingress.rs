@@ -6,6 +6,7 @@ use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBuf, Quota};
 use commonware_utils::{
+    PlatformSend,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Map,
 };
@@ -120,8 +121,8 @@ async fn request<P, E, R, F>(
 where
     P: PublicKey,
     E: Clock,
-    R: Send,
-    F: FnOnce(oneshot::Sender<R>) -> Message<P, E> + Send,
+    R: PlatformSend,
+    F: FnOnce(oneshot::Sender<R>) -> Message<P, E> + PlatformSend,
 {
     sender.request(make_msg).await
 }
@@ -334,7 +335,7 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     fn track<R>(&mut self, id: u64, peers: R) -> Feedback
     where
-        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+        R: Into<TrackedPeers<Self::PublicKey>> + PlatformSend,
     {
         self.oracle.track(id, peers.into())
     }
@@ -383,7 +384,7 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
 impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
     fn track<R>(&mut self, id: u64, peers: R) -> Feedback
     where
-        R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
+        R: Into<AddressableTrackedPeers<Self::PublicKey>> + PlatformSend,
     {
         // Ignore all addresses (simulated network doesn't use them)
         let peers = peers.into();

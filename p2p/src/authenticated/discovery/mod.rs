@@ -262,8 +262,9 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
-        Spawner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks, tokio,
+        Acceptor, BufferPooler, Clock, Connection, ConnectionOf, Dialer, Handle, IoBuf, Metrics,
+        Quota, Runner, Spawner, Supervisor as _, TcpEndpoint, TcpOrigin, deterministic,
+        telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
     use rand_core::{CryptoRng, Rng};
@@ -302,13 +303,17 @@ mod tests {
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
-    async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: u32,
-        base_port: u16,
-        n: usize,
-        mode: Mode,
-    ) {
+    async fn run_network<E>(context: E, max_message_size: u32, base_port: u16, n: usize, mode: Mode)
+    where
+        E: Spawner
+            + BufferPooler
+            + Clock
+            + CryptoRng
+            + Dialer<Endpoint = TcpEndpoint>
+            + Acceptor<Bind = SocketAddr, Connection = ConnectionOf<E>>
+            + Metrics,
+        ConnectionOf<E>: Connection<Origin = TcpOrigin>,
+    {
         // Create peers
         let mut peers = Vec::new();
         for i in 0..n {

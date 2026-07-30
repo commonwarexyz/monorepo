@@ -7,8 +7,9 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
-    SinkOf, Spawner, StreamOf, spawn_cell,
+    Acceptor, BufferPooler, Clock, Connection, ConnectionOf, ContextCell, Dialer, Handle,
+    KeyedRateLimiter, Listener, Metrics, Quota, SinkOf, Spawner, StreamOf, TcpEndpoint, TcpOrigin,
+    spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_stream::encrypted::{Config as StreamConfig, listen};
@@ -33,7 +34,18 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signer> {
+pub struct Actor<
+    E: Spawner
+        + BufferPooler
+        + Clock
+        + Dialer<Endpoint = TcpEndpoint>
+        + Acceptor<Bind = SocketAddr, Connection = ConnectionOf<E>>
+        + CryptoRng
+        + Metrics,
+    C: Signer,
+> where
+    ConnectionOf<E>: Connection<Origin = TcpOrigin>,
+{
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -48,7 +60,19 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signer> Actor<E, C> {
+impl<
+    E: Spawner
+        + BufferPooler
+        + Clock
+        + Dialer<Endpoint = TcpEndpoint>
+        + Acceptor<Bind = SocketAddr, Connection = ConnectionOf<E>>
+        + CryptoRng
+        + Metrics,
+    C: Signer,
+> Actor<E, C>
+where
+    ConnectionOf<E>: Connection<Origin = TcpOrigin>,
+{
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
@@ -150,7 +174,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
         // Start listening for incoming connections
         let mut listener = self
             .context
-            .bind(self.address)
+            .bind(&self.address)
             .await
             .expect("failed to bind listener");
 
@@ -163,13 +187,19 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
             },
             conn = listener.accept() => {
                 // Accept a new connection
-                let (address, sink, stream) = match conn {
-                    Ok((address, sink, stream)) => (address, sink, stream),
+                let connection = match conn {
+                    Ok(connection) => connection,
                     Err(e) => {
                         debug!(error = ?e, "failed to accept connection");
                         continue;
                     }
                 };
+                let (sink, stream, info) = connection.split();
+                let Some(origin) = info.origin else {
+                    debug!(transport = info.transport, "connection missing TCP origin");
+                    continue;
+                };
+                let address = origin.remote;
                 debug!(?address, "accepted incoming connection");
 
                 // Check whether the IP is private
@@ -243,7 +273,7 @@ mod tests {
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
+        Error as RuntimeError, Runner as _, Stream, Supervisor as _, TcpEndpoint, deterministic,
     };
     use commonware_utils::{NZU32, NZUsize};
     use std::{
@@ -310,9 +340,9 @@ mod tests {
                 actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Allow a single handshake attempt from this IP.
-            let (sink, mut stream) = loop {
-                match context.dial(address).await {
-                    Ok(pair) => break pair,
+            let (sink, mut stream, _) = loop {
+                match context.dial(&TcpEndpoint::from(address)).await {
+                    Ok(connection) => break connection.split(),
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }
@@ -326,7 +356,11 @@ mod tests {
 
             // Additional attempts should be rate limited immediately.
             for _ in 0..3 {
-                let (sink, mut stream) = context.dial(address).await.expect("dial");
+                let (sink, mut stream, _) = context
+                    .dial(&TcpEndpoint::from(address))
+                    .await
+                    .expect("dial")
+                    .split();
 
                 // Wait for some message or drop.
                 let _ = stream.recv(1).await;
@@ -456,9 +490,9 @@ mod tests {
                 actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener from a private IP
-            let (sink, mut stream) = loop {
-                match context.dial(address).await {
-                    Ok(pair) => break pair,
+            let (sink, mut stream, _) = loop {
+                match context.dial(&TcpEndpoint::from(address)).await {
+                    Ok(connection) => break connection.split(),
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }

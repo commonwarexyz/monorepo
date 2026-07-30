@@ -18,6 +18,7 @@ stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
+        PlatformSend, PlatformSync,
         channel::mpsc,
         ordered::{Map, Set},
     };
@@ -47,7 +48,7 @@ stability_scope!(BETA {
     }
 
     /// Interface for sending messages to a set of recipients without rate-limiting restrictions.
-    pub trait UnlimitedSender: Clone + Send + Sync + 'static {
+    pub trait UnlimitedSender: Clone + PlatformSend + PlatformSync + 'static {
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;
 
@@ -67,19 +68,19 @@ stability_scope!(BETA {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufs> + Send,
+            message: impl Into<IoBufs> + PlatformSend,
             priority: bool,
         ) -> Unreliable<Feedback>;
     }
 
     /// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
     /// filtering out any that are currently rate-limited.
-    pub trait LimitedSender: Clone + Send + Sync + 'static {
+    pub trait LimitedSender: Clone + PlatformSend + PlatformSync + 'static {
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;
 
         /// The type of [`CheckedSender`] returned after checking recipients.
-        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + Send
+        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + PlatformSend
         where
             Self: 'a;
 
@@ -103,7 +104,7 @@ stability_scope!(BETA {
     }
 
     /// Interface for sending messages to [`Recipients`] that are not currently rate-limited.
-    pub trait CheckedSender: Send {
+    pub trait CheckedSender: PlatformSend {
         /// Public key type used to identify [`Recipients`].
         type PublicKey: PublicKey;
 
@@ -123,7 +124,11 @@ stability_scope!(BETA {
         /// Feedback from submitting the message for delivery.
         /// [`Unreliable`] indicates that local submission may be rejected under backpressure.
         /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
-        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback>;
+        fn send(
+            self,
+            message: impl Into<IoBufs> + PlatformSend,
+            priority: bool,
+        ) -> Unreliable<Feedback>;
     }
 
     /// Interface for sending messages to a set of recipients.
@@ -149,7 +154,7 @@ stability_scope!(BETA {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufs> + Send,
+            message: impl Into<IoBufs> + PlatformSend,
             priority: bool,
         ) -> Vec<Self::PublicKey> {
             self.check(recipients).map_or_else(
@@ -171,9 +176,9 @@ stability_scope!(BETA {
     impl<S: LimitedSender> Sender for S {}
 
     /// Interface for receiving messages from arbitrary recipients.
-    pub trait Receiver: Debug + Send + 'static {
+    pub trait Receiver: Debug + PlatformSend + 'static {
         /// Error that can occur when receiving a message.
-        type Error: Debug + StdError + Send + Sync;
+        type Error: Debug + StdError + PlatformSend + PlatformSync;
 
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;
@@ -181,7 +186,7 @@ stability_scope!(BETA {
         /// Receive a message from an arbitrary recipient.
         fn recv(
             &mut self,
-        ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
+        ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + PlatformSend;
     }
 
     /// Notification sent to subscribers when a peer set changes.
@@ -266,7 +271,7 @@ stability_scope!(BETA {
     }
 
     /// Interface for reading peer set information.
-    pub trait Provider: Debug + Clone + Send + 'static {
+    pub trait Provider: Debug + Clone + PlatformSend + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
 
@@ -274,7 +279,7 @@ stability_scope!(BETA {
         fn peer_set(
             &mut self,
             id: u64,
-        ) -> impl Future<Output = Option<TrackedPeers<Self::PublicKey>>> + Send;
+        ) -> impl Future<Output = Option<TrackedPeers<Self::PublicKey>>> + PlatformSend;
 
         /// Subscribe to notifications when new peer sets are added.
         ///
@@ -284,7 +289,7 @@ stability_scope!(BETA {
         /// across tracked sets with the same rule (secondary excludes keys present as primary).
         fn subscribe(
             &mut self,
-        ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
+        ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + PlatformSend;
     }
 
     /// Interface for managing peer set membership (where peer addresses are not known).
@@ -315,7 +320,7 @@ stability_scope!(BETA {
         /// often both gossiping data to them and answering requests from them).
         fn track<R>(&mut self, id: u64, peers: R) -> Feedback
         where
-            R: Into<TrackedPeers<Self::PublicKey>> + Send;
+            R: Into<TrackedPeers<Self::PublicKey>> + PlatformSend;
     }
 
     /// Interface for managing peer set membership (where peer addresses are known).
@@ -347,7 +352,7 @@ stability_scope!(BETA {
         /// often both gossiping data to them and answering requests from them).
         fn track<R>(&mut self, id: u64, peers: R) -> Feedback
         where
-            R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send;
+            R: Into<AddressableTrackedPeers<Self::PublicKey>> + PlatformSend;
 
         /// Update addresses for multiple peers without creating a new peer set.
         ///
@@ -359,7 +364,7 @@ stability_scope!(BETA {
     }
 
     /// Interface for blocking other peers.
-    pub trait Blocker: Clone + Send + 'static {
+    pub trait Blocker: Clone + PlatformSend + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
 

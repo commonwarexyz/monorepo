@@ -112,6 +112,14 @@ stability_scope!(BETA {
         RecvFailed,
         #[error("transport failed: {0}")]
         TransportFailed(String),
+        #[error("unsupported endpoint")]
+        UnsupportedEndpoint,
+        #[error("protocol violation: {0}")]
+        ProtocolViolation(String),
+        #[error("incoming buffer limit exceeded")]
+        IncomingBufferExceeded,
+        #[error("backpressure limit exceeded")]
+        BackpressureExceeded,
         #[error("dns resolution failed: {0}")]
         ResolveFailed(String),
         #[error(
@@ -488,64 +496,88 @@ stability_scope!(BETA {
         }
     }
 
-    /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
-    pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
-
-    /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
-    pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
-
-    /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
-    pub type ListenerOf<N> = <N as crate::Network>::Listener;
-
-    /// Interface that any runtime must implement to create
-    /// network connections.
-    pub trait Network: PlatformSend + PlatformSync + 'static {
-        /// The type of [Listener] that's returned when binding to a socket.
-        /// Accepting a connection returns a [Sink] and [Stream] which are defined
-        /// by the [Listener] and used to send and receive data over the connection.
-        type Listener: Listener;
-
-        /// Bind to the given socket address.
-        fn bind(
-            &self,
-            socket: SocketAddr,
-        ) -> impl Future<Output = Result<Self::Listener, Error>> + PlatformSend;
-
-        /// Dial the given socket address.
-        fn dial(
-            &self,
-            socket: SocketAddr,
-        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + PlatformSend;
+    /// Transport-observed metadata for an established connection.
+    #[derive(Clone, Debug)]
+    pub struct ConnectionInfo<O> {
+        /// Transport-observed source, if the transport provides one.
+        pub origin: Option<O>,
+        /// Stable, low-cardinality transport name for logs and metrics.
+        pub transport: &'static str,
     }
 
-    /// Interface for DNS resolution.
-    pub trait Resolver: PlatformSend + PlatformSync + 'static {
-        /// Resolve a hostname to IP addresses.
-        ///
-        /// Returns a list of IP addresses that the hostname resolves to.
-        fn resolve(
-            &self,
-            host: &str,
-        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + PlatformSend;
-    }
-
-    /// Interface that any runtime must implement to handle
-    /// incoming network connections.
-    pub trait Listener: PlatformSend + PlatformSync + 'static {
-        /// The type of [Sink] that's returned when accepting a connection.
-        /// This is used to send data to the remote connection.
+    /// An established reliable byte stream.
+    pub trait Connection: PlatformSend + PlatformSync + 'static {
         type Sink: Sink;
-        /// The type of [Stream] that's returned when accepting a connection.
-        /// This is used to receive data from the remote connection.
         type Stream: Stream;
+        type Origin: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
 
-        /// Accept an incoming connection.
+        fn split(self) -> (Self::Sink, Self::Stream, ConnectionInfo<Self::Origin>);
+    }
+
+    /// Outbound connection capability.
+    pub trait Dialer: PlatformSend + PlatformSync + 'static {
+        type Endpoint: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
+        type Connection: Connection;
+
+        fn supports(&self, _endpoint: &Self::Endpoint) -> bool {
+            true
+        }
+
+        fn dial<'a>(
+            &'a self,
+            endpoint: &'a Self::Endpoint,
+        ) -> impl Future<Output = Result<Self::Connection, Error>> + PlatformSend + 'a;
+    }
+
+    /// Inbound connection capability.
+    pub trait Acceptor: PlatformSend + PlatformSync + 'static {
+        type Bind: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
+        type Connection: Connection;
+        type Listener: Listener<Connection = Self::Connection>;
+
+        fn bind<'a>(
+            &'a self,
+            bind: &'a Self::Bind,
+        ) -> impl Future<Output = Result<Self::Listener, Error>> + PlatformSend + 'a;
+    }
+
+    /// Accepts established connections from a bound transport.
+    pub trait Listener: PlatformSend + PlatformSync + 'static {
+        type Connection: Connection;
+
         fn accept(
             &mut self,
-        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + PlatformSend;
+        ) -> impl Future<Output = Result<Self::Connection, Error>> + PlatformSend;
+    }
 
-        /// Returns the local address of the listener.
+    /// Socket-specific metadata exposed by TCP listeners.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub trait TcpListener: Listener {
         fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
+    }
+
+    pub type ConnectionOf<D> = <D as Dialer>::Connection;
+    pub type SinkOf<D> = <<D as Dialer>::Connection as Connection>::Sink;
+    pub type StreamOf<D> = <<D as Dialer>::Connection as Connection>::Stream;
+    pub type OriginOf<D> = <<D as Dialer>::Connection as Connection>::Origin;
+
+    /// TCP dial location.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub enum TcpEndpoint {
+        Socket(SocketAddr),
+        Dns { host: String, port: u16 },
+    }
+
+    impl From<SocketAddr> for TcpEndpoint {
+        fn from(value: SocketAddr) -> Self {
+            Self::Socket(value)
+        }
+    }
+
+    /// Source observed by a TCP acceptor.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub struct TcpOrigin {
+        pub remote: SocketAddr,
     }
 
     /// Interface that any runtime must implement to send

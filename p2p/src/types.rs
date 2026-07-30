@@ -1,7 +1,7 @@
 //! Shared address types for p2p networking.
 
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Resolver};
+use commonware_runtime::{Buf, BufMut, TcpEndpoint};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
 
@@ -56,38 +56,17 @@ impl Ingress {
         }
     }
 
-    /// Resolve this ingress address to socket addresses.
-    ///
-    /// For `Socket` variants, returns a single-element iterator.
-    /// For `Dns` variants, performs DNS resolution and returns all resolved addresses.
-    pub async fn resolve(
-        &self,
-        resolver: &impl Resolver,
-    ) -> Result<impl Iterator<Item = SocketAddr>, RuntimeError> {
-        match self {
-            Self::Socket(addr) => Ok(vec![*addr].into_iter()),
-            Self::Dns { host, port } => {
-                let ips = resolver.resolve(host.as_str()).await?;
-                if ips.is_empty() {
-                    return Err(RuntimeError::ResolveFailed(host.to_string()));
-                }
-                Ok(ips
-                    .into_iter()
-                    .map(move |ip| SocketAddr::new(ip, *port))
-                    .collect::<Vec<_>>()
-                    .into_iter())
-            }
-        }
-    }
+}
 
-    /// [`resolve`](Self::resolve) and filter by private IP policy.
-    pub async fn resolve_filtered(
-        &self,
-        resolver: &impl Resolver,
-        allow_private_ips: bool,
-    ) -> Option<impl Iterator<Item = SocketAddr>> {
-        let addrs = self.resolve(resolver).await.ok()?;
-        Some(addrs.filter(move |addr| allow_private_ips || IpAddrExt::is_global(&addr.ip())))
+impl From<&Ingress> for TcpEndpoint {
+    fn from(value: &Ingress) -> Self {
+        match value {
+            Ingress::Socket(address) => Self::Socket(*address),
+            Ingress::Dns { host, port } => Self::Dns {
+                host: host.to_string(),
+                port: *port,
+            },
+        }
     }
 }
 

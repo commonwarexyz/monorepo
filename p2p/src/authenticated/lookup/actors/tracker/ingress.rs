@@ -5,7 +5,6 @@ use crate::{
         dialing::Dialable,
         lookup::actors::{peer, tracker::Metadata},
     },
-    types::Address,
 };
 use commonware_actor::{
     Feedback,
@@ -13,6 +12,7 @@ use commonware_actor::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
+    PlatformSend,
     channel::{mpsc, oneshot},
     ordered::Map,
 };
@@ -29,7 +29,7 @@ pub enum Message<C: PublicKey> {
     },
 
     /// Update addresses for multiple peers without creating a new peer set.
-    Overwrite { peers: Map<C, Address> },
+    Overwrite { peers: Map<C, crate::Address> },
 
     // ---------- Used by peer set provider ----------
     /// Fetch primary and secondary peers for a given ID.
@@ -151,7 +151,10 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
+    pub(crate) async fn dial(
+        &self,
+        public_key: C,
+    ) -> Option<(Reservation<C>, Ingress)> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dial {
             public_key,
@@ -176,7 +179,11 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn listen(&self, public_key: C, source_ip: IpAddr) -> Option<Reservation<C>> {
+    pub(crate) async fn listen(
+        &self,
+        public_key: C,
+        source_ip: IpAddr,
+    ) -> Option<Reservation<C>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Listen {
             public_key,
@@ -245,7 +252,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
     fn track<R>(&mut self, index: u64, peers: R) -> Feedback
     where
-        R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
+        R: Into<AddressableTrackedPeers<Self::PublicKey>> + PlatformSend,
     {
         self.sender.enqueue(Message::Register {
             index,
@@ -253,7 +260,7 @@ impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
         })
     }
 
-    fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Feedback {
+    fn overwrite(&mut self, peers: Map<Self::PublicKey, crate::Address>) -> Feedback {
         self.sender.enqueue(Message::Overwrite { peers })
     }
 }

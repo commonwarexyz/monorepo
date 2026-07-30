@@ -3,8 +3,8 @@
 //! This module is `ALPHA`. Its API may change as browser lifecycle and transport support mature.
 
 use crate::{
-    BufferPool, BufferPoolConfig, BufferPooler, Clock, Error, Execution, Handle, Metrics, Name,
-    Spawner, Supervisor,
+    BufferPool, BufferPoolConfig, BufferPooler, Clock, Dialer, Error, Execution, Handle, Metrics,
+    Name, Spawner, Supervisor,
     signal::Signal,
     telemetry::metrics::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
@@ -18,16 +18,17 @@ use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     convert::Infallible,
     future::Future,
     pin::Pin,
     rc::{Rc, Weak},
-    sync::Arc,
+    sync::{Arc, Weak as SyncWeak},
     task::{Context as TaskContext, Poll, Waker},
     time::{Duration, SystemTime},
 };
 use wasm_bindgen::{JsCast, closure::Closure};
-use web_sys::{Performance, Window};
+use web_sys::{Event, EventTarget, Performance, VisibilityState, Window};
 
 const MAX_TIMER_DELAY_MS: f64 = i32::MAX as f64;
 
@@ -64,15 +65,175 @@ struct Executor {
     monotonic_anchor_ms: f64,
     network_buffer_pool: BufferPool,
     storage_buffer_pool: BufferPool,
+    lifecycle: Rc<LifecycleState>,
+    lifecycle_taken: Cell<bool>,
+    lifecycle_handlers: RefCell<Option<LifecycleHandlers>>,
+    roots: RefCell<Vec<SyncWeak<Tree>>>,
+}
+
+impl Executor {
+    fn shutdown(&self, value: i32) {
+        let _ = self.shutdown.borrow_mut().stop(value);
+        let roots = self.roots.borrow_mut().drain(..).collect::<Vec<_>>();
+        for root in roots {
+            if let Some(root) = root.upgrade() {
+                root.abort();
+            }
+        }
+    }
+}
+
+/// Browser page and connectivity state change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleEvent {
+    Hidden,
+    Visible,
+    Offline,
+    Online,
+    PageHide,
+}
+
+struct LifecycleState {
+    events: RefCell<VecDeque<LifecycleEvent>>,
+    waker: RefCell<Option<Waker>>,
+}
+
+/// Single-consumer browser lifecycle event stream.
+pub struct Lifecycle {
+    state: Rc<LifecycleState>,
+}
+
+impl Lifecycle {
+    /// Wait for the next lifecycle event.
+    pub async fn next(&mut self) -> LifecycleEvent {
+        futures::future::poll_fn(|context| {
+            if let Some(event) = self.state.events.borrow_mut().pop_front() {
+                return Poll::Ready(event);
+            }
+            *self.state.waker.borrow_mut() = Some(context.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
+}
+
+struct LifecycleHandlers {
+    window: EventTarget,
+    document: EventTarget,
+    online: Closure<dyn FnMut(Event)>,
+    offline: Closure<dyn FnMut(Event)>,
+    pagehide: Closure<dyn FnMut(Event)>,
+    visibility: Closure<dyn FnMut(Event)>,
+}
+
+impl LifecycleHandlers {
+    fn install(executor: &Rc<Executor>) -> Result<Self, Error> {
+        let window: EventTarget = executor.window.clone().unchecked_into();
+        let document = executor
+            .window
+            .document()
+            .ok_or_else(|| Error::TransportFailed("browser document unavailable".into()))?;
+        let document_target: EventTarget = document.clone().unchecked_into();
+
+        let lifecycle = Rc::downgrade(&executor.lifecycle);
+        let online = Closure::new(move |_event: Event| {
+            if let Some(lifecycle) = lifecycle.upgrade() {
+                push_lifecycle(&lifecycle, LifecycleEvent::Online);
+            }
+        });
+
+        let lifecycle = Rc::downgrade(&executor.lifecycle);
+        let offline = Closure::new(move |_event: Event| {
+            if let Some(lifecycle) = lifecycle.upgrade() {
+                push_lifecycle(&lifecycle, LifecycleEvent::Offline);
+            }
+        });
+
+        let weak_executor = Rc::downgrade(executor);
+        let pagehide = Closure::new(move |_event: Event| {
+            let Some(executor) = weak_executor.upgrade() else {
+                return;
+            };
+            push_lifecycle(&executor.lifecycle, LifecycleEvent::PageHide);
+            executor.shutdown(0);
+        });
+
+        let lifecycle = Rc::downgrade(&executor.lifecycle);
+        let visibility_document = document;
+        let visibility = Closure::new(move |_event: Event| {
+            let Some(lifecycle) = lifecycle.upgrade() else {
+                return;
+            };
+            let event = match visibility_document.visibility_state() {
+                VisibilityState::Hidden => LifecycleEvent::Hidden,
+                _ => LifecycleEvent::Visible,
+            };
+            push_lifecycle(&lifecycle, event);
+        });
+
+        add_listener(&window, "online", &online)?;
+        add_listener(&window, "offline", &offline)?;
+        add_listener(&window, "pagehide", &pagehide)?;
+        add_listener(&document_target, "visibilitychange", &visibility)?;
+
+        Ok(Self {
+            window,
+            document: document_target,
+            online,
+            offline,
+            pagehide,
+            visibility,
+        })
+    }
+}
+
+impl Drop for LifecycleHandlers {
+    fn drop(&mut self) {
+        remove_listener(&self.window, "online", &self.online);
+        remove_listener(&self.window, "offline", &self.offline);
+        remove_listener(&self.window, "pagehide", &self.pagehide);
+        remove_listener(&self.document, "visibilitychange", &self.visibility);
+    }
+}
+
+fn add_listener(
+    target: &EventTarget,
+    name: &str,
+    callback: &Closure<dyn FnMut(Event)>,
+) -> Result<(), Error> {
+    target
+        .add_event_listener_with_callback(name, callback.as_ref().unchecked_ref())
+        .map_err(|_| Error::TransportFailed("failed to register browser lifecycle handler".into()))
+}
+
+fn remove_listener(target: &EventTarget, name: &str, callback: &Closure<dyn FnMut(Event)>) {
+    let _ = target.remove_event_listener_with_callback(name, callback.as_ref().unchecked_ref());
+}
+
+fn push_lifecycle(state: &LifecycleState, event: LifecycleEvent) {
+    {
+        let mut events = state.events.borrow_mut();
+        if events.back() == Some(&event) {
+            return;
+        }
+        if events.len() == 32 {
+            events.pop_front();
+        }
+        events.push_back(event);
+    }
+    if let Some(waker) = state.waker.borrow_mut().take() {
+        waker.wake();
+    }
 }
 
 /// Browser event-loop runtime.
 #[derive(Clone)]
-pub struct Runtime {
+pub struct Runtime<D = ()> {
     executor: Rc<Executor>,
+    dialer: Rc<D>,
 }
 
-impl Runtime {
+impl Runtime<()> {
     /// Create a runtime attached to the current browser window.
     pub fn new() -> Result<Self, Error> {
         let window = web_sys::window()
@@ -93,8 +254,11 @@ impl Runtime {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
-        Ok(Self {
-            executor: Rc::new(Executor {
+        let lifecycle = Rc::new(LifecycleState {
+            events: RefCell::new(VecDeque::new()),
+            waker: RefCell::new(None),
+        });
+        let executor = Rc::new(Executor {
                 registry,
                 metrics,
                 shutdown: RefCell::new(Stopper::default()),
@@ -104,14 +268,50 @@ impl Runtime {
                 performance,
                 network_buffer_pool,
                 storage_buffer_pool,
-            }),
+                lifecycle,
+                lifecycle_taken: Cell::new(false),
+            lifecycle_handlers: RefCell::new(None),
+            roots: RefCell::new(Vec::new()),
+            });
+        let handlers = LifecycleHandlers::install(&executor)?;
+        *executor.lifecycle_handlers.borrow_mut() = Some(handlers);
+
+        Ok(Self {
+            executor,
+            dialer: Rc::new(()),
         })
+    }
+
+    /// Attach an outbound transport to the runtime.
+    pub fn with_dialer<D>(self, dialer: D) -> Runtime<D> {
+        Runtime {
+            executor: self.executor,
+            dialer: Rc::new(dialer),
+        }
+    }
+
+}
+
+impl<D: 'static> Runtime<D> {
+    /// Take the runtime's lifecycle event stream.
+    pub fn take_lifecycle(&self) -> Option<Lifecycle> {
+        if self.executor.lifecycle_taken.replace(true) {
+            return None;
+        }
+        Some(Lifecycle {
+            state: Rc::clone(&self.executor.lifecycle),
+        })
+    }
+
+    /// Signal shutdown and abort every supervised root task.
+    pub fn shutdown(&self, value: i32) {
+        self.executor.shutdown(value);
     }
 
     /// Spawn the supervised root task on the browser event loop.
     pub fn spawn_root<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce(Context) -> Fut + 'static,
+        F: FnOnce(Context<D>) -> Fut + 'static,
         Fut: Future<Output = T> + 'static,
         T: 'static,
     {
@@ -129,20 +329,25 @@ impl Runtime {
                 .clone(),
         );
         let tree = Tree::root();
+        self.executor.roots.borrow_mut().push(Arc::downgrade(&tree));
         let context = Context {
             name: label.name(),
             attributes: Vec::new(),
             executor: Rc::clone(&self.executor),
+            dialer: Rc::clone(&self.dialer),
             tree: Arc::clone(&tree),
             execution: Execution::default(),
         };
-        let (task, handle) = Handle::init_local(f(context), metric, tree);
+        let (task, handle) = Handle::init_local(f(context), metric, Arc::clone(&tree));
+        if let Some(aborter) = handle.aborter() {
+            tree.register(aborter);
+        }
         wasm_bindgen_futures::spawn_local(task);
         handle
     }
 }
 
-impl Default for Runtime {
+impl Default for Runtime<()> {
     fn default() -> Self {
         Self::new().expect("web runtime requires a browser window")
     }
@@ -150,21 +355,22 @@ impl Default for Runtime {
 
 /// Capabilities available to browser tasks.
 #[derive(Clone)]
-pub struct Context {
+pub struct Context<D = ()> {
     name: String,
     attributes: Vec<(String, String)>,
     executor: Rc<Executor>,
+    dialer: Rc<D>,
     tree: Arc<Tree>,
     execution: Execution,
 }
 
-impl Context {
+impl<D> Context<D> {
     fn metrics(&self) -> &TaskMetrics {
         &self.executor.metrics
     }
 }
 
-impl Supervisor for Context {
+impl<D: 'static> Supervisor for Context<D> {
     fn name(&self) -> Name {
         Name {
             label: self.name.clone(),
@@ -178,6 +384,7 @@ impl Supervisor for Context {
             name: crate::telemetry::metrics::child_label(&self.name, label),
             attributes: self.attributes.clone(),
             executor: Rc::clone(&self.executor),
+            dialer: Rc::clone(&self.dialer),
             tree,
             execution: Execution::default(),
         }
@@ -190,7 +397,7 @@ impl Supervisor for Context {
     }
 }
 
-impl Spawner for Context {
+impl<D: 'static> Spawner for Context<D> {
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + 'static,
@@ -231,7 +438,7 @@ impl Spawner for Context {
     }
 }
 
-impl Metrics for Context {
+impl<D: 'static> Metrics for Context<D> {
     fn register<N: Into<String>, H: Into<String>, M: Metric>(
         &self,
         name: N,
@@ -251,7 +458,7 @@ impl Metrics for Context {
     }
 }
 
-impl Clock for Context {
+impl<D: 'static> Clock for Context<D> {
     fn current(&self) -> SystemTime {
         let elapsed_ms = (self.executor.performance.now() - self.executor.monotonic_anchor_ms).max(0.0);
         self.executor.wall_anchor + Duration::from_secs_f64(elapsed_ms / 1_000.0)
@@ -270,7 +477,7 @@ impl Clock for Context {
     }
 }
 
-impl GovernorClock for Context {
+impl<D: 'static> GovernorClock for Context<D> {
     type Instant = SystemTime;
 
     fn now(&self) -> Self::Instant {
@@ -278,9 +485,9 @@ impl GovernorClock for Context {
     }
 }
 
-impl ReasonablyRealtime for Context {}
+impl<D: 'static> ReasonablyRealtime for Context<D> {}
 
-impl BufferPooler for Context {
+impl<D: 'static> BufferPooler for Context<D> {
     fn network_buffer_pool(&self) -> &BufferPool {
         &self.executor.network_buffer_pool
     }
@@ -290,7 +497,7 @@ impl BufferPooler for Context {
     }
 }
 
-impl TryRng for Context {
+impl<D: 'static> TryRng for Context<D> {
     type Error = Infallible;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
@@ -307,7 +514,20 @@ impl TryRng for Context {
     }
 }
 
-impl TryCryptoRng for Context {}
+impl<D: 'static> TryCryptoRng for Context<D> {}
+
+impl<D: Dialer> Dialer for Context<D> {
+    type Endpoint = D::Endpoint;
+    type Connection = D::Connection;
+
+    fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+        self.dialer.supports(endpoint)
+    }
+
+    async fn dial(&self, endpoint: &Self::Endpoint) -> Result<Self::Connection, Error> {
+        self.dialer.dial(endpoint).await
+    }
+}
 
 struct SleepState {
     window: Window,

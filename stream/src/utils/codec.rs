@@ -4,6 +4,7 @@ use commonware_codec::{
     varint::{Decoder, MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Buf, IoBuf, IoBufMut, IoBufs, Sink, Stream};
+use commonware_utils::PlatformSend;
 
 /// Validates the frame size and assembles the frame via the caller's closure.
 ///
@@ -60,7 +61,7 @@ pub(crate) fn append_frame(
 /// Returns an error if the message is too large or the sink is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
-    bufs: impl Into<IoBufs> + Send,
+    bufs: impl Into<IoBufs> + PlatformSend,
     max_message_size: u32,
 ) -> Result<(), Error> {
     let mut bufs = bufs.into();

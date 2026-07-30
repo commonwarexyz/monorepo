@@ -13,10 +13,13 @@ use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
-use commonware_utils::channel::{
-    fallible::FallibleExt,
-    mpsc::{self, error::TrySendError},
-    oneshot,
+use commonware_utils::{
+    PlatformSend,
+    channel::{
+        fallible::FallibleExt,
+        mpsc::{self, error::TrySendError},
+        oneshot,
+    },
 };
 use std::{collections::HashMap, fmt::Debug, time::SystemTime};
 use thiserror::Error;
@@ -299,7 +302,7 @@ impl<S: Sender> GlobalSender<S> {
         &mut self,
         subchannel: Channel,
         recipients: Recipients<S::PublicKey>,
-        payload: impl Into<IoBufs> + Send,
+        payload: impl Into<IoBufs> + PlatformSend,
         priority: bool,
     ) -> Unreliable<Feedback> {
         self.check(recipients).map_or_else(
@@ -347,7 +350,11 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         self.inner.recipients()
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send(
+        self,
+        message: impl Into<IoBufs> + PlatformSend,
+        priority: bool,
+    ) -> Unreliable<Feedback> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
@@ -680,7 +687,7 @@ mod tests {
             unreachable!("rate-limited sender should not produce a checked sender");
         }
 
-        fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
+        fn send(self, _: impl Into<IoBufs> + PlatformSend, _: bool) -> Unreliable<Feedback> {
             unreachable!("rate-limited sender should not send");
         }
     }

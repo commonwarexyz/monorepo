@@ -7,8 +7,9 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    Spawner as _, StreamOf, Supervisor as _, ThreadSpawner as _, child_label,
+    Acceptor, BufferPool, BufferPoolConfig, Clock, ConnectionOf, Dialer, Error, Execution, Handle,
+    METRICS_PREFIX, Name, Spawner as _, Supervisor as _, TcpEndpoint, ThreadSpawner as _,
+    child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
@@ -37,7 +38,7 @@ use std::{
     convert::Infallible,
     env,
     future::Future,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
@@ -771,29 +772,26 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl crate::Network for Context {
-    type Listener = <Network as crate::Network>::Listener;
+impl Dialer for Context {
+    type Endpoint = TcpEndpoint;
+    type Connection = ConnectionOf<Network>;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        self.network.bind(socket).await
+    fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+        self.network.supports(endpoint)
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
-        self.network.dial(socket).await
+    async fn dial(&self, endpoint: &Self::Endpoint) -> Result<Self::Connection, Error> {
+        self.network.dial(endpoint).await
     }
 }
 
-impl crate::Resolver for Context {
-    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
-        // Uses the host's DNS configuration (e.g. /etc/resolv.conf on Unix,
-        // registry on Windows). This delegates to the system's libc resolver.
-        //
-        // The `:0` port is required by lookup_host's API but is not used
-        // for DNS resolution.
-        let addrs = tokio::net::lookup_host(format!("{host}:0"))
-            .await
-            .map_err(|e| Error::ResolveFailed(e.to_string()))?;
-        Ok(addrs.map(|addr| addr.ip()).collect())
+impl Acceptor for Context {
+    type Bind = SocketAddr;
+    type Connection = <Network as Acceptor>::Connection;
+    type Listener = <Network as Acceptor>::Listener;
+
+    async fn bind(&self, bind: &Self::Bind) -> Result<Self::Listener, Error> {
+        self.network.bind(bind).await
     }
 }
 
@@ -851,14 +849,13 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
-        tokio::telemetry,
+        Connection as _, Listener as _, Metrics, Runner as _, Sink, Stream, TcpListener as _,
+        telemetry::metrics::raw::Counter, tokio::telemetry,
     };
     use bytes::Bytes;
     use std::{
         self,
         collections::HashMap,
-        net::{IpAddr, Ipv4Addr, Ipv6Addr},
         str::FromStr,
     };
     use tracing::{Level, error};
@@ -1050,9 +1047,10 @@ mod tests {
 
             // Simulate a client connecting to the server
             let client_handle = context.child("client").spawn(move |context| async move {
-                let (mut sink, mut stream) = loop {
-                    match context.dial(address).await {
-                        Ok((sink, stream)) => break (sink, stream),
+                let endpoint = TcpEndpoint::Socket(address);
+                let (mut sink, mut stream, _) = loop {
+                    match context.dial(&endpoint).await {
+                        Ok(connection) => break connection.split(),
                         Err(e) => {
                             // The client may be polled before the server is ready, that's alright!
                             error!(err =?e, "failed to connect");
@@ -1094,14 +1092,19 @@ mod tests {
     fn test_resolver() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let addrs = context.resolve("localhost").await.unwrap();
-            assert!(!addrs.is_empty());
-            for addr in addrs {
-                assert!(
-                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
-                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
-                );
-            }
+            let mut listener = context
+                .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let endpoint = TcpEndpoint::Dns {
+                host: "127.0.0.1".to_string(),
+                port,
+            };
+
+            let (dialed, accepted) = futures::join!(context.dial(&endpoint), listener.accept());
+            dialed.unwrap().split();
+            accepted.unwrap().split();
         });
     }
 }

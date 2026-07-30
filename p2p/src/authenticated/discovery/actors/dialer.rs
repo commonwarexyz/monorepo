@@ -13,12 +13,13 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
-    StreamOf, spawn_cell,
+    BufferPooler, Clock, Connection, ConnectionOf, ContextCell, Dialer, Handle, Metrics, SinkOf,
+    Spawner, StreamOf, TcpEndpoint, TcpOrigin, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::encrypted::{Config as StreamConfig, dial};
-use rand::seq::{IndexedRandom, SliceRandom};
+use commonware_utils::IpAddrExt;
+use rand::seq::SliceRandom;
 use rand_core::CryptoRng;
 use std::time::Duration;
 use tracing::debug;
@@ -49,7 +50,10 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + Clock + Dialer<Endpoint = TcpEndpoint> + Metrics, C: Signer>
+where
+    ConnectionOf<E>: Connection<Origin = TcpOrigin>,
+{
     context: ContextCell<E>,
 
     // ---------- State ----------
@@ -68,8 +72,12 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     attempts: CounterFamily<metrics::Peer<C::PublicKey>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, C: Signer>
-    Actor<E, C>
+impl<
+    E: Spawner + BufferPooler + Clock + Dialer<Endpoint = TcpEndpoint> + CryptoRng + Metrics,
+    C: Signer,
+> Actor<E, C>
+where
+    ConnectionOf<E>: Connection<Origin = TcpOrigin>,
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");
@@ -105,29 +113,30 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
             let dial_timeout = self.dial_timeout;
-            move |mut context| async move {
+            move |context| async move {
                 let timeout = context.sleep(dial_timeout);
                 let dial = async {
-                    // Resolve ingress to socket addresses (filtered by private IP policy)
-                    let addresses: Vec<_> = ingress
-                        .resolve_filtered(&context, allow_private_ips)
-                        .await
-                        .map(Iterator::collect)
-                        .unwrap_or_default();
-                    let Some(&address) = addresses.choose(&mut context) else {
-                        debug!(?ingress, "failed to resolve or no valid addresses");
-                        return;
-                    };
-
                     // Attempt to dial peer
-                    let (sink, stream) = match context.dial(address).await {
-                        Ok(stream) => stream,
+                    let connection = match context.dial(&TcpEndpoint::from(&ingress)).await {
+                        Ok(connection) => connection,
                         Err(err) => {
                             debug!(?err, "failed to dial peer");
                             return;
                         }
                     };
-                    debug!(?peer, ?ingress, "dialed peer");
+                    let (sink, stream, info) = connection.split();
+                    let Some(TcpOrigin { remote: address }) = info.origin else {
+                        debug!(
+                            transport = info.transport,
+                            "dialed connection without TCP origin"
+                        );
+                        return;
+                    };
+                    if !allow_private_ips && !IpAddrExt::is_global(&address.ip()) {
+                        debug!(?address, "resolved ingress to private address");
+                        return;
+                    }
+                    debug!(?peer, ?address, "dialed peer");
 
                     // Upgrade connection
                     let instance = match dial(context, config, peer.clone(), stream, sink).await {
@@ -218,7 +227,7 @@ mod tests {
     use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
-    use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{Acceptor as _, Clock, Runner, Supervisor as _, deterministic};
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::NZUsize;
     use std::{
@@ -249,7 +258,7 @@ mod tests {
             // The deterministic network completes the transport dial immediately, but retaining
             // the listener without accepting leaves the encrypted handshake pending.
             let _listener = context
-                .bind(address)
+                .bind(&address)
                 .await
                 .expect("Failed to bind listener");
             let mut dialer = Actor::new(
