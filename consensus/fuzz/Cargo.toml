@@ -421,6 +421,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "marshal_e2e_coding_app_cert_mock_twins"
+path = "fuzz_targets/marshal_e2e_coding_app_cert_mock_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "marshal_e2e_standard_deferred_id_twins_split_header"
 path = "fuzz_targets/marshal_e2e_standard_deferred_id_twins_split_header.rs"
 test = false
@@ -437,6 +444,13 @@ bench = false
 [[bin]]
 name = "marshal_e2e_coding_cert_mock_disrupter"
 path = "fuzz_targets/marshal_e2e_coding_cert_mock_disrupter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_coding_id_disrupter"
+path = "fuzz_targets/marshal_e2e_coding_id_disrupter.rs"
 test = false
 doc = false
 bench = false

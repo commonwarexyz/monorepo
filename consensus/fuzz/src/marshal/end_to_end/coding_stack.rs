@@ -8,16 +8,13 @@
 //! than a `Sha256Digest`).
 
 use super::{
-    ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
-    app::{AlwaysAcceptBlockBuilderApp, DeliveryReporter},
+    app::DeliveryReporter,
     twins::{PublicKeyOf, SchemeOf},
 };
-use crate::SimplexCertificateMock;
-
-/// The coding liveness target runs on the cheap certificate mock.
-pub(crate) type P = SimplexCertificateMock;
+use crate::simplex::Simplex;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_consensus::{
+    CertifiableAutomaton, Relay,
     marshal::{
         Config, Start,
         coding::{
@@ -30,68 +27,84 @@ use commonware_consensus::{
             block::Block as MockBlock,
             harness::{
                 BLOCKS_PER_EPOCH, GENESIS_CODING_CONFIG, PAGE_CACHE_SIZE, PAGE_SIZE, TEST_QUOTA,
-                make_coding_genesis_block,
             },
         },
         resolver::p2p as resolver,
     },
     simplex::{
-        Engine, Floor, ForwardingPolicy, config, elector::Config as ElectorConfig,
-        types::Context as SimplexContext,
+        Engine, Floor, ForwardingPolicy, Plan, config, elector::Config as ElectorConfig,
+        scheme::Scheme as SimplexScheme, types::Context as SimplexContext,
     },
-    types::{Delta, Epoch, FixedEpocher, ViewDelta, coding::Commitment},
+    types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
 use commonware_cryptography::{
-    Digestible as _, Sha256,
+    Digest as _, Digestible as _, Hasher as _, Sha256,
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
-use commonware_p2p::simulated::Oracle;
+use commonware_p2p::{Receiver, Sender, simulated::Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize};
-use std::{num::NonZeroUsize, time::Duration};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 /// Consensus context for the coding variant: the payload is a `Commitment`.
-pub(crate) type CodingCtx = SimplexContext<Commitment, PublicKeyOf<P>>;
+pub(crate) type CodingCtx<P> = SimplexContext<Commitment, PublicKeyOf<P>>;
 
 /// Application block carried by the coding stack.
-pub(crate) type CodingB = MockBlock<Sha256Digest, CodingCtx>;
+pub(crate) type CodingB<P> = MockBlock<Sha256Digest, CodingCtx<P>>;
 
 /// Marshal variant for the coding stack.
-pub(crate) type CodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, PublicKeyOf<P>>;
+pub(crate) type CodingVariant<P> = Coding<CodingB<P>, ReedSolomon<Sha256>, Sha256, PublicKeyOf<P>>;
 
 /// Erasure-coded block the marshal actor stores; the raw [`CodingB`] is what
 /// marshal delivers to the application sink.
-pub(crate) type CodingCoded = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+pub(crate) type CodingCoded<P> = CodedBlock<CodingB<P>, ReedSolomon<Sha256>, Sha256>;
 
 /// Shard dissemination mailbox handed to the marshal actor and the engine.
-pub(crate) type ShardsMailbox =
-    shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, PublicKeyOf<P>>;
+pub(crate) type ShardsMailbox<P> =
+    shards::Mailbox<CodingB<P>, ReedSolomon<Sha256>, Sha256, PublicKeyOf<P>>;
+
+pub(crate) type CodingMarshaled<P, A> = Marshaled<
+    deterministic::Context,
+    A,
+    CodingB<P>,
+    ReedSolomon<Sha256>,
+    Sha256,
+    ConstantProvider<SchemeOf<P>, Epoch>,
+    Sequential,
+    FixedEpocher,
+>;
 
 /// One coding validator: the marshal mailbox, the delivery sink, and the shard
 /// mailbox the engine needs to disseminate and reconstruct blocks.
-pub(crate) struct CodingValidator {
-    pub(crate) mailbox: Mailbox<SchemeOf<P>, CodingVariant>,
-    pub(crate) application: Application<CodingB>,
-    pub(crate) shards: ShardsMailbox,
+pub(crate) struct CodingValidator<P: Simplex> {
+    pub(crate) mailbox: Mailbox<SchemeOf<P>, CodingVariant<P>>,
+    pub(crate) application: Application<CodingB<P>>,
+    pub(crate) shards: ShardsMailbox<P>,
 }
 
 /// Builds one coding validator's marshal actor, resolver, and shard engine.
 ///
 /// Mirrors [`super::twins::stack::setup_validator`] except that the block
 /// channel carries shards rather than buffered blocks.
-pub(crate) async fn setup_validator_coding(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn setup_validator_coding<P: Simplex>(
     context: deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
-    genesis: CodingCoded,
+    genesis: CodingCoded<P>,
     max_pending_acks: NonZeroUsize,
+    pending_ack_invariant_limit: Option<NonZeroUsize>,
     validator_idx: usize,
-) -> CodingValidator {
-    let application = Application::<CodingB>::manual_ack();
+    stack: Arc<str>,
+) -> CodingValidator<P>
+where
+    SchemeOf<P>: SimplexScheme<Commitment>,
+{
+    let application = Application::<CodingB<P>>::manual_ack();
     let acknowledger = application.clone();
     context.child("acknowledger").spawn(move |_| async move {
         loop {
@@ -101,8 +114,8 @@ pub(crate) async fn setup_validator_coding(
     let delivery_reporter = DeliveryReporter::new(
         validator_idx,
         application.clone(),
-        None,
-        "marshal-coding-liveness".into(),
+        pending_ack_invariant_limit,
+        stack,
     );
     let config = Config {
         provider: provider.clone(),
@@ -247,52 +260,78 @@ pub(crate) async fn setup_validator_coding(
     }
 }
 
-/// Starts the Simplex engine for one coding validator.
-///
-/// The automaton and relay are the [`Marshaled`] wrapper, so the consensus
-/// payload is a `Commitment` reconstructed from disseminated shards.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_engine_coding<EC>(
-    context: deterministic::Context,
-    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
-    validator: PublicKeyOf<P>,
-    scheme: SchemeOf<P>,
-    elector: EC,
+pub(crate) fn coding_marshaled<P: Simplex, A>(
+    context: &deterministic::Context,
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
-    marshal_mailbox: Mailbox<SchemeOf<P>, CodingVariant>,
-    shards: ShardsMailbox,
-    genesis_commitment: Commitment,
-    forwarding: ForwardingPolicy,
-) where
-    EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
+    application: A,
+    marshal_mailbox: Mailbox<SchemeOf<P>, CodingVariant<P>>,
+    shards: ShardsMailbox<P>,
+) -> CodingMarshaled<P, A>
+where
+    SchemeOf<P>: SimplexScheme<Commitment>,
+    A: commonware_consensus::Application<
+            deterministic::Context,
+            SigningScheme = SchemeOf<P>,
+            Context = CodingCtx<P>,
+            Block = CodingB<P>,
+            Input = (),
+        >,
 {
-    let control = oracle.control(validator.clone());
-    let vote = control.register(ENGINE_VOTE, TEST_QUOTA).await.unwrap();
-    let certificate = control
-        .register(ENGINE_CERTIFICATE, TEST_QUOTA)
-        .await
-        .unwrap();
-    let resolver = control.register(ENGINE_RESOLVER, TEST_QUOTA).await.unwrap();
-
-    let marshaled = Marshaled::new(
+    Marshaled::new(
         context.child("marshaled"),
         MarshaledConfig {
-            application: AlwaysAcceptBlockBuilderApp::<CodingCtx, SchemeOf<P>>::default(),
-            marshal: marshal_mailbox.clone(),
+            application,
+            marshal: marshal_mailbox,
             shards,
             scheme_provider: provider,
             strategy: Sequential,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
         },
-    );
+    )
+}
+
+/// Starts a coding Simplex engine on caller-supplied network channels.
+///
+/// Twins uses this entry point after splitting the compromised validator's
+/// vote, certificate, and resolver channels.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    validator: PublicKeyOf<P>,
+    scheme: SchemeOf<P>,
+    elector: EC,
+    automaton: A,
+    relay: R,
+    marshal_mailbox: Mailbox<SchemeOf<P>, CodingVariant<P>>,
+    genesis_commitment: Commitment,
+    forwarding: ForwardingPolicy,
+    vote: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    certificate: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    resolver: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+) where
+    SchemeOf<P>: SimplexScheme<Commitment>,
+    EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
+    A: CertifiableAutomaton<Context = CodingCtx<P>, Digest = Commitment>,
+    R: Relay<Digest = Commitment, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
+{
     let engine = Engine::new(
         context.child("engine"),
         config::Config {
             blocker: oracle.control(validator.clone()),
             scheme,
             elector,
-            automaton: marshaled.clone(),
-            relay: marshaled,
+            automaton,
+            relay,
             reporter: marshal_mailbox,
             partition: format!("engine-{validator}"),
             mailbox_size: NZUsize!(1024),
@@ -317,8 +356,19 @@ pub(crate) async fn start_engine_coding<EC>(
 
 /// Genesis coded block shared by every coding validator and by the consensus
 /// floor, so view-1 proposals link to the block marshal already holds.
-pub(crate) fn coding_genesis() -> CodingCoded {
-    let inner = make_coding_genesis_block();
+pub(crate) fn coding_genesis<P: Simplex>(leader: PublicKeyOf<P>) -> CodingCoded<P> {
+    let genesis_parent = Commitment::from((
+        Sha256Digest::EMPTY,
+        Sha256Digest::EMPTY,
+        Sha256Digest::EMPTY,
+        GENESIS_CODING_CONFIG,
+    ));
+    let context = CodingCtx::<P> {
+        round: Round::zero(),
+        leader,
+        parent: (View::zero(), genesis_parent),
+    };
+    let inner = MockBlock::new::<Sha256>(context, Sha256::hash(&[b""]), Height::zero(), 0);
     let commitment = Commitment::from((
         inner.digest(),
         inner.digest(),

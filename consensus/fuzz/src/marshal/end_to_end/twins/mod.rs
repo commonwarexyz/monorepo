@@ -1,11 +1,13 @@
-//! End-to-end Simplex Twins mutator over standard marshal.
+//! End-to-end Simplex Twins mutators over standard and coding marshal.
 //!
-//! The compromised identity runs one full Simplex engine plus the existing
-//! [`crate::disrupter::Disrupter`] with one signing key. Their vote, certificate,
-//! and resolver channels are split by the shared Twins helpers. Every correct
-//! engine and the compromised primary use a real
-//! `Inline|Deferred -> Marshal -> Application` data path.
+//! The compromised identity runs one full Simplex engine plus a Byzantine
+//! secondary with the same signing key. Their vote, certificate, and resolver
+//! channels are split by the shared Twins helpers. Every correct engine and the
+//! compromised primary use a real marshal/application data path. Standard
+//! selects an Inline or Deferred wrapper and uses the general Disrupter;
+//! coding uses Marshaled directly and a Commitment-typed double-voter.
 
+mod coding;
 mod layout;
 mod observer;
 pub(crate) mod stack;
@@ -23,6 +25,7 @@ use crate::{
     TwinsDisrupter, TwinsSetup, TwinsTopology, run_twins_with_backend, simplex::Simplex,
     strategy::StrategyChoice,
 };
+pub use coding::fuzz_marshal_coding_twins;
 use commonware_consensus::{
     marshal::mocks::{
         application::Application, block::Block as MockBlock, harness::NUM_VALIDATORS,
@@ -37,7 +40,7 @@ use commonware_p2p::{Receiver, Sender, simulated::Oracle};
 use commonware_runtime::{Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
 use layout::{AttackLayout, attack_layout};
-use observer::ObservedMarshal;
+pub(crate) use observer::ObservedMarshal;
 use stack::{
     ATTACK_SLOW_VERIFY_DELAY, ATTACK_VICTIM_VERIFY_DELAY, DEFAULT_MAX_PENDING_ACKS,
     DeferredMarshal, InlineMarshal, MarshalChoice, SelectedMarshal, TwinsBlockBuilder,
@@ -50,18 +53,44 @@ use std::{
     num::NonZeroUsize,
     sync::{
         Arc, LazyLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
 /// Opt-in ground-truth probe for header-context mismatches.
 static VERIFY_PROBE: LazyLock<bool> =
     LazyLock::new(|| std::env::var("MARSHAL_TWINS_PROBE").is_ok());
-static EMPTY_CASE_REPORTED: AtomicBool = AtomicBool::new(false);
+static SKIPPED_CASES: AtomicUsize = AtomicUsize::new(0);
+static EXECUTED_CASES: AtomicUsize = AtomicUsize::new(0);
 
 const MAX_CASES: usize = 64;
 const ATTACK_MAX_CASES: usize = 2048;
+const CASE_REPORT_INTERVAL: usize = 1024;
 const DEEP_PENDING_ACKS: NonZeroUsize = NZUsize!(8);
+
+fn pending_ack_invariant_limit(max_pending_acks: NonZeroUsize) -> Option<NonZeroUsize> {
+    (max_pending_acks <= DEEP_PENDING_ACKS).then_some(max_pending_acks)
+}
+
+fn record_case_outcome(was_executed: bool, stack: &str) {
+    let counter = if was_executed {
+        &EXECUTED_CASES
+    } else {
+        &SKIPPED_CASES
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+    let executed = EXECUTED_CASES.load(Ordering::Relaxed);
+    let skipped = SKIPPED_CASES.load(Ordering::Relaxed);
+    let total = executed.saturating_add(skipped);
+    if (was_executed || skipped != 1) && !total.is_multiple_of(CASE_REPORT_INTERVAL) {
+        return;
+    }
+    eprintln!(
+        "[marshal-twins] case coverage: executed={executed} skipped={skipped} \
+         skip_ratio={:.2}% stack={stack}",
+        (skipped as f64 / total.max(1) as f64) * 100.0,
+    );
+}
 
 struct MarshalTwinsInputDebug<'a>(&'a MarshalTwinsInput);
 
@@ -156,13 +185,15 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
     }
 
     fn pending_ack_invariant_limit(&self) -> Option<NonZeroUsize> {
-        Some(self.max_pending_acks)
+        pending_ack_invariant_limit(self.max_pending_acks)
     }
 
     fn report_empty_case(&self, reason: &str) {
-        if *VERIFY_PROBE || !EMPTY_CASE_REPORTED.swap(true, Ordering::Relaxed) {
-            eprintln!(
-                "[marshal-twins] no eligible case: reason={reason} policy={} strategy={:?} stack={}",
+        record_case_outcome(false, &self.stack_label);
+        if *VERIFY_PROBE {
+            panic!(
+                "marshal Twins generated no eligible case: reason={reason} policy={} \
+                 strategy={:?} stack={} input={}",
                 if self.uses_attack_layout() {
                     "attack-layout"
                 } else {
@@ -170,6 +201,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
                 },
                 self.input.strategy,
                 self.stack_label,
+                self.probe_input,
             );
         }
     }
@@ -183,6 +215,7 @@ where
 {
     type State = MarshalTwinsState<P>;
     type Case = Option<AttackLayout>;
+    type Digest = Sha256Digest;
 
     async fn setup(&mut self, context: &mut deterministic::Context) -> TwinsSetup<P, Self::State> {
         let (participants, schemes) = P::setup(context, NAMESPACE, NUM_VALIDATORS);
@@ -259,26 +292,31 @@ where
 
     fn select_case(
         &mut self,
-        _rng: &mut FuzzRng,
+        rng: &mut FuzzRng,
         participants: &[PublicKeyOf<P>],
         cases: Vec<twins::Case>,
     ) -> Option<TwinsCase<Self::Case>> {
-        if cases.is_empty() {
-            self.report_empty_case("no generated Twins case");
-            return None;
-        }
         let (case, attack) = if self.uses_attack_layout() {
-            let attack_cases = cases
-                .into_iter()
-                .filter_map(|case| {
-                    let byzantine = *case.compromised.first()?;
-                    attack_layout::<P>(&case.scenario, participants, byzantine)
-                        .map(|layout| (case, layout))
-                })
-                .collect::<Vec<_>>();
+            let eligible = |cases: Vec<twins::Case>| {
+                cases
+                    .into_iter()
+                    .filter_map(|case| {
+                        let byzantine = *case.compromised.first()?;
+                        attack_layout::<P>(&case.scenario, participants, byzantine)
+                            .map(|layout| (case, layout))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut attack_cases = eligible(cases);
+            if attack_cases.is_empty() {
+                let framework = self.framework(rng, participants.len());
+                attack_cases = eligible(twins::cases(rng, framework));
+            }
             let count = attack_cases.len();
             if count == 0 {
-                self.report_empty_case("no generated scenario matches AttackLayout");
+                self.report_empty_case(
+                    "neither generated scenario sample contains an AttackLayout",
+                );
                 return None;
             }
             let (case, layout) = attack_cases
@@ -287,6 +325,10 @@ where
                 .expect("selected AttackLayout case must exist");
             (case, Some(layout))
         } else {
+            if cases.is_empty() {
+                self.report_empty_case("no generated Twins case");
+                return None;
+            }
             let count = cases.len();
             let case = cases
                 .into_iter()
@@ -294,6 +336,7 @@ where
                 .expect("selected general case must exist");
             (case, None)
         };
+        record_case_outcome(true, &self.stack_label);
         if *VERIFY_PROBE && let Some(layout) = attack {
             eprintln!(
                 "[marshal-twins] attack layout: precursor={} attack={} victim={} slow={} fast={} \
@@ -463,7 +506,7 @@ where
         state: &mut Self::State,
         prefix_end: View,
     ) {
-        wait_for_liveness::<P>(
+        wait_for_liveness(
             context,
             &state.honest,
             prefix_end,
@@ -515,7 +558,7 @@ pub fn fuzz_marshal_standard_deferred_id_twins_split_header(mut input: MarshalTw
         StackSelection {
             application: ApplicationChoice::AlwaysAccept,
             marshal: MarshalChoice::Deferred,
-            max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
+            max_pending_acks: NZUsize!(2),
         },
         input.raw_bytes,
     );
@@ -540,7 +583,7 @@ pub fn fuzz_marshal_standard_inline_id_twins_split_header(mut input: MarshalTwin
         StackSelection {
             application: ApplicationChoice::AlwaysAccept,
             marshal: MarshalChoice::Inline,
-            max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
+            max_pending_acks: NZUsize!(2),
         },
         input.raw_bytes,
     );
@@ -642,6 +685,15 @@ mod tests {
             select_general_stack(&[0b1100]).0.max_pending_acks,
             DEFAULT_MAX_PENDING_ACKS,
         );
+    }
+
+    #[test]
+    fn pending_ack_oracle_is_armed_only_for_reachable_windows() {
+        assert_eq!(
+            pending_ack_invariant_limit(DEEP_PENDING_ACKS),
+            Some(DEEP_PENDING_ACKS)
+        );
+        assert_eq!(pending_ack_invariant_limit(DEFAULT_MAX_PENDING_ACKS), None);
     }
 
     #[test]

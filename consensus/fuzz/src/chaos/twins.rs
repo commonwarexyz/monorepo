@@ -269,7 +269,7 @@ where
         let participants = participants.clone();
         let scenario = scenario.clone();
         move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-            let view = crate::twins_resolver_view::<P>(message, &codec)?;
+            let view = crate::twins_resolver_view::<P, Sha256Digest>(message, &codec)?;
             let (primary, secondary) =
                 scenario.partitions(view, term_length, participants.as_ref());
             match origin {
@@ -283,7 +283,7 @@ where
         let participants = participants.clone();
         let scenario = scenario.clone();
         move |(sender, message): &(_, IoBuf)| {
-            let Some(view) = crate::twins_resolver_view::<P>(message, &codec) else {
+            let Some(view) = crate::twins_resolver_view::<P, Sha256Digest>(message, &codec) else {
                 return SplitTarget::None;
             };
             scenario.route(view, term_length, sender, participants.as_ref())

@@ -17,13 +17,14 @@
 //! - `app` is the block-building automaton bridging the engine to marshal.
 //! - `runner` sets up the cluster, drives the liveness window, and checks
 //!   invariants.
-//! - `twins` runs the standard marshal stack under sampled Simplex Twins
-//!   scenarios and checks post-prefix recovery.
+//! - `twins` runs the standard and coding marshal stacks under sampled Simplex
+//!   Twins scenarios and checks post-prefix recovery.
 //! - `invariants` holds the safety invariants and automaton assertions.
 
 use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 
 mod app;
+mod coding_disrupter;
 pub(crate) mod coding_stack;
 mod input;
 pub(super) mod invariants;
@@ -33,7 +34,7 @@ pub(crate) mod twins;
 pub use input::{MarshalDisrupterInput, MarshalTwinsInput};
 pub use runner::{fuzz_marshal_coding_disrupter, fuzz_marshal_standard_disrupter};
 pub use twins::{
-    fuzz_marshal_standard_deferred_id_twins_split_header,
+    fuzz_marshal_coding_twins, fuzz_marshal_standard_deferred_id_twins_split_header,
     fuzz_marshal_standard_inline_id_twins_split_header, fuzz_marshal_standard_twins,
 };
 

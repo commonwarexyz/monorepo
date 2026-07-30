@@ -162,7 +162,7 @@ async fn setup_prunable_validator_cert_mock(
 }
 
 const NUM_BLOCKS: u64 = 16;
-const MIN_OPS: usize = 1;
+const FORCED_OPS: usize = 25;
 const MAX_OPS: usize = 96;
 const EVENT_SETTLE: Duration = Duration::from_millis(20);
 
@@ -277,9 +277,9 @@ pub struct MarshalActorStoreInput {
 
 impl Arbitrary<'_> for MarshalActorStoreInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let op_count = u.int_in_range(MIN_OPS..=MAX_OPS)?;
-        let mut ops = Vec::with_capacity(op_count);
-        ops.extend([
+        let extra_ops = u.int_in_range(0..=MAX_OPS - FORCED_OPS)?;
+        let mut ops = Vec::with_capacity(FORCED_OPS + extra_ops);
+        let forced_ops: [StoreOp; FORCED_OPS] = [
             StoreOp::SeedBlock { block_idx: 0 },
             StoreOp::ReportFinalization { block_idx: 0 },
             StoreOp::GetBlock {
@@ -326,8 +326,9 @@ impl Arbitrary<'_> for MarshalActorStoreInput {
             StoreOp::DirectPutCertificate { block_idx: 0 },
             StoreOp::Restart,
             StoreOp::ObserveApplication,
-        ]);
-        for _ in ops.len()..op_count {
+        ];
+        ops.extend(forced_ops);
+        for _ in 0..extra_ops {
             ops.push(StoreOp::arbitrary(u)?);
         }
 
@@ -645,4 +646,17 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
             context.sleep(EVENT_SETTLE).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forced_script_allows_zero_extra_operations() {
+        let bytes = [0u8; 64];
+        let mut unstructured = arbitrary::Unstructured::new(&bytes);
+        let input = MarshalActorStoreInput::arbitrary(&mut unstructured).unwrap();
+        assert_eq!(input.ops.len(), FORCED_OPS);
+    }
 }

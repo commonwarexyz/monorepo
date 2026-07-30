@@ -48,7 +48,7 @@ use std::time::Duration;
 type CertScheme = SchemeOf<SimplexCertificateMock>;
 
 const NUM_BLOCKS: u64 = 24;
-const MIN_EVENTS: usize = 1;
+const FORCED_EVENTS: usize = 16;
 const MAX_EVENTS: usize = 64;
 const EVENT_SETTLE: Duration = Duration::from_millis(20);
 
@@ -194,7 +194,7 @@ pub struct MarshalActorStandardInput {
 
 impl Arbitrary<'_> for MarshalActorStandardInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
+        let extra_events = u.int_in_range(0..=MAX_EVENTS - FORCED_EVENTS)?;
         let app_propose_idx = if u.arbitrary()? {
             Some(block_idx(u)?)
         } else {
@@ -202,9 +202,9 @@ impl Arbitrary<'_> for MarshalActorStandardInput {
         };
         let app_verify_result = u.arbitrary()?;
 
-        let mut events = Vec::with_capacity(event_count);
+        let mut events = Vec::with_capacity(FORCED_EVENTS + extra_events);
         let boundary_idx = (BLOCKS_PER_EPOCH.get() - 2) as u8;
-        events.extend([
+        let forced_events: [InlineEvent; FORCED_EVENTS] = [
             // Exercise split-header equivocation before the general event
             // stream. The fields around this sequence remain fuzz-controlled,
             // including the application verdict, runtime byte tape, and all
@@ -270,8 +270,9 @@ impl Arbitrary<'_> for MarshalActorStandardInput {
             },
             InlineEvent::ReportTip { block_idx: 1 },
             InlineEvent::CloneWrapper,
-        ]);
-        for _ in events.len()..event_count {
+        ];
+        events.extend(forced_events);
+        for _ in 0..extra_events {
             events.push(InlineEvent::arbitrary(u)?);
         }
 
@@ -732,6 +733,14 @@ pub fn fuzz_marshal_actor_deferred(input: MarshalActorStandardInput) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forced_script_allows_zero_extra_events() {
+        let bytes = [0u8; 64];
+        let mut unstructured = arbitrary::Unstructured::new(&bytes);
+        let input = MarshalActorStandardInput::arbitrary(&mut unstructured).unwrap();
+        assert_eq!(input.events.len(), FORCED_EVENTS);
+    }
 
     #[test]
     fn out_of_epoch_proposal_does_not_arm_self_rejection() {

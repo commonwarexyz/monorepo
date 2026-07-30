@@ -35,15 +35,15 @@ use std::{
 
 type PublicKeyOf<P> =
     <<P as Simplex>::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey;
-type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
-type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
-type CertifyVerdicts = HashMap<(Round, Sha256Digest), (usize, bool)>;
-type ProposedBlocks = HashSet<(usize, Round, Sha256Digest)>;
+type GenericCtx<P, D> = SimplexContext<D, PublicKeyOf<P>>;
+type VerifiedContexts<P, D> = HashMap<(Round, D), Vec<GenericCtx<P, D>>>;
+type CertifyVerdicts<D> = HashMap<(Round, D), (usize, bool)>;
+type ProposedBlocks<D> = HashSet<(usize, Round, D)>;
 type AuditedBlock<D, P> = MockBlock<Sha256Digest, SimplexContext<D, P>>;
 type AuditedApplication<D, P> = Application<AuditedBlock<D, P>>;
 type AuditedBlocks<D, P> = BTreeMap<Height, Arc<AuditedBlock<D, P>>>;
 
-pub(super) trait ConsensusParentDigest: Digest {
+pub(crate) trait ConsensusParentDigest: Digest {
     fn block_digest(&self) -> Sha256Digest;
 }
 
@@ -59,13 +59,21 @@ impl ConsensusParentDigest for Commitment {
     }
 }
 
-#[derive(Default)]
-struct CertificationState {
-    agreement: CertifyVerdicts,
-    proposals: ProposedBlocks,
+struct CertificationState<D: Digest> {
+    agreement: CertifyVerdicts<D>,
+    proposals: ProposedBlocks<D>,
 }
 
-/// Ensures correct deferred automata return the same completed certification
+impl<D: Digest> Default for CertificationState<D> {
+    fn default() -> Self {
+        Self {
+            agreement: HashMap::new(),
+            proposals: HashSet::new(),
+        }
+    }
+}
+
+/// Ensures correct non-inline automata return the same completed certification
 /// verdict for the same `(round, digest)`. Direct drivers may also record
 /// completed proposals to ensure no marshal choice certifies them as false on
 /// the proposing node.
@@ -74,22 +82,30 @@ struct CertificationState {
 /// agreement, self-proposal rejection, and certification-poisoning checks are
 /// unreachable on Inline stacks. Their split-header coverage is verify-side.
 #[derive(Clone)]
-pub(crate) struct CertificationAgreementInvariant {
-    state: Arc<Mutex<CertificationState>>,
+pub(crate) struct CertificationAgreementInvariant<D: Digest = Sha256Digest> {
+    state: Arc<Mutex<CertificationState<D>>>,
     stack: Arc<str>,
-    marshal: MarshalChoice,
+    skip_cross_node_agreement: bool,
 }
 
-impl CertificationAgreementInvariant {
+impl<D: Digest> CertificationAgreementInvariant<D> {
     pub(crate) fn new(stack: Arc<str>, marshal: MarshalChoice) -> Self {
         Self {
             state: Arc::new(Mutex::new(CertificationState::default())),
             stack,
-            marshal,
+            skip_cross_node_agreement: matches!(marshal, MarshalChoice::Inline),
         }
     }
 
-    pub(crate) fn record_proposal(&self, validator: usize, round: Round, digest: Sha256Digest) {
+    pub(crate) fn coding(stack: Arc<str>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CertificationState::default())),
+            stack,
+            skip_cross_node_agreement: false,
+        }
+    }
+
+    pub(crate) fn record_proposal(&self, validator: usize, round: Round, digest: D) {
         self.state
             .lock()
             .proposals
@@ -100,7 +116,7 @@ impl CertificationAgreementInvariant {
         &self,
         validator: usize,
         round: Round,
-        digest: Sha256Digest,
+        digest: D,
         verdict: bool,
     ) {
         let mut state = self.state.lock();
@@ -111,7 +127,7 @@ impl CertificationAgreementInvariant {
             self.stack,
         );
 
-        if matches!(self.marshal, MarshalChoice::Inline) {
+        if self.skip_cross_node_agreement {
             return;
         }
 
@@ -131,20 +147,50 @@ impl CertificationAgreementInvariant {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum MarshalObservation {
+    Deferred,
+    Inline,
+    Coding,
+}
+
+impl From<MarshalChoice> for MarshalObservation {
+    fn from(marshal: MarshalChoice) -> Self {
+        match marshal {
+            MarshalChoice::Deferred => Self::Deferred,
+            MarshalChoice::Inline => Self::Inline,
+        }
+    }
+}
+
+impl std::fmt::Display for MarshalObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Deferred => formatter.write_str("deferred"),
+            Self::Inline => formatter.write_str("inline"),
+            Self::Coding => formatter.write_str("coding"),
+        }
+    }
+}
+
 /// Ensures a rejection scoped to one proposal header cannot poison
 /// certification of the same payload under its embedded header.
-pub(super) struct HeaderMismatchInvariant<P: Simplex, C: Copy> {
-    verified_contexts: Arc<Mutex<VerifiedContexts<P>>>,
+pub(crate) struct HeaderMismatchInvariant<
+    P: Simplex,
+    C: Copy,
+    D: ConsensusParentDigest = Sha256Digest,
+> {
+    verified_contexts: Arc<Mutex<VerifiedContexts<P, D>>>,
     missing_block_contexts: Arc<AtomicUsize>,
-    block_contexts: BlockContextRegistry<Ctx<P>>,
+    block_contexts: BlockContextRegistry<GenericCtx<P, D>>,
     app_choice: ApplicationChoice,
     app_config: C,
-    rejects: fn(ApplicationChoice, C, &Ctx<P>) -> bool,
-    marshal: MarshalChoice,
+    rejects: fn(ApplicationChoice, C, &GenericCtx<P, D>) -> bool,
+    marshal: MarshalObservation,
     stack: Arc<str>,
 }
 
-impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
+impl<P: Simplex, C: Copy, D: ConsensusParentDigest> Clone for HeaderMismatchInvariant<P, C, D> {
     fn clone(&self) -> Self {
         Self {
             verified_contexts: self.verified_contexts.clone(),
@@ -159,12 +205,12 @@ impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
     }
 }
 
-impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
-    pub(super) fn new(
+impl<P: Simplex, C: Copy, D: ConsensusParentDigest> HeaderMismatchInvariant<P, C, D> {
+    pub(crate) fn new(
         app_choice: ApplicationChoice,
         app_config: C,
-        rejects: fn(ApplicationChoice, C, &Ctx<P>) -> bool,
-        block_contexts: BlockContextRegistry<Ctx<P>>,
+        rejects: fn(ApplicationChoice, C, &GenericCtx<P, D>) -> bool,
+        block_contexts: BlockContextRegistry<GenericCtx<P, D>>,
         marshal: MarshalChoice,
         stack: Arc<str>,
     ) -> Self {
@@ -175,12 +221,31 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
             app_choice,
             app_config,
             rejects,
-            marshal,
+            marshal: marshal.into(),
             stack,
         }
     }
 
-    pub(super) fn record_verify(&self, context: Ctx<P>, digest: Sha256Digest) {
+    pub(crate) fn coding(
+        app_choice: ApplicationChoice,
+        app_config: C,
+        rejects: fn(ApplicationChoice, C, &GenericCtx<P, D>) -> bool,
+        block_contexts: BlockContextRegistry<GenericCtx<P, D>>,
+        stack: Arc<str>,
+    ) -> Self {
+        Self {
+            verified_contexts: Arc::new(Mutex::new(HashMap::new())),
+            missing_block_contexts: Arc::new(AtomicUsize::new(0)),
+            block_contexts,
+            app_choice,
+            app_config,
+            rejects,
+            marshal: MarshalObservation::Coding,
+            stack,
+        }
+    }
+
+    pub(crate) fn record_verify(&self, context: GenericCtx<P, D>, digest: D) {
         self.verified_contexts
             .lock()
             .entry((context.round, digest))
@@ -188,24 +253,39 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
             .push(context);
     }
 
-    pub(super) fn block_context(&self, digest: &Sha256Digest) -> Option<Ctx<P>> {
-        self.block_contexts.get(digest)
+    pub(crate) fn block_context(&self, digest: &D) -> Option<GenericCtx<P, D>> {
+        self.block_contexts.get(&digest.block_digest())
     }
 
-    pub(super) const fn marshal(&self) -> MarshalChoice {
+    pub(crate) fn verification_mismatch(
+        &self,
+        context: &GenericCtx<P, D>,
+        block_context: &GenericCtx<P, D>,
+        digest: D,
+    ) -> bool {
+        if digest == context.parent.1 {
+            return false;
+        }
+        match self.marshal {
+            MarshalObservation::Deferred | MarshalObservation::Coding => block_context != context,
+            MarshalObservation::Inline => block_context.parent.1 != context.parent.1,
+        }
+    }
+
+    pub(crate) fn marshal(&self) -> MarshalObservation {
         self.marshal
     }
 
-    pub(super) fn stack(&self) -> &str {
+    pub(crate) fn stack(&self) -> &str {
         &self.stack
     }
 
-    pub(super) fn missing_block_contexts(&self) -> usize {
+    pub(crate) fn missing_block_contexts(&self) -> usize {
         self.missing_block_contexts.load(Ordering::Relaxed)
     }
 
-    fn observed_mismatch(&self, round: Round, digest: Sha256Digest) -> bool {
-        if !matches!(self.marshal, MarshalChoice::Deferred) {
+    fn observed_mismatch(&self, round: Round, digest: D) -> bool {
+        if matches!(self.marshal, MarshalObservation::Inline) {
             return false;
         }
         let Some(block_context) = self.block_context(&digest) else {
@@ -219,13 +299,13 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
             .is_some_and(|contexts| {
                 contexts
                     .iter()
-                    .any(|context| digest != context.parent.1 && context != &block_context)
+                    .any(|context| self.verification_mismatch(context, &block_context, digest))
             });
         mismatch && !(self.rejects)(self.app_choice, self.app_config, &block_context)
     }
 
     /// Check a completed certification outcome after a header-mismatching verification.
-    pub(super) fn check_certification(&self, round: Round, digest: Sha256Digest, verdict: bool) {
+    pub(crate) fn check_certification(&self, round: Round, digest: D, verdict: bool) {
         if verdict {
             return;
         }
@@ -476,6 +556,26 @@ mod tests {
         }
     }
 
+    fn commitment(byte: u8) -> Commitment {
+        Commitment::from((
+            digest(byte),
+            digest(byte.wrapping_add(1)),
+            digest(byte.wrapping_add(2)),
+            commonware_consensus::marshal::mocks::harness::GENESIS_CODING_CONFIG,
+        ))
+    }
+
+    fn coding_context(
+        view: u64,
+        parent: Commitment,
+    ) -> SimplexContext<Commitment, id_mock::PublicKey> {
+        SimplexContext {
+            round: Round::new(Epoch::zero(), View::new(view)),
+            leader: id_mock::PublicKey::from_index(0),
+            parent: (View::new(view.saturating_sub(1)), parent),
+        }
+    }
+
     fn block(
         view: u64,
         context_parent: Sha256Digest,
@@ -692,6 +792,26 @@ mod tests {
     }
 
     #[test]
+    fn certification_mismatch_detects_coding_header_poison() {
+        let registry = BlockContextRegistry::default();
+        let payload = commitment(0xA);
+        let embedded = coding_context(2, commitment(0xB));
+        registry.record(payload.block(), embedded.clone());
+        let invariant = HeaderMismatchInvariant::<SimplexId, (), Commitment>::coding(
+            ApplicationChoice::AlwaysAccept,
+            (),
+            |_, _, _| false,
+            registry,
+            "test".into(),
+        );
+        let mut mutated = embedded;
+        mutated.parent.0 = View::zero();
+        invariant.record_verify(mutated, payload);
+
+        assert!(invariant.observed_mismatch(Round::new(Epoch::zero(), View::new(2)), payload,));
+    }
+
+    #[test]
     fn inline_certification_disagreement_is_allowed() {
         let invariant = CertificationAgreementInvariant::new("test".into(), MarshalChoice::Inline);
         invariant.check_certify_agreement(0, Round::zero(), digest(0xA), true);
@@ -705,6 +825,14 @@ mod tests {
             CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred);
         invariant.check_certify_agreement(0, Round::zero(), digest(0xA), true);
         invariant.check_certify_agreement(1, Round::zero(), digest(0xA), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "certify agreement violated")]
+    fn coding_certification_disagreement_is_rejected() {
+        let invariant = CertificationAgreementInvariant::coding("test".into());
+        invariant.check_certify_agreement(0, Round::zero(), commitment(0xA), true);
+        invariant.check_certify_agreement(1, Round::zero(), commitment(0xA), false);
     }
 
     #[test]

@@ -112,19 +112,29 @@ broadcast, and application-result transitions using structured libFuzzer input:
 cargo fuzz run marshal_actor_standard_inline_cert_mock
 cargo fuzz run marshal_actor_standard_deferred_cert_mock
 cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
+cargo fuzz run marshal_e2e_coding_app_cert_mock_twins
+cargo fuzz run marshal_e2e_coding_id_disrupter
 cargo fuzz run marshal_e2e_standard_deferred_id_twins_split_header
 cargo fuzz run marshal_e2e_standard_inline_id_twins_split_header
 ```
 
 The inline and deferred targets include split-header equivocation in their
 action space. The multi-node targets are Byzantine Twins mutators over the
-end-to-end standard stack. The general Twins target shares one corpus across
-the Basic and Faulty applications with both Inline and Deferred wrappers.
+end-to-end standard and coding stacks. The general Standard Twins target
+shares one corpus across the Basic and Faulty applications with both Inline
+and Deferred wrappers. The Coding Twins target shares the application axis but
+uses Coding's Marshaled adapter directly; Deferred and Inline do not apply.
+The coding disrupter also runs under `SimplexId`, whose certificate verifier
+checks the signer-set size and quorum rather than accepting the lightweight
+certificate-mock oracle.
 Three honest validators each run
-`Simplex -> Inline|Deferred -> Marshal -> Application`; the compromised
-identity runs one full Simplex engine over the same real marshal/application
-data plane and the existing `Disrupter` on its secondary half. The `Disrupter`
-can preserve an observed payload digest while mutating its proposal header.
+`Simplex -> Inline|Deferred|Marshaled -> Marshal -> Application`; the
+compromised identity runs one full Simplex engine over the same real
+marshal/application data plane plus a Byzantine secondary. On Standard, the
+secondary is the existing `Disrupter`, which can preserve an observed payload
+digest while mutating its proposal header. Coding uses a Commitment-typed
+secondary that signs both an observed proposal and a conflicting commitment
+with the compromised identity's key.
 
 The shared fuzz-layer Twins helpers sample leaders and recipient partitions for
 an adversarial prefix, then restore full synchrony. The target checks that every
