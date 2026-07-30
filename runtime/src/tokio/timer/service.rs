@@ -266,16 +266,19 @@ impl Timer {
     }
 
     /// Eagerly registers a sleep measured from this method call.
-    pub(crate) fn sleep(&self, duration: Duration) -> Sleep {
+    pub(crate) fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         if duration.is_zero() {
-            return Sleep::ready();
+            return Sleep::Ready;
         }
         let index = self.affinity.select();
-        Sleep::registered(self.shards[index].register_after(duration))
+        Sleep::Registered(self.shards[index].register_after(duration))
     }
 
     /// Eagerly converts one wall-clock deadline and registers its sleep.
-    pub(crate) fn sleep_until(&self, deadline: SystemTime) -> Sleep {
+    pub(crate) fn sleep_until(
+        &self,
+        deadline: SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static {
         let remaining = deadline
             .duration_since(SystemTime::now())
             .unwrap_or_default();
@@ -319,34 +322,20 @@ impl Drop for Timer {
 }
 
 /// Concrete future returned by the native timer facade.
-pub(crate) struct Sleep {
-    /// Ready or registered state owned by this future.
-    inner: SleepInner,
-}
-
-impl Sleep {
-    /// Constructs an immediately ready sleep.
-    const fn ready() -> Self {
-        Self {
-            inner: SleepInner::Ready,
-        }
-    }
-
-    /// Constructs a sleep tied to its originally selected shard.
-    const fn registered(registered: RegisteredSleep<NativeAlarm>) -> Self {
-        Self {
-            inner: SleepInner::Registered(registered),
-        }
-    }
+enum Sleep {
+    /// A zero-duration or past-deadline sleep.
+    Ready,
+    /// A sleep registered in one native shard.
+    Registered(RegisteredSleep<NativeAlarm>),
 }
 
 impl Future for Sleep {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        match &self.get_mut().inner {
-            SleepInner::Ready => poll_cooperative_ready(context),
-            SleepInner::Registered(sleep) => sleep.entry.poll(context),
+        match self.get_mut() {
+            Self::Ready => poll_cooperative_ready(context),
+            Self::Registered(sleep) => sleep.entry.poll(context),
         }
     }
 }
@@ -355,14 +344,6 @@ impl Future for Sleep {
 fn poll_cooperative_ready(context: &mut Context<'_>) -> Poll<()> {
     let mut budget = std::pin::pin!(tokio::task::coop::consume_budget());
     budget.as_mut().poll(context)
-}
-
-/// Storage variants for an immediately ready or registered sleep.
-enum SleepInner {
-    /// A zero-duration or past-deadline sleep.
-    Ready,
-    /// A sleep registered in one native shard.
-    Registered(RegisteredSleep<NativeAlarm>),
 }
 
 /// Registered sleep state that remembers its original cancellation shard.

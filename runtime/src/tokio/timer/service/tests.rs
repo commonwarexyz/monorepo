@@ -1539,7 +1539,7 @@ mod ordinary {
 
         // Await more immediate sleeps than one Tokio cooperative budget.
         for _ in 0..1_024 {
-            Sleep::ready().await;
+            Sleep::Ready.await;
             if peer_ran.load(AtomicOrdering::Acquire) {
                 break;
             }
