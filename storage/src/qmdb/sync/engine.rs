@@ -968,6 +968,16 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "engine requests pins only at the range start")]
+    fn test_insert_rejects_pins_away_from_start() {
+        let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
+        let id = requests.next_id();
+        let request = Request::new(Location::new(10), Location::new(5), NZU64!(1))
+            .retaining_from(Location::new(7));
+        requests.insert(id, request, std::future::ready(dummy_result(id)));
+    }
+
+    #[test]
     fn test_add_and_remove() {
         let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
         assert_eq!(requests.len(), 0);

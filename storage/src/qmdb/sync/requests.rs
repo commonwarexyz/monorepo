@@ -62,12 +62,21 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
 
     /// Register a request with a previously allocated ID. If a request already
     /// exists at the same start, the old one is superseded and aborted.
+    ///
+    /// Panics if the request asks for pins anywhere but its start: the engine verifies pins
+    /// at the range start, so answering such a request honestly would read as peer-invalid.
     pub fn insert(
         &mut self,
         id: Id,
         request: Request<F>,
         future: impl Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,
     ) {
+        assert!(
+            request
+                .retain_from
+                .is_none_or(|boundary| boundary == request.start),
+            "engine requests pins only at the range start"
+        );
         if let Some(old_id) = self.by_location.insert(request.start, id) {
             self.tracked.remove(&old_id);
         }
