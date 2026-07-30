@@ -46,7 +46,6 @@ use tracing::{Instrument as _, debug, info, info_span, warn};
 /// The exact effective dealer-log view used for one verification.
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
 
-/// Boundary-block responses waiting for one exact artifact verification.
 struct ArtifactWaiter<V: BlsVariant, C: Signer> {
     logs: PendingLogs<V, C::PublicKey>,
     responses: Vec<oneshot::Sender<EpochInfoResponse<V, C>>>,
@@ -90,38 +89,29 @@ impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
         });
     }
 
-    fn contains(&self, logs: &PendingLogs<V, C::PublicKey>) -> bool {
-        self.inner.iter().any(|waiter| waiter.logs == *logs)
-    }
-
-    fn next(&self) -> Option<PendingLogs<V, C::PublicKey>> {
-        self.inner.first().map(|waiter| waiter.logs.clone())
-    }
-
-    fn resolve(
+    fn take(
         &mut self,
         logs: &PendingLogs<V, C::PublicKey>,
-        result: EpochInfoResponse<V, C>,
-    ) {
-        let mut pending = Vec::with_capacity(self.inner.len());
-        for waiter in self.inner.drain(..) {
-            if waiter.logs == *logs {
-                for response in waiter.responses {
-                    let _ = response.send_lossy(result.clone());
-                }
-            } else {
-                pending.push(waiter);
-            }
-        }
-        self.inner = pending;
+    ) -> Vec<oneshot::Sender<EpochInfoResponse<V, C>>> {
+        let Some(index) = self.inner.iter().position(|waiter| waiter.logs == *logs) else {
+            return Vec::new();
+        };
+        let mut responses = self.inner.remove(index).responses;
+        responses.retain(|response| !response.is_closed());
+        responses
     }
 
-    fn target(
+    fn next_target<F>(
         &mut self,
-        fallback: PendingLogs<V, C::PublicKey>,
-    ) -> PendingLogs<V, C::PublicKey> {
+        fallback: F,
+    ) -> PendingLogs<V, C::PublicKey>
+    where
+        F: FnOnce() -> PendingLogs<V, C::PublicKey>,
+    {
         self.retain_open();
-        self.next().unwrap_or(fallback)
+        self.inner
+            .first()
+            .map_or_else(fallback, |waiter| waiter.logs.clone())
     }
 }
 
@@ -139,7 +129,6 @@ struct Artifact<V: BlsVariant, C: Signer> {
 ///
 /// `share` is present when this node participated as a player and absent when
 /// it only observed the public ceremony.
-#[derive(Clone)]
 struct Ceremony<V: BlsVariant, C: Signer> {
     output: Output<V, C::PublicKey>,
     share: Option<Share>,
@@ -162,16 +151,15 @@ struct VerifiedLogs<V: BlsVariant, C: Signer> {
 struct Verification<V: BlsVariant, C: Signer> {
     target: PendingLogs<V, C::PublicKey>,
     task: OptionFuture<Handle<VerifiedLogs<V, C>>>,
-    result: Option<VerifiedLogs<V, C>>,
+    ceremony: Option<Option<Ceremony<V, C>>>,
 }
 
 impl<V: BlsVariant, C: Signer> Verification<V, C> {
-    /// Creates an idle verifier targeting `target`.
     fn new(target: PendingLogs<V, C::PublicKey>) -> Self {
         Self {
             target,
             task: None.into(),
-            result: None,
+            ceremony: None,
         }
     }
 
@@ -185,15 +173,21 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
         }
 
         self.target = target;
-        self.result = None;
+        self.ceremony = None;
         true
     }
 
-    /// Installs the sole active task for the current target.
+    fn retarget_if_idle(&mut self, target: PendingLogs<V, C::PublicKey>) -> bool {
+        if self.task.is_some() {
+            return false;
+        }
+        self.retarget(target)
+    }
+
     fn start(&mut self, task: Handle<VerifiedLogs<V, C>>) {
         assert!(self.task.is_none(), "verification task already running");
         assert!(
-            self.result.is_none(),
+            self.ceremony.is_none(),
             "verification result already available"
         );
         self.task = Some(task).into();
@@ -201,7 +195,7 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
 
     /// Accepts `result` only when it matches the selected target.
     ///
-    /// Returns false for obsolete work so the caller can start the latest
+    /// Returns false for obsolete work so the caller can start the selected
     /// target after the active CPU task has exited.
     fn complete(&mut self, result: VerifiedLogs<V, C>) -> bool {
         self.task = None.into();
@@ -209,7 +203,7 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
             return false;
         }
 
-        self.result = Some(result);
+        self.ceremony = Some(result.ceremony);
         true
     }
 
@@ -217,11 +211,14 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
     ///
     /// The outer `None` means no matching verification has completed;
     /// `Some(None)` means verification completed and the ceremony failed.
-    fn ready(&self, logs: &PendingLogs<V, C::PublicKey>) -> Option<&Option<Ceremony<V, C>>> {
-        self.result
-            .as_ref()
-            .filter(|result| result.logs == *logs)
-            .map(|result| &result.ceremony)
+    fn ready(
+        &self,
+        logs: &PendingLogs<V, C::PublicKey>,
+    ) -> Option<Option<&Ceremony<V, C>>> {
+        if self.target != *logs {
+            return None;
+        }
+        self.ceremony.as_ref().map(Option::as_ref)
     }
 }
 
@@ -246,7 +243,20 @@ struct CachedArtifact<V: BlsVariant, C: Signer> {
     artifact: Option<Artifact<V, C>>,
 }
 
-/// Bounds used to extract non-finalized dealer logs from block ancestry.
+struct ArtifactCache<V: BlsVariant, C: Signer> {
+    next_players: Option<Set<C::PublicKey>>,
+    artifact: Option<CachedArtifact<V, C>>,
+}
+
+impl<V: BlsVariant, C: Signer> Default for ArtifactCache<V, C> {
+    fn default() -> Self {
+        Self {
+            next_players: None,
+            artifact: None,
+        }
+    }
+}
+
 struct PendingLogScan<'a, V: BlsVariant, P> {
     epoch: Epoch,
     info: &'a Info<V, P>,
@@ -460,8 +470,7 @@ where
 
         let mut served_at: Option<Height> = None;
         let mut finalized_tip = self.marshal.get_processed_height().await;
-        let mut next_players = None;
-        let mut artifact_cache = None;
+        let mut artifacts = ArtifactCache::default();
         let initial_logs = store.logs(epoch);
         let mut verification = Verification::new(initial_logs);
         self.start_verification(&mut verification, epoch, info, store);
@@ -479,37 +488,27 @@ where
                     continue;
                 }
                 let logs = verification.target.clone();
-                artifact_waiters.retain_open();
-                if artifact_waiters.contains(&logs) {
-                    let ceremony = verification
-                        .ready(&logs)
-                        .expect("completed verification must have a result")
-                        .clone();
-                    let artifact = self
-                        .artifact(
-                            epoch,
-                            store,
-                            logs.clone(),
-                            &ceremony,
-                            &mut next_players,
-                            &mut artifact_cache,
-                        )
-                        .await;
-                    let result = self.artifact_response(&artifact);
-                    artifact_waiters.resolve(&logs, result);
-                }
+                let ceremony = verification
+                    .ready(&logs)
+                    .expect("completed verification must have a result");
+                self.serve_waiters(
+                    epoch,
+                    store,
+                    logs,
+                    ceremony,
+                    &mut artifact_waiters,
+                    &mut artifacts,
+                )
+                .await;
 
-                let canonical_logs = store.logs(epoch);
-                if self.schedule_verification(
+                let target = artifact_waiters.next_target(|| store.logs(epoch));
+                self.retarget_verification(
                     &mut verification,
                     epoch,
                     info,
                     store,
-                    &mut artifact_waiters,
-                    canonical_logs,
-                ) {
-                    artifact_cache = None;
-                }
+                    target,
+                );
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
@@ -596,33 +595,28 @@ where
                         for (dealer, log) in pending_logs {
                             log_map.entry(dealer).or_insert(log);
                         }
-                        if let Some(ceremony) = verification.ready(&log_map).cloned() {
+                        if let Some(ceremony) = verification.ready(&log_map) {
                             let artifact = self
                                 .artifact(
                                     epoch,
                                     store,
                                     log_map,
-                                    &ceremony,
-                                    &mut next_players,
-                                    &mut artifact_cache,
+                                    ceremony,
+                                    &mut artifacts,
                                 )
                                 .await;
-                            let _ = response.send_lossy(self.artifact_response(&artifact));
+                            let _ = response.send_lossy(self.artifact_response(artifact.as_ref()));
                             return;
                         }
-                        artifact_waiters.retain_open();
                         artifact_waiters.push(log_map, response);
-                        let canonical_logs = store.logs(epoch);
-                        if self.schedule_verification(
+                        let target = artifact_waiters.next_target(|| store.logs(epoch));
+                        self.retarget_verification(
                             &mut verification,
                             epoch,
                             info,
                             store,
-                            &mut artifact_waiters,
-                            canonical_logs,
-                        ) {
-                            artifact_cache = None;
-                        }
+                            target,
+                        );
                     }
                     .instrument(process)
                     .await;
@@ -664,61 +658,57 @@ where
                         .await;
 
                         let done = block.height() == bounds.last();
-                        let canonical_logs = store.logs(epoch);
-                        artifact_waiters.retain_open();
-                        let retargeted = if done {
-                            self.replace_verification(
-                                &mut verification,
-                                epoch,
-                                info,
-                                store,
-                                canonical_logs.clone(),
-                            )
-                        } else {
-                            self.schedule_verification(
-                                &mut verification,
-                                epoch,
-                                info,
-                                store,
-                                &mut artifact_waiters,
-                                canonical_logs.clone(),
-                            )
-                        };
-                        if retargeted {
-                            artifact_cache = None;
-                        }
                         if done {
+                            let canonical_logs = store.logs(epoch);
+                            if verification.retarget_if_idle(canonical_logs.clone()) {
+                                self.start_verification(&mut verification, epoch, info, store);
+                            }
                             while verification.ready(&canonical_logs).is_none() {
-                                let task = verification
-                                    .task
-                                    .take()
-                                    .expect("pending verification must have a task");
-                                let completed = task.await.expect("verification task failed");
-                                if !verification.complete(completed) {
-                                    self.start_verification(
-                                        &mut verification,
-                                        epoch,
-                                        info,
-                                        store,
-                                    );
+                                let completed = (&mut verification.task)
+                                    .await
+                                    .expect("verification task failed");
+                                if verification.complete(completed) {
+                                    let logs = verification.target.clone();
+                                    if logs != canonical_logs {
+                                        let ceremony = verification.ready(&logs).expect(
+                                            "completed verification must have a result",
+                                        );
+                                        self.serve_waiters(
+                                            epoch,
+                                            store,
+                                            logs,
+                                            ceremony,
+                                            &mut artifact_waiters,
+                                            &mut artifacts,
+                                        )
+                                        .await;
+                                    }
                                 }
+                                self.retarget_verification(
+                                    &mut verification,
+                                    epoch,
+                                    info,
+                                    store,
+                                    canonical_logs.clone(),
+                                );
                             }
                             let ceremony = verification
                                 .ready(&canonical_logs)
-                                .expect("final verification must be cached")
-                                .clone();
+                                .expect("final verification must be cached");
+                            let responses = artifact_waiters.take(&canonical_logs);
                             let artifact = self
                                 .artifact(
                                     epoch,
                                     store,
-                                    canonical_logs.clone(),
-                                    &ceremony,
-                                    &mut next_players,
-                                    &mut artifact_cache,
+                                    canonical_logs,
+                                    ceremony,
+                                    &mut artifacts,
                                 )
                                 .await;
-                            let result = self.artifact_response(&artifact);
-                            artifact_waiters.resolve(&canonical_logs, result);
+                            let result = self.artifact_response(artifact.as_ref());
+                            for response in responses {
+                                let _ = response.send_lossy(result.clone());
+                            }
                             self.handle_finalized_epoch_info(
                                 epoch,
                                 store,
@@ -726,6 +716,15 @@ where
                                 block.payload(),
                             )
                             .await;
+                        } else {
+                            let target = artifact_waiters.next_target(|| store.logs(epoch));
+                            self.retarget_verification(
+                                &mut verification,
+                                epoch,
+                                info,
+                                store,
+                                target,
+                            );
                         }
 
                         finalized_tip = Some(block.height());
@@ -808,46 +807,25 @@ where
         }
     }
 
-    /// Selects the oldest live request, falling back to canonical precomputation.
-    ///
-    /// A target with a live waiter remains selected until it completes. Distinct
-    /// ancestry views are therefore verified sequentially without parking an
-    /// earlier request or overlapping CPU tasks.
-    fn schedule_verification(
-        &mut self,
-        verification: &mut Verification<V, C>,
-        epoch: Epoch,
-        info: &Info<V, C::PublicKey>,
-        store: &Store<E, SS, V, C::PublicKey>,
-        waiters: &mut ArtifactWaiters<V, C>,
-        fallback: PendingLogs<V, C::PublicKey>,
-    ) -> bool {
-        let target = waiters.target(fallback);
-        self.replace_verification(verification, epoch, info, store, target)
-    }
-
     /// Retargets asynchronous verification to an exact effective log set.
     ///
     /// A running verification is never overlapped with its replacement. The
     /// active task finishes first, after which the selected target is run.
-    /// A true return value requires the caller to invalidate the assembled
-    /// artifact cache.
-    fn replace_verification(
+    fn retarget_verification(
         &mut self,
         verification: &mut Verification<V, C>,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
         store: &Store<E, SS, V, C::PublicKey>,
         log_map: PendingLogs<V, C::PublicKey>,
-    ) -> bool {
+    ) {
         if !verification.retarget(log_map) {
-            return false;
+            return;
         }
 
         if verification.task.is_none() {
             self.start_verification(verification, epoch, info, store);
         }
-        true
     }
 
     /// Starts the current verification target on the shared pool.
@@ -903,16 +881,14 @@ where
 
         let mut logs = Logs::<_, _, N3f1>::new(info.clone());
         for (dealer, log) in log_map {
-            let dealer = dealer.clone();
-            let log = log.clone();
-            logs.record(dealer, log);
+            logs.record(dealer.clone(), log.clone());
         }
 
         let public_key = self.signer.public_key();
         let players = current
             .as_ref()
-            .map(|current| current.players.clone())
-            .or(dkg_participants)
+            .map(|current| &current.players)
+            .or(dkg_participants.as_ref())
             .expect("current epoch or DKG mode must provide players");
         let player = players.position(&public_key).and_then(|_| {
             store.create_player_with_logs::<C, N3f1>(
@@ -931,6 +907,32 @@ where
         }
     }
 
+    /// Resolves all live waiters for an exact verified log set.
+    ///
+    /// The shared artifact is assembled only when at least one waiter remains.
+    async fn serve_waiters(
+        &mut self,
+        epoch: Epoch,
+        store: &mut Store<E, SS, V, C::PublicKey>,
+        log_map: PendingLogs<V, C::PublicKey>,
+        ceremony: Option<&Ceremony<V, C>>,
+        waiters: &mut ArtifactWaiters<V, C>,
+        artifacts: &mut ArtifactCache<V, C>,
+    ) {
+        let responses = waiters.take(&log_map);
+        if responses.is_empty() {
+            return;
+        }
+
+        let artifact = self
+            .artifact(epoch, store, log_map, ceremony, artifacts)
+            .await;
+        let result = self.artifact_response(artifact.as_ref());
+        for response in responses {
+            let _ = response.send_lossy(result.clone());
+        }
+    }
+
     /// Assembles final epoch information from an already verified ceremony.
     ///
     /// Participant policy and retained-share storage are consulted here, while
@@ -943,11 +945,14 @@ where
         epoch: Epoch,
         store: &mut Store<E, SS, V, C::PublicKey>,
         log_map: PendingLogs<V, C::PublicKey>,
-        ceremony: &Option<Ceremony<V, C>>,
-        next_players: &mut Option<Set<C::PublicKey>>,
-        cache: &mut Option<CachedArtifact<V, C>>,
+        ceremony: Option<&Ceremony<V, C>>,
+        artifacts: &mut ArtifactCache<V, C>,
     ) -> Option<Artifact<V, C>> {
-        if let Some(cached) = cache.as_ref().filter(|cached| cached.logs == log_map) {
+        if let Some(cached) = artifacts
+            .artifact
+            .as_ref()
+            .filter(|cached| cached.logs == log_map)
+        {
             return cached.artifact.clone();
         }
 
@@ -963,7 +968,7 @@ where
         );
 
         let future_players = if current.is_some() {
-            match next_players {
+            match &mut artifacts.next_players {
                 Some(players) => players.clone(),
                 None => {
                     // The provider contract requires this set to remain stable
@@ -978,7 +983,7 @@ where
                         self.max_participants,
                         self.blocks_per_epoch,
                     );
-                    *next_players = Some(players.clone());
+                    artifacts.next_players = Some(players.clone());
                     players
                 }
             }
@@ -1034,7 +1039,7 @@ where
             (None, None) => None,
         };
 
-        *cache = Some(CachedArtifact {
+        artifacts.artifact = Some(CachedArtifact {
             logs: log_map,
             artifact: artifact.clone(),
         });
@@ -1046,7 +1051,7 @@ where
     /// A failed one-shot DKG legitimately produces no boundary artifact. A
     /// continuous reshare must always carry an artifact, including one that
     /// records ceremony failure, so local absence is unavailable there.
-    fn artifact_response(&self, artifact: &Option<Artifact<V, C>>) -> EpochInfoResponse<V, C> {
+    fn artifact_response(&self, artifact: Option<&Artifact<V, C>>) -> EpochInfoResponse<V, C> {
         match artifact {
             Some(artifact) => {
                 EpochInfoResponse::Available(Some(Payload::EpochInfo(artifact.info.clone())))
@@ -1299,7 +1304,7 @@ mod tests {
             assert!(!verification.complete(completed));
             assert_eq!(verification.target, latest);
             assert!(verification.task.is_none());
-            assert!(verification.result.is_none());
+            assert!(verification.ceremony.is_none());
         });
     }
 
@@ -1337,13 +1342,47 @@ mod tests {
     }
 
     #[test]
+    fn finalization_preserves_active_verification() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let active = dealer_logs(0);
+            let canonical = dealer_logs(1);
+            let completed_logs = active.clone();
+            let (release_tx, release_rx) = oneshot::channel();
+            let task = context.child("active").spawn(|_| async move {
+                release_rx.await.expect("task should be released");
+                VerifiedLogs::<TestBlsVariant, PrivateKey> {
+                    logs: completed_logs,
+                    ceremony: None,
+                }
+            });
+            let mut verification = Verification::new(active.clone());
+            verification.start(task);
+
+            assert!(!verification.retarget_if_idle(canonical.clone()));
+            assert_eq!(verification.target, active);
+
+            release_tx.send(()).expect("task should still be running");
+            let completed = verification
+                .task
+                .take()
+                .expect("task should be present")
+                .await
+                .expect("task should complete");
+            assert!(verification.complete(completed));
+            assert!(verification.retarget_if_idle(canonical.clone()));
+            assert_eq!(verification.target, canonical);
+        });
+    }
+
+    #[test]
     fn retargeting_preserves_ancestry_waiter() {
         let logs = dealer_logs(0);
         let (response_tx, response_rx) = oneshot::channel();
         let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
         waiters.push(logs.clone(), response_tx);
 
-        let selected = waiters.target(dealer_logs(1));
+        let selected = waiters.next_target(|| dealer_logs(1));
 
         assert_eq!(selected, logs);
         assert_eq!(waiters.inner.len(), 1);
@@ -1352,7 +1391,7 @@ mod tests {
     }
 
     #[test]
-    fn resolving_one_ancestry_preserves_other_waiters() {
+    fn taking_one_ancestry_preserves_other_waiters() {
         let first = dealer_logs(0);
         let second = dealer_logs(1);
         let (first_tx, first_rx) = oneshot::channel();
@@ -1361,14 +1400,19 @@ mod tests {
         waiters.push(first.clone(), first_tx);
         waiters.push(second.clone(), second_tx);
 
-        waiters.resolve(&first, EpochInfoResponse::Unavailable);
+        let mut responses = waiters.take(&first);
+        assert_eq!(responses.len(), 1);
+        let _ = responses
+            .pop()
+            .expect("first response should be present")
+            .send_lossy(EpochInfoResponse::Unavailable);
 
         assert!(matches!(
             first_rx.now_or_never(),
             Some(Ok(EpochInfoResponse::Unavailable))
         ));
         assert!((&mut second_rx).now_or_never().is_none());
-        assert_eq!(waiters.target(PendingLogs::new()), second);
+        assert_eq!(waiters.next_target(PendingLogs::new), second);
     }
 
     #[test]
