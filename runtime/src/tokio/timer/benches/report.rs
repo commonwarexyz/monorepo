@@ -45,27 +45,6 @@ impl Distribution {
     }
 }
 
-/// Largest descriptor count observed while a timer batch was resident.
-#[derive(Default)]
-pub(crate) struct PeakFdCount {
-    /// Largest available observation, or none when counting is unsupported.
-    count: Option<usize>,
-}
-
-impl PeakFdCount {
-    /// Includes one descriptor observation in the reported maximum.
-    pub(crate) fn observe(&mut self, count: Option<usize>) {
-        if let Some(count) = count {
-            self.count = Some(self.count.map_or(count, |peak| peak.max(count)));
-        }
-    }
-
-    /// Returns a printable maximum or an explicit unavailable marker.
-    pub(crate) fn label(&self) -> String {
-        fd_count_value_label(self.count)
-    }
-}
-
 /// Largest monotonic interval bracketing paired wall-clock observations.
 #[derive(Default)]
 pub(crate) struct ClockPairSpan {
@@ -105,7 +84,7 @@ pub(crate) fn print_effective_config(config: &Config) {
          accuracy_batches={} samples_per_concurrency_slot={} accuracy_concurrency={:?} \
          accuracy_spread_us={} worst_batches={} registration_timers={} registration_step_ns={} \
          cancellation_timers={} cancel_percent={} storm_timers={} storm_lead_us={} \
-         peer_lead_us={} fairness_worker_threads=1 fairness_shards={} fd_count={}",
+         peer_lead_us={} fairness_worker_threads=1 fairness_shards={}",
         config.scenario,
         config.backend,
         std::env::consts::OS,
@@ -125,7 +104,6 @@ pub(crate) fn print_effective_config(config: &Config) {
         STORM_LEAD.as_micros(),
         PEER_LEAD.as_micros(),
         fairness_shards_label(),
-        fd_count_label(),
     );
 }
 
@@ -136,24 +114,18 @@ pub(crate) fn print_duration(
     dimensions: &[(&str, usize)],
     metric: &str,
     samples: &[Duration],
-    peak_live_fd_count: Option<&PeakFdCount>,
     additional_fields: Option<&str>,
 ) -> io::Result<Distribution> {
     let distribution = Distribution::new(samples)?;
     let accounting = format_sample_counts(batches, dimensions, &[(metric, samples.len())]);
-    let peak_live_fd_count = peak_live_fd_count.map_or_else(String::new, |peak| {
-        format!(" peak_live_fd_count={}", peak.label())
-    });
     let additional_fields =
         additional_fields.map_or_else(String::new, |fields| format!(" {fields}"));
     println!(
         "{name} {accounting} {metric}_p50_us={:.3} {metric}_p99_us={:.3} \
-         {metric}_max_us={:.3} fd_count={}{}{}",
+         {metric}_max_us={:.3}{}",
         micros(distribution.p50),
         micros(distribution.p99),
         micros(distribution.max),
-        fd_count_label(),
-        peak_live_fd_count,
         additional_fields,
     );
     Ok(distribution)
@@ -225,31 +197,6 @@ pub(crate) fn elapsed_through_last(
 /// Converts a duration to fractional microseconds for compact output.
 pub(crate) fn micros(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000_000.0
-}
-
-/// Returns a printable descriptor count or an explicit unavailable marker.
-pub(crate) fn fd_count_label() -> String {
-    fd_count_value_label(fd_count())
-}
-
-/// Formats a captured descriptor count without taking another observation.
-fn fd_count_value_label(count: Option<usize>) -> String {
-    count.map_or_else(|| "unavailable".to_owned(), |count| count.to_string())
-}
-
-/// Counts open descriptors using the Linux process filesystem.
-#[cfg(target_os = "linux")]
-pub(crate) fn fd_count() -> Option<usize> {
-    // The directory iterator owns one descriptor that appears in its own listing.
-    std::fs::read_dir("/proc/self/fd")
-        .ok()
-        .map(|entries| entries.count().saturating_sub(1))
-}
-
-/// Reports descriptor counting as unavailable on platforms without procfs.
-#[cfg(not(target_os = "linux"))]
-pub(crate) const fn fd_count() -> Option<usize> {
-    None
 }
 
 /// Returns the checked zero-based index for a nearest-rank percentile.

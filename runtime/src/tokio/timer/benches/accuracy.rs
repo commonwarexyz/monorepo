@@ -125,7 +125,6 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
                 &[("concurrency", scenario.concurrency)],
                 "lateness",
                 &lateness,
-                None,
                 Some(&clock_pair_span),
             )?;
         }

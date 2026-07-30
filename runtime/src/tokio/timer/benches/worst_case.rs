@@ -64,13 +64,11 @@ async fn benchmark_descending_registration(
 ) -> io::Result<()> {
     for backend in config.backends() {
         let mut elapsed = Vec::with_capacity(config.worst_batches);
-        let mut peak_live_fd_count = report::PeakFdCount::default();
         for _ in 0..config.worst_batches {
-            let result =
+            elapsed.push(
                 run_registration_batch(&clock, backend, REGISTRATION_TIMERS, REGISTRATION_STEP)
-                    .await?;
-            elapsed.push(result.elapsed);
-            peak_live_fd_count.observe(result.live_fd_count);
+                    .await?,
+            );
         }
 
         let name = format!(
@@ -86,7 +84,6 @@ async fn benchmark_descending_registration(
             &[("timers_per_batch", REGISTRATION_TIMERS), ("producers", 1)],
             "registration",
             &elapsed,
-            Some(&peak_live_fd_count),
             None,
         )?;
     }
@@ -99,7 +96,7 @@ async fn run_registration_batch(
     backend: Backend,
     timers: usize,
     step: Duration,
-) -> io::Result<RegistrationBatch> {
+) -> io::Result<Duration> {
     let wall_base = checked_system_deadline(LONG_DEADLINE)?;
     let mut sleeps = Vec::with_capacity(timers);
     let start = Instant::now();
@@ -125,24 +122,10 @@ async fn run_registration_batch(
     }
     let elapsed = start.elapsed();
 
-    // Observe descriptors while every timer remains resident.
-    let live_fd_count = report::fd_count();
-
     // Cancellation is deliberately outside the registration distribution.
     drop(sleeps);
     tokio::task::yield_now().await;
-    Ok(RegistrationBatch {
-        elapsed,
-        live_fd_count,
-    })
-}
-
-/// Result of one descending-registration batch.
-struct RegistrationBatch {
-    /// Construction and initial-poll time for the complete batch.
-    elapsed: Duration,
-    /// Descriptor count while every registered timer remains resident.
-    live_fd_count: Option<usize>,
+    Ok(elapsed)
 }
 
 /// Measures deterministic high-rate cancellation at the selected producer levels.
@@ -165,7 +148,6 @@ async fn benchmark_cancellation(
             let mut setup = Vec::with_capacity(setup_samples);
             let mut cancellation = Vec::with_capacity(cancellation_samples);
             let mut drain = Vec::with_capacity(config.worst_batches);
-            let mut peak_live_fd_count = report::PeakFdCount::default();
 
             for batch in 0..config.worst_batches {
                 let batch = u64::try_from(batch).unwrap_or(u64::MAX);
@@ -200,8 +182,6 @@ async fn benchmark_cancellation(
                 setup.extend(latency.setup);
                 cancellation.extend(latency.cancellation);
                 drain.push(throughput.drain);
-                peak_live_fd_count.observe(latency.live_fd_count);
-                peak_live_fd_count.observe(throughput.live_fd_count);
             }
             if setup.len() != setup_samples
                 || cancellation.len() != cancellation_samples
@@ -255,7 +235,7 @@ async fn benchmark_cancellation(
                  drain_max_us={:.3} scaling_vs_one_producer={scaling} \
                  measurement_passes=2 cancellation_measurement=instrumented \
                  drain_measurement=uninstrumented setup_measurement=latency_pass \
-                 fd_count={} peak_live_fd_count={} {shard_distribution}",
+                 {shard_distribution}",
                 report::micros(setup_distribution.p50),
                 report::micros(setup_distribution.p99),
                 report::micros(setup_distribution.max),
@@ -265,8 +245,6 @@ async fn benchmark_cancellation(
                 report::micros(drain_distribution.p50),
                 report::micros(drain_distribution.p99),
                 report::micros(drain_distribution.max),
-                report::fd_count_label(),
-                peak_live_fd_count.label(),
             );
         }
     }
@@ -301,8 +279,6 @@ pub(super) struct CancellationBatch {
     pub(super) cancellation: Vec<Duration>,
     /// Wall time from producer release through the final cancellation.
     drain: Duration,
-    /// Descriptor count before cancellation releases any registered timer.
-    live_fd_count: Option<usize>,
 }
 
 /// Result returned by one contending cancellation producer thread.
@@ -325,8 +301,6 @@ struct CoordinatedCancellation {
     results: Vec<ProducerResult>,
     /// Wall time from producer release through the final cancellation.
     drain: Duration,
-    /// Descriptor count before cancellation releases any registered timer.
-    live_fd_count: Option<usize>,
 }
 
 /// Inputs owned by one dedicated cancellation producer.
@@ -450,7 +424,6 @@ pub(super) async fn run_cancellation_batch(
         setup,
         cancellation,
         drain: coordinated.drain,
-        live_fd_count: coordinated.live_fd_count,
     })
 }
 
@@ -543,7 +516,6 @@ fn coordinate_cancellation(
         discard_producers(handles);
         return Err(io::Error::other("cancellation producer setup was canceled"));
     }
-    let live_fd_count = report::fd_count();
     // Reserve result storage before release so coordinator allocation cannot
     // contribute to the measured cancellation drain.
     let mut results = Vec::with_capacity(handles.len());
@@ -554,11 +526,7 @@ fn coordinate_cancellation(
         drain_start,
         results.iter().map(|result| result.last_cancellation),
     )?;
-    Ok(CoordinatedCancellation {
-        results,
-        drain,
-        live_fd_count,
-    })
+    Ok(CoordinatedCancellation { results, drain })
 }
 
 /// Collects every cancellation producer and returns the first thread failure.
@@ -619,7 +587,6 @@ async fn benchmark_expiry_storm(
         let mut first_dispatch = Vec::with_capacity(config.worst_batches);
         let mut full_drain = Vec::with_capacity(config.worst_batches);
         let mut peer_gap = Vec::with_capacity(config.worst_batches);
-        let mut peak_live_fd_count = report::PeakFdCount::default();
         let mut clock_pair_span = report::ClockPairSpan::default();
 
         for _ in 0..config.worst_batches {
@@ -628,7 +595,6 @@ async fn benchmark_expiry_storm(
             first_dispatch.push(result.first_dispatch);
             full_drain.push(result.full_drain);
             peer_gap.push(result.peer_gap);
-            peak_live_fd_count.observe(result.live_fd_count);
             clock_pair_span.observe(result.clock_pair_span);
         }
 
@@ -656,7 +622,7 @@ async fn benchmark_expiry_storm(
              first_dispatch_max_us={:.3} full_drain_p50_us={:.3} \
              full_drain_p99_us={:.3} full_drain_max_us={:.3} \
              peer_gap_p50_us={:.3} peer_gap_p99_us={:.3} peer_gap_max_us={:.3} \
-             fd_count={} peak_live_fd_count={} {clock_pair_span}",
+             {clock_pair_span}",
             report::micros(first.p50),
             report::micros(first.p99),
             report::micros(first.max),
@@ -666,8 +632,6 @@ async fn benchmark_expiry_storm(
             report::micros(peer.p50),
             report::micros(peer.p99),
             report::micros(peer.max),
-            report::fd_count_label(),
-            peak_live_fd_count.label(),
         );
     }
     Ok(())
@@ -681,8 +645,6 @@ struct StormResult {
     full_drain: Duration,
     /// Longest interval in which the runnable peer was not scheduled.
     peer_gap: Duration,
-    /// Descriptor count while every storm timer remains resident.
-    live_fd_count: Option<usize>,
     /// Commonware wall-clock pairing uncertainty, when applicable.
     clock_pair_span: Option<Duration>,
 }
@@ -711,7 +673,6 @@ async fn run_storm_batch(
         }
         sleeps.push(sleep);
     }
-    let live_fd_count = report::fd_count();
     if Instant::now() >= deadlines.measurement_deadline {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -762,7 +723,6 @@ async fn run_storm_batch(
         first_dispatch,
         full_drain: last.saturating_sub(first),
         peer_gap,
-        live_fd_count,
         clock_pair_span: deadlines.clock_pair_span,
     })
 }
