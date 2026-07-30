@@ -239,6 +239,21 @@ mod tests {
         }
     }
 
+    /// Remove the entry at `index` and verify its identity and resulting state.
+    fn assert_remove_at(heap: &mut Heap, index: usize) {
+        let expected_entry = Arc::clone(&heap.items[index].entry);
+        let expected_key = key(&heap.items[index]);
+        let removed = heap.remove(index, &expected_entry).expect("resident entry");
+
+        assert!(Arc::ptr_eq(&removed.entry, &expected_entry));
+        assert_eq!(key(&removed), expected_key);
+        assert_eq!(
+            expected_entry.heap_index.load(Ordering::Relaxed),
+            NOT_IN_HEAP
+        );
+        assert_invariants(heap);
+    }
+
     /// Insert keys, verify every intermediate state, and verify pop order.
     fn assert_ordered(keys: &[(u64, u64)]) {
         let mut expected = keys.to_vec();
@@ -259,45 +274,47 @@ mod tests {
         assert_eq!(heap.len(), 0);
     }
 
-    /// An empty heap has no head and accepts no removal.
+    /// Basic inspection, popping, and positional removal preserve heap state.
     #[test]
-    fn empty_heap_behavior() {
-        // Start with no resident entries and an unrelated identity used for
-        // removal attempts.
+    fn basic_operations_and_positional_removal() {
+        // An empty heap has no head and accepts no removal.
         let mut heap = Heap::default();
-        let expected = Arc::new(Entry::new());
-
-        // Empty inspection and every removal form must leave both the heap and
-        // unrelated entry unchanged.
+        let missing = Arc::new(Entry::new());
         assert_eq!(heap.len(), 0);
         assert!(heap.peek().is_none());
         assert!(heap.pop().is_none());
-        assert!(heap.remove(0, &expected).is_none());
-        assert!(heap.remove(NOT_IN_HEAP, &expected).is_none());
-        assert_eq!(expected.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
-    }
+        assert!(heap.remove(0, &missing).is_none());
+        assert_eq!(missing.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
 
-    /// One entry becomes the head and becomes nonresident when popped.
-    #[test]
-    fn one_entry() {
-        // Insert a single entry so it must occupy both the head and index zero.
-        let mut heap = Heap::default();
-        let (entry, item) = item(7, 11);
-
-        heap.push(item);
-        assert_eq!(heap.len(), 1);
-        assert!(Arc::ptr_eq(
-            &heap.peek().expect("expected a head").entry,
-            &entry
-        ));
+        // Push and pop a singleton, checking its key, identity, and index.
+        let (entry, singleton) = item(7, 11);
+        heap.push(singleton);
+        let head = heap.peek().expect("expected a head");
+        assert!(Arc::ptr_eq(&head.entry, &entry));
+        assert_eq!(key(head), (Duration::from_nanos(7), 11));
         assert_eq!(entry.heap_index.load(Ordering::Relaxed), 0);
         assert_invariants(&heap);
 
-        // Popping the only entry must restore the nonresident sentinel exactly.
         let popped = heap.pop().expect("expected a timer");
         assert!(Arc::ptr_eq(&popped.entry, &entry));
+        assert_eq!(key(&popped), (Duration::from_nanos(7), 11));
         assert_eq!(entry.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
+        assert_invariants(&heap);
+
+        // Remove a singleton by index, then remove three positions from a larger heap.
+        heap.push(item(1, 0).1);
+        assert_remove_at(&mut heap, 0);
         assert_eq!(heap.len(), 0);
+        for value in (0..64).rev() {
+            heap.push(item(value, value).1);
+        }
+        assert_invariants(&heap);
+
+        assert_remove_at(&mut heap, 0);
+        let middle_index = heap.len() / 2;
+        assert_remove_at(&mut heap, middle_index);
+        let final_index = heap.len() - 1;
+        assert_remove_at(&mut heap, final_index);
     }
 
     /// Ascending, descending, equal, and wrapping insertions pop in order.
@@ -331,52 +348,6 @@ mod tests {
             (10, u64::MAX),
         ];
         assert_ordered(&wrapping);
-    }
-
-    /// Root, middle, final, and only-entry removal preserve all invariants.
-    #[test]
-    fn remove_positions() {
-        // Verify the one-entry case independently because no tail replacement
-        // or sift operation is available.
-        let mut only = Heap::default();
-        let (only_entry, only_item) = item(1, 0);
-        only.push(only_item);
-        let removed = only.remove(0, &only_entry).expect("expected only entry");
-        assert!(Arc::ptr_eq(&removed.entry, &only_entry));
-        assert_eq!(only_entry.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
-        assert_eq!(only.len(), 0);
-
-        // Build a nontrivial shape, then remove root, interior, and tail entries.
-        // Each removal must update the removed sentinel and every resident index.
-        let mut heap = Heap::default();
-        for value in (0..64).rev() {
-            heap.push(item(value, value).1);
-        }
-        assert_invariants(&heap);
-
-        let root = Arc::clone(&heap.items[0].entry);
-        let removed = heap.remove(0, &root).expect("expected root");
-        assert!(Arc::ptr_eq(&removed.entry, &root));
-        assert_eq!(root.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
-        assert_invariants(&heap);
-
-        let middle_index = heap.len() / 2;
-        let middle = Arc::clone(&heap.items[middle_index].entry);
-        let removed = heap
-            .remove(middle_index, &middle)
-            .expect("expected middle entry");
-        assert!(Arc::ptr_eq(&removed.entry, &middle));
-        assert_eq!(middle.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
-        assert_invariants(&heap);
-
-        let final_index = heap.len() - 1;
-        let final_entry = Arc::clone(&heap.items[final_index].entry);
-        let removed = heap
-            .remove(final_index, &final_entry)
-            .expect("expected final entry");
-        assert!(Arc::ptr_eq(&removed.entry, &final_entry));
-        assert_eq!(final_entry.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
-        assert_invariants(&heap);
     }
 
     /// Replacing an arbitrary item with an earlier tail item sifts upward.
@@ -545,28 +516,33 @@ mod tests {
     /// Parent and child arithmetic handles roots and integer boundaries.
     #[test]
     fn index_arithmetic_boundaries() {
-        // Check the root and both sides of the first 4-ary parent boundary.
-        assert_eq!(parent_index(0), None);
-        assert_eq!(parent_index(1), Some(0));
-        assert_eq!(parent_index(4), Some(0));
-        assert_eq!(parent_index(5), Some(1));
-        assert_eq!(parent_index(usize::MAX), Some((usize::MAX - 1) / ARITY));
+        // Cover the root, the first 4-ary boundary, and the integer limit.
+        for (index, expected) in [
+            (0, None),
+            (1, Some(0)),
+            (4, Some(0)),
+            (5, Some(1)),
+            (usize::MAX, Some((usize::MAX - 1) / ARITY)),
+        ] {
+            assert_eq!(parent_index(index), expected);
+        }
 
-        // Check all four root children and reject an invalid child offset.
-        assert_eq!(child_index(0, 0), Some(1));
-        assert_eq!(child_index(0, 1), Some(2));
-        assert_eq!(child_index(0, 2), Some(3));
-        assert_eq!(child_index(0, 3), Some(4));
-        assert_eq!(child_index(0, ARITY), None);
-
-        // At the integer boundary, representable children succeed and every
-        // overflowing multiplication or addition returns `None`.
+        // Cover all root children, an invalid offset, and each overflow boundary.
         let edge_parent = usize::MAX / ARITY;
-        assert_eq!(child_index(edge_parent, 0), Some(usize::MAX - 2));
-        assert_eq!(child_index(edge_parent, 1), Some(usize::MAX - 1));
-        assert_eq!(child_index(edge_parent, 2), Some(usize::MAX));
-        assert_eq!(child_index(edge_parent, 3), None);
-        assert_eq!(child_index(edge_parent + 1, 0), None);
+        for (index, offset, expected) in [
+            (0, 0, Some(1)),
+            (0, 1, Some(2)),
+            (0, 2, Some(3)),
+            (0, 3, Some(4)),
+            (0, ARITY, None),
+            (edge_parent, 0, Some(usize::MAX - 2)),
+            (edge_parent, 1, Some(usize::MAX - 1)),
+            (edge_parent, 2, Some(usize::MAX)),
+            (edge_parent, 3, None),
+            (edge_parent + 1, 0, None),
+        ] {
+            assert_eq!(child_index(index, offset), expected);
+        }
     }
 
     /// Inserting one shared entry twice violates the resident-index invariant.
