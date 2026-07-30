@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::resolver::{Request, Response, Source as SyncSource},
+    qmdb::sync::source::{Request, Response, Source as SyncSource},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
@@ -31,7 +31,8 @@ type DatabaseRoot<F, DB> = <Shared<DB> as SyncSource<Request<F>>>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
 type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
 type Pending<F, Op, D> = mailbox::Delivery<F, Op, D>;
-type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<F, DB>, DatabaseRoot<F, DB>>>>;
+type PendingSubs<F, DB> =
+    BTreeMap<handler::Request<F>, Vec<Pending<F, Op<F, DB>, DatabaseRoot<F, DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -224,10 +225,7 @@ where
     }
 
     /// Process a mailbox message. Returns a request to fetch if a new key was registered.
-    fn handle_mailbox_message(
-        &mut self,
-        message: SyncMessage<F, DB>,
-    ) -> MailboxAction<F> {
+    fn handle_mailbox_message(&mut self, message: SyncMessage<F, DB>) -> MailboxAction<F> {
         match message {
             mailbox::Message::AttachDatabase(db) => {
                 let replacing_existing = matches!(self.state, State::HasDb(_));
@@ -292,17 +290,18 @@ where
 
         // `max_ops` is sourced from the original local request key above.
         let max_ops = key.max_ops.get() as usize;
-        let decoded =
-            match handler::Response::<F, Op<F, DB>, DatabaseRoot<F, DB>>::decode_cfg(value, &max_ops) {
-                Ok(decoded) => decoded,
-                Err(_) => {
-                    self.pending.insert(key, subscribers);
-                    let _ = self.metrics.pending_requests.try_set(self.pending.len());
-                    self.metrics.deliveries.inc(status::Status::Invalid);
-                    response.send_lossy(false);
-                    return;
-                }
-            };
+        let decoded = match handler::Response::<F, Op<F, DB>, DatabaseRoot<F, DB>>::decode_cfg(
+            value, &max_ops,
+        ) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                self.pending.insert(key, subscribers);
+                let _ = self.metrics.pending_requests.try_set(self.pending.len());
+                self.metrics.deliveries.inc(status::Status::Invalid);
+                response.send_lossy(false);
+                return;
+            }
+        };
 
         let mut approvals = Vec::new();
         for subscriber in subscribers {
@@ -482,7 +481,7 @@ mod tests {
         Result<
             (
                 Response<mmr::Family, TestOp, sha256::Digest>,
-                commonware_storage::qmdb::sync::resolver::Validity,
+                commonware_storage::qmdb::sync::source::Validity,
             ),
             mailbox::ResponseDropped,
         >,

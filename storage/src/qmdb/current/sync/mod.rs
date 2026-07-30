@@ -380,7 +380,7 @@ impl_current_sync_database!(
 ///
 /// Every `current` alias resolves to this one generic, so one implementation covers all four.
 impl<F, E, U, C, I, H, const N: usize, S>
-    crate::qmdb::sync::Source<crate::qmdb::sync::resolver::Request<F>>
+    crate::qmdb::sync::Source<crate::qmdb::sync::source::Request<F>>
     for db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
@@ -399,11 +399,11 @@ where
 
     async fn serve(
         &self,
-        request: crate::qmdb::sync::resolver::Request<F>,
+        request: crate::qmdb::sync::source::Request<F>,
     ) -> Result<
         (
-            crate::qmdb::sync::resolver::Response<F, Self::Op, H::Digest>,
-            crate::qmdb::sync::resolver::Validity,
+            crate::qmdb::sync::source::Response<F, Self::Op, H::Digest>,
+            crate::qmdb::sync::source::Validity,
         ),
         qmdb::Error<F>,
     > {

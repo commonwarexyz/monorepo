@@ -38,7 +38,10 @@ use commonware_storage::{
             db::Db,
         },
         operation::Key,
-        sync::{self, Target as CurrentSyncTarget, resolver::{Request, Source}},
+        sync::{
+            self, Target as CurrentSyncTarget,
+            source::{Request, Source},
+        },
     },
     translator::Translator,
 };
@@ -970,8 +973,7 @@ where
             Family = F,
             Op = Operation<F, unordered::Update<K, FixedEncoding<V>>>,
             Digest = H::Digest,
-        > + Clone
-        + 'static,
+        > + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1027,8 +1029,7 @@ where
             Family = F,
             Op = Operation<F, ordered::Update<K, FixedEncoding<V>>>,
             Digest = H::Digest,
-        > + Clone
-        + 'static,
+        > + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1085,8 +1086,7 @@ where
             Family = F,
             Op = Operation<F, unordered::Update<K, VariableEncoding<V>>>,
             Digest = H::Digest,
-        > + Clone
-        + 'static,
+        > + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -1143,8 +1143,7 @@ where
             Family = F,
             Op = Operation<F, ordered::Update<K, VariableEncoding<V>>>,
             Digest = H::Digest,
-        > + Clone
-        + 'static,
+        > + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 

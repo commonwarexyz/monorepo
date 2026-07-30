@@ -322,7 +322,7 @@ where
     H: Hasher + 'static,
     S: Strategy,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
-    R: sync::compact::Resolver<Self>,
+    R: sync::compact::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -358,7 +358,7 @@ where
     Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
-    R: sync::compact::Resolver<Self>,
+    R: sync::compact::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -423,7 +423,7 @@ mod tests {
         stale_request_tx: mpsc::Sender<()>,
     }
 
-    impl sync::resolver::Source<sync::compact::Target<mmr::Family, Digest>>
+    impl sync::source::Source<sync::compact::Target<mmr::Family, Digest>>
         for SupersedingCompactResolver
     {
         type Family = mmr::Family;
@@ -436,8 +436,8 @@ mod tests {
             target: sync::compact::Target<Self::Family, Self::Digest>,
         ) -> Result<
             (
-                sync::resolver::Response<Self::Family, Self::Op, Self::Digest>,
-                sync::resolver::Validity,
+                sync::source::Response<Self::Family, Self::Op, Self::Digest>,
+                sync::source::Validity,
             ),
             Self::Error,
         > {

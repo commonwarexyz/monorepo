@@ -8,7 +8,7 @@ use commonware_storage::{
     merkle::Family,
     qmdb::sync::{
         compact,
-        resolver::{Response, Source, Validity},
+        source::{Response, Source, Validity},
     },
 };
 use commonware_utils::channel::oneshot;

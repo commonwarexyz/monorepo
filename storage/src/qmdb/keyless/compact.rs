@@ -95,8 +95,10 @@ where
     }
 }
 
-type CompactStateResult<F, V, D> =
-    Result<crate::qmdb::sync::resolver::Response<F, Operation<F, V>, D>, crate::qmdb::sync::ServeError<F, D>>;
+type CompactStateResult<F, V, D> = Result<
+    crate::qmdb::sync::source::Response<F, Operation<F, V>, D>,
+    crate::qmdb::sync::ServeError<F, D>,
+>;
 
 /// A speculative batch for a compact keyless db.
 #[allow(clippy::type_complexity)]
@@ -440,10 +442,12 @@ where
         } = entry;
         let op = Operation::<F, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
             .map_err(|_| {
-                crate::qmdb::sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
+                crate::qmdb::sync::ServeError::Database(Error::DataCorrupted(
+                    "invalid commit operation",
+                ))
             })?;
         let _ = leaf_count;
-        Ok(crate::qmdb::sync::resolver::Response::new(
+        Ok(crate::qmdb::sync::source::Response::new(
             last_commit_proof,
             vec![op],
             Some(pinned_nodes),

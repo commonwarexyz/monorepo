@@ -9,11 +9,11 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 
-/// Errors a [`Source`](crate::qmdb::sync::resolver::Source) returns instead of a response.
+/// Errors a [`Source`](crate::qmdb::sync::source::Source) returns instead of a response.
 ///
 /// Serving reads local storage, so these describe the source's own state, not a bad request from
 /// a peer. A peer that sends something unusable is scored through
-/// [`Validity`](crate::qmdb::sync::resolver::Validity) instead.
+/// [`Validity`](crate::qmdb::sync::source::Validity) instead.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError<F: Family, D: Digest> {
     /// The source database failed while building the response.
@@ -89,9 +89,9 @@ where
     #[error("database error: {0}")]
     Database(crate::qmdb::Error<F>),
 
-    /// Resolver error
-    #[error("resolver error: {0:?}")]
-    Resolver(U),
+    /// Source error
+    #[error("source error: {0:?}")]
+    Source(U),
 
     /// Engine error
     #[error("engine error: {0}")]

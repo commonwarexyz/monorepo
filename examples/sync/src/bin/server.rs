@@ -15,7 +15,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{self, Target, compact, resolver::Source as _},
+    qmdb::sync::{self, Target, compact, source::Source as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
@@ -351,7 +351,7 @@ async fn handle_get_compact_state<DB>(
 ) -> Result<wire::GetCompactStateResponse<DB::Operation, Key>, Error>
 where
     DB: CompactSyncable<Family = mmr::Family>,
-    Arc<AsyncRwLock<Option<DB>>>: sync::resolver::Source<
+    Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
             compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,
@@ -363,19 +363,15 @@ where
 
     // Serving is driven by the requesting client, which this handler cannot cancel, so the
     // sender is held for the duration of the read.
-    let (compact_state, _) = state
-        .database
-        .serve(request.target)
-        .await
-        .map_err(|err| {
-            warn!(?err, "failed to serve compact state");
-            match err {
-                sync::ServeError::Database(err) => Error::Database(err),
-                sync::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
-                sync::ServeError::MissingSource => Error::DatabaseUnavailable,
-                sync::ServeError::InvalidTarget(_) => Error::InvalidRequest(err.to_string()),
-            }
-        })?;
+    let (compact_state, _) = state.database.serve(request.target).await.map_err(|err| {
+        warn!(?err, "failed to serve compact state");
+        match err {
+            sync::ServeError::Database(err) => Error::Database(err),
+            sync::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
+            sync::ServeError::MissingSource => Error::DatabaseUnavailable,
+            sync::ServeError::InvalidTarget(_) => Error::InvalidRequest(err.to_string()),
+        }
+    })?;
 
     Ok(wire::GetCompactStateResponse {
         request_id: request.request_id,
@@ -420,7 +416,7 @@ where
     DB: CompactSyncable<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
-    Arc<AsyncRwLock<Option<DB>>>: sync::resolver::Source<
+    Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
             compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,
@@ -697,7 +693,7 @@ where
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
-    Arc<AsyncRwLock<Option<DB>>>: sync::resolver::Source<
+    Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
             compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,

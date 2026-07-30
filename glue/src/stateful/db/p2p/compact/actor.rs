@@ -15,7 +15,7 @@ use commonware_storage::{
         self,
         sync::{
             compact,
-            resolver::{Response, Source},
+            source::{Response, Source},
         },
     },
 };
@@ -37,8 +37,7 @@ type ActorMailbox<DB, F, H> = Mailbox<DB, F, DbOp<DB, F, <H as Hasher>::Digest>,
 type MailboxReceiver<DB, F, H> = actor_mailbox::Receiver<
     mailbox::Message<DB, F, DbOp<DB, F, <H as Hasher>::Digest>, <H as Hasher>::Digest>,
 >;
-type PendingSubs<F, Op, D> =
-    BTreeMap<handler::Request<F, D>, Vec<mailbox::Delivery<F, Op, D>>>;
+type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<mailbox::Delivery<F, Op, D>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -527,7 +526,11 @@ mod tests {
             let request = handler::Request::from_target(target);
             let (pending_tx, _pending_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![pending_tx]);
-            state.pinned_nodes.as_mut().unwrap().push(sha256::Digest::from([9; 32]));
+            state
+                .pinned_nodes
+                .as_mut()
+                .unwrap()
+                .push(sha256::Digest::from([9; 32]));
 
             let (valid_tx, valid_rx) = oneshot::channel();
             actor
@@ -621,9 +624,7 @@ mod tests {
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 async {
-                    actor
-                        .handle_deliver(request, state.encode(), ack_tx)
-                        .await;
+                    actor.handle_deliver(request, state.encode(), ack_tx).await;
                 },
                 async {
                     let (_, validity_tx) = subscriber_rx.await.unwrap().unwrap();
@@ -651,9 +652,7 @@ mod tests {
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 async {
-                    actor
-                        .handle_deliver(request, state.encode(), ack_tx)
-                        .await;
+                    actor.handle_deliver(request, state.encode(), ack_tx).await;
                 },
                 async {
                     let fetch = subscriber_rx.await.unwrap().unwrap();

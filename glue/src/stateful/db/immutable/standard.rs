@@ -27,7 +27,10 @@ use commonware_storage::{
             fixed, initial_root, variable,
         },
         operation::Key,
-        sync::{self, Target as AnySyncTarget, resolver::{Request, Source}},
+        sync::{
+            self, Target as AnySyncTarget,
+            source::{Request, Source},
+        },
     },
     translator::Translator,
 };
@@ -441,9 +444,7 @@ where
     H: Hasher + 'static,
     T: Translator,
     S: Strategy,
-    R: Source<Request<F>, Family = F, Op = fixed::Operation<F, K, V>, Digest = H::Digest>
-        + Clone
-        + 'static,
+    R: Source<Request<F>, Family = F, Op = fixed::Operation<F, K, V>, Digest = H::Digest> + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -485,7 +486,6 @@ where
     S: Strategy,
     variable::Operation<F, K, V>: Codec,
     R: Source<Request<F>, Family = F, Op = variable::Operation<F, K, V>, Digest = H::Digest>
-        + Clone
         + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;

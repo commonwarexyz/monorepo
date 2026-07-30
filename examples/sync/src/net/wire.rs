@@ -7,7 +7,7 @@ use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
     merkle::MAX_PINNED_NODES,
     mmr::{self, Location, Proof},
-    qmdb::sync::{Target, compact, resolver::Response},
+    qmdb::sync::{Target, compact, source::Response},
 };
 use std::num::NonZeroU64;
 

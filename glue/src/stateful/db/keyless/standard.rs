@@ -27,7 +27,10 @@ use commonware_storage::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, initial_root, variable,
         },
-        sync::{self, Target as AnySyncTarget, resolver::{Request, Source}},
+        sync::{
+            self, Target as AnySyncTarget,
+            source::{Request, Source},
+        },
     },
 };
 use commonware_utils::{channel::mpsc, non_empty_range};
@@ -402,9 +405,7 @@ where
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
-    R: Source<Request<F>, Family = F, Op = fixed::Operation<F, V>, Digest = H::Digest>
-        + Clone
-        + 'static,
+    R: Source<Request<F>, Family = F, Op = fixed::Operation<F, V>, Digest = H::Digest> + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
@@ -442,9 +443,7 @@ where
     V: VariableValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
-    R: Source<Request<F>, Family = F, Op = variable::Operation<F, V>, Digest = H::Digest>
-        + Clone
-        + 'static,
+    R: Source<Request<F>, Family = F, Op = variable::Operation<F, V>, Digest = H::Digest> + 'static,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 

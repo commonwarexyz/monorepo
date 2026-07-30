@@ -4,11 +4,11 @@ use crate::{
     qmdb::{
         self,
         sync::{
-            Database, DbResolver, Error as SyncError, Journal, Metrics, Target,
+            Database, Error as SyncError, Journal, Metrics, SourceFor, Target,
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
-            resolver::{Request, Response, Source, Validity},
+            source::{Request, Response, Source, Validity},
             target::validate_update,
         },
     },
@@ -26,12 +26,12 @@ use commonware_utils::{
 };
 use futures::future::{Aborted, Either, pending};
 use mpsc::error::TryRecvError;
-use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
+use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64, sync::Arc};
 
 /// Type alias for sync engine errors
-type Error<DB, R> = qmdb::sync::Error<
+type Error<DB, S> = qmdb::sync::Error<
     <DB as Database>::Family,
-    <R as Source<Request<<DB as Database>::Family>>>::Error,
+    <S as Source<Request<<DB as Database>::Family>>>::Error,
     <DB as Database>::Digest,
 >;
 
@@ -103,16 +103,16 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
 }
 
 /// Configuration for creating a new Engine
-pub struct Config<DB, R>
+pub struct Config<DB, S>
 where
     DB: Database,
-    R: DbResolver<DB>,
+    S: SourceFor<DB>,
     DB::Op: Encode,
 {
     /// Runtime context for creating database components
     pub context: DB::Context,
-    /// Network resolver for fetching operations and proofs
-    pub resolver: R,
+    /// Source of operations and proofs
+    pub resolver: S,
     /// Sync target (root digest and operation bounds)
     pub target: Target<DB::Family, DB::Digest>,
     /// Maximum number of outstanding requests for operation batches
@@ -142,14 +142,14 @@ where
     pub max_retained_roots: usize,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
-pub(crate) struct Engine<DB, R>
+pub(crate) struct Engine<DB, S>
 where
     DB: Database,
-    R: DbResolver<DB>,
+    S: SourceFor<DB>,
     DB::Op: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
-    outstanding_requests: Requests<DB::Family, DB::Op, DB::Digest, R::Error>,
+    outstanding_requests: Requests<DB::Family, DB::Op, DB::Digest, S::Error>,
 
     /// Operations that have been fetched but not yet applied to the log.
     ///
@@ -187,8 +187,8 @@ where
     /// Journal that operations are applied to during sync
     journal: DB::Journal,
 
-    /// Resolver for fetching operations and proofs from the sync source
-    resolver: R,
+    /// Source of operations and proofs, shared with in-flight requests
+    resolver: Arc<S>,
 
     /// Hasher used for proof verification
     hasher: StandardHasher<DB::Hasher>,
@@ -223,10 +223,10 @@ where
 }
 
 #[cfg(test)]
-impl<DB, R> Engine<DB, R>
+impl<DB, S> Engine<DB, S>
 where
     DB: Database,
-    R: DbResolver<DB>,
+    S: SourceFor<DB>,
     DB::Op: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
@@ -234,13 +234,13 @@ where
     }
 }
 
-impl<DB, R> Engine<DB, R>
+impl<DB, S> Engine<DB, S>
 where
     DB: Database,
-    R: DbResolver<DB>,
+    S: SourceFor<DB>,
     DB::Op: Encode,
 {
-    pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
+    pub async fn new(config: Config<DB, S>) -> Result<Self, Error<DB, S>> {
         if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
                 lower_bound_pos: config.target.range.start(),
@@ -285,7 +285,7 @@ where
             fetch_batch_size: config.fetch_batch_size,
             apply_batch_size: config.apply_batch_size,
             journal,
-            resolver: config.resolver.clone(),
+            resolver: Arc::new(config.resolver),
             hasher: qmdb::hasher::<DB::Hasher>(),
             context: config.context,
             config: config.db_config,
@@ -301,7 +301,7 @@ where
     }
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
-    fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
+    fn schedule_requests(&mut self) -> Result<(), Error<DB, S>> {
         let target_size = self.target.range.end();
 
         // Schedule a boundary request at the lower sync bound if we don't have boundary
@@ -314,7 +314,7 @@ where
         {
             let start_loc = self.target.range.start();
             let request = Request::new(target_size, start_loc, NZU64!(1)).retaining_from(start_loc);
-            let resolver = self.resolver.clone();
+            let resolver = Arc::clone(&self.resolver);
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
                 .insert(id, start_loc, target_size, async move {
@@ -355,7 +355,7 @@ where
 
             // Schedule the request
             let request = Request::new(target_size, gap_range.start, batch_size);
-            let resolver = self.resolver.clone();
+            let resolver = Arc::clone(&self.resolver);
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
                 .insert(id, gap_range.start, target_size, async move {
@@ -376,7 +376,7 @@ where
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
-    ) -> Result<Self, Error<DB, R>> {
+    ) -> Result<Self, Error<DB, S>> {
         self.journal = self.journal.resize(new_target.range.start()).await?;
         // Remove requests at or before the new start. The request at start
         // must be re-issued as a pinned-nodes request with the new target size.
@@ -406,7 +406,7 @@ where
     /// may complete as soon as it is at a target. If the finish channel is
     /// disconnected before a finish request is observed, this returns
     /// [`EngineError::FinishChannelClosed`].
-    fn drain_finish_requests(&mut self) -> Result<(), Error<DB, R>> {
+    fn drain_finish_requests(&mut self) -> Result<(), Error<DB, S>> {
         let Some(finish_rx) = self.finish_rx.as_mut() else {
             return Ok(());
         };
@@ -464,7 +464,7 @@ where
     /// This method finds operations that are contiguous with the current journal tip
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
-    pub(crate) async fn apply_operations(mut self) -> Result<Self, Error<DB, R>> {
+    pub(crate) async fn apply_operations(mut self) -> Result<Self, Error<DB, S>> {
         let mut next_loc = self.journal.size();
 
         // Remove any batches of operations with stale data.
@@ -512,7 +512,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub fn is_at_target(&mut self) -> Result<bool, Error<DB, R>> {
+    pub fn is_at_target(&mut self) -> Result<bool, Error<DB, S>> {
         let journal_size = self.journal.size();
         let target_journal_size = self.target.range.end();
 
@@ -539,7 +539,7 @@ where
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
-    fn is_ready_to_complete(&mut self) -> Result<bool, Error<DB, R>> {
+    fn is_ready_to_complete(&mut self) -> Result<bool, Error<DB, S>> {
         Ok(self.is_at_target()? && self.has_boundary_state())
     }
 
@@ -549,8 +549,8 @@ where
     /// to a matching historical root from `retained_roots` if available.
     fn handle_fetch_result(
         &mut self,
-        fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, R::Error>,
-    ) -> Result<(), Error<DB, R>> {
+        fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, S::Error>,
+    ) -> Result<(), Error<DB, S>> {
         // Defensive: removal aborts a request's future, so a result for an
         // untracked ID should be unreachable.
         let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
@@ -565,7 +565,7 @@ where
                 pinned_nodes,
             },
             validity,
-        ) = fetch_result.result.map_err(SyncError::Resolver)?;
+        ) = fetch_result.result.map_err(SyncError::Source)?;
 
         // Validate batch size
         let operations_len = operations.len() as u64;
@@ -646,8 +646,8 @@ where
     /// Handle a sync event and return the next engine state.
     async fn handle_event(
         mut self,
-        event: Event<DB::Family, DB::Op, DB::Digest, R::Error>,
-    ) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+        event: Event<DB::Family, DB::Op, DB::Digest, S::Error>,
+    ) -> Result<NextStep<Self, DB>, Error<DB, S>> {
         match event {
             Event::TargetUpdate(new_target) => {
                 validate_update(&self.target, &new_target)?;
@@ -690,7 +690,7 @@ where
     /// Returns `NextStep::Complete(database)` when sync is finished, or
     /// `NextStep::Continue(self)` when more work remains.
     #[boxed]
-    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, S>> {
         self.drain_finish_requests()?;
 
         // Check if sync is complete
@@ -749,7 +749,7 @@ where
     ///
     /// This method repeatedly calls `step()` until sync is complete. The `step()` method
     /// handles building the final database and verifying the root digest.
-    pub async fn sync(mut self) -> Result<DB, Error<DB, R>> {
+    pub async fn sync(mut self) -> Result<DB, Error<DB, S>> {
         // Run sync loop until completion
         loop {
             match self.step().await? {
@@ -875,7 +875,8 @@ mod tests {
         async fn serve(
             &self,
             _request: Request<MmrFamily>,
-        ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+        ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>
+        {
             Ok((
                 Response::new(
                     Proof {

@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            resolver::{self, Request, Response, Source, Validity},
+            source::{self, Request, Response, Source, Validity},
         },
     },
 };
@@ -183,14 +183,14 @@ where
 /// Test that resolver failure is handled correctly
 pub(crate) fn test_sync_resolver_fails<H: SyncTestHarness>()
 where
-    resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
+    source::tests::FailSource<H::Family, OpOf<H>, Digest>:
         Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let resolver = resolver::tests::FailResolver::<H::Family, OpOf<H>, Digest>::new();
+        let resolver = source::tests::FailSource::<H::Family, OpOf<H>, Digest>::new();
         let target_root = Digest::from([0; 32]);
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -449,10 +449,10 @@ where
 }
 
 /// Test case where existing database on disk exactly matches the sync target.
-/// Uses FailResolver to verify that no network requests are made since data already exists.
+/// Uses FailSource to verify that no network requests are made since data already exists.
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>(num_ops: usize)
 where
-    resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
+    source::tests::FailSource<H::Family, OpOf<H>, Digest>:
         Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
@@ -491,7 +491,7 @@ where
         // sync_db should never ask the resolver for operations
         // because it is already complete. Use a resolver that always fails
         // to ensure that it's not being used.
-        let resolver = resolver::tests::FailResolver::<H::Family, OpOf<H>, Digest>::new();
+        let resolver = source::tests::FailSource::<H::Family, OpOf<H>, Digest>::new();
         let config = Config {
             db_config: sync_config, // Use same config to access same partitions
             fetch_batch_size: NZU64!(10),
@@ -1306,7 +1306,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
 ) where
-    Arc<AsyncRwLock<Option<DbOf<H>>>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1908,8 +1909,7 @@ where
                 // so the engine has to retry it.
                 let historical =
                     Request::new(self.historical_target_size, request.start, request.max_ops);
-                let (mut response, validity_tx) =
-                    self.inner.serve(historical).await?;
+                let (mut response, validity_tx) = self.inner.serve(historical).await?;
                 response.pinned_nodes = None;
                 return Ok((response, validity_tx));
             }

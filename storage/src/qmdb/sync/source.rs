@@ -251,7 +251,8 @@ macro_rules! impl_locked_source {
             async fn serve(
                 &self,
                 request: Req,
-            ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+            ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error>
+            {
                 self.read().await.serve(request).await
             }
         }
@@ -263,18 +264,18 @@ impl_locked_source!(TracedAsyncRwLock);
 
 /// Answer a [`Request`] from a database's inherent proof reads.
 ///
-/// Written once and expanded by each [`ProofSource`] implementation below. The two reads
+/// Written once and expanded by each [`Source`] implementation below. The two reads
 /// belong to one answer: the pins are only meaningful because the proof in the same response
 /// authenticates them.
 macro_rules! serve_request {
     () => {
         async fn serve(
             &self,
-            request: $crate::qmdb::sync::resolver::Request<F>,
+            request: $crate::qmdb::sync::source::Request<F>,
         ) -> Result<
             (
-                $crate::qmdb::sync::resolver::Response<F, Self::Op, H::Digest>,
-                $crate::qmdb::sync::resolver::Validity,
+                $crate::qmdb::sync::source::Response<F, Self::Op, H::Digest>,
+                $crate::qmdb::sync::source::Validity,
             ),
             $crate::qmdb::Error<F>,
         > {
@@ -287,7 +288,7 @@ macro_rules! serve_request {
                 None => None,
             };
             Ok((
-                $crate::qmdb::sync::resolver::Response::new(proof, operations, pinned_nodes),
+                $crate::qmdb::sync::source::Response::new(proof, operations, pinned_nodes),
                 None,
             ))
         }
@@ -325,9 +326,8 @@ where
     E: Context,
     K: Key,
     V: crate::qmdb::any::value::ValueEncoding,
-    C: crate::journal::contiguous::Mutable<
-            Item = crate::qmdb::immutable::Operation<F, K, V>,
-        > + Send
+    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::immutable::Operation<F, K, V>>
+        + Send
         + Sync,
     C::Item: commonware_codec::EncodeShared + Send,
     H: Hasher,
@@ -380,7 +380,7 @@ pub(crate) mod tests {
     };
     use std::{marker::PhantomData, sync::Arc};
 
-    macro_rules! assert_resolver_variants {
+    macro_rules! assert_source_variants {
         ($db:ty) => {
             assert_serves::<mmr::Family, Arc<$db>>();
             assert_serves::<mmr::Family, Arc<AsyncRwLock<$db>>>();
@@ -390,22 +390,14 @@ pub(crate) mod tests {
         };
     }
 
-    fn assert_serves<F: Family, R: Source<Request<F>>>() {}
+    fn assert_serves<F: Family, S: Source<Request<F>>>() {}
 
-    /// A resolver that always fails.
-    pub struct FailResolver<F: Family, Op, D> {
+    /// A source that always fails. Not `Clone`, which the engine must not require.
+    pub struct FailSource<F: Family, Op, D> {
         _phantom: PhantomData<(F, Op, D)>,
     }
 
-    impl<F: Family, Op, D> Clone for FailResolver<F, Op, D> {
-        fn clone(&self) -> Self {
-            Self {
-                _phantom: PhantomData,
-            }
-        }
-    }
-
-    impl<F, Op, D> Source<Request<F>> for FailResolver<F, Op, D>
+    impl<F, Op, D> Source<Request<F>> for FailSource<F, Op, D>
     where
         F: Family,
         D: Digest,
@@ -424,7 +416,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl<F: Family, Op, D> FailResolver<F, Op, D> {
+    impl<F: Family, Op, D> FailSource<F, Op, D> {
         pub fn new() -> Self {
             Self {
                 _phantom: PhantomData,
@@ -433,7 +425,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_all_qmdb_variants_implement_strategy_resolvers() {
+    fn test_all_qmdb_variants_implement_sources() {
         type AnyOrderedFixed = crate::qmdb::any::ordered::fixed::Db<
             mmr::Family,
             deterministic::Context,
@@ -543,25 +535,25 @@ pub(crate) mod tests {
             Rayon,
         >;
 
-        assert_resolver_variants!(AnyOrderedFixed);
-        assert_resolver_variants!(AnyOrderedVariable);
-        assert_resolver_variants!(AnyUnorderedFixed);
-        assert_resolver_variants!(AnyUnorderedVariable);
-        assert_resolver_variants!(CurrentOrderedFixed);
-        assert_resolver_variants!(CurrentOrderedVariable);
-        assert_resolver_variants!(CurrentUnorderedFixed);
-        assert_resolver_variants!(CurrentUnorderedVariable);
-        assert_resolver_variants!(ImmutableFixed);
-        assert_resolver_variants!(ImmutableVariable);
-        assert_resolver_variants!(KeylessFixed);
-        assert_resolver_variants!(KeylessVariable);
+        assert_source_variants!(AnyOrderedFixed);
+        assert_source_variants!(AnyOrderedVariable);
+        assert_source_variants!(AnyUnorderedFixed);
+        assert_source_variants!(AnyUnorderedVariable);
+        assert_source_variants!(CurrentOrderedFixed);
+        assert_source_variants!(CurrentOrderedVariable);
+        assert_source_variants!(CurrentUnorderedFixed);
+        assert_source_variants!(CurrentUnorderedVariable);
+        assert_source_variants!(ImmutableFixed);
+        assert_source_variants!(ImmutableVariable);
+        assert_source_variants!(KeylessFixed);
+        assert_source_variants!(KeylessVariable);
     }
 
     /// A source behind a lock reaches the source and reports its error.
     #[test]
     fn test_locked_source_reaches_source() {
         deterministic::Runner::default().start(|_context| async move {
-            let lock = AsyncRwLock::new(FailResolver::<mmr::Family, u8, ShaDigest>::new());
+            let lock = AsyncRwLock::new(FailSource::<mmr::Family, u8, ShaDigest>::new());
 
             let request = Request::new(Location::new(1), Location::new(0), NZU64!(1));
             let result = lock.serve(request).await;

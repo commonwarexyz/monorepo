@@ -22,8 +22,8 @@ pub(crate) use database::{
     Config as DatabaseConfig, Database, journal_covers_range, local_pinned_nodes,
 };
 
-pub mod resolver;
-pub(crate) use resolver::Source;
+pub mod source;
+pub(crate) use source::Source;
 
 mod target;
 pub use target::Target;
@@ -34,33 +34,29 @@ mod requests;
 /// A [`Source`] of operations whose associated types match a specific `Database`.
 ///
 /// Blanket-impled for any matching `Source`, so callers never implement this directly.
-/// `Clone` and `'static` are required by the engine, which clones the source once per
-/// in-flight request; they are not required of sources in general.
-pub trait DbResolver<DB: Database>:
-    Source<resolver::Request<DB::Family>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
-    + Clone
-    + 'static
+/// `'static` is the engine's requirement, not one on sources in general.
+pub trait SourceFor<DB: Database>:
+    Source<source::Request<DB::Family>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static
 {
 }
 
-impl<DB, R> DbResolver<DB> for R
+impl<DB, S> SourceFor<DB> for S
 where
     DB: Database,
-    R: Source<resolver::Request<DB::Family>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
-        + Clone
+    S: Source<source::Request<DB::Family>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
         + 'static,
 {
 }
 
 /// Create/open a database and sync it to a target state
 #[boxed]
-pub async fn sync<DB, R>(
-    config: Config<DB, R>,
-) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
+pub async fn sync<DB, S>(
+    config: Config<DB, S>,
+) -> Result<DB, Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,
-    R: DbResolver<DB>,
+    S: SourceFor<DB>,
 {
     Engine::new(config).await?.sync().await
 }

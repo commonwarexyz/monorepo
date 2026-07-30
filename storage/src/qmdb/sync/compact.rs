@@ -60,23 +60,18 @@ use crate::{
         operation::Key,
         sync::{
             EngineError, Error, ServeError,
-            resolver::{Request, Response, Source, Validity},
+            source::{Request, Response, Source, Validity},
         },
         verify_proof,
     },
     translator::Translator,
 };
-use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
-};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor, reschedule};
-use commonware_utils::{
-    Array,
-    channel::mpsc,
-};
+use commonware_utils::{Array, channel::mpsc};
 use futures::future::{Either, pending};
 use std::{future::Future, num::NonZeroU64};
 
@@ -168,7 +163,7 @@ where
 
 /// Compact state that has been validated against a target root.
 ///
-/// [`validate_compact_state`] is what produces one: the frontier pins and the final commit have
+/// `validate_compact_state` is what produces one: the frontier pins and the final commit have
 /// both been authenticated against `root`, so construction can treat them as trusted.
 #[derive(Clone, Debug)]
 pub struct ValidatedState<F: Family, Op, D: Digest> {
@@ -186,18 +181,23 @@ pub struct ValidatedState<F: Family, Op, D: Digest> {
 
 /// A [`Source`] of compact state whose associated types match a specific [`Database`].
 ///
-/// Blanket-impled for any matching `Source`, so callers never implement this directly. It names
-/// the type equalities [`sync`] needs and nothing else: compact sync fetches one response at a
-/// time through a borrow, so it never needs a source it can clone or outlive.
-pub trait Resolver<DB: Database>:
+/// Blanket-impled for any matching `Source`, so callers never implement this directly. No
+/// `'static`, unlike [`crate::qmdb::sync::SourceFor`]: compact sync reads one response through
+/// a borrow.
+pub trait SourceFor<DB: Database>:
     Source<Target<DB::Family, DB::Digest>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
 {
 }
 
-impl<DB, R> Resolver<DB> for R
+impl<DB, S> SourceFor<DB> for S
 where
     DB: Database,
-    R: Source<Target<DB::Family, DB::Digest>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
+    S: Source<
+            Target<DB::Family, DB::Digest>,
+            Family = DB::Family,
+            Op = DB::Op,
+            Digest = DB::Digest,
+        >,
 {
 }
 
@@ -235,15 +235,15 @@ pub trait Database: Sized + Send {
 }
 
 /// Configuration for compact synchronization into a compact-storage database.
-pub struct Config<DB, R>
+pub struct Config<DB, S>
 where
     DB: Database,
-    R: Resolver<DB>,
+    S: SourceFor<DB>,
 {
     /// Runtime context for creating database components.
     pub context: DB::Context,
     /// Source resolver for fetching compact authenticated state.
-    pub resolver: R,
+    pub resolver: S,
     /// Sync target (root digest and total leaf count).
     pub target: Target<DB::Family, DB::Digest>,
     /// Database-specific configuration.
@@ -293,12 +293,12 @@ async fn drain_latest_target<T>(update_rx: &mut mpsc::Receiver<T>) -> Option<T> 
 /// reaching a target parks sync until a finish signal or another target update arrives. Each
 /// reached target is reported on `reached_target_tx`.
 #[boxed]
-pub async fn sync<DB, R>(
-    config: Config<DB, R>,
-) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
+pub async fn sync<DB, S>(
+    config: Config<DB, S>,
+) -> Result<DB, Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: Database,
-    R: Resolver<DB>,
+    S: SourceFor<DB>,
 {
     let Config {
         context,
@@ -383,16 +383,16 @@ where
 /// 5. Assert the db root still matches and persist the state.
 ///
 /// A failure before the final persist leaves on-disk state untouched.
-async fn attempt_sync<DB, R>(
+async fn attempt_sync<DB, S>(
     context: &DB::Context,
     attempt: u64,
-    resolver: &R,
+    resolver: &S,
     db_config: &DB::Config,
     target: &Target<DB::Family, DB::Digest>,
-) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
+) -> Result<DB, Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: Database,
-    R: Resolver<DB>,
+    S: SourceFor<DB>,
 {
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Resolver errors and local construction failures remain terminal.
@@ -400,7 +400,7 @@ where
         let (response, validity_tx) = resolver
             .serve(target.clone())
             .await
-            .map_err(Error::Resolver)?;
+            .map_err(Error::Source)?;
 
         // Validation failures describe a bad compact response. Reject it if the resolver supplied
         // feedback, then fetch another candidate.
@@ -598,10 +598,7 @@ macro_rules! impl_compact_source {
                 target: Target<F, H::Digest>,
             ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 let current = Target::new(self.root(), self.bounds().end);
-                Ok((
-                    compact_state_from_log(self, current, target).await?,
-                    None,
-                ))
+                Ok((compact_state_from_log(self, current, target).await?, None))
             }
         }
     };
@@ -624,10 +621,7 @@ macro_rules! impl_compact_source {
                 target: Target<F, H::Digest>,
             ) -> Result<(Response<F, Self::Op, H::Digest>, Validity), Self::Error> {
                 let current = Target::new(self.root(), self.bounds().end);
-                Ok((
-                    compact_state_from_log(self, current, target).await?,
-                    None,
-                ))
+                Ok((compact_state_from_log(self, current, target).await?, None))
             }
         }
     };
@@ -710,17 +704,17 @@ mod tests {
         },
     };
 
-    macro_rules! assert_resolver_variants {
+    macro_rules! assert_source_variants {
         ($db:ty) => {
-            assert_resolver::<Arc<$db>>();
-            assert_resolver::<Arc<AsyncRwLock<$db>>>();
-            assert_resolver::<Arc<AsyncRwLock<Option<$db>>>>();
-            assert_resolver::<Arc<TracedAsyncRwLock<$db>>>();
-            assert_resolver::<Arc<TracedAsyncRwLock<Option<$db>>>>();
+            assert_serves::<Arc<$db>>();
+            assert_serves::<Arc<AsyncRwLock<$db>>>();
+            assert_serves::<Arc<AsyncRwLock<Option<$db>>>>();
+            assert_serves::<Arc<TracedAsyncRwLock<$db>>>();
+            assert_serves::<Arc<TracedAsyncRwLock<Option<$db>>>>();
         };
     }
 
-    fn assert_resolver<R: Source<Target<mmr::Family, Digest>>>() {}
+    fn assert_serves<S: Source<Target<mmr::Family, Digest>>>() {}
 
     struct TestDb {
         root: Digest,
@@ -760,11 +754,11 @@ mod tests {
 
     /// Serves a canned sequence of responses, one per call, so tests can drive the retry loop.
     #[derive(Clone)]
-    struct SequenceResolver {
+    struct SequenceSource {
         responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
     }
 
-    impl Source<Target<mmr::Family, Digest>> for SequenceResolver {
+    impl Source<Target<mmr::Family, Digest>> for SequenceSource {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = u8;
@@ -782,7 +776,10 @@ mod tests {
         }
     }
 
-    fn valid_state_and_target() -> (Response<mmr::Family, u8, Digest>, Target<mmr::Family, Digest>) {
+    fn valid_state_and_target() -> (
+        Response<mmr::Family, u8, Digest>,
+        Target<mmr::Family, Digest>,
+    ) {
         let hasher = qmdb::hasher::<Sha256>();
         let mut merkle = crate::merkle::mem::Mem::<mmr::Family, Digest>::new();
         let op = 0u8;
@@ -807,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_compact_qmdb_variants_implement_strategy_resolvers() {
+    fn test_all_compact_qmdb_variants_implement_sources() {
         type KeylessFixedCompactDb = crate::qmdb::keyless::fixed::CompactDb<
             mmr::Family,
             deterministic::Context,
@@ -841,10 +838,10 @@ mod tests {
             Rayon,
         >;
 
-        assert_resolver_variants!(KeylessFixedCompactDb);
-        assert_resolver_variants!(KeylessVariableCompactDb);
-        assert_resolver_variants!(ImmutableFixedCompactDb);
-        assert_resolver_variants!(ImmutableVariableCompactDb);
+        assert_source_variants!(KeylessFixedCompactDb);
+        assert_source_variants!(KeylessVariableCompactDb);
+        assert_source_variants!(ImmutableFixedCompactDb);
+        assert_source_variants!(ImmutableVariableCompactDb);
     }
 
     #[test]
@@ -874,7 +871,7 @@ mod tests {
 
             let db = super::sync::<TestDb, _>(Config {
                 context,
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, Some(good_tx)),

@@ -80,7 +80,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::resolver;
+use commonware_storage::qmdb::sync::source;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -185,24 +185,24 @@ impl<DB> WriteSlot<'_, DB> {
 }
 
 /// Serve any sync request by delegating to the storage implementation on the inner lock.
-impl<DB, Req> resolver::Source<Req> for Shared<DB>
+impl<DB, Req> source::Source<Req> for Shared<DB>
 where
     DB: Send + Sync + 'static,
     Req: Send + 'static,
-    Inner<DB>: resolver::Source<Req>,
+    Inner<DB>: source::Source<Req>,
 {
-    type Family = <Inner<DB> as resolver::Source<Req>>::Family;
-    type Digest = <Inner<DB> as resolver::Source<Req>>::Digest;
-    type Op = <Inner<DB> as resolver::Source<Req>>::Op;
-    type Error = <Inner<DB> as resolver::Source<Req>>::Error;
+    type Family = <Inner<DB> as source::Source<Req>>::Family;
+    type Digest = <Inner<DB> as source::Source<Req>>::Digest;
+    type Op = <Inner<DB> as source::Source<Req>>::Op;
+    type Error = <Inner<DB> as source::Source<Req>>::Error;
 
     async fn serve(
         &self,
         request: Req,
     ) -> Result<
         (
-            resolver::Response<Self::Family, Self::Op, Self::Digest>,
-            resolver::Validity,
+            source::Response<Self::Family, Self::Op, Self::Digest>,
+            source::Validity,
         ),
         Self::Error,
     > {

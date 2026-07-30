@@ -369,7 +369,7 @@ where
         };
         let database: DB = match compact::sync(sync_config).await {
             Ok(database) => database,
-            Err(sync::Error::Resolver(Error::Server {
+            Err(sync::Error::Source(Error::Server {
                 code: ErrorCode::StaleTarget,
                 message,
             })) => {

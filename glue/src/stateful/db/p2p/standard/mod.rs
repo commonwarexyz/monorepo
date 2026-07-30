@@ -1,6 +1,6 @@
 //! P2P implementation of the QMDB sync resolver.
 //!
-//! Implements [`commonware_storage::qmdb::sync::resolver::Resolver`] over
+//! Implements [`commonware_storage::qmdb::sync::source::Source`] over
 //! [`commonware_resolver::p2p::Engine`], fetching operations from peers and
 //! serving local operations in response to incoming requests.
 //!

@@ -7,7 +7,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::resolver::{Request, Response, Source as SyncSource, Validity},
+    qmdb::sync::source::{Request, Response, Source as SyncSource, Validity},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};

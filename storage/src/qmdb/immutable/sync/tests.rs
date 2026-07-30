@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            resolver::{Request, Source},
+            source::{Request, Source},
         },
     },
     translator::TwoCap,
@@ -106,7 +106,8 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -177,7 +178,8 @@ where
 pub(crate) fn test_sync_empty_to_nonempty<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -225,7 +227,8 @@ where
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
@@ -291,7 +294,8 @@ where
 pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -380,7 +384,8 @@ where
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -427,7 +432,8 @@ where
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -481,7 +487,8 @@ where
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -533,7 +540,8 @@ where
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -596,7 +604,8 @@ where
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -654,7 +663,8 @@ where
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -725,7 +735,8 @@ where
 pub(crate) fn test_sync_nonzero_floor<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -803,7 +814,8 @@ where
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>:
+        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1281,18 +1293,20 @@ mod compact_variable_mmr {
     }
 
     #[derive(Clone)]
-    struct SequenceResolver {
+    struct SequenceSource {
         responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
     }
 
     type CompactResponse = (
-        sync::resolver::Response<mmr::Family, immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>, sha256::Digest>,
-        sync::resolver::Validity,
+        sync::source::Response<
+            mmr::Family,
+            immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>,
+            sha256::Digest,
+        >,
+        sync::source::Validity,
     );
 
-    impl sync::resolver::Source<sync::compact::Target<mmr::Family, sha256::Digest>>
-        for SequenceResolver
-    {
+    impl sync::source::Source<sync::compact::Target<mmr::Family, sha256::Digest>> for SequenceSource {
         type Family = mmr::Family;
         type Digest = sha256::Digest;
         type Op = immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>;
@@ -1316,13 +1330,13 @@ mod compact_variable_mmr {
         target: sync::compact::Target<mmr::Family, sha256::Digest>,
     ) -> Result<
         (
-            sync::resolver::Response<mmr::Family, R::Op, sha256::Digest>,
-            sync::resolver::Validity,
+            sync::source::Response<mmr::Family, R::Op, sha256::Digest>,
+            sync::source::Validity,
         ),
         R::Error,
     >
     where
-        R: sync::resolver::Source<
+        R: sync::source::Source<
                 sync::compact::Target<mmr::Family, sha256::Digest>,
                 Family = mmr::Family,
                 Digest = sha256::Digest,
@@ -1435,7 +1449,7 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -1483,19 +1497,23 @@ mod compact_variable_mmr {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            let Some(immutable::variable::Operation::Commit(metadata, _)) = bad_state.operations.pop()
+            let Some(immutable::variable::Operation::Commit(metadata, _)) =
+                bad_state.operations.pop()
             else {
                 panic!("compact state should carry a commit operation");
             };
             bad_state
                 .operations
-                .push(immutable::variable::Operation::Commit(metadata, Location::new(0)));
+                .push(immutable::variable::Operation::Commit(
+                    metadata,
+                    Location::new(0),
+                ));
 
             let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, Some(bad_tx)),
                         (good_state, Some(good_tx)),
@@ -1554,7 +1572,7 @@ mod compact_variable_mmr {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -1614,7 +1632,7 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -1669,8 +1687,7 @@ mod compact_variable_mmr {
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
-            let result =
-                fetch_compact_state(&source, stale_target.clone()).await;
+            let result = fetch_compact_state(&source, stale_target.clone()).await;
             assert!(matches!(
                 result,
                 Err(sync::ServeError::StaleTarget { requested, current })
@@ -1808,7 +1825,7 @@ mod compact_variable_mmr {
             .await;
             assert!(matches!(
                 stale_result,
-                Err(sync::Error::Resolver(sync::ServeError::StaleTarget {
+                Err(sync::Error::Source(sync::ServeError::StaleTarget {
                     requested,
                     current
                 })) if requested == target2 && current == target3
@@ -1939,8 +1956,7 @@ mod compact_variable_mmr {
                 .await
                 .unwrap();
             let validated =
-                sync::compact::validate_compact_state::<ClientDb>(&target_b, response)
-                    .unwrap();
+                sync::compact::validate_compact_state::<ClientDb>(&target_b, response).unwrap();
             let imported = <ClientDb as sync::compact::Database>::from_validated_state(
                 context.child("import"),
                 client_cfg.clone(),
@@ -1959,8 +1975,7 @@ mod compact_variable_mmr {
                 .await
                 .unwrap();
             let validated =
-                sync::compact::validate_compact_state::<ClientDb>(&target_b, response)
-                    .unwrap();
+                sync::compact::validate_compact_state::<ClientDb>(&target_b, response).unwrap();
             let imported = <ClientDb as sync::compact::Database>::from_validated_state(
                 context.child("import").with_attribute("index", 2),
                 client_cfg.clone(),
@@ -2053,18 +2068,20 @@ mod compact_variable_mmb {
     }
 
     #[derive(Clone)]
-    struct SequenceResolver {
+    struct SequenceSource {
         responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
     }
 
     type CompactResponse = (
-        sync::resolver::Response<mmb::Family, immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>, sha256::Digest>,
-        sync::resolver::Validity,
+        sync::source::Response<
+            mmb::Family,
+            immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>,
+            sha256::Digest,
+        >,
+        sync::source::Validity,
     );
 
-    impl sync::resolver::Source<sync::compact::Target<mmb::Family, sha256::Digest>>
-        for SequenceResolver
-    {
+    impl sync::source::Source<sync::compact::Target<mmb::Family, sha256::Digest>> for SequenceSource {
         type Family = mmb::Family;
         type Digest = sha256::Digest;
         type Op = immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>;
@@ -2088,13 +2105,13 @@ mod compact_variable_mmb {
         target: sync::compact::Target<mmb::Family, sha256::Digest>,
     ) -> Result<
         (
-            sync::resolver::Response<mmb::Family, R::Op, sha256::Digest>,
-            sync::resolver::Validity,
+            sync::source::Response<mmb::Family, R::Op, sha256::Digest>,
+            sync::source::Validity,
         ),
         R::Error,
     >
     where
-        R: sync::resolver::Source<
+        R: sync::source::Source<
                 sync::compact::Target<mmb::Family, sha256::Digest>,
                 Family = mmb::Family,
                 Digest = sha256::Digest,
@@ -2207,7 +2224,7 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -2255,19 +2272,23 @@ mod compact_variable_mmb {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            let Some(immutable::variable::Operation::Commit(metadata, _)) = bad_state.operations.pop()
+            let Some(immutable::variable::Operation::Commit(metadata, _)) =
+                bad_state.operations.pop()
             else {
                 panic!("compact state should carry a commit operation");
             };
             bad_state
                 .operations
-                .push(immutable::variable::Operation::Commit(metadata, Location::new(0)));
+                .push(immutable::variable::Operation::Commit(
+                    metadata,
+                    Location::new(0),
+                ));
 
             let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, Some(bad_tx)),
                         (good_state, Some(good_tx)),
@@ -2326,7 +2347,7 @@ mod compact_variable_mmb {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -2389,7 +2410,7 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceResolver {
+                resolver: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -2444,8 +2465,7 @@ mod compact_variable_mmb {
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
-            let result =
-                fetch_compact_state(&source, stale_target.clone()).await;
+            let result = fetch_compact_state(&source, stale_target.clone()).await;
             assert!(matches!(
                 result,
                 Err(sync::ServeError::StaleTarget { requested, current })
@@ -2584,7 +2604,7 @@ mod compact_variable_mmb {
             .await;
             assert!(matches!(
                 stale_result,
-                Err(sync::Error::Resolver(sync::ServeError::StaleTarget {
+                Err(sync::Error::Source(sync::ServeError::StaleTarget {
                     requested,
                     current
                 })) if requested == target2 && current == target3

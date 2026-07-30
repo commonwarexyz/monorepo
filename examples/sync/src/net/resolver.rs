@@ -103,7 +103,7 @@ where
     pub async fn get_compact_state(
         &self,
         target: compact::Target<mmr::Family, D>,
-    ) -> Result<sync::resolver::Response<mmr::Family, Op, D>, crate::Error> {
+    ) -> Result<sync::source::Response<mmr::Family, Op, D>, crate::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetCompactStateRequest(wire::GetCompactStateRequest {
             request_id,
@@ -132,7 +132,7 @@ where
     }
 }
 
-impl<Op, D> sync::resolver::Source<sync::resolver::Request<mmr::Family>> for Resolver<Op, D>
+impl<Op, D> sync::source::Source<sync::source::Request<mmr::Family>> for Resolver<Op, D>
 where
     Op: Clone + Read + EncodeShared,
     Op::Cfg: IsUnit,
@@ -145,11 +145,11 @@ where
 
     async fn serve(
         &self,
-        request: sync::resolver::Request<mmr::Family>,
+        request: sync::source::Request<mmr::Family>,
     ) -> Result<
         (
-            sync::resolver::Response<Self::Family, Self::Op, Self::Digest>,
-            sync::resolver::Validity,
+            sync::source::Response<Self::Family, Self::Op, Self::Digest>,
+            sync::source::Validity,
         ),
         Self::Error,
     > {
@@ -175,7 +175,7 @@ where
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
             wire::Message::GetOperationsResponse(r) => Ok((
-                sync::resolver::Response::new(r.proof, r.operations, r.pinned_nodes),
+                sync::source::Response::new(r.proof, r.operations, r.pinned_nodes),
                 None,
             )),
             wire::Message::Error(err) => Err(crate::Error::Server {
@@ -187,7 +187,7 @@ where
     }
 }
 
-impl<Op, D> sync::resolver::Source<compact::Target<mmr::Family, D>> for Resolver<Op, D>
+impl<Op, D> sync::source::Source<compact::Target<mmr::Family, D>> for Resolver<Op, D>
 where
     Op: Clone + Read + EncodeShared,
     Op::Cfg: IsUnit,
@@ -203,8 +203,8 @@ where
         target: compact::Target<mmr::Family, D>,
     ) -> Result<
         (
-            sync::resolver::Response<Self::Family, Self::Op, Self::Digest>,
-            sync::resolver::Validity,
+            sync::source::Response<Self::Family, Self::Op, Self::Digest>,
+            sync::source::Validity,
         ),
         Self::Error,
     > {
