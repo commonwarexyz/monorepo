@@ -209,11 +209,16 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
         // The checks above leave `start == last_commit_loc`, so a boundary request's pin
         // boundary is exactly the location the stored pins describe.
-        let pinned_nodes = request.retain_from().map(|_| pinned_nodes);
-        Ok(Response {
-            proof,
-            operations: vec![op],
-            pinned_nodes,
+        Ok(match request {
+            Request::Operations { .. } => Response::Operations {
+                proof,
+                operations: vec![op],
+            },
+            Request::Boundary { .. } => Response::Boundary {
+                proof,
+                op,
+                pins: pinned_nodes,
+            },
         })
     }
 

@@ -1466,7 +1466,10 @@ mod compact_variable_mmr {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            bad_state.proof = crate::merkle::Proof::default();
+            let sync::Response::Boundary { proof, .. } = &mut bad_state else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+            *proof = crate::merkle::Proof::default();
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
@@ -1515,17 +1518,13 @@ mod compact_variable_mmr {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            let Some(immutable::variable::Operation::Commit(metadata, _)) =
-                bad_state.operations.pop()
-            else {
+            let sync::Response::Boundary { op, .. } = &mut bad_state else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+            let immutable::variable::Operation::Commit(metadata, _) = op.clone() else {
                 panic!("compact state should carry a commit operation");
             };
-            bad_state
-                .operations
-                .push(immutable::variable::Operation::Commit(
-                    metadata,
-                    Location::new(0),
-                ));
+            *op = immutable::variable::Operation::Commit(metadata, Location::new(0));
 
             let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
@@ -1582,7 +1581,10 @@ mod compact_variable_mmr {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            bad_state.pinned_nodes.as_mut().unwrap()[0] = sha256::Digest::from([0xaa; 32]);
+            let sync::Response::Boundary { pins, .. } = &mut bad_state else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+            pins[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
@@ -1640,7 +1642,10 @@ mod compact_variable_mmr {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            bad_state.proof.leaves = Location::new(*bad_state.proof.leaves - 1);
+            let sync::Response::Boundary { proof, .. } = &mut bad_state else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+            proof.leaves = Location::new(*proof.leaves - 1);
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
@@ -1968,11 +1973,12 @@ mod compact_variable_mmr {
             };
             assert_ne!(target_b, target_a);
             let source = Arc::new(source);
-            let (mut response, _) = fetch_compact_state(&source, target_b.clone())
+            let (response, _) = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let op = response.operations.pop().unwrap();
-            let pins = response.pinned_nodes.take().unwrap();
+            let sync::Response::Boundary { op, pins, .. } = response else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
             let journal = crate::journal::contiguous::variable::Journal::init(
                 context.child("import"),
                 client_cfg.witness.clone(),
@@ -1995,11 +2001,12 @@ mod compact_variable_mmr {
             assert!(imported.rewind(target_b.leaf_count).await.is_err());
 
             // Prune is likewise rejected while the import is pending; rebuild the import.
-            let (mut response, _) = fetch_compact_state(&source, target_b.clone())
+            let (response, _) = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let op = response.operations.pop().unwrap();
-            let pins = response.pinned_nodes.take().unwrap();
+            let sync::Response::Boundary { op, pins, .. } = response else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
             let journal = crate::journal::contiguous::variable::Journal::init(
                 context.child("import").with_attribute("index", 2),
                 client_cfg.witness.clone(),
@@ -2256,7 +2263,10 @@ mod compact_variable_mmb {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            bad_state.proof = crate::merkle::Proof::default();
+            let sync::Response::Boundary { proof, .. } = &mut bad_state else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+            *proof = crate::merkle::Proof::default();
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
@@ -2305,17 +2315,13 @@ mod compact_variable_mmb {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            let Some(immutable::variable::Operation::Commit(metadata, _)) =
-                bad_state.operations.pop()
-            else {
+            let sync::Response::Boundary { op, .. } = &mut bad_state else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+            let immutable::variable::Operation::Commit(metadata, _) = op.clone() else {
                 panic!("compact state should carry a commit operation");
             };
-            bad_state
-                .operations
-                .push(immutable::variable::Operation::Commit(
-                    metadata,
-                    Location::new(0),
-                ));
+            *op = immutable::variable::Operation::Commit(metadata, Location::new(0));
 
             let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
@@ -2372,7 +2378,10 @@ mod compact_variable_mmb {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            bad_state.pinned_nodes.as_mut().unwrap()[0] = sha256::Digest::from([0xaa; 32]);
+            let sync::Response::Boundary { pins, .. } = &mut bad_state else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+            pins[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
@@ -2433,7 +2442,10 @@ mod compact_variable_mmb {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            bad_state.proof.leaves = Location::new(*bad_state.proof.leaves - 1);
+            let sync::Response::Boundary { proof, .. } = &mut bad_state else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+            proof.leaves = Location::new(*proof.leaves - 1);
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),

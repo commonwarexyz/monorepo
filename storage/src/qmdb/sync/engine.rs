@@ -306,18 +306,16 @@ where
                 .outstanding_requests
                 .contains(&self.target.range.start())
         {
-            let start_loc = self.target.range.start();
             let request = Request::Boundary {
                 size: target_size,
-                start: start_loc,
+                start: self.target.range.start(),
             };
             let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
-            self.outstanding_requests
-                .insert(id, start_loc, target_size, async move {
-                    let result = source.serve(request).await;
-                    IndexedFetchResult { id, result }
-                });
+            self.outstanding_requests.insert(id, request, async move {
+                let result = source.serve(request).await;
+                IndexedFetchResult { id, result }
+            });
         }
 
         // Calculate the maximum number of requests to make
@@ -358,11 +356,10 @@ where
             };
             let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
-            self.outstanding_requests
-                .insert(id, gap_range.start, target_size, async move {
-                    let result = source.serve(request).await;
-                    IndexedFetchResult { id, result }
-                });
+            self.outstanding_requests.insert(id, request, async move {
+                let result = source.serve(request).await;
+                IndexedFetchResult { id, result }
+            });
         }
 
         Ok(())
@@ -573,34 +570,36 @@ where
             return Ok(());
         };
 
-        let start_loc = request.start_loc;
-        let (
-            Response {
-                proof,
-                operations,
-                pinned_nodes,
-            },
-            validity,
-        ) = fetch_result.result.map_err(SyncError::Source)?;
+        let (response, validity) = fetch_result.result.map_err(SyncError::Source)?;
 
-        // Validate batch size
-        let operations_len = operations.len() as u64;
-        if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
-            return Self::reject_response(validity);
-        }
+        // An answer shaped unlike its question is invalid regardless of its contents.
+        let (proof, operations, pins) = match (request, response) {
+            (Request::Operations { .. }, Response::Operations { proof, operations }) => {
+                let operations_len = operations.len() as u64;
+                if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
+                    return Self::reject_response(validity);
+                }
+                (proof, operations, None)
+            }
+            (Request::Boundary { .. }, Response::Boundary { proof, op, pins }) => {
+                (proof, vec![op], Some(pins))
+            }
+            _ => return Self::reject_response(validity),
+        };
 
-        if proof.leaves != request.target_size {
+        let start_loc = request.start();
+        if proof.leaves != request.size() {
             return Self::reject_response(validity);
         }
 
         // Look up the root to verify against using the merkle structure size the
         // request asked for. Fresh requests match the current target; retained
         // requests match a historical root that was explicitly retained.
-        let is_current_target = request.target_size == self.target.range.end();
+        let is_current_target = request.size() == self.target.range.end();
         let target_root = if is_current_target {
             &self.target.root
         } else {
-            let Some(root) = self.retained_roots.get(&request.target_size) else {
+            let Some(root) = self.retained_roots.get(&request.size()) else {
                 // No historical root to verify against (evicted or
                 // max_retained_roots is 0). Drop the result without
                 // penalizing the source -- the data may be valid.
@@ -609,27 +608,26 @@ where
             root
         };
 
-        // Pinned nodes are only extracted from proofs for the current root because
-        // the database needs them for the latest merkle structure size.
+        // Pins are consumed only from proofs verified against the current root, because
+        // the database needs them for the latest merkle structure size. A boundary answer
+        // for a superseded target still contributes its operation; its pins are dropped.
         let need_pinned = is_current_target
             && self.pinned_nodes.is_none()
             && start_loc == self.target.range.start();
         let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-        let valid = if need_pinned {
-            let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
-            proof.verify_proof_and_pinned_nodes(
+        let valid = match &pins {
+            Some(pins) if need_pinned => proof.verify_proof_and_pinned_nodes(
                 &self.hasher,
                 &elements,
                 start_loc,
-                nodes,
+                pins,
                 target_root,
-            )
-        } else {
-            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
+            ),
+            _ => proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root),
         };
 
         if !valid {
-            if need_pinned {
+            if pins.is_some() {
                 tracing::warn!("boundary proof or pinned nodes failed verification");
             }
             return Self::reject_response(validity);
@@ -640,9 +638,8 @@ where
             validity.send_lossy(true);
         }
 
-        // Cache pinned nodes only from current-root-verified proofs.
-        if need_pinned && let Some(nodes) = pinned_nodes {
-            self.pinned_nodes = Some(nodes);
+        if need_pinned && let Some(pins) = pins {
+            self.pinned_nodes = Some(pins);
         }
 
         // Store operations for later application.
@@ -886,14 +883,13 @@ mod tests {
         ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>
         {
             Ok((
-                Response {
+                Response::Operations {
                     proof: Proof {
                         leaves: Location::new(0),
                         inactive_peaks: 0,
                         digests: vec![],
                     },
                     operations: vec![],
-                    pinned_nodes: None,
                 },
                 None,
             ))
@@ -955,14 +951,13 @@ mod tests {
         IndexedFetchResult {
             id,
             result: Ok((
-                Response {
+                Response::Operations {
                     proof: Proof {
                         leaves: Location::new(0),
                         inactive_peaks: 0,
                         digests: vec![],
                     },
                     operations: vec![],
-                    pinned_nodes: None,
                 },
                 None,
             )),
@@ -974,8 +969,11 @@ mod tests {
         let id = requests.next_id();
         requests.insert(
             id,
-            Location::new(loc),
-            Location::new(loc),
+            Request::Operations {
+                size: Location::new(loc),
+                start: Location::new(loc),
+                max_ops: NZU64!(1),
+            },
             std::future::ready(dummy_result(id)),
         );
         id
@@ -1091,8 +1089,11 @@ mod tests {
             let id = requests.next_id();
             requests.insert(
                 id,
-                Location::new(5),
-                Location::new(5),
+                Request::Operations {
+                    size: Location::new(5),
+                    start: Location::new(5),
+                    max_ops: NZU64!(1),
+                },
                 std::future::pending(),
             );
             requests.remove_before(Location::new(10));

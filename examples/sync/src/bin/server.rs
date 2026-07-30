@@ -395,11 +395,15 @@ where
         }
     })?;
 
+    let (proof, operations, pinned_nodes) = match response {
+        sync::Response::Operations { proof, operations } => (proof, operations, None),
+        sync::Response::Boundary { proof, op, pins } => (proof, vec![op], Some(pins)),
+    };
     Ok(wire::GetOperationsResponse {
         request_id: request.request_id,
-        proof: response.proof,
-        operations: response.operations,
-        pinned_nodes: response.pinned_nodes,
+        proof,
+        operations,
+        pinned_nodes,
     })
 }
 

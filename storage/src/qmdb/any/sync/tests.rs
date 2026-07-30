@@ -1804,15 +1804,14 @@ where
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         let (mut response, validity_tx) = self.inner.serve(request).await?;
-        // Corrupt pinned nodes only on the first request that includes them.
-        if response.pinned_nodes.is_some()
+        // Corrupt pinned nodes only on the first boundary response.
+        if let Response::Boundary { pins, .. } = &mut response
             && !self
                 .corrupted
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
-            && let Some(ref mut nodes) = response.pinned_nodes
-            && !nodes.is_empty()
+            && !pins.is_empty()
         {
-            nodes[0] = Digest::from([0xFFu8; 32]);
+            pins[0] = Digest::from([0xFFu8; 32]);
             return Ok((response, feedback_validity()));
         }
         Ok((response, validity_tx))
@@ -1915,15 +1914,14 @@ where
         if request.retain_from().is_some() && request.start() == self.boundary_start {
             let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
-                // Answer the boundary request against the historical size and without pins,
-                // so the engine has to retry it.
+                // Answer the boundary request with an operations response against the
+                // historical size, so the engine has to retry it.
                 let historical = Request::Operations {
                     size: self.historical_target_size,
                     start: request.start(),
                     max_ops: request.max_ops(),
                 };
-                let (mut response, _) = self.inner.serve(historical).await?;
-                response.pinned_nodes = None;
+                let (response, _) = self.inner.serve(historical).await?;
                 return Ok((response, feedback_validity()));
             }
 

@@ -1,7 +1,7 @@
 use crate::{
     Context,
     journal::{authenticated, contiguous::Contiguous},
-    merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
+    merkle::{Family, Location, Proof},
     qmdb::{
         self,
         operation::{Floored, Key},
@@ -9,10 +9,7 @@ use crate::{
     },
     translator::Translator,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{
-    EncodeShared, EncodeSize, Error as CodecError, Read, ReadRangeExt as _, Write,
-};
+use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -105,71 +102,70 @@ impl<F: Family> std::fmt::Debug for Request<F> {
     }
 }
 
-/// One authenticated response.
+/// One authenticated response, shaped like the [`Request`] it answers.
 ///
-/// The proof, the operations, and the pins are verified as a unit: the pins are only
-/// believable because the proof folds them into digests it already commits to.
-pub struct Response<F: Family, Op, D: Digest> {
-    /// Proof authenticating `operations` against the root at the requested size.
-    pub proof: Proof<F, D>,
-    /// The operations that were fetched.
-    pub operations: Vec<Op>,
-    /// Pins at the requested boundary, if the request asked for them.
-    pub pinned_nodes: Option<Vec<D>>,
+/// In a [`Response::Boundary`], the proof, the operation, and the pins are verified as a
+/// unit: the pins are only believable because the proof folds them into digests it already
+/// commits to.
+pub enum Response<F: Family, Op, D: Digest> {
+    /// Answer to a [`Request::Operations`].
+    Operations {
+        /// Proof authenticating `operations` against the root at the requested size.
+        proof: Proof<F, D>,
+        /// The operations that were fetched.
+        operations: Vec<Op>,
+    },
+    /// Answer to a [`Request::Boundary`].
+    Boundary {
+        /// Proof authenticating `op` against the root at the requested size.
+        proof: Proof<F, D>,
+        /// The operation at the requested boundary.
+        op: Op,
+        /// Pins at the requested boundary.
+        pins: Vec<D>,
+    },
+}
+
+impl<F: Family, Op, D: Digest> Response<F, Op, D> {
+    /// The proof authenticating this response.
+    pub const fn proof(&self) -> &Proof<F, D> {
+        match self {
+            Self::Operations { proof, .. } | Self::Boundary { proof, .. } => proof,
+        }
+    }
 }
 
 impl<F: Family, Op: Clone, D: Digest> Clone for Response<F, Op, D> {
     fn clone(&self) -> Self {
-        Self {
-            proof: self.proof.clone(),
-            operations: self.operations.clone(),
-            pinned_nodes: self.pinned_nodes.clone(),
+        match self {
+            Self::Operations { proof, operations } => Self::Operations {
+                proof: proof.clone(),
+                operations: operations.clone(),
+            },
+            Self::Boundary { proof, op, pins } => Self::Boundary {
+                proof: proof.clone(),
+                op: op.clone(),
+                pins: pins.clone(),
+            },
         }
     }
 }
 
 impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for Response<F, Op, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Response")
-            .field("proof", &self.proof)
-            .field("operations", &self.operations)
-            .field("pinned_nodes", &self.pinned_nodes)
-            .finish()
-    }
-}
-
-impl<F: Family, Op: Write, D: Digest> Write for Response<F, Op, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.operations.write(buf);
-        self.pinned_nodes.write(buf);
-    }
-}
-
-impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.operations.encode_size() + self.pinned_nodes.encode_size()
-    }
-}
-
-impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D>
-where
-    Op::Cfg: Clone,
-{
-    /// The `max_ops` the request asked for, and the configuration for decoding one operation.
-    type Cfg = (usize, Op::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
-        let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
-        let proof = Proof::<F, D>::read_cfg(buf, &max_proof_digests)?;
-        let operations = Vec::<Op>::read_cfg(buf, &((..=*max_ops).into(), op_cfg.clone()))?;
-        // Pins are the fold-prefix peaks at the requested boundary, independent of `max_ops`.
-        let pinned_nodes = Option::<Vec<D>>::read_range(buf, ..=MAX_PINNED_NODES)?;
-        Ok(Self {
-            proof,
-            operations,
-            pinned_nodes,
-        })
+        match self {
+            Self::Operations { proof, operations } => f
+                .debug_struct("Operations")
+                .field("proof", proof)
+                .field("operations", operations)
+                .finish(),
+            Self::Boundary { proof, op, pins } => f
+                .debug_struct("Boundary")
+                .field("proof", proof)
+                .field("op", op)
+                .field("pins", pins)
+                .finish(),
+        }
     }
 }
 
@@ -301,26 +297,29 @@ where
             return Err(crate::merkle::Error::RangeOutOfBounds(request.size()).into());
         }
         let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(self, request.size()).await?;
-        let (proof, operations) = self
-            .historical_proof(
-                request.size(),
-                request.start(),
-                request.max_ops(),
-                inactive_peaks,
-            )
-            .await?;
-        let pinned_nodes = match request.retain_from() {
-            Some(boundary) => Some(self.merkle.pinned_nodes_at(boundary).await?),
-            None => None,
+        let response = match request {
+            Request::Operations {
+                size,
+                start,
+                max_ops,
+            } => {
+                let (proof, operations) = self
+                    .historical_proof(size, start, max_ops, inactive_peaks)
+                    .await?;
+                Response::Operations { proof, operations }
+            }
+            Request::Boundary { size, start } => {
+                let (proof, mut operations) = self
+                    .historical_proof(size, start, NonZeroU64::MIN, inactive_peaks)
+                    .await?;
+                let op = operations
+                    .pop()
+                    .ok_or(crate::merkle::Error::RangeOutOfBounds(start))?;
+                let pins = self.merkle.pinned_nodes_at(start).await?;
+                Response::Boundary { proof, op, pins }
+            }
         };
-        Ok((
-            Response {
-                proof,
-                operations,
-                pinned_nodes,
-            },
-            None,
-        ))
+        Ok((response, None))
     }
 }
 

@@ -698,11 +698,12 @@ mod tests {
                 .await
                 .unwrap();
             assert!(validity_tx.is_none());
-            assert!(response.pinned_nodes.is_none());
-            assert_eq!(response.operations.len(), 1);
+            let Response::Operations { operations, .. } = response else {
+                panic!("operations request should get an operations response");
+            };
+            assert_eq!(operations.len(), 1);
             let (response, _) = db.serve(boundary(n, Location::new(*n - 1))).await.unwrap();
-            assert_eq!(response.operations.len(), 1);
-            assert!(response.pinned_nodes.is_some());
+            assert!(matches!(response, Response::Boundary { .. }));
         });
     }
 
@@ -1137,7 +1138,10 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                (target, response.pinned_nodes.unwrap())
+                let Response::Boundary { pins, .. } = response else {
+                    panic!("boundary request should get a boundary response");
+                };
+                (target, pins)
             };
 
             // Seed the destination partition with a different committed state A.

@@ -142,14 +142,35 @@ where
             .await
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
-            wire::Message::GetOperationsResponse(r) => Ok((
-                sync::Response {
-                    proof: r.proof,
-                    operations: r.operations,
-                    pinned_nodes: r.pinned_nodes,
-                },
-                None,
-            )),
+            wire::Message::GetOperationsResponse(r) => {
+                // The wire carries the flat shape; rebuild the typed response the request
+                // asked for, refusing an answer shaped unlike its question.
+                let response = match request {
+                    sync::Request::Boundary { .. } => {
+                        let mut operations = r.operations;
+                        let (Some(op), Some(pins), true) =
+                            (operations.pop(), r.pinned_nodes, operations.is_empty())
+                        else {
+                            return Err(crate::Error::UnexpectedResponse { request_id });
+                        };
+                        sync::Response::Boundary {
+                            proof: r.proof,
+                            op,
+                            pins,
+                        }
+                    }
+                    sync::Request::Operations { .. } => {
+                        if r.pinned_nodes.is_some() {
+                            return Err(crate::Error::UnexpectedResponse { request_id });
+                        }
+                        sync::Response::Operations {
+                            proof: r.proof,
+                            operations: r.operations,
+                        }
+                    }
+                };
+                Ok((response, None))
+            }
             wire::Message::Error(err) => Err(crate::Error::Server {
                 code: err.error_code,
                 message: err.message,

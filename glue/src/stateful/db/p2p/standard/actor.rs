@@ -271,6 +271,32 @@ where
         true
     }
 
+    /// Convert a decoded wire response into the typed response `key` asked for, or `None`
+    /// when the answer is shaped unlike its question.
+    fn typed_response(
+        key: &handler::Request<F>,
+        decoded: handler::Response<F, Op<DB>, DatabaseRoot<DB>>,
+    ) -> Option<Response<F, Op<DB>, DatabaseRoot<DB>>> {
+        let handler::Response {
+            proof,
+            mut operations,
+            pinned_nodes,
+        } = decoded;
+        if key.include_pinned_nodes {
+            if operations.len() != 1 {
+                return None;
+            }
+            let op = operations.pop()?;
+            let pins = pinned_nodes?;
+            Some(Response::Boundary { proof, op, pins })
+        } else {
+            if pinned_nodes.is_some() {
+                return None;
+            }
+            Some(Response::Operations { proof, operations })
+        }
+    }
+
     /// Decode a peer's response, fan it out to pending subscribers, and aggregate approvals.
     async fn handle_deliver(
         &mut self,
@@ -301,18 +327,21 @@ where
                 }
             };
 
+        // The wire carries the flat shape; rebuild the typed response the request asked
+        // for, refusing an answer shaped unlike its question.
+        let Some(response) = Self::typed_response(&key, decoded) else {
+            self.pending.insert(key, subscribers);
+            let _ = self.metrics.pending_requests.try_set(self.pending.len());
+            self.metrics.deliveries.inc(status::Status::Invalid);
+            validity_tx.send_lossy(false);
+            return;
+        };
+
         let mut approvals = Vec::new();
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok((
-                    Response {
-                        proof: decoded.proof.clone(),
-                        operations: decoded.operations.clone(),
-                        pinned_nodes: decoded.pinned_nodes.clone(),
-                    },
-                    Some(success_tx),
-                )))
+                .send(Ok((response.clone(), Some(success_tx))))
                 .is_err()
             {
                 continue;
@@ -378,14 +407,19 @@ where
             return;
         };
 
-        response_tx.send_lossy(
-            handler::Response {
-                proof: response.proof,
-                operations: response.operations,
-                pinned_nodes: response.pinned_nodes,
-            }
-            .encode(),
-        );
+        let response = match response {
+            Response::Operations { proof, operations } => handler::Response {
+                proof,
+                operations,
+                pinned_nodes: None,
+            },
+            Response::Boundary { proof, op, pins } => handler::Response {
+                proof,
+                operations: vec![op],
+                pinned_nodes: Some(pins),
+            },
+        };
+        response_tx.send_lossy(response.encode());
         self.metrics.serve_requests.inc(status::Status::Success);
     }
 }
