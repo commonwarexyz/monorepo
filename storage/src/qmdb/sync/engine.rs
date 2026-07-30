@@ -316,11 +316,10 @@ where
             let request = Request::new(target_size, start_loc, NZU64!(1)).retaining_from(start_loc);
             let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
-            self.outstanding_requests
-                .insert(id, start_loc, target_size, async move {
-                    let result = source.serve(request).await;
-                    IndexedFetchResult { id, result }
-                });
+            self.outstanding_requests.insert(id, request, async move {
+                let result = source.serve(request).await;
+                IndexedFetchResult { id, result }
+            });
         }
 
         // Calculate the maximum number of requests to make
@@ -357,11 +356,10 @@ where
             let request = Request::new(target_size, gap_range.start, batch_size);
             let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
-            self.outstanding_requests
-                .insert(id, gap_range.start, target_size, async move {
-                    let result = source.serve(request).await;
-                    IndexedFetchResult { id, result }
-                });
+            self.outstanding_requests.insert(id, request, async move {
+                let result = source.serve(request).await;
+                IndexedFetchResult { id, result }
+            });
         }
 
         Ok(())
@@ -557,7 +555,7 @@ where
             return Ok(());
         };
 
-        let start_loc = request.start_loc;
+        let start_loc = request.start;
         let (
             Response {
                 proof,
@@ -567,18 +565,14 @@ where
             validity,
         ) = fetch_result.result.map_err(SyncError::Source)?;
 
-        // Validate batch size
+        // The request is the authority on what answers it; a contradiction is the peer's
+        // fault, and the range is refetched on the next scan.
         let operations_len = operations.len() as u64;
-        if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
-            // Invalid batch size - notify source of failure.
-            // We will request these operations again when we scan for unfetched operations.
-            if let Some(validity) = validity {
-                validity.send_lossy(false);
-            }
-            return Ok(());
-        }
-
-        if proof.leaves != request.target_size {
+        let contradicts_request = operations_len == 0
+            || operations_len > request.max_ops.get()
+            || proof.leaves != request.size
+            || pinned_nodes.is_some() != request.retain_from.is_some();
+        if contradicts_request {
             if let Some(validity) = validity {
                 validity.send_lossy(false);
             }
@@ -588,11 +582,11 @@ where
         // Look up the root to verify against using the tree size the request
         // asked for. Fresh requests match the current target; retained
         // requests match a historical root that was explicitly retained.
-        let is_current_target = request.target_size == self.target.range.end();
+        let is_current_target = request.size == self.target.range.end();
         let target_root = if is_current_target {
             &self.target.root
         } else {
-            let Some(root) = self.retained_roots.get(&request.target_size) else {
+            let Some(root) = self.retained_roots.get(&request.size) else {
                 // No historical root to verify against (evicted or
                 // max_retained_roots is 0). Drop the result without
                 // penalizing the source -- the data may be valid.
@@ -601,14 +595,10 @@ where
             root
         };
 
-        // Pinned nodes are only extracted from proofs for the current root because
-        // the database needs them for the latest tree size.
-        let need_pinned = is_current_target
-            && self.pinned_nodes.is_none()
-            && start_loc == self.target.range.start();
+        // Pins arrive only when requested (checked above); the verifier binds them to the
+        // range start, the only boundary the engine requests them at.
         let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-        let valid = if need_pinned {
-            let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
+        let valid = if let Some(nodes) = pinned_nodes.as_deref() {
             proof.verify_proof_and_pinned_nodes(
                 &self.hasher,
                 &elements,
@@ -626,14 +616,19 @@ where
         }
 
         if !valid {
-            if need_pinned {
+            if pinned_nodes.is_some() {
                 tracing::warn!("boundary proof or pinned nodes failed verification, will retry");
             }
             return Ok(());
         }
 
-        // Cache pinned nodes only from current-root-verified proofs.
-        if need_pinned && let Some(nodes) = pinned_nodes {
+        // Keep pins only from the current root and boundary; the database needs them at the
+        // latest size.
+        if is_current_target
+            && start_loc == self.target.range.start()
+            && self.pinned_nodes.is_none()
+            && let Some(nodes) = pinned_nodes
+        {
             self.pinned_nodes = Some(nodes);
         }
 
@@ -966,8 +961,7 @@ mod tests {
         let id = requests.next_id();
         requests.insert(
             id,
-            Location::new(loc),
-            Location::new(loc),
+            Request::new(Location::new(loc + 1), Location::new(loc), NZU64!(1)),
             std::future::ready(dummy_result(id)),
         );
         id

@@ -1863,6 +1863,150 @@ where
     });
 }
 
+/// How a tampered response contradicts the request it answers.
+#[derive(Clone, Copy)]
+enum Tamper {
+    /// More operations than the request allowed.
+    OversizeBatch,
+    /// Pins the request did not ask for.
+    UnsolicitedPins,
+    /// Missing the pins the request asked for.
+    StripPins,
+}
+
+/// Tampers with the first applicable response, then serves honestly.
+///
+/// The tampered response carries an injected validity channel so the test can observe the
+/// engine's verdict.
+struct TamperFirstResolver<R> {
+    inner: R,
+    tamper: Tamper,
+    done: Arc<std::sync::atomic::AtomicBool>,
+    verdict_rx: Arc<Mutex<Option<oneshot::Receiver<bool>>>>,
+}
+
+impl<R, F> Source<Request<F>> for TamperFirstResolver<R>
+where
+    F: crate::merkle::Family,
+    R: Source<Request<F>, Family = F, Digest = Digest>,
+    R::Op: Clone,
+{
+    type Family = R::Family;
+    type Digest = Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn serve(
+        &self,
+        request: Request<F>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
+        let (mut response, validity_tx) = self.inner.serve(request).await?;
+        let applies = match self.tamper {
+            Tamper::OversizeBatch => true,
+            Tamper::UnsolicitedPins => request.retain_from.is_none(),
+            Tamper::StripPins => request.retain_from.is_some(),
+        };
+        if applies && !self.done.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            match self.tamper {
+                Tamper::OversizeBatch => {
+                    let dup = response.operations.last().unwrap().clone();
+                    response.operations.push(dup);
+                }
+                Tamper::UnsolicitedPins => response.pinned_nodes = Some(vec![]),
+                Tamper::StripPins => response.pinned_nodes = None,
+            }
+            let (tx, rx) = oneshot::channel();
+            *self.verdict_rx.lock() = Some(rx);
+            return Ok((response, Some(tx)));
+        }
+        Ok((response, validity_tx))
+    }
+}
+
+/// Sync against a source whose first applicable response contradicts its request: the engine
+/// must reject it as peer-invalid and succeed on the honest retry.
+fn run_tamper_rejection<H: SyncTestHarness>(tamper: Tamper)
+where
+    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Prune the target so the boundary request needs pins.
+        let target_db = H::init_db(context.child("target")).await;
+        let ops = H::create_ops(20);
+        let target_db = H::apply_ops(target_db, ops).await;
+        let boundary = target_db.sync_boundary();
+        let target_db = target_db.prune(boundary).await.unwrap();
+
+        let sync_root = H::sync_target_root(&target_db);
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
+
+        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let verdict_rx = Arc::new(Mutex::new(None));
+        let resolver = TamperFirstResolver {
+            inner: Arc::new(target_db),
+            tamper,
+            done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            verdict_rx: verdict_rx.clone(),
+        };
+
+        let config = sync::engine::Config {
+            db_config,
+            fetch_batch_size: NZU64!(5),
+            target: Target {
+                root: sync_root,
+                range: non_empty_range!(lower_bound, upper_bound),
+            },
+            context: context.child("client"),
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        };
+
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
+        assert_eq!(synced_db.root(), sync_root);
+
+        let rx = verdict_rx.lock().take().expect("tampered response served");
+        assert_eq!(rx.await, Ok(false));
+
+        synced_db.destroy().await.unwrap();
+    });
+}
+
+pub(crate) fn test_sync_rejects_oversize_batch<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone,
+    JournalOf<H>: Contiguous,
+{
+    run_tamper_rejection::<H>(Tamper::OversizeBatch);
+}
+
+pub(crate) fn test_sync_rejects_unsolicited_pins<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone,
+    JournalOf<H>: Contiguous,
+{
+    run_tamper_rejection::<H>(Tamper::UnsolicitedPins);
+}
+
+pub(crate) fn test_sync_rejects_stripped_pins<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode + Clone,
+    JournalOf<H>: Contiguous,
+{
+    run_tamper_rejection::<H>(Tamper::StripPins);
+}
+
 /// A source wrapper that replays the first fresh boundary request against the retained
 /// historical root, then blocks the retry until the test releases it.
 #[derive(Clone)]
@@ -2904,6 +3048,21 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_retries_bad_pinned_nodes() {
                 super::test_sync_retries_bad_pinned_nodes::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_rejects_oversize_batch() {
+                super::test_sync_rejects_oversize_batch::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_rejects_unsolicited_pins() {
+                super::test_sync_rejects_unsolicited_pins::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_rejects_stripped_pins() {
+                super::test_sync_rejects_stripped_pins::<$harness>();
             }
 
             #[test_traced]
