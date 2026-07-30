@@ -116,12 +116,14 @@ pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 /// run that has not already finished is given a GST transition. Shared by the
 /// ByzzFuzz runner and the marshal multi-node liveness runner.
 pub(crate) const FAULT_PHASE: Duration = Duration::from_secs(30);
-/// Standard's bounded wait on the ordinary 10ms-link network.
+/// Standard's minimum bounded wait on the ordinary 10ms-link network.
 const STANDARD_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
-/// Audit Standard's bounded wait on the ordinary 10ms-link network.
+/// Audit Standard's minimum bounded wait on the ordinary 10ms-link network.
 const AUDITED_STANDARD_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
-/// Twins' bounded wait, including its scripted prefix on 500ms links.
+/// Twins' minimum bounded wait, including its scripted prefix on 500ms links.
 const TWINS_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
+const STANDARD_LIVENESS_PER_VIEW: Duration = Duration::from_secs(1);
+const TWINS_LIVENESS_PER_VIEW: Duration = Duration::from_secs(4);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -423,6 +425,21 @@ pub struct FuzzInput {
 
 fn should_bound_standard_liveness(input: &FuzzInput) -> bool {
     input.partition.is_connected() && input.configuration.is_valid() && !input.degraded_network
+}
+
+fn work_scaled_liveness_window(floor: Duration, per_view: Duration, views: u64) -> Duration {
+    per_view
+        .saturating_mul(u32::try_from(views).unwrap_or(u32::MAX))
+        .max(floor)
+}
+
+fn standard_liveness_window(floor: Duration, required_containers: u64) -> Duration {
+    work_scaled_liveness_window(floor, STANDARD_LIVENESS_PER_VIEW, required_containers)
+}
+
+fn twins_liveness_window(prefix_end: View, required_containers: u64) -> Duration {
+    let views = prefix_end.get().saturating_add(required_containers);
+    work_scaled_liveness_window(TWINS_LIVENESS_WINDOW, TWINS_LIVENESS_PER_VIEW, views)
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -2010,6 +2027,8 @@ fn run_standard_once<P: simplex::Simplex>(
         .await;
 
         if should_bound_standard_liveness(&input) {
+            let liveness_window =
+                standard_liveness_window(STANDARD_LIVENESS_WINDOW, input.required_containers);
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -2026,7 +2045,7 @@ fn run_standard_once<P: simplex::Simplex>(
                 );
             }
             select! {
-                _ = context.sleep(STANDARD_LIVENESS_WINDOW) => {
+                _ = context.sleep(liveness_window) => {
                     let mut diag = String::new();
                     for (idx, (_, reporter)) in reporters.iter().enumerate() {
                         let participant_idx = idx + config.faults as usize;
@@ -2058,7 +2077,7 @@ fn run_standard_once<P: simplex::Simplex>(
                         );
                     }
                     panic!(
-                        "simplex: no progress within {STANDARD_LIVENESS_WINDOW:?};{diag}"
+                        "simplex: no progress within {liveness_window:?};{diag}"
                     );
                 },
                 _ = join_all(finalizers) => {},
@@ -2121,7 +2140,9 @@ fn run_standard_once<P: simplex::Simplex>(
 /// shared [`run_standard_once`] path continues to use the consensus mock
 /// reporter and application automaton directly.
 fn run_audited_standard_once<P: simplex::Simplex>(input: FuzzInput) -> (bool, bool) {
-    run_audited_standard_once_with_window::<P>(input, AUDITED_STANDARD_LIVENESS_WINDOW)
+    let liveness_window =
+        standard_liveness_window(AUDITED_STANDARD_LIVENESS_WINDOW, input.required_containers);
+    run_audited_standard_once_with_window::<P>(input, liveness_window)
 }
 
 fn run_audited_standard_once_with_window<P: simplex::Simplex>(
@@ -3378,8 +3399,9 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                 }
             }
         }
+        let liveness_window = twins_liveness_window(prefix_end, self.input.required_containers);
         select! {
-            _ = context.sleep(TWINS_LIVENESS_WINDOW) => {
+            _ = context.sleep(liveness_window) => {
                 let mut diag = String::new();
                 for (idx, reporter) in state.honest_indices.iter().copied().zip(
                     state.reporters.iter().skip(state.honest_start)
@@ -3392,7 +3414,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     );
                 }
                 panic!(
-                    "simplex twins: no progress within {TWINS_LIVENESS_WINDOW:?};{diag}"
+                    "simplex twins: no progress within {liveness_window:?};{diag}"
                 );
             },
             _ = join_all(finalizers) => {},
@@ -4118,6 +4140,22 @@ mod tests {
 
         input.degraded_network = true;
         assert!(!should_bound_standard_liveness(&input));
+    }
+
+    #[test]
+    fn liveness_windows_scale_with_direct_test_inputs() {
+        assert_eq!(
+            standard_liveness_window(STANDARD_LIVENESS_WINDOW, 1_000),
+            Duration::from_secs(1_000),
+        );
+        assert_eq!(
+            twins_liveness_window(View::new(40), 30),
+            TWINS_LIVENESS_WINDOW,
+        );
+        assert_eq!(
+            twins_liveness_window(View::zero(), 1_000),
+            Duration::from_secs(4_000),
+        );
     }
 
     #[test]

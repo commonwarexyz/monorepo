@@ -46,6 +46,7 @@ use stack::{
 };
 use std::{
     collections::HashMap,
+    fmt,
     num::NonZeroUsize,
     sync::{
         Arc, LazyLock,
@@ -60,6 +61,24 @@ static EMPTY_CASE_REPORTED: AtomicBool = AtomicBool::new(false);
 
 const MAX_CASES: usize = 64;
 const ATTACK_MAX_CASES: usize = 2048;
+const DEEP_PENDING_ACKS: NonZeroUsize = NZUsize!(8);
+
+struct MarshalTwinsInputDebug<'a>(&'a MarshalTwinsInput);
+
+impl fmt::Debug for MarshalTwinsInputDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let input = self.0;
+        f.debug_struct("MarshalTwinsInput")
+            .field("raw_bytes_len", &input.raw_bytes.len())
+            .field("rounds", &input.rounds)
+            .field("case_selector", &input.case_selector)
+            .field("sustained", &input.sustained)
+            .field("strategy", &input.strategy)
+            .field("trailing_blocks", &input.trailing_blocks)
+            .field("forwarding", &input.forwarding)
+            .finish()
+    }
+}
 
 pub(crate) type SchemeOf<P> = <P as Simplex>::Scheme;
 pub(crate) type PublicKeyOf<P> =
@@ -504,6 +523,8 @@ pub fn fuzz_marshal_standard_deferred_id_twins_split_header(mut input: MarshalTw
 
 /// Crypto: `SimplexId`. Marshal: standard, inline. Cluster: `N4F1C3` Twins,
 /// `SplitHeader` strategy. Liveness: checked. App: fixed always-accept.
+/// Inline certification structurally returns true, so this target covers the
+/// verify-side split-header invariant, not certification poisoning.
 pub fn fuzz_marshal_standard_inline_id_twins_split_header(mut input: MarshalTwinsInput) {
     input.strategy = StrategyChoice::SplitHeader {
         fault_rounds: input.rounds.into(),
@@ -544,10 +565,11 @@ fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
     } else {
         MarshalChoice::Inline
     };
-    let max_pending_acks = if selector & 0b100 == 0 {
-        NZUsize!(2)
-    } else {
-        DEFAULT_MAX_PENDING_ACKS
+    let max_pending_acks = match (selector >> 2) & 0b11 {
+        0 => NZUsize!(1),
+        1 => NZUsize!(2),
+        2 => DEEP_PENDING_ACKS,
+        _ => DEFAULT_MAX_PENDING_ACKS,
     };
     let entropy = if entropy.is_empty() {
         vec![0]
@@ -582,7 +604,7 @@ fn fuzz_marshal_twins_with<P, A, M>(
     if *VERIFY_PROBE {
         eprintln!("[marshal-twins] selected stack: {stack_label}");
     }
-    let probe_input: Arc<str> = format!("{input:?}").into();
+    let probe_input: Arc<str> = format!("{:?}", MarshalTwinsInputDebug(&input)).into();
     let rng = FuzzRng::new(entropy.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -607,10 +629,35 @@ mod tests {
 
     #[test]
     fn general_stack_samples_tight_and_deep_ack_windows() {
-        assert_eq!(select_general_stack(&[0]).0.max_pending_acks, NZUsize!(2));
+        assert_eq!(select_general_stack(&[0]).0.max_pending_acks, NZUsize!(1));
         assert_eq!(
             select_general_stack(&[0b100]).0.max_pending_acks,
+            NZUsize!(2),
+        );
+        assert_eq!(
+            select_general_stack(&[0b1000]).0.max_pending_acks,
+            NZUsize!(8),
+        );
+        assert_eq!(
+            select_general_stack(&[0b1100]).0.max_pending_acks,
             DEFAULT_MAX_PENDING_ACKS,
         );
+    }
+
+    #[test]
+    fn probe_input_elides_raw_entropy() {
+        let input = MarshalTwinsInput {
+            raw_bytes: vec![0xAB; 1024],
+            rounds: 1,
+            case_selector: 0,
+            sustained: false,
+            strategy: StrategyChoice::AnyScope,
+            trailing_blocks: 1,
+            forwarding: commonware_consensus::simplex::ForwardingPolicy::Disabled,
+        };
+
+        let rendered = format!("{:?}", MarshalTwinsInputDebug(&input));
+        assert!(rendered.contains("raw_bytes_len: 1024"));
+        assert!(!rendered.contains("171, 171"));
     }
 }

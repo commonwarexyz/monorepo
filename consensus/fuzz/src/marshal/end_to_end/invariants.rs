@@ -69,6 +69,10 @@ struct CertificationState {
 /// verdict for the same `(round, digest)`. Direct drivers may also record
 /// completed proposals to ensure no marshal choice certifies them as false on
 /// the proposing node.
+///
+/// Inline certification structurally returns `true`, so false-verdict
+/// agreement, self-proposal rejection, and certification-poisoning checks are
+/// unreachable on Inline stacks. Their split-header coverage is verify-side.
 #[derive(Clone)]
 pub(crate) struct CertificationAgreementInvariant {
     state: Arc<Mutex<CertificationState>>,
@@ -201,6 +205,9 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
     }
 
     fn observed_mismatch(&self, round: Round, digest: Sha256Digest) -> bool {
+        if !matches!(self.marshal, MarshalChoice::Deferred) {
+            return false;
+        }
         let Some(block_context) = self.block_context(&digest) else {
             self.missing_block_contexts.fetch_add(1, Ordering::Relaxed);
             return false;
@@ -209,7 +216,11 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
             .verified_contexts
             .lock()
             .get(&(round, digest))
-            .is_some_and(|contexts| contexts.iter().any(|context| context != &block_context));
+            .is_some_and(|contexts| {
+                contexts
+                    .iter()
+                    .any(|context| digest != context.parent.1 && context != &block_context)
+            });
         mismatch && !(self.rejects)(self.app_choice, self.app_config, &block_context)
     }
 
@@ -360,9 +371,9 @@ pub(super) fn check_pending_acks<B: Block>(
 /// Walks the arrival-ordered delivery log. Delivery starts either at the
 /// genesis floor block (height 0, surfaced on a fresh start) or at the first
 /// finalized container (height 1), then every subsequent delivery must advance
-/// by exactly one or repeat the identical `(height, digest)` once. Because this
-/// is the true arrival sequence, an out-of-order delivery, a gap, repeated
-/// duplicate, or same-height fork fails the check.
+/// by exactly one or repeat the identical `(height, digest)`. Because delivery
+/// is at-least-once, any number of exact duplicates is allowed; an out-of-order
+/// delivery, gap, or same-height fork fails the check.
 fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], stack: &str) {
     let first = delivered.first().map_or(0, |(height, _)| height.get());
     assert!(
@@ -370,21 +381,12 @@ fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], s
         "node{idx} first delivery at height {first} is above the genesis floor + 1; \
          sequence={delivered:?}; stack={stack}",
     );
-    let mut previous_was_duplicate = false;
     for window in delivered.windows(2) {
         let (height_0, digest_0) = &window[0];
         let (height_1, digest_1) = &window[1];
         if height_1 == height_0 && digest_1 == digest_0 {
-            assert!(
-                !previous_was_duplicate,
-                "node{idx} delivered more than one duplicate at height {}; \
-                 sequence={delivered:?}; stack={stack}",
-                height_1.get(),
-            );
-            previous_was_duplicate = true;
             continue;
         }
-        previous_was_duplicate = false;
         assert!(
             height_0.get().checked_add(1) == Some(height_1.get()),
             "node{idx} violated in-order delivery (out-of-order, gap, or same-height fork): \
@@ -403,8 +405,8 @@ fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], s
 /// comparing finalized heights alone would not detect conflicting blocks.
 ///
 /// [`check_in_order`] establishes that each node's delivery log is contiguous
-/// and permits at most one exact duplicate at one height. Given that, requiring
-/// one digest per height across all honest delivery logs and current tips is
+/// and permits exact duplicates at one height. Given that, requiring one digest
+/// per height across all honest delivery logs and current tips is
 /// equivalent to pairwise prefix compatibility and also checks that a tip
 /// agrees with any delivered block at the same height. Heights are used instead
 /// of raw sequence indexes because a fresh application may surface genesis at
@@ -502,8 +504,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "more than one duplicate")]
-    fn more_than_one_duplicate_delivery_is_rejected() {
+    fn repeated_duplicate_delivery_is_allowed() {
         check_in_order(
             0,
             &[
@@ -599,6 +600,19 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "max_pending_acks backpressure violated")]
+    fn pending_ack_deep_window_is_reachable() {
+        type TestBlock = MockBlock<Sha256Digest, ()>;
+
+        let mut application = Application::<TestBlock>::manual_ack();
+        let block = TestBlock::new::<Sha256>((), digest(0), Height::zero(), 0);
+        let (ack, _waiter) = Exact::handle();
+        application.report(Update::Block(Arc::new(block), ack));
+
+        check_pending_acks(0, &application, Height::new(8), NZUsize!(8), "test");
+    }
+
+    #[test]
     fn missing_block_context_is_an_incomplete_observation() {
         let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
             ApplicationChoice::AlwaysAccept,
@@ -611,6 +625,70 @@ mod tests {
 
         assert!(!invariant.observed_mismatch(Round::zero(), digest(0xA)));
         assert_eq!(invariant.missing_block_contexts(), 1);
+    }
+
+    #[test]
+    fn certification_mismatch_ignores_parent_digest_reproposal() {
+        let registry = BlockContextRegistry::default();
+        let payload = digest(0xA);
+        let embedded = context(2, digest(0xB));
+        registry.record(payload, embedded.clone());
+        let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
+            ApplicationChoice::AlwaysAccept,
+            (),
+            |_, _, _| false,
+            registry,
+            MarshalChoice::Deferred,
+            "test".into(),
+        );
+        let mut reproposal = embedded;
+        reproposal.parent.0 = View::zero();
+        reproposal.parent.1 = payload;
+        invariant.record_verify(reproposal, payload);
+
+        assert!(!invariant.observed_mismatch(Round::new(Epoch::zero(), View::new(2)), payload,));
+    }
+
+    #[test]
+    fn certification_mismatch_is_deferred_only() {
+        let registry = BlockContextRegistry::default();
+        let payload = digest(0xA);
+        let embedded = context(2, digest(0xB));
+        registry.record(payload, embedded.clone());
+        let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
+            ApplicationChoice::AlwaysAccept,
+            (),
+            |_, _, _| false,
+            registry,
+            MarshalChoice::Inline,
+            "test".into(),
+        );
+        let mut mutated = embedded;
+        mutated.parent.0 = View::zero();
+        invariant.record_verify(mutated, payload);
+
+        assert!(!invariant.observed_mismatch(Round::new(Epoch::zero(), View::new(2)), payload,));
+    }
+
+    #[test]
+    fn certification_mismatch_detects_deferred_header_poison() {
+        let registry = BlockContextRegistry::default();
+        let payload = digest(0xA);
+        let embedded = context(2, digest(0xB));
+        registry.record(payload, embedded.clone());
+        let invariant = HeaderMismatchInvariant::<SimplexId, ()>::new(
+            ApplicationChoice::AlwaysAccept,
+            (),
+            |_, _, _| false,
+            registry,
+            MarshalChoice::Deferred,
+            "test".into(),
+        );
+        let mut mutated = embedded;
+        mutated.parent.0 = View::zero();
+        invariant.record_verify(mutated, payload);
+
+        assert!(invariant.observed_mismatch(Round::new(Epoch::zero(), View::new(2)), payload,));
     }
 
     #[test]

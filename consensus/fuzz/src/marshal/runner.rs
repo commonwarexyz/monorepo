@@ -67,6 +67,12 @@ fn parent_view(height: Height) -> View {
         .unwrap_or(View::zero())
 }
 
+fn proposal_matches_epoch(round: Round, height: Height) -> bool {
+    FixedEpocher::new(BLOCKS_PER_EPOCH)
+        .containing(height)
+        .is_some_and(|info| info.epoch() == round.epoch())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum InlineSeed {
     Proposed,
@@ -586,12 +592,14 @@ fn fuzz_marshal_actor_standard(input: MarshalActorStandardInput, kind: WrapperKi
                             _ = context.sleep(EVENT_SETTLE) => None,
                         };
                         if let Some(digest) = result {
-                            certification_invariant.record_proposal(0, round, digest);
                             let _ = wrapper.broadcast(digest, Plan::Propose { round });
-                            assert!(
-                                marshal.get_block(&digest).await.is_some(),
-                                "inline proposal is unavailable after relay"
-                            );
+                            let block = marshal
+                                .get_block(&digest)
+                                .await
+                                .expect("inline proposal is unavailable after relay");
+                            if proposal_matches_epoch(round, block.height()) {
+                                certification_invariant.record_proposal(0, round, digest);
+                            }
                             available.insert(digest);
                         }
                     }
@@ -724,6 +732,33 @@ pub fn fuzz_marshal_actor_deferred(input: MarshalActorStandardInput) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn out_of_epoch_proposal_does_not_arm_self_rejection() {
+        let invariant =
+            CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred);
+        let round = Round::new(Epoch::zero(), View::new(20));
+        let digest = Sha256::hash(&[b"proposal"]);
+
+        if proposal_matches_epoch(round, Height::new(20)) {
+            invariant.record_proposal(0, round, digest);
+        }
+        invariant.check_certify_agreement(0, round, digest, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "certified its own proposal as false")]
+    fn in_epoch_proposal_arms_self_rejection() {
+        let invariant =
+            CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred);
+        let round = Round::new(Epoch::zero(), View::new(19));
+        let digest = Sha256::hash(&[b"proposal"]);
+
+        if proposal_matches_epoch(round, Height::new(19)) {
+            invariant.record_proposal(0, round, digest);
+        }
+        invariant.check_certify_agreement(0, round, digest, false);
+    }
 
     #[test]
     fn deferred_out_of_epoch_split_header_does_not_arm_recovery() {

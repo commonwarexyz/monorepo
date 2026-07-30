@@ -101,7 +101,7 @@ pub(crate) async fn setup_validator_coding(
     let delivery_reporter = DeliveryReporter::new(
         validator_idx,
         application.clone(),
-        Some(max_pending_acks),
+        None,
         "marshal-coding-liveness".into(),
     );
     let config = Config {

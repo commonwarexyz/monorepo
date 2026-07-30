@@ -81,7 +81,9 @@ use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize};
 use std::{fmt::Write as _, num::NonZeroUsize, time::Duration};
 
-/// Backlog large enough to exercise pending-ack depth beyond one.
+/// Marshal backlog for the disrupter and coding configurations.
+///
+/// Pending-ack invariant coverage uses the Twins target's reachable windows.
 const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 /// Marshal's post-GST recovery budget on its ordinary simulated links.
 const MARSHAL_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
@@ -326,7 +328,7 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
                     DeliveryReporter::new(
                         idx,
                         node.application.clone(),
-                        Some(MAX_PENDING_ACKS),
+                        None,
                         "marshal-liveness".into(),
                     ),
                 );
