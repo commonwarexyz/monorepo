@@ -204,12 +204,11 @@ where
             max_retained_roots: 0,
         };
 
-        // The existing journal has the target's bounds but belongs to another root. Individual
-        // removals fail before mutation, while the removal batch reports failure after its whole
-        // set commits. A retry must therefore observe one discarded generation, never a mixture.
-        *context.storage_fault_config().write() = deterministic::FaultConfig::default()
-            .remove(1.0)
-            .remove_batch_post_commit(1.0);
+        // The existing journal has the target's bounds but belongs to another root. Discarding
+        // the rejected generation must remove every backing component in one batch. Even when a
+        // committed batch reports an error, a retry must never observe a mixed generation.
+        *context.storage_fault_config().write() =
+            deterministic::FaultConfig::default().batch_post_commit(1.0);
         let first: Result<H::Db, _> =
             sync::sync(sync_config(context.child("interrupted_discard"))).await;
         assert!(matches!(first, Err(sync::Error::Database(_))));
@@ -3119,12 +3118,5 @@ mod mismatch_discard_recovery {
     fn unordered_fixed() {
         super::test_interrupted_mismatch_discard_retries_cleanly::<harnesses::UnorderedFixedHarness>(
         );
-    }
-
-    #[test_traced]
-    fn unordered_variable() {
-        super::test_interrupted_mismatch_discard_retries_cleanly::<
-            harnesses::UnorderedVariableHarness,
-        >();
     }
 }

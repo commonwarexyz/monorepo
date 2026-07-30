@@ -854,7 +854,10 @@ where
         let Self { any, metadata, .. } = self;
         let mut targets = any.into_remove_targets().await?;
         targets.extend(metadata.into_remove_targets().await?);
-        context.remove_batch(targets).await.map_err(Error::Runtime)
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(Error::Runtime)
     }
 }
 
@@ -1300,7 +1303,7 @@ where
     let mut targets = merkle.into_remove_targets().await?;
     targets.extend(backing_targets);
     destroy_context
-        .remove_batch(targets)
+        .apply_batch(targets.into_iter().map(Into::into).collect())
         .await
         .map_err(Error::Runtime)
 }

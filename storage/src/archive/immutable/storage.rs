@@ -342,7 +342,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         self.ordinal.last_index()
     }
 
-    /// Wait for pending child syncs, then return the archive's storage targets.
+    /// Wait for pending child syncs, then return the archive's namespace entries.
     async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         let Self {
             metadata,
@@ -383,7 +383,7 @@ impl<E: Context, K: Array, V: CodecShared> Archive<E, K, V> {
         self.0.metadata.destroy_context()
     }
 
-    /// Wait for pending child syncs, then return the archive's storage targets.
+    /// Wait for pending child syncs, then return the archive's namespace entries.
     async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         self.0.into_remove_targets().await
     }
@@ -439,7 +439,7 @@ impl<E: Context, K: Array, V: CodecShared> crate::archive::Archive for Archive<E
         let context = self.destroy_context();
         let targets = self.into_remove_targets().await?;
         context
-            .remove_batch(targets)
+            .apply_batch(targets.into_iter().map(Into::into).collect())
             .await
             .map_err(metadata::Error::Runtime)
             .map_err(Error::Metadata)

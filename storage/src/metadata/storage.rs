@@ -3,7 +3,8 @@ use crate::SyncCompletion;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, BufferPooler, Error as RError, Handle, IoBufMut, Metrics, RemoveTarget, Storage,
+    BatchOperation, Blob, BufMut, BufferPooler, Error as RError, Handle, IoBufMut, Metrics,
+    RemoveTarget, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -680,6 +681,9 @@ impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     pub async fn destroy(self) -> Result<(), Error> {
         let context = self.destroy_context();
         let targets = self.into_remove_targets().await?;
-        context.remove_batch(targets).await.map_err(Error::Runtime)
+        context
+            .apply_batch(targets.into_iter().map(BatchOperation::Remove).collect())
+            .await
+            .map_err(Error::Runtime)
     }
 }

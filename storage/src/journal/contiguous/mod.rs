@@ -288,8 +288,9 @@ pub trait Mutable: Contiguous + Sized {
     /// - If `size > bounds.end`, returns [Error::InvalidRewind]
     /// - If `size == bounds.end`, this is a no-op
     /// - If `size < bounds.start`, returns [Error::ItemPruned] (can't rewind to pruned data)
-    /// - Whole-blob removals are committed as one namespace batch. After commitment, storage
-    ///   recovery completes any interrupted removals before reopening the namespace
+    /// - The retained blob's final tail and all whole-blob removals share one namespace batch.
+    ///   After commitment, storage recovery completes any interrupted batch before reopening the
+    ///   namespace
     ///
     /// # Warnings
     ///

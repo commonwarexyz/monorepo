@@ -1,9 +1,10 @@
 use super::Header;
-use crate::{BufferPool, Error, RemoveTarget};
+use crate::{BatchOperation, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
 use std::path::Path;
 use std::{
+    collections::BTreeMap,
     ops::RangeInclusive,
     path::PathBuf,
     sync::{
@@ -69,9 +70,31 @@ pub struct Storage {
     pool: BufferPool,
 }
 
+type Generation = super::generation::Token;
+
 struct Namespace {
     lock: Arc<Mutex<()>>,
     recovery_required: AtomicBool,
+    generations: super::generation::Registry,
+}
+
+impl Namespace {
+    fn generation(&self, partition: &str, name: &[u8]) -> Arc<Generation> {
+        self.generations.generation(partition, name)
+    }
+
+    fn is_current(&self, partition: &str, name: &[u8], generation: &Arc<Generation>) -> bool {
+        self.generations.is_current(partition, name, generation)
+    }
+
+    fn invalidate_operations(&self, operations: &[super::batch::Operation]) {
+        self.generations.invalidate(operations);
+    }
+
+    #[cfg(test)]
+    fn generation_count(&self) -> usize {
+        self.generations.len()
+    }
 }
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
@@ -95,6 +118,7 @@ impl Storage {
             namespace: Arc::new(Namespace {
                 lock: Arc::new(Mutex::new(())),
                 recovery_required: AtomicBool::new(true),
+                generations: super::generation::Registry::default(),
             }),
             cfg,
             pool,
@@ -112,7 +136,10 @@ impl Storage {
         let root = self.cfg.storage_directory.clone();
         let namespace = self.namespace.clone();
         let recovery = tokio::task::spawn_blocking(move || {
-            let result = super::removal_fs::recover(&root);
+            let invalidator = namespace.clone();
+            let result = super::batch_fs::recover_notifying(&root, move |operations| {
+                invalidator.invalidate_operations(operations);
+            });
             if result.is_ok() {
                 namespace.recovery_required.store(false, Ordering::Release);
             }
@@ -128,19 +155,80 @@ impl Storage {
         }
     }
 
-    /// Execute a removal batch from a blocking worker that owns the namespace guard.
-    async fn remove_batch_guarded<F>(
+    /// Execute a storage batch from a blocking worker that owns the namespace guard.
+    async fn apply_batch_guarded<F>(
         &self,
-        targets: Vec<RemoveTarget>,
+        operations: Vec<BatchOperation<<Self as crate::Storage>::Blob>>,
         on_worker_start: F,
     ) -> Result<(), Error>
     where
         F: FnOnce() + Send + 'static,
     {
-        let targets = super::removal::canonicalize(targets)?;
         let guard = self.lock_recovered().await?;
-        if targets.is_empty() {
+        let mut filesystem_operations = Vec::with_capacity(operations.len());
+        let mut mutated = BTreeMap::new();
+        for operation in operations {
+            match operation {
+                BatchOperation::Remove(target) => {
+                    filesystem_operations.push(super::batch::Operation::Remove(target));
+                }
+                BatchOperation::Resize { blob, len } => {
+                    let partition = blob.partition().to_string();
+                    let name = blob.name().to_vec();
+                    if !self
+                        .namespace
+                        .is_current(&partition, &name, blob.generation())
+                    {
+                        return Err(Error::BlobMissing(partition, hex(&name)));
+                    }
+                    let raw_len = len
+                        .checked_add(blob.data_offset())
+                        .ok_or(Error::OffsetOverflow)?;
+                    filesystem_operations.push(super::batch::Operation::Resize {
+                        partition: partition.clone(),
+                        name: name.clone(),
+                        len: raw_len,
+                    });
+                    mutated.entry((partition, name)).or_insert(blob);
+                }
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => {
+                    let partition = blob.partition().to_string();
+                    let name = blob.name().to_vec();
+                    if !self
+                        .namespace
+                        .is_current(&partition, &name, blob.generation())
+                    {
+                        return Err(Error::BlobMissing(partition, hex(&name)));
+                    }
+                    let raw_offset = offset
+                        .checked_add(blob.data_offset())
+                        .ok_or(Error::OffsetOverflow)?;
+                    let raw_len = len
+                        .checked_add(blob.data_offset())
+                        .ok_or(Error::OffsetOverflow)?;
+                    filesystem_operations.push(super::batch::Operation::Update {
+                        partition: partition.clone(),
+                        name: name.clone(),
+                        offset: raw_offset,
+                        data,
+                        len: raw_len,
+                    });
+                    mutated.entry((partition, name)).or_insert(blob);
+                }
+            }
+        }
+        let filesystem_operations = super::batch::canonicalize_operations(filesystem_operations)?;
+        if filesystem_operations.is_empty() {
             return Ok(());
+        }
+
+        for blob in mutated.values() {
+            crate::Blob::sync(blob).await?;
         }
 
         self.namespace
@@ -148,16 +236,25 @@ impl Storage {
             .store(true, Ordering::Release);
         let root = self.cfg.storage_directory.clone();
         let namespace = self.namespace.clone();
-        let removal = tokio::task::spawn_blocking(move || {
+        let batch = tokio::task::spawn_blocking(move || {
             on_worker_start();
-            let result = super::removal_fs::remove_batch(&root, &targets);
+            let invalidator = namespace.clone();
+            let committed = std::cell::Cell::new(false);
+            let result =
+                super::batch_fs::apply_batch(&root, &filesystem_operations, |operations| {
+                    invalidator.invalidate_operations(operations);
+                    committed.set(true);
+                });
             if result.is_ok() {
+                if !committed.get() {
+                    namespace.invalidate_operations(&filesystem_operations);
+                }
                 namespace.recovery_required.store(false, Ordering::Release);
             }
             drop(guard);
             result
         });
-        match removal.await {
+        match batch.await {
             Ok(result) => result.map_err(Into::into),
             Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
             Err(_) => Err(Error::Closed),
@@ -271,74 +368,21 @@ impl crate::Storage for Storage {
         let file = file.into_std().await;
 
         // Construct the blob while still holding the filesystem lock.
-        let blob = Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset);
+        let generation = self.namespace.generation(partition, name);
+        let blob = Self::Blob::new(
+            partition.into(),
+            name,
+            file,
+            self.pool.clone(),
+            data_offset,
+            generation,
+        );
         drop(guard);
         Ok((blob, logical_size, blob_version))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        super::validate_partition_name(partition)?;
-
-        // Acquire the filesystem lock
-        let guard = self.lock_recovered().await?;
-
-        #[cfg(windows)]
-        {
-            let target = match name {
-                Some(name) => RemoveTarget::Blob {
-                    partition: partition.to_string(),
-                    name: name.to_vec(),
-                },
-                None => RemoveTarget::Partition(partition.to_string()),
-            };
-            let root = self.cfg.storage_directory.clone();
-            let removal = tokio::task::spawn_blocking(move || {
-                let result = super::removal_fs::remove_windows(&root, &target);
-                drop(guard);
-                result
-            });
-            let removed = match removal.await {
-                Ok(result) => result?,
-                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-                Err(_) => return Err(Error::Closed),
-            };
-            if !removed {
-                return match name {
-                    Some(name) => Err(Error::BlobMissing(partition.into(), hex(name))),
-                    None => Err(Error::PartitionMissing(partition.into())),
-                };
-            }
-            return Ok(());
-        }
-
-        #[cfg(not(windows))]
-        {
-            let _guard = guard;
-
-            // Remove all related files
-            let path = self.cfg.storage_directory.join(partition);
-            if let Some(name) = name {
-                let blob_path = path.join(hex(name));
-                fs::remove_file(blob_path)
-                    .await
-                    .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
-
-                // Sync the partition directory to ensure the removal is durable.
-                sync_dir(&path).await?;
-            } else {
-                fs::remove_dir_all(&path)
-                    .await
-                    .map_err(|_| Error::PartitionMissing(partition.into()))?;
-
-                // Sync the storage directory to ensure the removal is durable.
-                sync_dir(&self.cfg.storage_directory).await?;
-            }
-            Ok(())
-        }
-    }
-
-    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
-        self.remove_batch_guarded(targets, || {}).await
+    async fn apply_batch(&self, operations: Vec<BatchOperation<Self::Blob>>) -> Result<(), Error> {
+        self.apply_batch_guarded(operations, || {}).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -378,7 +422,7 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _,
+        Blob, BufferPoolConfig, RemoveTarget, Storage as _,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -435,7 +479,7 @@ mod tests {
     /// Once the blocking worker owns the namespace guard, dropping the caller cannot abandon a
     /// committed batch or let a later open observe its partial progress.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_remove_batch_cancellation_completes() {
+    async fn test_apply_batch_cancellation_completes() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_batch_cancel_{}", random_suffix()));
         let storage = Storage::new(
@@ -445,16 +489,19 @@ mod tests {
         let (old, _) = storage.open("batch_cancel", b"victim").await.unwrap();
         old.write_at_sync(0, b"old").await.unwrap();
 
-        let targets = vec![RemoveTarget::Blob {
-            partition: "batch_cancel".into(),
-            name: b"victim".to_vec(),
-        }];
+        let operations = vec![
+            RemoveTarget::Blob {
+                partition: "batch_cancel".into(),
+                name: b"victim".to_vec(),
+            }
+            .into(),
+        ];
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
         let removing = storage.clone();
         let task = tokio::spawn(async move {
             removing
-                .remove_batch_guarded(targets, move || {
+                .apply_batch_guarded(operations, move || {
                     started_tx.send(()).expect("caller waits for worker");
                     proceed_rx.recv().expect("caller releases worker");
                 })
@@ -480,6 +527,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_committed_removal_invalidates_generation_before_cleanup_finishes() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_batch_generation_{}",
+            random_suffix()
+        ));
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let (old, _) = storage.open("partition", b"blob").await.unwrap();
+        old.write_at_sync(0, b"old").await.unwrap();
+        let operations = vec![crate::storage::batch::Operation::Remove(
+            RemoveTarget::Blob {
+                partition: "partition".into(),
+                name: b"blob".to_vec(),
+            },
+        )];
+
+        storage
+            .namespace
+            .recovery_required
+            .store(true, Ordering::Release);
+        let error = crate::storage::batch_fs::fail_final_control_sync_for_test(
+            &storage_directory,
+            &operations,
+            |operations| storage.namespace.invalidate_operations(operations),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(
+            !storage
+                .namespace
+                .is_current(old.partition(), old.name(), old.generation())
+        );
+
+        // Recovery can confirm the absent marker, but must not make the committed generation
+        // current again.
+        let error = storage
+            .apply_batch(vec![BatchOperation::Resize { blob: old, len: 1 }])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::BlobMissing(..)));
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_missing_root_removal_invalidates_generation() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_batch_missing_root_{}",
+            random_suffix()
+        ));
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let (old, _) = storage.open("partition", b"blob").await.unwrap();
+        std::fs::remove_dir_all(&storage_directory).unwrap();
+
+        storage
+            .apply_batch(vec![
+                RemoveTarget::Blob {
+                    partition: "partition".into(),
+                    name: b"blob".to_vec(),
+                }
+                .into(),
+            ])
+            .await
+            .unwrap();
+        let error = storage
+            .apply_batch(vec![BatchOperation::Resize { blob: old, len: 0 }])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::BlobMissing(..)));
+    }
+
+    #[tokio::test]
+    async fn test_dropped_blob_generations_are_reclaimed() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_batch_generation_reclaim_{}",
+            random_suffix()
+        ));
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+
+        for name in 0u64..65 {
+            let (blob, _) = storage
+                .open("partition", &name.to_be_bytes())
+                .await
+                .unwrap();
+            drop(blob);
+        }
+        assert!(
+            storage.namespace.generation_count() <= 64,
+            "dropped handles must not accumulate one registry entry per opened name"
+        );
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
     async fn test_first_namespace_operation_recovers_committed_batch() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_batch_recover_{}", random_suffix()));
@@ -490,18 +640,18 @@ mod tests {
         storage.open("beta", b"remove").await.unwrap();
         drop(storage);
 
-        let targets = crate::storage::removal::canonicalize(vec![
-            RemoveTarget::Partition("beta".into()),
-            RemoveTarget::Blob {
+        let operations = crate::storage::batch::canonicalize_operations(vec![
+            crate::storage::batch::Operation::Remove(RemoveTarget::Partition("beta".into())),
+            crate::storage::batch::Operation::Remove(RemoveTarget::Blob {
                 partition: "alpha".into(),
                 name: b"remove".to_vec(),
-            },
+            }),
         ])
         .unwrap();
         assert!(
-            crate::storage::removal_fs::interrupt_committed_for_test(
+            crate::storage::batch_fs::interrupt_committed_for_test(
                 &storage_directory,
-                &targets,
+                &operations,
                 1,
             )
             .is_err()
@@ -531,7 +681,7 @@ mod tests {
             Config::new(storage_directory.clone(), 2 * 1024 * 1024),
             test_pool(),
         );
-        assert!(storage.remove_batch(Vec::new()).await.is_err());
+        assert!(storage.apply_batch(Vec::new()).await.is_err());
         assert!(storage.open("partition", b"blob").await.is_err());
         assert!(committed.exists());
 

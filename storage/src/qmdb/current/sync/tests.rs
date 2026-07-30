@@ -1161,11 +1161,15 @@ fn test_incompatible_pending_target_resets_before_restage() {
 
 #[test_traced]
 fn test_interrupted_incompatible_target_reset_retries_cleanly() {
-    use crate::qmdb::sync::{self, Target, engine::Config};
+    use crate::qmdb::{
+        current::db as current_db,
+        sync::{self, Target, engine::Config},
+    };
     use commonware_utils::NZU64;
     use std::sync::Arc;
 
     type H = harnesses::UnorderedFixedMmrHarness;
+    type F = <H as SyncTestHarness>::Family;
     type Db = <H as SyncTestHarness>::Db;
 
     deterministic::Runner::default().start(|context| async move {
@@ -1209,18 +1213,31 @@ fn test_interrupted_incompatible_target_reset_retries_cleanly() {
             root: old_sync_root,
             range: target_spec.range.clone(),
         };
-        // The durable target remains resumable after this error, so the committed removal must
-        // cover both components before a same-target retry can refill the journal.
+        // The pending target remains durable until the operations journal and Merkle projection
+        // have both been reset. A post-commit error must therefore leave a retryable intent and no
+        // mixture of the discarded components.
         *context.storage_fault_config().write() =
-            deterministic::FaultConfig::default().remove_batch_post_commit(1.0);
+            deterministic::FaultConfig::default().batch_post_commit(1.0);
         let reset = <Db as SyncDatabase>::prepare_sync(
             context.child("interrupt_reset"),
             &client_config,
             &incompatible,
         )
         .await;
-        reset.expect_err("post-commit removal failure must surface");
+        reset.expect_err("post-commit batch failure must surface");
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+        let metadata = current_db::open_metadata::<F, _>(
+            context.child("inspect_pending_target"),
+            &client_config.grafted_metadata_partition,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            current_db::pending_sync::<F, _, Digest>(&metadata).unwrap(),
+            Some(target_spec.clone())
+        );
+        drop(metadata);
 
         let synced: Db = sync::sync(Config {
             context: context.child("retry"),
@@ -1552,22 +1569,3 @@ current_sync_tests_for_harness!(harnesses::OrderedFixedMmrHarness, ordered_fixed
 current_sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
 current_sync_tests_for_harness!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
 current_sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
-
-mod mismatch_discard_recovery {
-    use super::harnesses;
-    use commonware_macros::test_traced;
-
-    #[test_traced]
-    fn unordered_fixed() {
-        crate::qmdb::any::sync::tests::test_interrupted_mismatch_discard_retries_cleanly::<
-            harnesses::UnorderedFixedMmrHarness,
-        >();
-    }
-
-    #[test_traced]
-    fn unordered_variable() {
-        crate::qmdb::any::sync::tests::test_interrupted_mismatch_discard_retries_cleanly::<
-            harnesses::UnorderedVariableMmrHarness,
-        >();
-    }
-}

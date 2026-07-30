@@ -919,7 +919,7 @@ where
         let context = self.destroy_context();
         let targets = self.into_remove_targets().await?;
         context
-            .remove_batch(targets)
+            .apply_batch(targets.into_iter().map(Into::into).collect())
             .await
             .map_err(crate::qmdb::Error::Runtime)
     }

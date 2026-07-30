@@ -284,13 +284,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "qmdb_sync_discard_recovery"
-path = "fuzz_targets/qmdb_sync_discard_recovery.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "archive_crash_recovery"
 path = "fuzz_targets/archive_crash_recovery.rs"
 test = false

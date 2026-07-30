@@ -695,7 +695,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.intervals.last_index()
     }
 
-    /// Wait for pending child syncs, then return the archive's storage targets.
+    /// Wait for pending child syncs, then return the archive's namespace entries.
     async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         let Self {
             metadata,
@@ -811,7 +811,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.0.metadata.destroy_context()
     }
 
-    /// Wait for pending child syncs, then return the archive's storage targets.
+    /// Wait for pending child syncs, then return the archive's namespace entries.
     async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         self.0.into_remove_targets().await
     }
@@ -890,7 +890,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let context = self.destroy_context();
         let targets = self.into_remove_targets().await?;
         context
-            .remove_batch(targets)
+            .apply_batch(targets.into_iter().map(Into::into).collect())
             .await
             .map_err(crate::metadata::Error::Runtime)
             .map_err(Error::Metadata)

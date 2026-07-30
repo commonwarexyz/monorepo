@@ -1,6 +1,6 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{Error, Handle, IoBuf, IoBufs, IoBufsMut, RemoveTarget, deterministic::BoxDynRng};
+use crate::{BatchOperation, Error, Handle, IoBuf, IoBufs, IoBufsMut, deterministic::BoxDynRng};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
@@ -21,9 +21,8 @@ enum Op {
     Write,
     Sync,
     Resize,
-    Remove,
-    RemoveBatch,
-    RemoveBatchPostCommit,
+    Batch,
+    BatchPostCommit,
     Scan,
 }
 
@@ -59,14 +58,11 @@ pub struct Config {
     /// Value from 0.0 (always complete failure) to 1.0 (always partial resize).
     pub partial_resize_rate: Option<f64>,
 
-    /// Failure rate for `remove` operations.
-    pub remove_rate: Option<f64>,
+    /// Pre-commit failure rate for non-empty `apply_batch` operations.
+    pub batch_rate: Option<f64>,
 
-    /// Pre-commit failure rate for non-empty `remove_batch` operations.
-    pub remove_batch_rate: Option<f64>,
-
-    /// Failure rate reported after a non-empty `remove_batch` commits successfully.
-    pub remove_batch_post_commit_rate: Option<f64>,
+    /// Failure rate reported after a non-empty `apply_batch` commits successfully.
+    pub batch_post_commit_rate: Option<f64>,
 
     /// Failure rate for `scan` operations.
     pub scan_rate: Option<f64>,
@@ -81,9 +77,8 @@ impl Config {
             Op::Write => self.write_rate,
             Op::Sync => self.sync_rate,
             Op::Resize => self.resize_rate,
-            Op::Remove => self.remove_rate,
-            Op::RemoveBatch => self.remove_batch_rate,
-            Op::RemoveBatchPostCommit => self.remove_batch_post_commit_rate,
+            Op::Batch => self.batch_rate,
+            Op::BatchPostCommit => self.batch_post_commit_rate,
             Op::Scan => self.scan_rate,
         }
         .unwrap_or(0.0)
@@ -131,21 +126,15 @@ impl Config {
         self
     }
 
-    /// Set the remove failure rate.
-    pub const fn remove(mut self, rate: f64) -> Self {
-        self.remove_rate = Some(rate);
+    /// Set the pre-commit batch failure rate.
+    pub const fn batch(mut self, rate: f64) -> Self {
+        self.batch_rate = Some(rate);
         self
     }
 
-    /// Set the pre-commit removal batch failure rate.
-    pub const fn remove_batch(mut self, rate: f64) -> Self {
-        self.remove_batch_rate = Some(rate);
-        self
-    }
-
-    /// Set the failure rate reported after a removal batch commits.
-    pub const fn remove_batch_post_commit(mut self, rate: f64) -> Self {
-        self.remove_batch_post_commit_rate = Some(rate);
+    /// Set the failure rate reported after a batch commits.
+    pub const fn batch_post_commit(mut self, rate: f64) -> Self {
+        self.batch_post_commit_rate = Some(rate);
         self
     }
 
@@ -301,27 +290,81 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             .open_versioned(partition, name, versions)
             .await
             .map(|(blob, len, blob_version)| {
-                (Blob::new(self.ctx.clone(), blob, len), len, blob_version)
+                (
+                    Blob::new(self.ctx.clone(), blob, partition.into(), name.to_vec(), len),
+                    len,
+                    blob_version,
+                )
             })
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        if self.ctx.should_fail(Op::Remove) {
+    async fn apply_batch(&self, operations: Vec<BatchOperation<Self::Blob>>) -> Result<(), Error> {
+        let descriptors = operations
+            .iter()
+            .map(|operation| match operation {
+                BatchOperation::Remove(target) => {
+                    crate::storage::batch::Operation::Remove(target.clone())
+                }
+                BatchOperation::Resize { blob, len } => crate::storage::batch::Operation::Resize {
+                    partition: blob.partition.clone(),
+                    name: blob.name.clone(),
+                    len: *len,
+                },
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => crate::storage::batch::Operation::Update {
+                    partition: blob.partition.clone(),
+                    name: blob.name.clone(),
+                    offset: *offset,
+                    data: data.clone(),
+                    len: *len,
+                },
+            })
+            .collect();
+        crate::storage::batch::canonicalize_operations(descriptors)?;
+        if operations.is_empty() {
+            return self.inner.apply_batch(Vec::new()).await;
+        }
+        if self.ctx.should_fail(Op::Batch) {
             return Err(injected_io_error().into());
         }
-        self.inner.remove(partition, name).await
-    }
 
-    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
-        let targets = crate::storage::removal::canonicalize(targets)?;
-        if targets.is_empty() {
-            return self.inner.remove_batch(targets).await;
+        let mut resized = Vec::new();
+        let operations = operations
+            .into_iter()
+            .map(|operation| match operation {
+                BatchOperation::Remove(target) => BatchOperation::Remove(target),
+                BatchOperation::Resize { blob, len } => {
+                    resized.push((blob.size.clone(), len));
+                    BatchOperation::Resize {
+                        blob: blob.inner,
+                        len,
+                    }
+                }
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => {
+                    resized.push((blob.size.clone(), len));
+                    BatchOperation::Update {
+                        blob: blob.inner,
+                        offset,
+                        data,
+                        len,
+                    }
+                }
+            })
+            .collect();
+        self.inner.apply_batch(operations).await?;
+        for (size, len) in resized {
+            size.store(len, Ordering::Relaxed);
         }
-        if self.ctx.should_fail(Op::RemoveBatch) {
-            return Err(injected_io_error().into());
-        }
-        self.inner.remove_batch(targets).await?;
-        if self.ctx.should_fail(Op::RemoveBatchPostCommit) {
+        if self.ctx.should_fail(Op::BatchPostCommit) {
             return Err(injected_io_error().into());
         }
         Ok(())
@@ -340,15 +383,19 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 pub struct Blob<B: crate::Blob> {
     inner: B,
     ctx: Oracle,
+    partition: String,
+    name: Vec<u8>,
     /// Tracked size for partial resize support.
     size: Arc<AtomicU64>,
 }
 
 impl<B: crate::Blob> Blob<B> {
-    fn new(ctx: Oracle, inner: B, size: u64) -> Self {
+    fn new(ctx: Oracle, inner: B, partition: String, name: Vec<u8>, size: u64) -> Self {
         Self {
             inner,
             ctx,
+            partition,
+            name,
             size: Arc::new(AtomicU64::new(size)),
         }
     }
@@ -494,7 +541,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, RemoveTarget, Storage as _,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -648,7 +695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_remove_always_fails() {
+    async fn test_faulty_storage_remove_uses_batch_faults() {
         let h = Harness::new(Config::default());
 
         // Create a blob first
@@ -657,8 +704,8 @@ mod tests {
         blob.sync().await.unwrap();
         drop(blob);
 
-        // Enable remove faults
-        h.config.write().remove_rate = Some(1.0);
+        // Enable pre-commit batch faults.
+        h.config.write().batch_rate = Some(1.0);
 
         assert!(matches!(
             h.storage.remove("partition", Some(b"test")).await,
@@ -667,8 +714,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_remove_batch_fault_phases_are_atomic() {
-        let h = Harness::new(Config::default().remove_batch(1.0));
+    async fn test_faulty_storage_batch_fault_phases_are_atomic() {
+        let h = Harness::new(Config::default().batch(1.0));
         for partition in ["batch_a", "batch_b"] {
             let (blob, _) = h.storage.open(partition, b"name").await.unwrap();
             blob.write_at(0, partition.as_bytes()).await.unwrap();
@@ -677,11 +724,11 @@ mod tests {
 
         assert!(matches!(
             h.storage
-                .remove_batch(vec![RemoveTarget::Partition("invalid/name".into())])
+                .apply_batch(vec![RemoveTarget::Partition("invalid/name".into()).into()])
                 .await,
             Err(Error::PartitionNameInvalid(_))
         ));
-        h.storage.remove_batch(Vec::new()).await.unwrap();
+        h.storage.apply_batch(Vec::new()).await.unwrap();
 
         let targets = vec![
             RemoveTarget::Blob {
@@ -698,7 +745,9 @@ mod tests {
             },
         ];
         assert!(matches!(
-            h.storage.remove_batch(targets.clone()).await,
+            h.storage
+                .apply_batch(targets.iter().cloned().map(BatchOperation::from).collect())
+                .await,
             Err(Error::Io(_))
         ));
         assert_eq!(
@@ -710,13 +759,85 @@ mod tests {
             vec![b"name".to_vec()]
         );
 
-        *h.config.write() = Config::default().remove(1.0).remove_batch_post_commit(1.0);
+        *h.config.write() = Config::default().batch_post_commit(1.0);
         assert!(matches!(
-            h.storage.remove_batch(targets).await,
+            h.storage
+                .apply_batch(targets.into_iter().map(BatchOperation::from).collect())
+                .await,
             Err(Error::Io(_))
         ));
         assert!(h.inner.scan("batch_a").await.unwrap().is_empty());
         assert!(h.inner.scan("batch_b").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_validates_mixed_batch_before_faulting() {
+        let h = Harness::new(Config::default().batch(1.0));
+        let (blob, _) = h.storage.open("partition", b"name").await.unwrap();
+
+        let error = h
+            .storage
+            .apply_batch(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "partition".into(),
+                    name: b"name".to_vec(),
+                }),
+                BatchOperation::Resize { blob, len: 0 },
+            ])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Io(error) if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_batch_resize_bypasses_resize_faults() {
+        let h = Harness::new(Config::default());
+        let (blob, _) = h.storage.open("partition", b"name").await.unwrap();
+        blob.write_at(0, b"contents").await.unwrap();
+        blob.sync().await.unwrap();
+        *h.config.write() = Config::default().resize(1.0).partial_resize(1.0);
+
+        h.storage
+            .apply_batch(vec![BatchOperation::Resize { blob, len: 3 }])
+            .await
+            .unwrap();
+
+        let (_, len) = h.inner.open("partition", b"name").await.unwrap();
+        assert_eq!(len, 3);
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_batch_update_post_commit_tracks_size() {
+        let h = Harness::new(Config::default());
+        let (blob, _) = h.storage.open("partition", b"name").await.unwrap();
+        blob.write_at(0, b"contents").await.unwrap();
+        blob.sync().await.unwrap();
+        *h.config.write() = Config::default()
+            .write(1.0)
+            .partial_write(1.0)
+            .resize(1.0)
+            .partial_resize(1.0)
+            .batch_post_commit(1.0);
+
+        assert!(matches!(
+            h.storage
+                .apply_batch(vec![BatchOperation::Update {
+                    blob: blob.clone(),
+                    offset: 1,
+                    data: b"new".into(),
+                    len: 4,
+                }])
+                .await,
+            Err(Error::Io(_))
+        ));
+
+        assert_eq!(blob.size.load(Ordering::Relaxed), 4);
+        let (inner, len) = h.inner.open("partition", b"name").await.unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(inner.read_at(0, 4).await.unwrap().coalesce(), b"cnew");
     }
 
     #[tokio::test]

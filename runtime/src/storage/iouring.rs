@@ -22,7 +22,7 @@
 
 use super::Header;
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, RemoveTarget,
+    BatchOperation, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
@@ -30,6 +30,7 @@ use crate::{
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
+    collections::BTreeMap,
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
@@ -98,6 +99,26 @@ pub struct Storage {
 struct Namespace {
     lock: Mutex<()>,
     recovery_required: AtomicBool,
+    generations: super::generation::Registry,
+}
+
+impl Namespace {
+    fn generation(&self, partition: &str, name: &[u8]) -> Arc<super::generation::Token> {
+        self.generations.generation(partition, name)
+    }
+
+    fn is_current(
+        &self,
+        partition: &str,
+        name: &[u8],
+        generation: &Arc<super::generation::Token>,
+    ) -> bool {
+        self.generations.is_current(partition, name, generation)
+    }
+
+    fn invalidate_operations(&self, operations: &[super::batch::Operation]) {
+        self.generations.invalidate(operations);
+    }
 }
 
 impl Storage {
@@ -121,6 +142,7 @@ impl Storage {
             namespace: Arc::new(Namespace {
                 lock: Mutex::new(()),
                 recovery_required: AtomicBool::new(true),
+                generations: super::generation::Registry::default(),
             }),
             storage_directory,
             io_handle,
@@ -136,7 +158,9 @@ impl Storage {
         if !self.namespace.recovery_required.load(Ordering::Acquire) {
             return Ok(());
         }
-        super::removal_fs::recover(&self.storage_directory)?;
+        super::batch_fs::recover_notifying(&self.storage_directory, |operations| {
+            self.namespace.invalidate_operations(operations);
+        })?;
         self.namespace
             .recovery_required
             .store(false, Ordering::Release);
@@ -208,54 +232,104 @@ impl crate::Storage for Storage {
             }
         };
 
-        let blob = Blob::new(
+        let generation = self.namespace.generation(partition, name);
+        let blob = Blob::new_with_generation(
             partition.into(),
             name,
             file,
             self.io_handle.clone(),
             self.pool.clone(),
             data_offset,
+            generation,
         );
         Ok((blob, logical_len, blob_version))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        super::validate_partition_name(partition)?;
-
-        // Acquire the filesystem lock
+    async fn apply_batch(&self, operations: Vec<BatchOperation<Self::Blob>>) -> Result<(), Error> {
         let _guard = self.namespace.lock.lock();
         self.recover_locked()?;
-
-        let path = self.storage_directory.join(partition);
-        if let Some(name) = name {
-            let blob_path = path.join(hex(name));
-            fs::remove_file(blob_path)
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
-
-            // Sync the partition directory to ensure the removal is durable.
-            sync_dir(&path)?;
-        } else {
-            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
-
-            // Sync the storage directory to ensure the removal is durable.
-            sync_dir(&self.storage_directory)?;
+        let mut filesystem_operations = Vec::with_capacity(operations.len());
+        let mut mutated = BTreeMap::new();
+        for operation in operations {
+            match operation {
+                BatchOperation::Remove(target) => {
+                    filesystem_operations.push(super::batch::Operation::Remove(target));
+                }
+                BatchOperation::Resize { blob, len } => {
+                    let partition = blob.partition.clone();
+                    let name = blob.name.clone();
+                    if !self
+                        .namespace
+                        .is_current(&partition, &name, &blob.generation)
+                    {
+                        return Err(Error::BlobMissing(partition, hex(&name)));
+                    }
+                    let raw_len = len
+                        .checked_add(blob.data_offset)
+                        .ok_or(Error::OffsetOverflow)?;
+                    filesystem_operations.push(super::batch::Operation::Resize {
+                        partition: partition.clone(),
+                        name: name.clone(),
+                        len: raw_len,
+                    });
+                    mutated.entry((partition, name)).or_insert(blob);
+                }
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => {
+                    let partition = blob.partition.clone();
+                    let name = blob.name.clone();
+                    if !self
+                        .namespace
+                        .is_current(&partition, &name, &blob.generation)
+                    {
+                        return Err(Error::BlobMissing(partition, hex(&name)));
+                    }
+                    let raw_offset = offset
+                        .checked_add(blob.data_offset)
+                        .ok_or(Error::OffsetOverflow)?;
+                    let raw_len = len
+                        .checked_add(blob.data_offset)
+                        .ok_or(Error::OffsetOverflow)?;
+                    filesystem_operations.push(super::batch::Operation::Update {
+                        partition: partition.clone(),
+                        name: name.clone(),
+                        offset: raw_offset,
+                        data,
+                        len: raw_len,
+                    });
+                    mutated.entry((partition, name)).or_insert(blob);
+                }
+            }
         }
-        Ok(())
-    }
-
-    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
-        let targets = super::removal::canonicalize(targets)?;
-        let _guard = self.namespace.lock.lock();
-        self.recover_locked()?;
-        if targets.is_empty() {
+        let filesystem_operations = super::batch::canonicalize_operations(filesystem_operations)?;
+        if filesystem_operations.is_empty() {
             return Ok(());
+        }
+
+        for blob in mutated.values() {
+            blob.sync_blocking()?;
         }
 
         self.namespace
             .recovery_required
             .store(true, Ordering::Release);
-        let result = super::removal_fs::remove_batch(&self.storage_directory, &targets);
+        let committed = std::cell::Cell::new(false);
+        let result = super::batch_fs::apply_batch(
+            &self.storage_directory,
+            &filesystem_operations,
+            |operations| {
+                self.namespace.invalidate_operations(operations);
+                committed.set(true);
+            },
+        );
         if result.is_ok() {
+            if !committed.get() {
+                self.namespace.invalidate_operations(&filesystem_operations);
+            }
             self.namespace
                 .recovery_required
                 .store(false, Ordering::Release);
@@ -306,6 +380,8 @@ pub struct Blob {
     partition: String,
     /// The name of the blob
     name: Vec<u8>,
+    /// Identity of the current namespace generation for this name.
+    generation: Arc<super::generation::Token>,
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
@@ -321,6 +397,7 @@ impl Clone for Blob {
         Self {
             partition: self.partition.clone(),
             name: self.name.clone(),
+            generation: self.generation.clone(),
             file: self.file.clone(),
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
@@ -339,14 +416,41 @@ impl Blob {
         pool: BufferPool,
         data_offset: u64,
     ) -> Self {
+        Self::new_with_generation(
+            partition,
+            name,
+            file,
+            io_handle,
+            pool,
+            data_offset,
+            super::generation::Token::detached(),
+        )
+    }
+
+    fn new_with_generation(
+        partition: String,
+        name: &[u8],
+        file: File,
+        io_handle: iouring::Handle,
+        pool: BufferPool,
+        data_offset: u64,
+        generation: Arc<super::generation::Token>,
+    ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
+            generation,
             file: Arc::new(file),
             io_handle,
             pool,
             data_offset,
         }
+    }
+
+    fn sync_blocking(&self) -> Result<(), Error> {
+        self.file.sync_all().map_err(|error| {
+            Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), error.into())
+        })
     }
 }
 
@@ -862,22 +966,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_reports_missing_targets() {
-        // Verify wrapper-level remove errors distinguish missing partitions from missing blobs.
+    async fn test_remove_missing_targets_is_idempotent() {
         let (storage, storage_directory) = create_test_storage();
 
-        // Removing a missing partition should fail before any blob-specific path logic runs.
-        let err = storage.remove("missing", None).await.unwrap_err();
-        assert_eq!(err.to_string(), "partition missing: missing");
+        storage.remove("missing", None).await.unwrap();
 
-        // Once the partition exists, removing an absent blob should surface the
-        // more specific `BlobMissing` error instead.
         std::fs::create_dir_all(storage_directory.join("partition")).unwrap();
-        let err = storage
-            .remove("partition", Some(b"missing"))
-            .await
-            .unwrap_err();
-        assert_eq!(err.to_string(), "blob missing: partition/6d697373696e67");
+        storage.remove("partition", Some(b"missing")).await.unwrap();
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

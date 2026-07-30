@@ -66,10 +66,13 @@
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
     glob::{Config as GlobConfig, Glob},
+    manager::PreparedRewind,
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, RemoveTarget, Storage};
+use commonware_runtime::{
+    BatchOperation, BufferPooler, Error as RError, Handle, Metrics, RemoveTarget, Storage,
+};
 use futures::future::try_join;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -131,6 +134,12 @@ pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     values: Glob<E, V>,
 }
 
+/// Child rewind state awaiting successful application of its shared batch.
+pub(crate) struct PreparedOversizedRewind {
+    index: PreparedRewind,
+    values: PreparedRewind,
+}
+
 impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug
     for Oversized<E, I, V>
 {
@@ -177,6 +186,21 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         cfg: Config<V::Cfg>,
         checkpoint: (u64, u64),
     ) -> Result<Self, Error> {
+        let mut batch = Vec::new();
+        let (mut oversized, prepared) =
+            Self::init_from_checkpoint_into(context, cfg, checkpoint, &mut batch).await?;
+        oversized.index.apply_batch_operations(batch).await?;
+        oversized.finalize_rewind(prepared);
+        Ok(oversized)
+    }
+
+    /// Prepare checkpoint restoration as part of a caller-owned atomic batch.
+    pub(crate) async fn init_from_checkpoint_into(
+        context: E,
+        cfg: Config<V::Cfg>,
+        checkpoint: (u64, u64),
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<(Self, PreparedOversizedRewind), Error> {
         let (section, index_size) = checkpoint;
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         if !index_size.is_multiple_of(chunk_size) {
@@ -186,7 +210,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         }
         Self::open(context, cfg)
             .await?
-            .restore(section, index_size)
+            .restore_into(section, index_size, batch)
             .await
     }
 
@@ -361,7 +385,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
     /// Restore the journals to exactly the durable state `(section, index_size)`
     /// describes (see [Self::init_from_checkpoint]).
-    async fn restore(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
+    async fn restore_into(
+        mut self,
+        section: u64,
+        index_size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<(Self, PreparedOversizedRewind), Error> {
         // Sections below the checkpoint were durable when it was published and never appended to
         // again. Verify each terminal index/value boundary, then adopt the section unchanged.
         let below: Vec<u64> = self
@@ -408,14 +437,11 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             )));
         }
 
-        // Truncate to the checkpoint and remove everything after it, durably (see
-        // Self::rewind). Later appends can only reuse the freed offsets once the
-        // truncations are durable.
-        self = self
-            .rewind_validated(section, index_size, value_size)
+        let prepared = self
+            .rewind_validated_into(section, index_size, value_size, batch)
             .await?;
 
-        Ok(self)
+        Ok((self, prepared))
     }
 
     /// Verify a section's journals agree: the last entry's value range must end exactly
@@ -488,11 +514,10 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             .filter(|s| !index_sections.contains(s))
             .collect();
 
-        // Remove each orphan section
-        for section in orphan_sections {
+        for &section in &orphan_sections {
             warn!(section, "removing orphan value section");
-            (self.values, _) = self.values.remove_section(section).await?;
         }
+        self.values.remove_sections(&orphan_sections).await?;
 
         Ok(self)
     }
@@ -613,14 +638,16 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// between that removal and these blob removals merely leaves old sections to be scanned
     /// again, while the reverse order can report a pruned section as lost.
     ///
-    /// Prunes index first, then glob. Each journal commits its selected sections as one namespace
-    /// batch. Once the index batch commits, storage recovery completes it; interruption before the
-    /// glob batch commits can therefore leave only orphan values, which are safe to remove later.
+    /// After both journals wait for in-flight section syncs, all selected index and value blobs
+    /// are committed in one namespace batch. In-memory state is updated only after that batch
+    /// succeeds.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
-        let index_pruned;
-        (self.index, index_pruned) = self.index.prune(min).await?;
-        let value_pruned;
-        (self.values, value_pruned) = self.values.prune(min).await?;
+        let mut operations = self.index.prune_targets(min).await?;
+        operations.extend(self.values.prune_targets(min).await?);
+        self.index.apply_batch_operations(operations).await?;
+
+        let index_pruned = self.index.finalize_prune(min);
+        let value_pruned = self.values.finalize_prune(min);
         Ok((self, index_pruned || value_pruned))
     }
 
@@ -629,10 +656,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// This rewinds the section to the given index size and removes all sections
     /// after the given section. The value size is derived from the last entry.
     ///
-    /// Both of `section`'s truncations are durable before this returns: a crash recovers
-    /// `section` to either its pre-rewind or its post-rewind state. Each journal commits its later
-    /// sections as one namespace removal batch before truncating `section`; storage recovery
-    /// completes a committed batch before reopening the namespace.
+    /// The child blobs' complete retained-tail updates and every later-section removal share one
+    /// storage batch.
     ///
     /// The caller must durably lower its checkpoint to this boundary first, or recovery will
     /// report the discarded data as lost.
@@ -677,28 +702,26 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         index_size: u64,
         value_size: u64,
     ) -> Result<Self, Error> {
-        // Section removals are durable on their own, so only an actual truncation needs the
-        // sync ordering below. A rewind to the current sizes syncs nothing.
-        let index_resized = index_size < self.index.size(section)?;
-        let values_resized = value_size < self.values.size(section)?;
-
-        // Rewind index first (this also removes sections after `section`)
-        self.index = self.index.rewind(section, index_size).await?;
-
-        // Make the index truncation durable before the values are rewound: rewinding the
-        // values frees their ranges for reuse by later appends, and a dropped index entry
-        // that stayed durable would be adopted referencing whatever bytes a later append
-        // placed at its offsets.
-        if index_resized {
-            self.index = self.index.sync(section).await?;
-        }
-
-        // Rewind values (this also removes sections after `section`)
-        self.values = self.values.rewind(section, value_size).await?;
-        if values_resized {
-            self.values = self.values.sync(section).await?;
-        }
+        let mut batch = Vec::new();
+        let prepared = self
+            .rewind_validated_into(section, index_size, value_size, &mut batch)
+            .await?;
+        self.index.apply_batch_operations(batch).await?;
+        self.finalize_rewind(prepared);
         Ok(self)
+    }
+
+    /// Stage the index first so its buffered page state cannot reference reused value bytes.
+    async fn rewind_validated_into(
+        &mut self,
+        section: u64,
+        index_size: u64,
+        value_size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedOversizedRewind, Error> {
+        let index = self.index.rewind_into(section, index_size, batch).await?;
+        let values = self.values.rewind_into(section, value_size, batch).await?;
+        Ok(PreparedOversizedRewind { index, values })
     }
 
     /// Rewind only the given section to a specific index size.
@@ -706,21 +729,29 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// Unlike `rewind`, this does not affect other sections.
     /// The value size is derived from the last entry after rewinding the index.
     ///
-    /// Both truncations are made durable before returning, and the caller must durably lower its
+    /// Both retained-tail updates share one storage batch. The caller must durably lower its
     /// checkpoint for `section` first (see [Self::rewind]).
     /// `index_size` must be item-aligned and no larger than the section's retained size.
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         let value_size = self.preflight_rewind(section, index_size).await?;
-
-        // Rewind index first
-        self.index = self.index.rewind_section(section, index_size).await?;
-        // Make the index truncation durable before the values are rewound (see Self::rewind).
-        self.index = self.index.sync(section).await?;
-
-        // Rewind values
-        self.values = self.values.rewind_section(section, value_size).await?;
-        self.values = self.values.sync(section).await?;
+        let mut batch = Vec::new();
+        let index = self
+            .index
+            .rewind_section_into(section, index_size, &mut batch)
+            .await?;
+        let values = self
+            .values
+            .rewind_section_into(section, value_size, &mut batch)
+            .await?;
+        self.index.apply_batch_operations(batch).await?;
+        self.finalize_rewind(PreparedOversizedRewind { index, values });
         Ok(self)
+    }
+
+    /// Finalize both child journals after their shared batch succeeds.
+    pub(crate) fn finalize_rewind(&mut self, prepared: PreparedOversizedRewind) {
+        self.index.finalize_rewind(prepared.index);
+        self.values.finalize_rewind(prepared.values);
     }
 
     /// Get index size for checkpoint.
@@ -767,7 +798,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         self.index.destroy_context()
     }
 
-    /// Wait for pending child syncs, then return the journal's removal targets.
+    /// Wait for pending child syncs, then return the journal's removal operations.
     pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
         let Self { index, values } = self;
         let mut targets = index.into_remove_targets().await?;
@@ -778,12 +809,14 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     /// Destroy all underlying storage.
     ///
     /// The caller must durably invalidate any externally persisted checkpoint before calling this
-    /// method. Once destruction is committed, recovery completes an interrupted removal before
-    /// another namespace operation proceeds.
+    /// method.
     pub async fn destroy(self) -> Result<(), Error> {
         let context = self.destroy_context();
         let targets = self.into_remove_targets().await?;
-        context.remove_batch(targets).await.map_err(Error::Runtime)
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(Error::Runtime)
     }
 }
 
@@ -898,13 +931,19 @@ mod tests {
             self.inner.open_versioned(partition, name, versions).await
         }
 
-        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
-            self.inner.remove(partition, name).await
-        }
-
-        async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), RError> {
-            self.batches.lock().push(targets.clone());
-            self.inner.remove_batch(targets).await
+        async fn apply_batch(
+            &self,
+            operations: Vec<BatchOperation<Self::Blob>>,
+        ) -> Result<(), RError> {
+            let targets = operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    BatchOperation::Remove(target) => Some(target.clone()),
+                    BatchOperation::Resize { .. } | BatchOperation::Update { .. } => None,
+                })
+                .collect();
+            self.batches.lock().push(targets);
+            self.inner.apply_batch(operations).await
         }
 
         async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
@@ -1045,6 +1084,52 @@ mod tests {
                     RemoveTarget::Partition(cfg.value_partition),
                 ]]
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_submits_one_batch_for_both_partitions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let batches = Arc::new(Mutex::new(Vec::new()));
+            let context = RecordingContext {
+                inner: context,
+                batches: batches.clone(),
+            };
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                init_oversized(context, cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            for section in 1u64..=3 {
+                let value = [section as u8; 16];
+                (oversized, _, _, _) = oversized
+                    .append(section, TestEntry::new(section, 0, 0), &value)
+                    .await
+                    .expect("Failed to append");
+            }
+            oversized = oversized.sync_all().await.expect("Failed to sync");
+
+            let pruned;
+            (oversized, pruned) = oversized.prune(3).await.expect("Failed to prune");
+            assert!(pruned);
+
+            let target = |partition: &str, section: u64| RemoveTarget::Blob {
+                partition: partition.into(),
+                name: section.to_be_bytes().to_vec(),
+            };
+            assert_eq!(
+                *batches.lock(),
+                vec![vec![
+                    target(&cfg.index_partition, 1),
+                    target(&cfg.index_partition, 2),
+                    target(&cfg.value_partition, 1),
+                    target(&cfg.value_partition, 2),
+                ]]
+            );
+
+            oversized.destroy().await.expect("Failed to destroy");
         });
     }
 
@@ -1366,7 +1451,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_oversized_rewind_fails_when_truncation_cannot_be_made_durable() {
+    fn test_oversized_rewind_preparation_failure_preserves_durable_state() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
@@ -1381,9 +1466,8 @@ mod tests {
             oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Boot 2: the glob cannot be synced, so `rewind` must fail rather than return
-            // with a values truncation that is not durable (later appends could otherwise
-            // reuse entry 1's still-durable value range).
+            // Boot 2: the glob cannot be synced while preparing the rewind, so the shared
+            // index/value batch must not commit.
             let faulty_values = SyncFaultContext {
                 inner: context.child("second"),
                 fail_partition: "test-values".into(),
@@ -1394,18 +1478,20 @@ mod tests {
                     .expect("Failed to reinit");
             assert!(
                 oversized.rewind(1, 0).await.is_err(),
-                "rewind must fail when its truncation cannot be made durable"
+                "rewind must fail when its retained value state cannot be made durable"
             );
         });
 
-        // The index truncation was made durable before the failure, so the dropped entry
-        // must not be adopted at recovery.
+        // Preparation did not publish the index truncation, so recovery observes the complete
+        // pre-rewind entry/value pair.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 init_oversized(context.child("third"), test_cfg(&context))
                     .await
                     .expect("Failed to reinit");
-            assert_eq!(oversized.size(1).expect("size"), 0);
+            let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+            assert_eq!(oversized.size(1).expect("size"), chunk);
+            assert_eq!(oversized.get(1, 0).await.expect("entry").id, 1);
             oversized.destroy().await.expect("Failed to destroy");
         });
     }
@@ -3226,7 +3312,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_recovery_glob_pruned_but_index_not() {
+    fn test_glob_pruned_ahead_of_index_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -3248,8 +3334,7 @@ mod tests {
             }
             drop(oversized);
 
-            // Simulate crash during prune: prune ONLY the glob, not the index
-            // This creates the "glob pruned but index not" scenario
+            // Plant an impossible state by pruning the glob without the index.
             use crate::journal::segmented::glob::{Config as GlobConfig, Glob};
             let glob_cfg = GlobConfig {
                 partition: cfg.value_partition.clone(),
@@ -3971,6 +4056,11 @@ mod tests {
     fn test_recovery_values_has_multiple_orphan_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let batches = Arc::new(Mutex::new(Vec::new()));
+            let context = RecordingContext {
+                inner: context,
+                batches: batches.clone(),
+            };
             let cfg = test_cfg(&context);
 
             // Create and populate with only section 1
@@ -4020,6 +4110,23 @@ mod tests {
 
             // Newest section should be 1 (orphans removed)
             assert_eq!(oversized.newest_section(), Some(1));
+            assert_eq!(
+                *batches.lock(),
+                vec![vec![
+                    RemoveTarget::Blob {
+                        partition: cfg.value_partition.clone(),
+                        name: 2u64.to_be_bytes().to_vec(),
+                    },
+                    RemoveTarget::Blob {
+                        partition: cfg.value_partition.clone(),
+                        name: 3u64.to_be_bytes().to_vec(),
+                    },
+                    RemoveTarget::Blob {
+                        partition: cfg.value_partition.clone(),
+                        name: 4u64.to_be_bytes().to_vec(),
+                    },
+                ]]
+            );
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4898,91 +5005,6 @@ mod tests {
 
             // Verify the offset starts where entry 2 ended (no gaps)
             assert_eq!(offset, byte_end(locations[2].1, locations[2].2));
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_recovery_crash_during_orphan_cleanup() {
-        // Tests crash during orphan section cleanup: recovery starts removing
-        // orphan value sections, but crashes mid-cleanup.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context);
-
-            // Phase 1: Create valid data in section 1
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                init_oversized(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to init");
-
-            let value: TestValue = [1; 16];
-            let entry = TestEntry::new(1, 0, 0);
-            let (offset1, size1);
-            (oversized, _, offset1, size1) = oversized
-                .append(1, entry, &value)
-                .await
-                .expect("Failed to append");
-            oversized = oversized.sync(1).await.expect("Failed to sync");
-            drop(oversized);
-
-            // Phase 2: Create orphan value sections 2, 3, 4 (no index entries)
-            let glob_cfg = GlobConfig {
-                partition: cfg.value_partition.clone(),
-                compression: cfg.compression,
-                codec_config: (),
-                write_buffer: cfg.value_write_buffer,
-            };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
-
-            for section in 2u64..=4 {
-                let orphan_value: TestValue = [section as u8; 16];
-                (glob, _, _) = glob
-                    .append(section, &orphan_value)
-                    .await
-                    .expect("Failed to append orphan");
-                glob = glob.sync(section).await.expect("Failed to sync glob");
-            }
-            drop(glob);
-
-            // Phase 3: Simulate partial orphan cleanup (section 2 removed, 3 and 4 remain)
-            // This simulates a crash during cleanup_orphan_value_sections()
-            context
-                .remove(&cfg.value_partition, Some(&2u64.to_be_bytes()))
-                .await
-                .expect("Failed to remove section 2");
-
-            // Phase 4: Recovery should complete the cleanup
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                init_oversized(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to reinit");
-
-            // Section 1 should still be valid
-            let entry = oversized.get(1, 0).await.expect("Failed to get");
-            assert_eq!(entry.id, 1);
-            let value = oversized
-                .get_value(1, offset1, size1)
-                .await
-                .expect("Failed to get value");
-            assert_eq!(value, [1; 16]);
-
-            // No orphan sections should remain
-            assert_eq!(oversized.oldest_section(), Some(1));
-            assert_eq!(oversized.newest_section(), Some(1));
-
-            // Should be able to append to section 2 (now clean)
-            let new_value: TestValue = [42; 16];
-            let new_entry = TestEntry::new(42, 0, 0);
-            let pos;
-            (oversized, pos, _, _) = oversized
-                .append(2, new_entry, &new_value)
-                .await
-                .expect("Failed to append to section 2");
-            assert_eq!(pos, 0); // First entry in new section
 
             oversized.destroy().await.expect("Failed to destroy");
         });

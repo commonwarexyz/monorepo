@@ -1,5 +1,5 @@
 use crate::{
-    Buf, Error, Handle, IoBufs, IoBufsMut, RemoveTarget,
+    BatchOperation, Buf, Error, Handle, IoBufs, IoBufsMut,
     telemetry::metrics::{Counter, Gauge, Register, raw},
 };
 use std::{
@@ -104,12 +104,43 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
-    }
-
-    async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
-        self.inner.remove_batch(targets).await
+    async fn apply_batch(&self, operations: Vec<BatchOperation<Self::Blob>>) -> Result<(), Error> {
+        let mut resizes = 0;
+        let mut writes = 0;
+        let mut write_bytes = 0;
+        let operations = operations
+            .into_iter()
+            .map(|operation| match operation {
+                BatchOperation::Remove(target) => BatchOperation::Remove(target),
+                BatchOperation::Resize { blob, len } => {
+                    resizes += 1;
+                    BatchOperation::Resize {
+                        blob: blob.inner,
+                        len,
+                    }
+                }
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => {
+                    writes += 1;
+                    write_bytes += data.len() as u64;
+                    resizes += 1;
+                    BatchOperation::Update {
+                        blob: blob.inner,
+                        offset,
+                        data,
+                        len,
+                    }
+                }
+            })
+            .collect();
+        self.metrics.storage_writes.inc_by(writes);
+        self.metrics.storage_write_bytes.inc_by(write_bytes);
+        self.metrics.storage_resizes.inc_by(resizes);
+        self.inner.apply_batch(operations).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -374,6 +405,44 @@ mod tests {
             open_blobs_after_drop, 0,
             "open_blobs metric was not decremented after dropping the blob"
         );
+    }
+
+    #[tokio::test]
+    async fn test_metered_batch_counts_resize_and_update_effects() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+        let (first, _) = storage.open("partition", b"first").await.unwrap();
+        let (second, _) = storage.open("partition", b"second").await.unwrap();
+        let (updated, _) = storage.open("partition", b"updated").await.unwrap();
+
+        storage
+            .apply_batch(vec![
+                BatchOperation::Resize {
+                    blob: first,
+                    len: 3,
+                },
+                BatchOperation::Resize {
+                    blob: second,
+                    len: 5,
+                },
+                BatchOperation::Update {
+                    blob: updated,
+                    offset: 1,
+                    data: b"new".into(),
+                    len: 4,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(storage.metrics.storage_writes.get(), 1);
+        assert_eq!(storage.metrics.storage_write_bytes.get(), 3);
+        assert_eq!(storage.metrics.storage_resizes.get(), 3);
+
+        let (updated, len) = storage.inner.open("partition", b"updated").await.unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(updated.read_at(0, 4).await.unwrap().coalesce(), b"\0new");
     }
 
     /// Test that `start_sync` increments the sync metric, matching `sync`.

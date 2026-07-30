@@ -4,7 +4,7 @@ use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, Error as RError, RemoveTarget,
+    BatchOperation, Blob, Buf, BufMut, BufferPooler, Error as RError, RemoveTarget,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -115,11 +115,14 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let record_size = Record::<V>::SIZE as u64;
         let items_per_blob = config.items_per_blob.get();
         let mut blobs = BTreeMap::new();
+        let mut resizes = BTreeMap::new();
         let stored_blobs = if bits.is_none() {
-            match context.remove(&config.partition, None).await {
-                Ok(()) | Err(RError::PartitionMissing(_)) => Vec::new(),
-                Err(err) => return Err(Error::Runtime(err)),
-            }
+            context
+                .apply_batch(vec![BatchOperation::Remove(RemoveTarget::Partition(
+                    config.partition.clone(),
+                ))])
+                .await?;
+            Vec::new()
         } else {
             match context.scan(&config.partition).await {
                 Ok(blobs) => blobs,
@@ -136,7 +139,9 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
 
-            // Check if blob size is aligned to record size
+            // Recovery below applies every retained truncation and uncovered-section removal as
+            // one physical mutation. Until then, remember the aligned size without changing the
+            // blob.
             if bits.is_some() && len % record_size != 0 {
                 warn!(
                     blob = index,
@@ -145,8 +150,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                     "blob size is not a multiple of record size, truncating"
                 );
                 len -= len % record_size;
-                blob.resize(len).await?;
-                blob.sync().await?;
+                resizes.insert(index, (blob.clone(), len));
             }
 
             debug!(blob = index, len, "found index blob");
@@ -175,20 +179,28 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 })
                 .copied()
                 .collect::<Vec<_>>();
-            if !sections_to_remove.is_empty() {
-                let targets = sections_to_remove
-                    .iter()
-                    .map(|section| RemoveTarget::Blob {
+            let removed = sections_to_remove.iter().copied().collect::<BTreeSet<_>>();
+            let mut operations = Vec::new();
+            for &section in blobs.keys() {
+                if removed.contains(&section) {
+                    operations.push(BatchOperation::Remove(RemoveTarget::Blob {
                         partition: config.partition.clone(),
                         name: section.to_be_bytes().to_vec(),
-                    })
-                    .collect();
-                context.remove_batch(targets).await?;
-
-                for section in sections_to_remove {
-                    let (blob, _) = blobs.remove(&section).expect("selected section must exist");
-                    drop(blob);
+                    }));
+                    continue;
                 }
+
+                if let Some((blob, len)) = resizes.remove(&section) {
+                    operations.push(BatchOperation::Resize { blob, len });
+                }
+            }
+            if !operations.is_empty() {
+                context.apply_batch(operations).await?;
+            }
+
+            for section in sections_to_remove {
+                let (blob, _) = blobs.remove(&section).expect("selected section must exist");
+                drop(blob);
             }
 
             // Replay ignores records outside the committed bits, but recovery clears them so
@@ -401,14 +413,16 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         }
 
         // Keep handles and logical state until the batch reports success.
-        let targets = sections_to_remove
+        let targets: Vec<RemoveTarget> = sections_to_remove
             .iter()
             .map(|section| RemoveTarget::Blob {
                 partition: self.config.partition.clone(),
                 name: section.to_be_bytes().to_vec(),
             })
             .collect();
-        self.context.remove_batch(targets).await?;
+        self.context
+            .apply_batch(targets.into_iter().map(BatchOperation::Remove).collect())
+            .await?;
 
         for section in sections_to_remove {
             let blob = self
@@ -559,7 +573,10 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     pub async fn destroy(self) -> Result<(), Error> {
         let context = self.0.context.child("destroy");
         let targets = self.into_remove_targets();
-        context.remove_batch(targets).await.map_err(Error::Runtime)
+        context
+            .apply_batch(targets.into_iter().map(BatchOperation::Remove).collect())
+            .await
+            .map_err(Error::Runtime)
     }
 }
 

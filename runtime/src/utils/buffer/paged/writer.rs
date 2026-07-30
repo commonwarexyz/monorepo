@@ -42,7 +42,7 @@ use super::{
     view::View,
 };
 use crate::{
-    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
+    BatchOperation, Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
     buffer::{
         SyncState,
         paged::{ActiveChecksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE, CacheRef, Checksum, Slot},
@@ -53,6 +53,16 @@ use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
+
+#[derive(Clone, Copy)]
+struct ShrinkLayout {
+    page_size: u64,
+    full_pages: u64,
+    partial_bytes: u64,
+    new_physical_size: u64,
+    current_physical_size: u64,
+    tail_offset: u64,
+}
 
 /// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
 /// applying two upward adjustments:
@@ -1178,6 +1188,39 @@ impl<B: Blob> Writer<B> {
         self.shrink(size).await
     }
 
+    /// Prepare a shrink for an atomic storage batch.
+    ///
+    /// Pending writes are made durable before the final physical image is appended to `batch`.
+    /// Preparing a partial-page shrink does not modify the durable page: the retained prefix,
+    /// zeroed suffix, final checksum, and final physical length are staged in one update. The
+    /// page-boundary case stages a resize. The writer's logical state is updated immediately. The
+    /// caller must apply the batch immediately and treat failure as fatal; continuing to use the
+    /// writer after a failed batch is unsupported.
+    pub async fn resize_into(
+        &mut self,
+        size: u64,
+        batch: &mut Vec<BatchOperation<B>>,
+    ) -> Result<(), Error> {
+        self.ensure_usable()?;
+        let current_size = self.buffer.size();
+        if size > current_size {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        self.sync().await?;
+        if size == current_size {
+            return Ok(());
+        }
+
+        self.poisoned = true;
+        let result = self.shrink_synced_into(size, batch).await;
+        if result.is_ok() {
+            self.poisoned = false;
+            self.needs_sync_before_write = false;
+        }
+        result
+    }
+
     /// Coordinate the dispatch logic for shrinking the blob.
     async fn shrink(&mut self, target_size: u64) -> Result<(), Error> {
         // Resolve buffered and pending work before entering the non-retryable shrink protocol.
@@ -1194,6 +1237,105 @@ impl<B: Blob> Writer<B> {
 
     /// Shrink a fully synchronized writer. The caller poisons the handle until this completes.
     async fn shrink_synced(&mut self, target_size: u64) -> Result<(), Error> {
+        let layout = self.shrink_layout(target_size)?;
+
+        // A logical shrink can leave the physical page count unchanged. Only real physical
+        // resizes need to create a pending sync.
+        if layout.new_physical_size != layout.current_physical_size {
+            self.sync_state
+                .resize(&self.blob, layout.new_physical_size)
+                .await?;
+        }
+
+        self.finish_shrink(layout).await
+    }
+
+    /// Prepare a synchronized shrink while deferring its physical resize to `batch`.
+    async fn shrink_synced_into(
+        &mut self,
+        target_size: u64,
+        batch: &mut Vec<BatchOperation<B>>,
+    ) -> Result<(), Error> {
+        let layout = self.shrink_layout(target_size)?;
+
+        if layout.partial_bytes > 0 {
+            return self.shrink_to_partial_into(layout, batch).await;
+        }
+
+        self.finish_shrink(layout).await?;
+        if layout.new_physical_size != layout.current_physical_size {
+            batch.push(BatchOperation::Resize {
+                blob: self.blob.clone(),
+                len: layout.new_physical_size,
+            });
+        }
+        Ok(())
+    }
+
+    /// Stage a complete final physical page without modifying the durable page in place.
+    async fn shrink_to_partial_into(
+        &mut self,
+        layout: ShrinkLayout,
+        batch: &mut Vec<BatchOperation<B>>,
+    ) -> Result<(), Error> {
+        let (page_data, _) = super::get_page_with_checksum_from_blob(
+            &self.blob,
+            layout.full_pages,
+            layout.page_size,
+        )
+        .await?;
+        if (page_data.len() as u64) < layout.partial_bytes {
+            return Err(Error::InvalidChecksum);
+        }
+
+        let partial_len =
+            usize::try_from(layout.partial_bytes).map_err(|_| Error::OffsetOverflow)?;
+        let partial_len_u16 =
+            u16::try_from(layout.partial_bytes).map_err(|_| Error::OffsetOverflow)?;
+        let new_data = &page_data.as_ref()[..partial_len];
+        let new_crc = Crc32::checksum(new_data);
+        let final_checksum = ActiveChecksum::new(Slot::First, partial_len_u16, new_crc);
+        let checksum = Checksum::new(partial_len_u16, new_crc);
+        let physical_page_size = layout
+            .page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        let page_size = usize::try_from(layout.page_size).map_err(|_| Error::OffsetOverflow)?;
+        let physical_page_size_usize =
+            usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
+        let mut final_page = Vec::with_capacity(physical_page_size_usize);
+        final_page.extend_from_slice(new_data);
+        final_page.resize(page_size, 0);
+        final_page.extend_from_slice(&checksum.to_bytes());
+        assert_eq!(final_page.len(), physical_page_size_usize);
+
+        let physical_offset = layout
+            .full_pages
+            .checked_mul(physical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        assert_eq!(
+            physical_offset.checked_add(physical_page_size),
+            Some(layout.new_physical_size)
+        );
+
+        self.cache_ref.invalidate_from(self.id, layout.full_pages);
+        batch.push(BatchOperation::Update {
+            blob: self.blob.clone(),
+            offset: physical_offset,
+            data: final_page.into(),
+            len: layout.new_physical_size,
+        });
+        self.publish_partial_shrink(
+            layout.full_pages,
+            layout.tail_offset,
+            new_data,
+            final_checksum,
+        );
+
+        Ok(())
+    }
+
+    fn shrink_layout(&self, target_size: u64) -> Result<ShrinkLayout, Error> {
         let page_size = self.cache_ref.page_size();
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
@@ -1222,33 +1364,41 @@ impl<B: Blob> Writer<B> {
                 .ok_or(Error::OffsetOverflow)?
         };
 
-        // A logical shrink can leave the physical page count unchanged. Only real physical
-        // resizes need to create a pending sync.
-        if new_physical_size != current_physical_size {
-            self.sync_state
-                .resize(&self.blob, new_physical_size)
-                .await?;
-        }
+        Ok(ShrinkLayout {
+            page_size,
+            full_pages,
+            partial_bytes,
+            new_physical_size,
+            current_physical_size,
+            tail_offset,
+        })
+    }
 
+    async fn finish_shrink(&mut self, layout: ShrinkLayout) -> Result<(), Error> {
         // Evict cached pages at or beyond the new full-page boundary. The page at
         // `full_pages` (if partial) is now owned by the tip buffer, and anything above is
         // beyond the new size. Leaving their pre-resize contents in the cache
         // lets `try_read_sync_into` (whose reads below the tip boundary come straight from
         // the page cache) observe stale bytes once
         // the tip is repopulated.
-        self.cache_ref.invalidate_from(self.id, full_pages);
+        self.cache_ref.invalidate_from(self.id, layout.full_pages);
 
-        if partial_bytes > 0 {
+        if layout.partial_bytes > 0 {
             return self
-                .shrink_to_partial(full_pages, partial_bytes, page_size, tail_offset)
+                .shrink_to_partial(
+                    layout.full_pages,
+                    layout.partial_bytes,
+                    layout.page_size,
+                    layout.tail_offset,
+                )
                 .await;
         }
 
         // Shrink the blob to a page boundary, which requires no CRC-slot rewrite.
         self.partial_page_state = None;
         self.synced_partial_page_state = None;
-        self.current_page = full_pages;
-        self.buffer.offset = tail_offset;
+        self.current_page = layout.full_pages;
+        self.buffer.offset = layout.tail_offset;
         self.buffer.clear();
 
         Ok(())
@@ -1283,6 +1433,18 @@ impl<B: Blob> Writer<B> {
             .await?;
 
         // Publish only after every non-retryable footer mutation has completed.
+        self.publish_partial_shrink(full_pages, tail_offset, new_data, final_checksum);
+
+        Ok(())
+    }
+
+    fn publish_partial_shrink(
+        &mut self,
+        full_pages: u64,
+        tail_offset: u64,
+        new_data: &[u8],
+        final_checksum: ActiveChecksum,
+    ) {
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;
         self.buffer.clear();
@@ -1290,8 +1452,6 @@ impl<B: Blob> Writer<B> {
         assert!(!over_capacity);
         self.partial_page_state = Some(final_checksum);
         self.mark_partial_page_synced();
-
-        Ok(())
     }
 
     /// Page-cache id used for reads. Exposed for tests.
@@ -4974,6 +5134,129 @@ mod tests {
             // Verify content is still readable and intact.
             let read = append.read_at(0, 11).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"hello world");
+        });
+    }
+
+    #[test]
+    fn test_resize_into_partial_shrink_is_staged_until_batch_applied() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+            let target = 50usize;
+
+            for (name, initial_len) in [
+                (b"resize_into_partial_page".as_slice(), 80usize),
+                (b"resize_into_full_page".as_slice(), page_size),
+            ] {
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let data: Vec<u8> = (0..initial_len).map(|i| (i % 251) as u8).collect();
+                let (blob, size) = context.open("test_partition", name).await.unwrap();
+                let mut writer = Writer::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
+                writer.append(&data).await.unwrap();
+                writer.sync().await.unwrap();
+
+                let physical_size = physical_page_size as u64;
+                let raw_before = blob
+                    .read_at(0, physical_page_size)
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref()
+                    .to_vec();
+
+                let mut batch = Vec::new();
+                writer.resize_into(target as u64, &mut batch).await.unwrap();
+                assert_eq!(writer.size(), target as u64);
+                assert_eq!(
+                    writer.read_at(0, target).await.unwrap().coalesce().as_ref(),
+                    &data[..target]
+                );
+
+                let [
+                    BatchOperation::Update {
+                        offset,
+                        data: final_page,
+                        len,
+                        ..
+                    },
+                ] = batch.as_slice()
+                else {
+                    panic!("partial-page shrink must emit exactly one update");
+                };
+                assert_eq!(*offset, 0);
+                assert_eq!(*len, physical_size);
+                assert_eq!(final_page.len(), physical_page_size);
+                assert_eq!(&final_page.as_ref()[..target], &data[..target]);
+                assert!(
+                    final_page.as_ref()[target..page_size]
+                        .iter()
+                        .all(|byte| *byte == 0)
+                );
+                let checksum = read_crc_record_from_page(final_page.as_ref());
+                assert_eq!(
+                    checksum.get_slot(Slot::First),
+                    (target as u16, Crc32::checksum(&data[..target]))
+                );
+                assert_eq!(checksum.get_slot(Slot::Second), (0, 0));
+                let final_page = final_page.clone();
+
+                assert_eq!(
+                    blob.read_at(0, physical_page_size)
+                        .await
+                        .unwrap()
+                        .coalesce()
+                        .as_ref(),
+                    raw_before.as_slice()
+                );
+                drop(writer);
+
+                let (blob, size) = context.open("test_partition", name).await.unwrap();
+                assert_eq!(size, physical_size);
+                let reopened = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(reopened.size(), initial_len as u64);
+                assert_eq!(
+                    reopened
+                        .read_at(0, initial_len)
+                        .await
+                        .unwrap()
+                        .coalesce()
+                        .as_ref(),
+                    data.as_slice()
+                );
+                drop(reopened);
+
+                context.apply_batch(batch).await.unwrap();
+
+                let (blob, size) = context.open("test_partition", name).await.unwrap();
+                assert_eq!(size, physical_size);
+                assert_eq!(
+                    blob.read_at(0, physical_page_size)
+                        .await
+                        .unwrap()
+                        .coalesce()
+                        .as_ref(),
+                    final_page.as_ref()
+                );
+                let reopened = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                    .await
+                    .unwrap();
+                assert_eq!(reopened.size(), target as u64);
+                assert_eq!(
+                    reopened
+                        .read_at(0, target)
+                        .await
+                        .unwrap()
+                        .coalesce()
+                        .as_ref(),
+                    &data[..target]
+                );
+            }
         });
     }
 

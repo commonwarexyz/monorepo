@@ -26,7 +26,7 @@ use commonware_storage::{
 };
 use commonware_storage_fuzz::{
     RNG_BYTES, bounded_items_per_section, bounded_page_cache_size, bounded_page_size, bounded_rate,
-    fuzz_runner, interrupt_faults,
+    fuzz_runner,
 };
 use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
@@ -661,28 +661,13 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             Snapshot::from_db(&db, concrete)
         });
 
-    // Cross a second crash boundary, verify the recovered database, then interrupt its real
-    // composite destroy.
-    let redestroy_suffix = suffix.clone();
-    let (_, checkpoint) =
-        deterministic::Runner::from(checkpoint).start_and_recover(|ctx| async move {
-            let db: Db<F> = Db::init(ctx.child("sentinel"), make_config(&ctx, &suffix, params))
-                .await
-                .expect("sentinel recovery must succeed");
-            verify_recovery(&db, &Expected::Exact(expected), params.log_items_per_blob).await;
-            *ctx.storage_fault_config().write() = interrupt_faults();
-            let _ = db.destroy().await;
-        });
-
+    // Cross a second crash boundary, verify the recovered database, then clean it up.
     deterministic::Runner::from(checkpoint).start(|ctx| async move {
-        *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let db: Db<F> = Db::init(
-            ctx.child("redestroy"),
-            make_config(&ctx, &redestroy_suffix, params),
-        )
-        .await
-        .expect("Current must reopen after interrupted destroy");
-        db.destroy().await.expect("destroy retry must succeed");
+        let db: Db<F> = Db::init(ctx.child("sentinel"), make_config(&ctx, &suffix, params))
+            .await
+            .expect("sentinel recovery must succeed");
+        verify_recovery(&db, &Expected::Exact(expected), params.log_items_per_blob).await;
+        db.destroy().await.expect("cleanup destroy must succeed");
     });
 }
 

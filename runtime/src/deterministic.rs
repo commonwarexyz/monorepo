@@ -1596,12 +1596,11 @@ impl crate::Storage for Context {
         self.storage.open_versioned(partition, name, versions).await
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.storage.remove(partition, name).await
-    }
-
-    async fn remove_batch(&self, targets: Vec<crate::RemoveTarget>) -> Result<(), Error> {
-        self.storage.remove_batch(targets).await
+    async fn apply_batch(
+        &self,
+        operations: Vec<crate::BatchOperation<Self::Blob>>,
+    ) -> Result<(), Error> {
+        self.storage.apply_batch(operations).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -1625,8 +1624,8 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        Blob, Metrics as _, RemoveTarget, Resolver, Runner as _, Spawner as _, Storage,
-        Strategizer, Supervisor as _, deterministic, reschedule,
+        BatchOperation, Blob, Metrics as _, RemoveTarget, Resolver, Runner as _, Spawner as _,
+        Storage, Strategizer, Supervisor as _, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
@@ -1871,8 +1870,8 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_remove_batch_is_atomic_and_durable() {
-        fn targets() -> Vec<RemoveTarget> {
+    fn test_recover_batch_is_atomic_and_durable() {
+        fn removals() -> Vec<RemoveTarget> {
             vec![
                 RemoveTarget::Partition("batch_partition".into()),
                 RemoveTarget::Blob {
@@ -1883,7 +1882,7 @@ mod tests {
         }
 
         let config = deterministic::Config::default().with_storage_fault_config(FaultConfig {
-            remove_batch_rate: Some(1.0),
+            batch_rate: Some(1.0),
             ..FaultConfig::default()
         });
         let (result, checkpoint) =
@@ -1893,7 +1892,26 @@ mod tests {
                     blob.write_at(0, partition.as_bytes()).await.unwrap();
                     blob.sync().await.unwrap();
                 }
-                context.remove_batch(targets()).await
+                let (resized, _) = context.open("batch_resize", b"name").await.unwrap();
+                resized.write_at(0, b"resize").await.unwrap();
+                resized.sync().await.unwrap();
+                let (updated, _) = context.open("batch_update", b"name").await.unwrap();
+                updated.write_at(0, b"update-old").await.unwrap();
+                updated.sync().await.unwrap();
+
+                let mut operations: Vec<BatchOperation<_>> =
+                    removals().into_iter().map(Into::into).collect();
+                operations.push(BatchOperation::Resize {
+                    blob: resized,
+                    len: 3,
+                });
+                operations.push(BatchOperation::Update {
+                    blob: updated,
+                    offset: 2,
+                    data: b"NEW".into(),
+                    len: 5,
+                });
+                context.apply_batch(operations).await
             });
         assert!(matches!(result, Err(Error::Io(_))));
 
@@ -1907,8 +1925,28 @@ mod tests {
                     context.scan("batch_partition").await.unwrap(),
                     vec![b"name".to_vec()]
                 );
+                let (resized, len) = context.open("batch_resize", b"name").await.unwrap();
+                assert_eq!(len, 6);
+                let (updated, len) = context.open("batch_update", b"name").await.unwrap();
+                assert_eq!(len, 10);
+                assert_eq!(
+                    updated.read_at(0, 10).await.unwrap().coalesce(),
+                    b"update-old"
+                );
                 *context.storage_fault_config().write() = FaultConfig::default();
-                context.remove_batch(targets()).await.unwrap();
+                let mut operations: Vec<BatchOperation<_>> =
+                    removals().into_iter().map(Into::into).collect();
+                operations.push(BatchOperation::Resize {
+                    blob: resized,
+                    len: 3,
+                });
+                operations.push(BatchOperation::Update {
+                    blob: updated,
+                    offset: 2,
+                    data: b"NEW".into(),
+                    len: 5,
+                });
+                context.apply_batch(operations).await.unwrap();
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
@@ -1917,6 +1955,11 @@ mod tests {
                 context.scan("batch_partition").await,
                 Err(Error::PartitionMissing(_))
             ));
+            let (_, resized_len) = context.open("batch_resize", b"name").await.unwrap();
+            assert_eq!(resized_len, 3);
+            let (updated, updated_len) = context.open("batch_update", b"name").await.unwrap();
+            assert_eq!(updated_len, 5);
+            assert_eq!(updated.read_at(0, 5).await.unwrap().coalesce(), b"upNEW");
             let (_, blob_len) = context.open("batch_blob", b"name").await.unwrap();
             assert_eq!(blob_len, 0);
             let (_, partition_len) = context.open("batch_partition", b"name").await.unwrap();

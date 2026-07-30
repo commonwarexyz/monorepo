@@ -6,7 +6,7 @@
 use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufferPool, Error as RError, Handle, Metrics, RemoveTarget, Storage,
+    BatchOperation, Blob, BufferPool, Error as RError, Handle, Metrics, RemoveTarget, Storage,
     buffer::{
         Write,
         paged::{CacheRef, Writer},
@@ -24,6 +24,9 @@ use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Send + Sync {
+    /// The wrapped blob type staged into atomic batches.
+    type Blob: Blob;
+
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> u64;
 
@@ -40,11 +43,17 @@ pub trait SectionBuffer: Send + Sync {
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Resize the logical size of the buffer.
-    fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+    /// Stage a logical shrink in `batch`.
+    fn resize_into(
+        &mut self,
+        len: u64,
+        batch: &mut Vec<BatchOperation<Self::Blob>>,
+    ) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
 impl<B: Blob> SectionBuffer for Writer<B> {
+    type Blob = B;
+
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -61,12 +70,18 @@ impl<B: Blob> SectionBuffer for Writer<B> {
         Self::wait_for_sync(self).await
     }
 
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+    async fn resize_into(
+        &mut self,
+        len: u64,
+        batch: &mut Vec<BatchOperation<B>>,
+    ) -> Result<(), RError> {
+        Self::resize_into(self, len, batch).await
     }
 }
 
 impl<B: Blob> SectionBuffer for Write<B> {
+    type Blob = B;
+
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -83,15 +98,19 @@ impl<B: Blob> SectionBuffer for Write<B> {
         Self::wait_for_sync(self).await
     }
 
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+    async fn resize_into(
+        &mut self,
+        len: u64,
+        batch: &mut Vec<BatchOperation<B>>,
+    ) -> Result<(), RError> {
+        Self::resize_into(self, len, batch).await
     }
 }
 
 /// Factory for creating section buffers from raw blobs.
 pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     /// The buffer type produced by this factory.
-    type Buffer: SectionBuffer;
+    type Buffer: SectionBuffer<Blob = B>;
 
     /// Create a new buffer wrapping the given blob with the specified size.
     fn create(
@@ -180,6 +199,14 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     pruned: Counter,
 }
 
+/// A rewind whose batchable storage operations are staged but not yet finalized in memory.
+pub(super) struct PreparedRewind {
+    section: u64,
+    size: u64,
+    old_size: Option<u64>,
+    remove_newer: bool,
+}
+
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Wait for all started syncs to complete before their blobs are dropped.
     async fn wait_for_syncs<'a>(
@@ -194,8 +221,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             .map_err(Error::Runtime)
     }
 
-    /// Remove every section in `range` as one namespace operation.
-    async fn remove_range<R>(&mut self, range: R) -> Result<Vec<(u64, u64)>, Error>
+    /// Wait for selected section syncs, then return their exact removal targets.
+    async fn remove_range_targets<R>(
+        &mut self,
+        range: R,
+    ) -> Result<Vec<BatchOperation<E::Blob>>, Error>
     where
         R: RangeBounds<u64> + Clone,
     {
@@ -210,14 +240,28 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
         Self::wait_for_syncs(self.blobs.range_mut(range).map(|(_, blob)| blob)).await?;
 
-        let targets = sections
-            .iter()
-            .map(|section| RemoveTarget::Blob {
-                partition: self.partition.clone(),
-                name: section.to_be_bytes().to_vec(),
+        Ok(sections
+            .into_iter()
+            .map(|section| {
+                RemoveTarget::Blob {
+                    partition: self.partition.clone(),
+                    name: section.to_be_bytes().to_vec(),
+                }
+                .into()
             })
+            .collect())
+    }
+
+    /// Drop selected section handles after their removal succeeds.
+    fn finalize_remove_range<R>(&mut self, range: R) -> Vec<(u64, u64)>
+    where
+        R: RangeBounds<u64>,
+    {
+        let sections: Vec<_> = self
+            .blobs
+            .range(range)
+            .map(|(&section, _)| section)
             .collect();
-        self.context.remove_batch(targets).await?;
 
         let mut removed = Vec::with_capacity(sections.len());
         for section in sections {
@@ -230,7 +274,31 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             removed.push((section, size));
         }
 
-        Ok(removed)
+        removed
+    }
+
+    /// Remove every section in `range` as one namespace operation.
+    async fn remove_range<R>(&mut self, range: R) -> Result<Vec<(u64, u64)>, Error>
+    where
+        R: RangeBounds<u64> + Clone,
+    {
+        let targets = self.remove_range_targets(range.clone()).await?;
+        self.apply_batch_operations(targets).await?;
+        Ok(self.finalize_remove_range(range))
+    }
+
+    /// Apply exact storage mutations through this manager's storage context.
+    pub(super) async fn apply_batch_operations(
+        &self,
+        operations: Vec<BatchOperation<E::Blob>>,
+    ) -> Result<(), Error> {
+        if operations.is_empty() {
+            return Ok(());
+        }
+        self.context
+            .apply_batch(operations)
+            .await
+            .map_err(Error::Runtime)
     }
 
     /// Initialize a new `Manager`.
@@ -377,7 +445,22 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        let removed = self.remove_range(..min).await?;
+        let targets = self.prune_targets(min).await?;
+        self.apply_batch_operations(targets).await?;
+        Ok(self.finalize_prune(min))
+    }
+
+    /// Wait for pruned section syncs, then return their exact removal targets.
+    pub(super) async fn prune_targets(
+        &mut self,
+        min: u64,
+    ) -> Result<Vec<BatchOperation<E::Blob>>, Error> {
+        self.remove_range_targets(..min).await
+    }
+
+    /// Apply a successful prune to the in-memory state and metrics.
+    pub(super) fn finalize_prune(&mut self, min: u64) -> bool {
+        let removed = self.finalize_remove_range(..min);
         for (section, size) in &removed {
             debug!(section, size, "pruned blob");
             self.tracked.dec();
@@ -388,7 +471,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             self.oldest_retained_section = min;
         }
 
-        Ok(!removed.is_empty())
+        !removed.is_empty()
     }
 
     /// Returns true when `section` is below the prune floor.
@@ -429,23 +512,49 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.blobs.keys().copied()
     }
 
-    /// Remove a specific section. Returns true if the section existed and was removed.
-    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
-        self.prune_guard(section)?;
+    /// Remove selected sections as one namespace operation.
+    pub(super) async fn remove_sections(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<usize, Error> {
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        for &section in &sections {
+            self.prune_guard(section)?;
+        }
 
-        if let Some(mut blob) = self.blobs.remove(&section) {
+        let mut targets = Vec::with_capacity(sections.len());
+        for &section in &sections {
+            let Some(blob) = self.blobs.get_mut(&section) else {
+                continue;
+            };
             blob.wait_for_sync().await?;
+            targets.push(
+                RemoveTarget::Blob {
+                    partition: self.partition.clone(),
+                    name: section.to_be_bytes().to_vec(),
+                }
+                .into(),
+            );
+        }
+        self.apply_batch_operations(targets).await?;
+
+        let mut removed = 0;
+        for section in sections {
+            let Some(blob) = self.blobs.remove(&section) else {
+                continue;
+            };
             let size = blob.size();
             drop(blob);
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
             self.tracked.dec();
+            removed += 1;
             debug!(section, size, "removed section");
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        Ok(removed)
+    }
+
+    /// Remove a specific section. Returns true if the section existed and was removed.
+    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
+        Ok(self.remove_sections(section).await? != 0)
     }
 
     /// Return a context capable of removing this manager's namespace entries.
@@ -453,7 +562,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.context.child("destroy")
     }
 
-    /// Wait for pending section syncs, then return the owned partition removal target.
+    /// Wait for pending section syncs, then return the owned partition removal operation.
     pub(crate) async fn into_remove_targets(mut self) -> Result<Vec<RemoveTarget>, Error> {
         Self::wait_for_syncs(self.blobs.values_mut()).await?;
         Ok(vec![RemoveTarget::Partition(self.partition)])
@@ -474,52 +583,95 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Rewind by removing all sections after `section` and resizing the target section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-
-        // Remove every newer section before resizing the target. Section `u64::MAX` has no
-        // successor, so there are no sections above it to remove.
-        let removed = match section.checked_add(1) {
-            Some(next) => self.remove_range(next..).await?,
-            None => Vec::new(),
-        };
-        for (removed_section, _) in removed {
-            self.tracked.dec();
-            debug!(section = removed_section, "removed blob during rewind");
-        }
-
-        // If the section exists, truncate it to the given size. The buffer waits for any in-flight
-        // sync before shrinking and makes the shrink durable before later writes reuse the range.
-        if let Some(blob) = self.blobs.get_mut(&section) {
-            let current_size = blob.size();
-            if size < current_size {
-                blob.resize(size).await?;
-                debug!(
-                    section,
-                    old_size = current_size,
-                    new_size = size,
-                    "rewound blob"
-                );
-            }
-        }
-
+        let mut batch = Vec::new();
+        let prepared = self.rewind_into(section, size, &mut batch).await?;
+        self.apply_batch_operations(batch).await?;
+        self.finalize_rewind(prepared);
         Ok(())
     }
 
     /// Resize only the given section without affecting other sections.
     pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        let mut batch = Vec::new();
+        let prepared = self.rewind_section_into(section, size, &mut batch).await?;
+        self.apply_batch_operations(batch).await?;
+        self.finalize_rewind(prepared);
+        Ok(())
+    }
+
+    /// Stage a rewind in `batch` without finalizing removed section handles.
+    pub(super) async fn rewind_into(
+        &mut self,
+        section: u64,
+        size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
+        self.prepare_rewind(section, size, true, batch).await
+    }
+
+    /// Stage a single-section rewind in `batch`.
+    pub(super) async fn rewind_section_into(
+        &mut self,
+        section: u64,
+        size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
+        self.prepare_rewind(section, size, false, batch).await
+    }
+
+    /// Stage the requested shrink and removals after validating the prune floor.
+    async fn prepare_rewind(
+        &mut self,
+        section: u64,
+        size: u64,
+        remove_newer: bool,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
         self.prune_guard(section)?;
 
-        // Get the blob at the given section
-        if let Some(blob) = self.blobs.get_mut(&section) {
-            // Truncate the blob to the given size
-            let current = blob.size();
-            if size < current {
-                blob.resize(size).await?;
-                debug!(section, from = current, to = size, "rewound section");
+        let old_size = if let Some(blob) = self.blobs.get_mut(&section) {
+            let current_size = blob.size();
+            if size < current_size {
+                blob.resize_into(size, batch).await?;
+                Some(current_size)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if remove_newer && let Some(next) = section.checked_add(1) {
+            batch.extend(self.remove_range_targets(next..).await?);
+        }
+
+        Ok(PreparedRewind {
+            section,
+            size,
+            old_size,
+            remove_newer,
+        })
+    }
+
+    /// Finalize a successfully applied rewind in memory.
+    pub(super) fn finalize_rewind(&mut self, prepared: PreparedRewind) {
+        if prepared.remove_newer
+            && let Some(next) = prepared.section.checked_add(1)
+        {
+            for (removed_section, _) in self.finalize_remove_range(next..) {
+                self.tracked.dec();
+                debug!(section = removed_section, "removed blob during rewind");
             }
         }
 
-        Ok(())
+        if let Some(old_size) = prepared.old_size {
+            debug!(
+                section = prepared.section,
+                old_size,
+                new_size = prepared.size,
+                "rewound blob"
+            );
+        }
     }
 
     /// Returns the byte size of the given section.
@@ -552,10 +704,15 @@ mod tests {
     /// A shared sync result, mirroring the runtime buffers' internal completion sharing.
     type SharedSync = Shared<BoxFuture<'static, Result<(), RError>>>;
 
+    #[derive(Debug, Eq, PartialEq)]
+    enum RecordedOperation {
+        Remove(RemoveTarget),
+        Resize { len: u64 },
+    }
+
     #[derive(Default)]
     struct RemoveCalls {
-        single: usize,
-        batches: Vec<Vec<RemoveTarget>>,
+        batches: Vec<Vec<RecordedOperation>>,
     }
 
     #[derive(Clone)]
@@ -609,14 +766,21 @@ mod tests {
             self.inner.open_versioned(partition, name, versions).await
         }
 
-        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
-            self.calls.lock().single += 1;
-            self.inner.remove(partition, name).await
-        }
-
-        async fn remove_batch(&self, targets: Vec<RemoveTarget>) -> Result<(), RError> {
-            self.calls.lock().batches.push(targets.clone());
-            self.inner.remove_batch(targets).await
+        async fn apply_batch(
+            &self,
+            operations: Vec<BatchOperation<Self::Blob>>,
+        ) -> Result<(), RError> {
+            let recorded = operations
+                .iter()
+                .map(|operation| match operation {
+                    BatchOperation::Remove(target) => RecordedOperation::Remove(target.clone()),
+                    BatchOperation::Resize { len, .. } | BatchOperation::Update { len, .. } => {
+                        RecordedOperation::Resize { len: *len }
+                    }
+                })
+                .collect();
+            self.calls.lock().batches.push(recorded);
+            self.inner.apply_batch(operations).await
         }
 
         async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
@@ -630,15 +794,19 @@ mod tests {
         wait_for_syncs: Arc<AtomicUsize>,
     }
 
-    struct TestBuffer {
+    struct TestBuffer<B: Blob> {
+        blob: B,
+        size: u64,
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
         syncing: Option<SharedSync>,
     }
 
-    impl SectionBuffer for TestBuffer {
+    impl<B: Blob> SectionBuffer for TestBuffer<B> {
+        type Blob = B;
+
         fn size(&self) -> u64 {
-            0
+            self.size
         }
 
         async fn sync(&mut self) -> Result<(), RError> {
@@ -669,16 +837,29 @@ mod tests {
             Ok(())
         }
 
-        async fn resize(&mut self, _len: u64) -> Result<(), RError> {
+        async fn resize_into(
+            &mut self,
+            len: u64,
+            batch: &mut Vec<BatchOperation<B>>,
+        ) -> Result<(), RError> {
+            if len < self.size {
+                self.size = len;
+                batch.push(BatchOperation::Resize {
+                    blob: self.blob.clone(),
+                    len,
+                });
+            }
             Ok(())
         }
     }
 
     impl<B: Blob> BufferFactory<B> for TestFactory {
-        type Buffer = TestBuffer;
+        type Buffer = TestBuffer<B>;
 
-        async fn create(&self, _blob: B, _size: u64) -> Result<Self::Buffer, RError> {
+        async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
             Ok(TestBuffer {
+                blob,
+                size,
                 pending: self.pending.clone(),
                 wait_for_syncs: self.wait_for_syncs.clone(),
                 syncing: None,
@@ -742,20 +923,22 @@ mod tests {
                     .await
                     .expect("failed to create section");
             }
-            manager.rewind(5, 0).await.expect("rewind failed");
+            manager.blobs.get_mut(&5).unwrap().size = 10;
+            manager.rewind(5, 4).await.expect("rewind failed");
 
-            let target = |section: u64| RemoveTarget::Blob {
-                partition: "test".into(),
-                name: section.to_be_bytes().to_vec(),
+            let target = |section: u64| {
+                RecordedOperation::Remove(RemoveTarget::Blob {
+                    partition: "test".into(),
+                    name: section.to_be_bytes().to_vec(),
+                })
             };
             let calls = calls.lock();
-            assert_eq!(calls.single, 0);
             assert_eq!(
                 calls.batches,
                 vec![
                     vec![target(1), target(2)],
                     vec![target(3), target(4)],
-                    vec![target(6), target(7)],
+                    vec![RecordedOperation::Resize { len: 4 }, target(6), target(7),],
                 ]
             );
         });
@@ -802,7 +985,7 @@ mod tests {
                 .await
                 .expect("failed to collect remove targets");
             destroy_context
-                .remove_batch(targets)
+                .apply_batch(targets.into_iter().map(Into::into).collect())
                 .await
                 .expect("destroy failed");
         });
@@ -855,7 +1038,7 @@ mod tests {
                 .await
                 .expect("failed to collect remove targets");
             destroy_context
-                .remove_batch(targets)
+                .apply_batch(targets.into_iter().map(Into::into).collect())
                 .await
                 .expect("destroy failed");
         });
@@ -934,7 +1117,7 @@ mod tests {
                     .await
                     .expect("failed to collect remove targets");
                 destroy_context
-                    .remove_batch(targets)
+                    .apply_batch(targets.into_iter().map(Into::into).collect())
                     .await
                     .expect("destroy failed");
                 completed_clone.fetch_add(1, Ordering::Relaxed);

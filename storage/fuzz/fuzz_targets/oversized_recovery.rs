@@ -16,7 +16,7 @@ use commonware_storage::journal::{
     Error as JournalError,
     segmented::oversized::{Config, Oversized, Record},
 };
-use commonware_storage_fuzz::{RNG_BYTES, fuzz_runner, remove_faults};
+use commonware_storage_fuzz::{RNG_BYTES, batch_faults, fuzz_runner};
 use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -1006,92 +1006,79 @@ fn fuzz_crash_recovery(input: CrashRecoveryInput) {
     });
 
     const INTERRUPTED_PRUNE_MIN: u64 = 12;
-    let ((expected, post_prune_checkpoint), runtime_checkpoint) = deterministic::Runner::from(
-        runtime_checkpoint,
-    )
-    .start_and_recover(move |context| async move {
-        let cfg = crash_cfg(&context, compression);
-        let mut journal = recover(context.child("final"), cfg, durable_ends)
-            .await
-            .expect("final organic crash recovery should succeed");
-        assert_eq!(recovered_prefix(&journal, &expected).await, expected);
+    let ((expected, post_prune_checkpoint, prune_completed), runtime_checkpoint) =
+        deterministic::Runner::from(runtime_checkpoint).start_and_recover(
+            move |context| async move {
+                let cfg = crash_cfg(&context, compression);
+                let mut journal = recover(context.child("final"), cfg, durable_ends)
+                    .await
+                    .expect("final organic crash recovery should succeed");
+                assert_eq!(recovered_prefix(&journal, &expected).await, expected);
 
-        let mut expected = expected;
-        for section in 10..=INTERRUPTED_PRUNE_MIN {
-            let value = [section as u8; 16];
-            let (position, offset, size);
-            (journal, position, offset, size) = journal
-                .append(section, TestEntry::new(section), &value)
-                .await
-                .expect("pre-prune append should succeed");
-            let entries = expected.entry(section).or_default();
-            assert_eq!(position as usize, entries.len());
-            entries.push((TestEntry::new(section).with_location(offset, size), value));
-        }
-        journal = journal
-            .sync_all()
-            .await
-            .expect("pre-prune sync should succeed");
-
-        // Invalidate checkpoint floors below the requested prune before production removes
-        // their sections. Surviving old sections are then uncommitted debris that recovery
-        // may retain or discard.
-        let post_prune_checkpoint = expected
-            .keys()
-            .filter(|&&section| section >= INTERRUPTED_PRUNE_MIN)
-            .filter_map(|&section| journal.size(section).ok().map(|size| (section, size)))
-            .collect();
-        *context.storage_fault_config().write() = remove_faults();
-        let _ = journal.prune(INTERRUPTED_PRUNE_MIN).await;
-        (expected, post_prune_checkpoint)
-    });
-
-    let (_, runtime_checkpoint) = deterministic::Runner::from(runtime_checkpoint)
-        .start_and_recover(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let cfg = crash_cfg(&context, compression);
-            let journal = recover(context.child("prune_recovery"), cfg, post_prune_checkpoint)
-                .await
-                .expect("oversized journal must reopen after interrupted prune");
-            let recovered = recovered_prefix(&journal, &expected).await;
-            assert_eq!(
-                recovered[&INTERRUPTED_PRUNE_MIN], expected[&INTERRUPTED_PRUNE_MIN],
-                "prune changed the retained boundary section"
-            );
-            let mut retained = false;
-            for (&section, expected_entries) in expected.iter().filter(|(section, entries)| {
-                **section < INTERRUPTED_PRUNE_MIN && !entries.is_empty()
-            }) {
-                let recovered_entries = &recovered[&section];
-                if recovered_entries.is_empty() {
-                    assert!(
-                        !retained,
-                        "interrupted ascending prune left a hole before section {section}"
-                    );
-                } else {
-                    assert_eq!(
-                        recovered_entries, expected_entries,
-                        "interrupted prune partially removed section {section}"
-                    );
-                    retained = true;
+                let mut expected = expected;
+                for section in 10..=INTERRUPTED_PRUNE_MIN {
+                    let value = [section as u8; 16];
+                    let (position, offset, size);
+                    (journal, position, offset, size) = journal
+                        .append(section, TestEntry::new(section), &value)
+                        .await
+                        .expect("pre-prune append should succeed");
+                    let entries = expected.entry(section).or_default();
+                    assert_eq!(position as usize, entries.len());
+                    entries.push((TestEntry::new(section).with_location(offset, size), value));
                 }
-            }
+                journal = journal
+                    .sync_all()
+                    .await
+                    .expect("pre-prune sync should succeed");
 
-            let (journal, _) = journal
-                .prune(INTERRUPTED_PRUNE_MIN)
-                .await
-                .expect("prune retry must succeed");
-            *context.storage_fault_config().write() = remove_faults();
-            let _ = journal.destroy().await;
-        });
+                // Invalidate checkpoint floors below the requested prune before production removes
+                // their sections. Recovery may retain all old physical sections or discard them
+                // through the one atomic removal batch.
+                let post_prune_checkpoint = expected
+                    .keys()
+                    .filter(|&&section| section >= INTERRUPTED_PRUNE_MIN)
+                    .filter_map(|&section| journal.size(section).ok().map(|size| (section, size)))
+                    .collect();
+                *context.storage_fault_config().write() = batch_faults();
+                let prune_completed = journal.prune(INTERRUPTED_PRUNE_MIN).await.is_ok();
+                (expected, post_prune_checkpoint, prune_completed)
+            },
+        );
 
     deterministic::Runner::from(runtime_checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
         let cfg = crash_cfg(&context, compression);
-        let journal = recover(context.child("redestroy"), cfg, BTreeMap::new())
+        let journal = recover(context.child("prune_recovery"), cfg, post_prune_checkpoint)
             .await
-            .expect("oversized journal must reopen after interrupted destroy");
-        journal.destroy().await.expect("destroy retry must succeed");
+            .expect("oversized journal must reopen after interrupted prune");
+        let recovered = recovered_prefix(&journal, &expected).await;
+        let mut fully_pruned = expected.clone();
+        for (&section, entries) in &mut fully_pruned {
+            if section < INTERRUPTED_PRUNE_MIN {
+                entries.clear();
+            }
+        }
+        if prune_completed {
+            assert_eq!(
+                recovered, fully_pruned,
+                "completed prune did not recover its committed state"
+            );
+        } else {
+            assert!(
+                recovered == expected || recovered == fully_pruned,
+                "interrupted atomic prune recovered neither its old nor committed state"
+            );
+        }
+
+        let (journal, _) = journal
+            .prune(INTERRUPTED_PRUNE_MIN)
+            .await
+            .expect("prune retry must succeed");
+        journal
+            .destroy()
+            .await
+            .expect("cleanup destroy must succeed");
     });
 }
 

@@ -259,7 +259,7 @@ where
 
     pub(crate) hasher: StandardHasher<H>,
 
-    /// Exact namespace entries owned by the backing journal.
+    /// Exact namespace entries owned by the backing journal for its lifetime.
     backing_targets: Vec<RemoveTarget>,
 }
 
@@ -726,7 +726,7 @@ where
         self.merkle.destroy_context()
     }
 
-    /// Finish backing-journal work, then return the physical namespace entries it owns.
+    /// Finish backing-journal work, then return this journal's exact namespace entries.
     pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error<F>> {
         let Self {
             journal,
@@ -749,7 +749,7 @@ where
         let context = self.destroy_context();
         let targets = self.into_remove_targets().await?;
         context
-            .remove_batch(targets)
+            .apply_batch(targets.into_iter().map(Into::into).collect())
             .await
             .map_err(JournalError::Runtime)
             .map_err(Error::Journal)

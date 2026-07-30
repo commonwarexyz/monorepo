@@ -18,6 +18,7 @@ const IOVEC_BATCH_SIZE: usize = 32;
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
+    generation: Arc<super::Generation>,
     file: Arc<File>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
@@ -25,20 +26,38 @@ pub struct Blob {
 }
 
 impl Blob {
-    pub fn new(
+    pub(super) fn new(
         partition: String,
         name: &[u8],
         file: File,
         pool: BufferPool,
         data_offset: u64,
+        generation: Arc<super::Generation>,
     ) -> Self {
         Self {
             partition,
             name: name.into(),
+            generation,
             file: Arc::new(file),
             pool,
             data_offset,
         }
+    }
+
+    pub(super) fn partition(&self) -> &str {
+        &self.partition
+    }
+
+    pub(super) fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    pub(super) const fn data_offset(&self) -> u64 {
+        self.data_offset
+    }
+
+    pub(super) const fn generation(&self) -> &Arc<super::Generation> {
+        &self.generation
     }
 
     fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {

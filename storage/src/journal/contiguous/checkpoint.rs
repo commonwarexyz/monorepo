@@ -31,9 +31,7 @@ use crate::{
     journal::Error,
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_runtime::Handle;
-#[commonware_macros::stability(ALPHA)]
-use commonware_runtime::RemoveTarget;
+use commonware_runtime::{Handle, RemoveTarget};
 use commonware_utils::sequence::VecU64;
 
 /// Key for the mid-blob pruning boundary. Absent when the boundary is blob-aligned (it is then

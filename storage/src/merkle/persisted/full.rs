@@ -908,7 +908,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.journal.destroy_context()
     }
 
-    /// Wait for in-flight child syncs, then return the physical namespace entries it owns.
+    /// Wait for in-flight child syncs, then return this structure's namespace entries.
     pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error<F>> {
         let Self {
             journal, metadata, ..
@@ -923,7 +923,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let context = self.destroy_context();
         let targets = self.into_remove_targets().await?;
         context
-            .remove_batch(targets)
+            .apply_batch(targets.into_iter().map(Into::into).collect())
             .await
             .map_err(JError::Runtime)
             .map_err(Error::Journal)
@@ -2803,9 +2803,9 @@ mod tests {
                     drop(old);
 
                     let faults = if post_commit {
-                        deterministic::FaultConfig::default().remove_batch_post_commit(1.0)
+                        deterministic::FaultConfig::default().batch_post_commit(1.0)
                     } else {
-                        deterministic::FaultConfig::default().remove_batch(1.0)
+                        deterministic::FaultConfig::default().batch(1.0)
                     };
                     *context.storage_fault_config().write() = faults;
                     let result = Merkle::<F, _, Digest, Sequential>::init_sync(

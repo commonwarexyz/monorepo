@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, RemoveTarget,
+    BatchOperation, Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, RemoveTarget,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -22,6 +22,18 @@ struct Metrics {
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
+}
+
+/// A blob rewind whose durable storage operations have been prepared but not yet applied.
+pub(super) enum PreparedRewind<B: RBlob> {
+    /// The existing writable tail was shortened in place.
+    Tail,
+    /// A sealed blob becomes the new writable tail after newer blobs are removed.
+    Sealed {
+        tail: Writer<B>,
+        sealed_len: usize,
+        removed: u64,
+    },
 }
 
 impl Metrics {
@@ -91,27 +103,55 @@ impl<E: Context> Partition<E> {
         Ok(blobs)
     }
 
-    /// Remove the given blob.
-    pub(super) async fn remove(&self, blob: u64) -> Result<(), Error> {
-        self.context
-            .remove(&self.name, Some(&blob.to_be_bytes()))
-            .await?;
-        Ok(())
-    }
-
     /// Remove an exact set of blobs as one namespace operation.
     pub(super) async fn remove_many(
         &self,
         blobs: impl IntoIterator<Item = u64>,
     ) -> Result<(), Error> {
-        let targets = blobs.into_iter().map(|blob| RemoveTarget::Blob {
-            partition: self.name.clone(),
-            name: blob.to_be_bytes().to_vec(),
-        });
+        let targets = self.blob_targets(blobs);
+        self.remove_targets(targets).await
+    }
+
+    /// Return the exact namespace entries for the given blobs.
+    fn blob_targets(&self, blobs: impl IntoIterator<Item = u64>) -> Vec<RemoveTarget> {
+        blobs
+            .into_iter()
+            .map(|blob| RemoveTarget::Blob {
+                partition: self.name.clone(),
+                name: blob.to_be_bytes().to_vec(),
+            })
+            .collect()
+    }
+
+    /// Return removal operations for the given blobs.
+    pub(super) fn blob_operations(
+        &self,
+        blobs: impl IntoIterator<Item = u64>,
+    ) -> Vec<BatchOperation<E::Blob>> {
+        self.blob_targets(blobs)
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Apply storage operations atomically.
+    pub(super) async fn apply_batch(
+        &self,
+        operations: Vec<BatchOperation<E::Blob>>,
+    ) -> Result<(), Error> {
+        if operations.is_empty() {
+            return Ok(());
+        }
         self.context
-            .remove_batch(targets.collect())
+            .apply_batch(operations)
             .await
             .map_err(Error::Runtime)
+    }
+
+    /// Remove exact namespace entries as one batch.
+    async fn remove_targets(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        self.apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
     }
 
     /// Return a context capable of removing this partition's namespace entries.
@@ -125,16 +165,17 @@ impl<E: Context> Partition<E> {
     }
 
     /// Return the exact namespace entry owned by this partition.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn destroy_target(&self) -> RemoveTarget {
         RemoveTarget::Partition(self.name.clone())
     }
 
-    /// Remove an entire partition by name, treating "already missing" as success.
+    /// Remove an entire partition by name.
     pub(super) async fn remove_all(context: &E, name: &str) -> Result<(), Error> {
-        match context.remove(name, None).await {
-            Ok(()) | Err(RError::PartitionMissing(_)) => Ok(()),
-            Err(err) => Err(Error::Runtime(err)),
-        }
+        context
+            .apply_batch(vec![RemoveTarget::Partition(name.to_owned()).into()])
+            .await
+            .map_err(Error::Runtime)
     }
 
     /// Select the blob partition for `prefix` using legacy-first compatibility rules: the
@@ -331,6 +372,43 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
+    /// Return the exact namespace entries for every blob below `min_blob` after draining syncs.
+    ///
+    /// # Invariants
+    ///
+    /// - `oldest_blob_index < min_blob <= tail_blob_index`
+    pub(super) async fn prune_targets(
+        &mut self,
+        min_blob: u64,
+    ) -> Result<Vec<RemoveTarget>, Error> {
+        assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+        self.drain_tail_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
+
+        Ok(self
+            .partition
+            .blob_targets(self.oldest_blob_index..min_blob))
+    }
+
+    /// Remove exact namespace entries as one batch.
+    pub(super) async fn remove_targets(&self, targets: Vec<RemoveTarget>) -> Result<(), Error> {
+        self.partition.remove_targets(targets).await
+    }
+
+    /// Drop every blob below `min_blob` from the live state after its removal succeeds.
+    pub(super) fn finalize_prune(&mut self, min_blob: u64) {
+        assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
+
+        let drop_count = (min_blob - self.oldest_blob_index) as usize;
+        self.sealed.drain(..drop_count);
+        self.sealed_snapshot = None;
+        self.oldest_blob_index = min_blob;
+        self.metrics
+            .tracked
+            .dec_by(i64::try_from(drop_count).expect("tracked blob count fits in i64"));
+        self.metrics.pruned.inc_by(drop_count as u64);
+    }
+
     /// Drop every blob below `min_blob` and remove their names as one batch. Safe with live
     /// readers: snapshot readers keep their own handles, which the runtime's read-after-remove
     /// contract keeps valid.
@@ -338,57 +416,34 @@ impl<E: Context> Writable<E> {
     /// # Invariants
     ///
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
+    #[cfg(test)]
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
-        assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
-        self.drain_tail_predecessor_sync().await?;
-        self.drain_tail_sync().await?;
-
-        let drop_count = (min_blob - self.oldest_blob_index) as usize;
-        let prev_oldest_blob_index = self.oldest_blob_index;
-        self.sealed.drain(..drop_count);
-        self.sealed_snapshot = None;
-        self.oldest_blob_index = min_blob;
-
-        self.partition
-            .remove_many(prev_oldest_blob_index..min_blob)
-            .await?;
-        self.metrics
-            .tracked
-            .dec_by(i64::try_from(drop_count).expect("tracked blob count fits in i64"));
-        self.metrics.pruned.inc_by(drop_count as u64);
+        let targets = self.prune_targets(min_blob).await?;
+        self.remove_targets(targets).await?;
+        self.finalize_prune(min_blob);
         Ok(())
     }
 
-    /// Rewind the tail to `byte_offset`, shrinking it in place.
+    /// Prepare a rewind by draining syncs and staging the retained shrink and all suffix removals.
     ///
     /// # Invariants
     ///
-    /// - `byte_offset <= tail size`
-    ///
-    pub(super) async fn rewind_tail(&mut self, byte_offset: u64) -> Result<(), Error> {
-        let current_bytes = self.tail.size();
-        assert!(byte_offset <= current_bytes);
-        if byte_offset < current_bytes {
-            self.drain_tail_predecessor_sync().await?;
-            self.drain_tail_sync().await?;
-            self.tail.resize(byte_offset).await?;
-        }
-        Ok(())
-    }
-
-    /// Rewind into a sealed blob: demote it to the writable tail, rewinding to `byte_offset`,
-    /// and discarding every newer blob.
-    ///
-    /// # Invariants
-    ///
-    /// - `blob < tail_blob_index`
-    pub(super) async fn rewind_into_sealed(
+    /// - `blob <= tail_blob_index`
+    /// - `byte_offset` does not exceed the target blob's size
+    pub(super) async fn prepare_rewind(
         &mut self,
         blob: u64,
         byte_offset: u64,
-    ) -> Result<(), Error> {
+        operations: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind<E::Blob>, Error> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
+
+        if blob == self.tail_blob_index() {
+            assert!(byte_offset <= self.tail.size());
+            self.tail.resize_into(byte_offset, operations).await?;
+            return Ok(PreparedRewind::Tail);
+        }
 
         let idx = blob
             .checked_sub(self.oldest_blob_index)
@@ -400,30 +455,51 @@ impl<E: Context> Writable<E> {
         // gets a fresh page-cache id, so pages cached under the sealed handle's id are
         // unreachable.
         let mut new_writer = self.partition.open(blob).await?;
-        let current_bytes = new_writer.size();
-        if byte_offset < current_bytes {
-            new_writer.resize(byte_offset).await?;
-        }
+        assert!(byte_offset <= new_writer.size());
+        new_writer.resize_into(byte_offset, operations).await?;
 
-        // Capture the old tail before truncating `sealed` (which redefines `tail_blob`).
+        // Capture the old tail before finalization redefines `tail_blob`.
         let old_tail_blob = self.tail_blob_index();
-        self.tail = new_writer;
-        self.partition
-            .remove_many((blob + 1)..=old_tail_blob)
-            .await?;
+        operations.extend(self.partition.blob_operations((blob + 1)..=old_tail_blob));
+        Ok(PreparedRewind::Sealed {
+            tail: new_writer,
+            sealed_len: idx,
+            removed: old_tail_blob - blob,
+        })
+    }
+
+    /// Apply prepared storage operations atomically.
+    pub(super) async fn apply_batch(
+        &self,
+        operations: Vec<BatchOperation<E::Blob>>,
+    ) -> Result<(), Error> {
+        self.partition.apply_batch(operations).await
+    }
+
+    /// Publish a prepared rewind after its storage batch succeeds.
+    pub(super) fn finalize_rewind(&mut self, prepared: PreparedRewind<E::Blob>) {
+        let PreparedRewind::Sealed {
+            tail,
+            sealed_len,
+            removed,
+        } = prepared
+        else {
+            return;
+        };
+
+        self.tail = tail;
         self.metrics
             .tracked
-            .dec_by(i64::try_from(old_tail_blob - blob).expect("tracked blob count fits in i64"));
+            .dec_by(i64::try_from(removed).expect("tracked blob count fits in i64"));
 
         // Sealed history now ends below the target, which is the tail.
-        self.sealed.truncate(idx);
+        self.sealed.truncate(sealed_len);
         self.sealed_snapshot = None;
-        Ok(())
     }
 
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
     ///
-    /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
+    /// Safe with live readers, like pruning: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
