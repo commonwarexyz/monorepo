@@ -1345,6 +1345,9 @@ where
         // The floor is durable, so cache/finalized data below it can be pruned.
         self = self.prune_after_floor(height).await;
 
+        // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
+        // stops obsolete network work, but later local ingress can still satisfy these waiters,
+        // and callers do not retry a closed subscription.
         let repaired;
         (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
         if repaired {

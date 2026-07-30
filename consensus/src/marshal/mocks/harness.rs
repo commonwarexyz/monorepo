@@ -5081,6 +5081,7 @@ where
             )
             .await
             .unwrap();
+
         // Consume the known finalized range. The stream may keep waiting for
         // an older parent while that parent can still become available.
         let blocks = ancestry.take(5).collect::<Vec<_>>().await;
