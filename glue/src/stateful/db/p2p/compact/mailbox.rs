@@ -144,13 +144,12 @@ where
         &self,
         target: compact::Target<Self::Family, Self::Digest>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
-        let request = target;
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetState {
-            request: request.clone(),
+            request: target.clone(),
             response,
         });
-        let mut cancel = CancelGuard::new(self.sender.clone(), Message::CancelState { request });
+        let mut cancel = CancelGuard::new(self.sender.clone(), Message::CancelState { request: target });
         let result = receiver.await;
         cancel.disarm();
         result.map_err(|_| ResponseDropped)?

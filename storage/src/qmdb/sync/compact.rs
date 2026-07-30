@@ -440,7 +440,7 @@ where
 /// 2. Verify the final commit proof against `target.root`.
 /// 3. Rebuild the compact frontier in memory and compare its root against `target.root`.
 /// 4. Build the compact db from that already-validated state.
-/// 5. Assert the db root still matches and persist the state.
+/// 5. Fail with `RootMismatch` if the db root does not match; otherwise persist the state.
 ///
 /// A failure before the final persist leaves on-disk state untouched.
 async fn attempt_sync<DB, S>(
@@ -475,9 +475,9 @@ where
             }
         };
 
-        // The peer response has already authenticated the final commit and frontier. From here,
-        // construction should only fail for local database/storage reasons; a root mismatch is a
-        // local defect, terminal and never persisted, and no fault of the peer.
+        // The peer response has already authenticated the final commit and frontier, so a root
+        // mismatch after construction is a local defect: fail terminally, persisting nothing
+        // and judging no peer.
         let db = DB::from_validated_state(
             context.child("compact").with_attribute("attempt", attempt),
             db_config.clone(),
@@ -501,7 +501,6 @@ where
     }
 }
 
-/// Validate the peer-provided compact state before constructing local database storage.
 /// Whether a response has the shape and commit proof of compact state for `target`.
 ///
 /// The cheap prefix of full validation: exactly one operation, the pins at the tip, a proof
@@ -539,6 +538,7 @@ where
     )
 }
 
+/// Validate the peer-provided compact state before constructing local database storage.
 pub(crate) fn validate_compact_state<DB>(
     target: &Target<DB::Family, DB::Digest>,
     response: Response<DB::Family, DB::Op, DB::Digest>,
@@ -799,23 +799,24 @@ mod tests {
 
     struct TestDb {
         root: Digest,
+        persists: Arc<AtomicUsize>,
     }
 
     impl Database for TestDb {
         type Family = mmr::Family;
         type Op = u8;
-        type Config = (Digest, Arc<AtomicUsize>);
+        type Config = (Digest, Arc<AtomicUsize>, Arc<AtomicUsize>);
         type Digest = Digest;
         type Context = deterministic::Context;
         type Hasher = Sha256;
 
         async fn from_validated_state(
             _context: Self::Context,
-            (root, constructions): Self::Config,
+            (root, constructions, persists): Self::Config,
             _state: super::ValidatedState<Self::Family, Self::Op, Self::Digest>,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
             constructions.fetch_add(1, Ordering::SeqCst);
-            Ok(Self { root })
+            Ok(Self { root, persists })
         }
 
         fn inactivity_floor(_op: &Self::Op) -> Option<Location<Self::Family>> {
@@ -827,6 +828,7 @@ mod tests {
         }
 
         async fn persist_compact_state(self) -> Result<Self, qmdb::Error<Self::Family>> {
+            self.persists.fetch_add(1, Ordering::SeqCst);
             Ok(self)
         }
     }
@@ -948,6 +950,7 @@ mod tests {
                 .push(Sha256::hash(&[b"extra pin"]));
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let constructions = Arc::new(AtomicUsize::new(0));
+            let persists = Arc::new(AtomicUsize::new(0));
 
             let db = super::sync::<TestDb, _>(Config {
                 context,
@@ -958,7 +961,7 @@ mod tests {
                     ]))),
                 },
                 target: target.clone(),
-                db_config: (target.root, constructions.clone()),
+                db_config: (target.root, constructions.clone(), persists.clone()),
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
@@ -968,6 +971,7 @@ mod tests {
 
             assert!(good_rx.await.expect("valid feedback should arrive"));
             assert_eq!(constructions.load(Ordering::SeqCst), 1);
+            assert_eq!(persists.load(Ordering::SeqCst), 1);
             assert_eq!(db.root(), target.root);
         });
     }
@@ -978,20 +982,21 @@ mod tests {
             let (state, target) = valid_state_and_target();
             let (validity_tx, validity_rx) = commonware_utils::channel::oneshot::channel();
             let constructions = Arc::new(AtomicUsize::new(0));
+            let persists = Arc::new(AtomicUsize::new(0));
             let wrong_root = Sha256::hash(&[b"wrong root"]);
 
             // The database reconstructs to a root other than the validated target: a local
             // defect, so sync must fail without retrying or judging the peer.
             let result = super::sync::<TestDb, _>(Config {
                 context,
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([(
                         state,
                         Some(validity_tx),
                     )]))),
                 },
                 target: target.clone(),
-                db_config: (wrong_root, constructions.clone()),
+                db_config: (wrong_root, constructions.clone(), persists.clone()),
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
@@ -1010,6 +1015,7 @@ mod tests {
                 Ok(_) => panic!("expected RootMismatch, sync succeeded"),
             }
             assert_eq!(constructions.load(Ordering::SeqCst), 1);
+            assert_eq!(persists.load(Ordering::SeqCst), 0, "nothing may be persisted");
             assert!(validity_rx.await.is_err(), "peer must not be judged");
         });
     }
