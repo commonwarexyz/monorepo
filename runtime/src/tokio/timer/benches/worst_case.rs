@@ -64,10 +64,7 @@ async fn benchmark_descending_registration(
     for backend in config.backends() {
         let mut elapsed = Vec::with_capacity(config.worst_batches);
         for _ in 0..config.worst_batches {
-            elapsed.push(
-                run_registration_batch(&clock, backend, REGISTRATION_TIMERS, REGISTRATION_STEP)
-                    .await?,
-            );
+            elapsed.push(run_registration_batch(&clock, backend).await?);
         }
 
         let name = format!(
@@ -93,20 +90,16 @@ async fn benchmark_descending_registration(
 async fn run_registration_batch(
     clock: &commonware_tokio::Context,
     backend: Backend,
-    timers: usize,
-    step: Duration,
 ) -> io::Result<Duration> {
-    let wall_base = checked_system_deadline(LONG_DEADLINE)?;
-    let mut sleeps = Vec::with_capacity(timers);
+    let wall_base = SystemTime::now() + LONG_DEADLINE;
+    let mut sleeps = Vec::with_capacity(REGISTRATION_TIMERS);
     let start = Instant::now();
 
     // Register latest to earliest so each insertion becomes the heap minimum.
-    for index in 0..timers {
-        let positions = timers - index;
-        let offset = checked_step(step, positions)?;
-        let wall_deadline = wall_base
-            .checked_add(offset)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wall deadline overflow"))?;
+    for index in 0..REGISTRATION_TIMERS {
+        let positions = u32::try_from(REGISTRATION_TIMERS - index)
+            .expect("fixed registration count must fit into u32");
+        let wall_deadline = wall_base + REGISTRATION_STEP * positions;
         let mut sleep = sleep_until_wall(clock, backend, wall_deadline);
 
         // Tokio registers lazily, while Commonware registers during construction.
@@ -135,13 +128,7 @@ async fn benchmark_cancellation(
     for backend in config.backends() {
         let mut one_producer_p50 = None;
         for producers in config.cancellation_producer_counts() {
-            let total_canceled =
-                CANCELLATION_TIMERS
-                    .checked_mul(CANCEL_PERCENT)
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "cancel count overflow")
-                    })?
-                    / 100;
+            let total_canceled = CANCELLATION_TIMERS * CANCEL_PERCENT / 100;
             let mut drain = Vec::with_capacity(config.worst_batches);
 
             for batch in 0..config.worst_batches {
@@ -249,10 +236,8 @@ pub(super) async fn run_cancellation_batch(
     producers: usize,
     batch: u64,
 ) -> io::Result<Duration> {
-    let wall_deadline = checked_system_deadline(LONG_DEADLINE)?;
-    let tokio_deadline = tokio::time::Instant::now()
-        .checked_add(LONG_DEADLINE)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Tokio deadline overflow"))?;
+    let wall_deadline = SystemTime::now() + LONG_DEADLINE;
+    let tokio_deadline = tokio::time::Instant::now() + LONG_DEADLINE;
     let gate = Arc::new(ProducerGate::new());
     let runtime = tokio::runtime::Handle::current();
     let mut handles = Vec::with_capacity(producers);
@@ -512,7 +497,7 @@ async fn run_storm_batch(
     lead: Duration,
     peer_lead: Duration,
 ) -> io::Result<StormResult> {
-    let deadlines = DeadlinePair::new(backend, lead)?;
+    let deadlines = DeadlinePair::new(backend, lead);
     let recorder = Arc::new(Recorder::new(deadlines.measurement_origin, timers));
     let waker = Waker::from(Arc::clone(&recorder));
     let mut task_context = Context::from_waker(&waker);
@@ -543,10 +528,7 @@ async fn run_storm_batch(
         tokio::time::sleep(remaining - peer_lead).await;
     }
     let (peer_ready_sender, peer_ready) = oneshot::channel();
-    let peer_timeout = deadlines
-        .measurement_deadline
-        .checked_add(STORM_COMPLETION_TIMEOUT)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "peer timeout overflow"))?;
+    let peer_timeout = deadlines.measurement_deadline + STORM_COMPLETION_TIMEOUT;
     let peer_recorder = Arc::clone(&recorder);
     let peer = tokio::spawn(measure_peer_gap(
         peer_recorder,
@@ -648,7 +630,7 @@ impl Recorder {
         // callback execution order. Every callback performs only this one RMW.
         let before = self.completed.fetch_add(1, Ordering::Relaxed);
         let is_first = before == 0;
-        let is_final = before.checked_add(1) == Some(self.target);
+        let is_final = before + 1 == self.target;
         if !is_first && !is_final {
             return;
         }
@@ -690,27 +672,4 @@ fn decode_duration(encoded: u64) -> io::Result<Duration> {
         return Err(io::Error::other("storm timer recorder was never woken"));
     }
     Ok(Duration::from_nanos(encoded - 1))
-}
-
-/// Adds a fixed duration to the wall clock with overflow validation.
-fn checked_system_deadline(duration: Duration) -> io::Result<SystemTime> {
-    SystemTime::now()
-        .checked_add(duration)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wall deadline overflow"))
-}
-
-/// Multiplies a deadline step by a platform-sized position.
-fn checked_step(step: Duration, positions: usize) -> io::Result<Duration> {
-    let positions = u32::try_from(positions).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "registration timer count exceeds u32",
-        )
-    })?;
-    step.checked_mul(positions).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "registration deadline offset overflow",
-        )
-    })
 }

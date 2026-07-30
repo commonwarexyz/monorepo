@@ -153,17 +153,16 @@ pub(crate) fn cancellation_shard_distribution(
     shards: Option<usize>,
     producers: usize,
 ) -> String {
-    let Backend::Commonware = backend else {
-        return "effective_timer_shards=backend-managed \
-                producers_per_timer_shard_min=unavailable \
-                producers_per_timer_shard_max=unavailable"
-            .to_owned();
+    let unavailable = |effective| {
+        format!(
+            "effective_timer_shards={effective} producers_per_timer_shard_min=unavailable \
+             producers_per_timer_shard_max=unavailable"
+        )
     };
-    let Some(shards) = shards else {
-        return "effective_timer_shards=tokio-fallback \
-                producers_per_timer_shard_min=unavailable \
-                producers_per_timer_shard_max=unavailable"
-            .to_owned();
+    let shards = match (backend, shards) {
+        (Backend::Commonware, Some(shards)) => shards,
+        (Backend::Commonware, None) => return unavailable("tokio-fallback"),
+        (Backend::Tokio, _) => return unavailable("backend-managed"),
     };
 
     // Dedicated producer threads receive consecutive round-robin claims.

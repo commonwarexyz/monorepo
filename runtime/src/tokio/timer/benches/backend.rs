@@ -4,7 +4,6 @@ use crate::Backend;
 use commonware_runtime::{Clock as _, tokio as commonware_tokio};
 use std::{
     future::Future,
-    io,
     pin::Pin,
     task::{Context, Poll},
     time::{Duration, Instant, SystemTime},
@@ -30,37 +29,31 @@ pub(crate) struct DeadlinePair {
 
 impl DeadlinePair {
     /// Constructs both backend forms and retains the selected measurement pair.
-    pub(crate) fn new(backend: Backend, target: Duration) -> io::Result<Self> {
+    pub(crate) fn new(backend: Backend, target: Duration) -> Self {
         // The monotonic observations bracket the wall-clock snapshot. Using
         // the preceding value for Commonware prevents valid callbacks from
         // being classified early, while the span bounds its overstatement.
         let commonware_origin = Instant::now();
         let wall_origin = SystemTime::now();
         let tokio_origin = tokio::time::Instant::now();
-        let wall = wall_origin
-            .checked_add(target)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wall deadline overflow"))?;
-        let tokio = tokio_origin.checked_add(target).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Tokio deadline overflow")
-        })?;
+        let wall = wall_origin + target;
+        let tokio = tokio_origin + target;
         let tokio_origin = tokio_origin.into_std();
         let (measurement_origin, measurement_deadline, clock_pair_span) = match backend {
             Backend::Commonware => (
                 commonware_origin,
-                commonware_origin.checked_add(target).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "measurement deadline overflow")
-                })?,
+                commonware_origin + target,
                 Some(tokio_origin.saturating_duration_since(commonware_origin)),
             ),
             Backend::Tokio => (tokio_origin, tokio.into_std(), None),
         };
-        Ok(Self {
+        Self {
             wall,
             tokio,
             measurement_origin,
             measurement_deadline,
             clock_pair_span,
-        })
+        }
     }
 }
 

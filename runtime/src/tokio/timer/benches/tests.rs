@@ -37,8 +37,8 @@ fn worst_batch_overflow_is_rejected_before_allocation() {
 #[test]
 fn deadline_pair_preserves_each_backend_measurement_contract() {
     let target = Duration::from_millis(50);
-    let commonware = backend::DeadlinePair::new(Backend::Commonware, target).unwrap();
-    let tokio = backend::DeadlinePair::new(Backend::Tokio, target).unwrap();
+    let commonware = backend::DeadlinePair::new(Backend::Commonware, target);
+    let tokio = backend::DeadlinePair::new(Backend::Tokio, target);
 
     // Derive Commonware's monotonic clock-pair uncertainty.
     let span = commonware
