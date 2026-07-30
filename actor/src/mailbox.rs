@@ -909,6 +909,22 @@ mod tests {
         }
     }
 
+    fn assert_send<T: Send>(_: &T) {}
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn native_mailboxes_remain_thread_safe() {
+        assert_send_sync::<Sender<Ack>>();
+        assert_send_sync::<UnreliableSender<Message>>();
+
+        let (_sender, mut receiver) = new::<Ack>(NZUsize!(1));
+        assert_send(&receiver.recv());
+
+        let (_sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
+        assert_send(&receiver.recv());
+    }
+
     struct Ack {
         _sender: oneshot::Sender<()>,
     }
