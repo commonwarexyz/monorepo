@@ -308,23 +308,21 @@ impl Panicker {
     }
 
     /// Notifies the runtime of an infrastructure failure regardless of panic policy.
-    ///
-    /// Returns true when this failure won the single root-interruption race.
     #[cfg(any(test, target_os = "linux", target_os = "macos"))]
-    pub(crate) fn notify_fatal(&self, panic: Box<dyn Any + Send + 'static>) -> bool {
-        self.send(panic)
+    pub(crate) fn notify_fatal(&self, panic: Box<dyn Any + Send + 'static>) {
+        self.send(panic);
     }
 
     /// Sends the first root-interrupting panic and ignores later failures.
-    fn send(&self, panic: Box<dyn Any + Send + 'static>) -> bool {
+    fn send(&self, panic: Box<dyn Any + Send + 'static>) {
         // Claim the sender before publishing so wake callbacks run without this lock.
         let sender = self.sender.lock().take();
         let Some(sender) = sender else {
-            return false;
+            return;
         };
 
-        // Report a win only when the root receiver still accepts the payload.
-        sender.send(panic).is_ok()
+        // The root task may have completed after the sender was claimed.
+        let _ = sender.send(panic);
     }
 }
 
@@ -411,10 +409,6 @@ mod tests {
     use futures::future;
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
-        sync::{
-            Arc, Barrier,
-            atomic::{AtomicUsize, Ordering},
-        },
         task::Poll,
     };
     use tracing_subscriber::{Registry, layer::SubscriberExt as _};
@@ -433,42 +427,20 @@ mod tests {
     }
 
     #[test]
-    fn fatal_notification_bypasses_catch_and_has_one_winner() {
+    fn fatal_notification_bypasses_catch() {
         // Configure ordinary task panics to be caught, then verify an ordinary
         // notification leaves the root-interruption sender available.
         let (panicker, panicked) = Panicker::new(true);
         panicker.notify(Box::new("caught task panic"));
 
-        // Race several infrastructure failures against the same one-shot path.
-        // Exactly one caller must consume the sender.
-        let contenders = 4;
-        let barrier = Arc::new(Barrier::new(contenders));
-        let winners = Arc::new(AtomicUsize::new(0));
-        let threads: Vec<_> = (0..contenders)
-            .map(|index| {
-                let panicker = panicker.clone();
-                let barrier = Arc::clone(&barrier);
-                let winners = Arc::clone(&winners);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    if panicker.notify_fatal(Box::new(format!("fatal {index}"))) {
-                        winners.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-            })
-            .collect();
-        for thread in threads {
-            thread.join().unwrap();
-        }
+        // Infrastructure failures bypass the ordinary catch policy.
+        panicker.notify_fatal(Box::new("fatal infrastructure failure"));
 
-        // The winning payload reaches the receiver despite `catch = true`, while
-        // every later infrastructure failure observes the consumed sender.
-        assert_eq!(winners.load(Ordering::Relaxed), 1);
+        // The fatal payload reaches the receiver despite `catch = true`.
         let panic = futures::executor::block_on(panicked.receiver).unwrap();
-        assert!(
-            panic
-                .downcast_ref::<String>()
-                .is_some_and(|message| message.starts_with("fatal "))
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"fatal infrastructure failure")
         );
     }
 
@@ -494,7 +466,7 @@ mod tests {
         // same poll, after the interrupt receiver was first observed pending.
         let (panicker, panicked) = Panicker::new(true);
         let task = async move {
-            assert!(panicker.notify_fatal(Box::new("fatal during final poll")));
+            panicker.notify_fatal(Box::new("fatal during final poll"));
             7
         };
 
@@ -512,7 +484,7 @@ mod tests {
         // and then raises a generic panic during the same poll.
         let (panicker, panicked) = Panicker::new(true);
         let task = async move {
-            assert!(panicker.notify_fatal(Box::new("detailed fatal failure")));
+            panicker.notify_fatal(Box::new("detailed fatal failure"));
             panic!("generic root panic");
         };
 
@@ -523,16 +495,6 @@ mod tests {
         }))
         .expect_err("generic root panic replaced its fatal notification");
         assert_eq!(extract_panic_message(&*panic), "detailed fatal failure");
-    }
-
-    #[test]
-    fn fatal_notification_reports_closed_root_receiver() {
-        // Close the root receiver before attempting an infrastructure notification.
-        let (panicker, panicked) = Panicker::new(true);
-        drop(panicked);
-
-        // A consumed sender without a receiver must not be reported as an interrupt.
-        assert!(!panicker.notify_fatal(Box::new("unobserved fatal failure")));
     }
 
     #[test]

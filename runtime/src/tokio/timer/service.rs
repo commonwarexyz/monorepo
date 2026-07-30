@@ -666,7 +666,7 @@ impl<A: Alarm> Shard<A> {
             let pending = drain_heap(&mut state.entries);
             // Claim root interruption while the shard lock prevents a newly
             // failed sleep from racing this more detailed payload.
-            let _ = self.panicker.notify_fatal(Box::new(message));
+            self.panicker.notify_fatal(Box::new(message));
             (queued, desired, armed, notified, pending)
         };
 
