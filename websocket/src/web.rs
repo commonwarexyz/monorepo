@@ -331,11 +331,11 @@ impl Inner {
     }
 
     fn poll_open(&self, context: &mut TaskContext<'_>) -> Poll<Result<(), Error>> {
-        if self.opened.get() {
-            return Poll::Ready(Ok(()));
-        }
         if let Some(error) = self.terminal.borrow().clone() {
             return Poll::Ready(Err(error));
+        }
+        if self.opened.get() {
+            return Poll::Ready(Ok(()));
         }
         *self.open_waker.borrow_mut() = Some(context.waker().clone());
         Poll::Pending
