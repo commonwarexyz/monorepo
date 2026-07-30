@@ -15,6 +15,10 @@
 //! runtime stream contract. Dropping either half closes the data channel and peer connection.
 //! WebRTC does not expose a trustworthy peer origin, so the returned connection metadata has no
 //! origin. Changing [`PROTOCOL`] is a transport compatibility break.
+//!
+//! # Stability
+//!
+//! This crate is `ALPHA`. Its API may change as browser transport support matures.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
