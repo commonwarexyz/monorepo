@@ -29,7 +29,9 @@ interface BrowserP2pWasmModule {
   createBrowserChat?: (onEvent: (event: ChatEvent) => void) => BrowserP2pSession;
 }
 
-export const WASM_MODULE_URL = "/wasm/browser_p2p.js";
+const WASM_VERSION = "signaling-wasm-v1";
+export const WASM_MODULE_URL = `/wasm/browser_p2p.js?v=${WASM_VERSION}`;
+const WASM_BINARY_URL = `/wasm/browser_p2p_bg.wasm?v=${WASM_VERSION}`;
 
 export async function createBrowserChat(
   onEvent: (event: ChatEvent) => void,
@@ -43,7 +45,7 @@ export async function createBrowserChat(
   }
 
   try {
-    await module.default?.();
+    await module.default?.({ module_or_path: WASM_BINARY_URL });
   } catch (error) {
     throw bridgeError("Could not initialize the Commonware WASM module", error);
   }

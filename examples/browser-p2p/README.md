@@ -72,12 +72,18 @@ just clean   # Remove generated example output.
 
 ## ICE configuration
 
-The default configuration has no ICE servers and is intended for same-LAN testing. Inject STUN or
-TURN configuration through `COMMONWARE_ICE_SERVERS`:
+The default uses `stun:stun.cloudflare.com:3478` for public candidate discovery. STUN assists the
+browsers in finding a direct path; it does not relay chat traffic. Override the complete ICE server
+list through `COMMONWARE_ICE_SERVERS`:
 
 ```bash
 COMMONWARE_ICE_SERVERS='[{"urls":"stun:stun.example.net:3478"}]' just run
 ```
+
+Use `COMMONWARE_ICE_SERVERS='[]'` for isolated same-LAN testing. Some browser and network privacy
+configurations cannot establish that path without STUN. If STUN-assisted negotiation still fails,
+provide a credentialed TURN entry; direct connectivity cannot be guaranteed across arbitrary NATs
+and firewalls.
 
 The Bun service returns this bounded configuration from `/config.json`. Do not hardcode production
 TURN credentials in the application bundle. A TURN-selected connection relays WebRTC packets and

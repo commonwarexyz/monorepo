@@ -17,7 +17,8 @@ bun run serve
 ```
 
 `dist/` contains the hashed frontend assets. The parent build packages wasm-bindgen output beneath
-`dist/wasm`. `COMMONWARE_ICE_SERVERS` supplies an optional JSON array of ICE servers. Set
+`dist/wasm`. The default ICE configuration uses Cloudflare's public STUN endpoint;
+`COMMONWARE_ICE_SERVERS` replaces it with a JSON array, including `[]` to disable STUN. Set
 `TLS_CERT_FILE` and `TLS_KEY_FILE` together to protect application delivery and signaling metadata.
 The example's signaling cipher runs in WASM and therefore does not require secure-context-only Web
 Crypto. The server advertises a non-loopback LAN address by default. Set `PUBLIC_URL` to override

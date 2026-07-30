@@ -142,10 +142,17 @@ async function serveStatic(pathname: string): Promise<Response> {
   }
   return new Response(file, {
     headers: {
-      "cache-control": pathname === "/" ? "no-store" : "public, max-age=31536000, immutable",
+      "cache-control": cacheControl(pathname),
       "x-content-type-options": "nosniff",
     },
   });
+}
+
+export function cacheControl(pathname: string): string {
+  if (pathname === "/" || pathname.startsWith("/wasm/")) {
+    return "no-store";
+  }
+  return "public, max-age=31536000, immutable";
 }
 
 export function resolveStaticPath(root: string, pathname: string): string | undefined {
@@ -231,9 +238,9 @@ function isRelay(value: unknown): value is { type: "signal"; payload: string } {
     typeof value.payload === "string";
 }
 
-function parseIceServers(raw: string | undefined): RTCIceServer[] {
+export function parseIceServers(raw: string | undefined): RTCIceServer[] {
   if (!raw) {
-    return [];
+    return [{ urls: "stun:stun.cloudflare.com:3478" }];
   }
   let value: unknown;
   try {
