@@ -146,7 +146,10 @@ where
             request: target.clone(),
             response,
         });
-        let mut cancel = CancelGuard::new(self.sender.clone(), Message::CancelState { request: target });
+        let mut cancel = CancelGuard::new(
+            self.sender.clone(),
+            Message::CancelState { request: target },
+        );
         let result = receiver.await;
         cancel.disarm();
         result.map_err(|_| ResponseDropped)?

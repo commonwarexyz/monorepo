@@ -1008,7 +1008,11 @@ mod tests {
                 Ok(_) => panic!("expected RootMismatch, sync succeeded"),
             }
             assert_eq!(constructions.load(Ordering::SeqCst), 1);
-            assert_eq!(persists.load(Ordering::SeqCst), 0, "nothing may be persisted");
+            assert_eq!(
+                persists.load(Ordering::SeqCst),
+                0,
+                "nothing may be persisted"
+            );
             assert!(validity_rx.await.is_err(), "peer must not be judged");
         });
     }
