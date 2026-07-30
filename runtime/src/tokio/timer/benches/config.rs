@@ -211,7 +211,7 @@ impl Config {
     }
 
     /// Parses an explicit argument stream for production and unit tests.
-    pub(super) fn parse_from<I, T>(arguments: I) -> Result<Option<Self>, clap::Error>
+    fn parse_from<I, T>(arguments: I) -> Result<Option<Self>, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
