@@ -87,6 +87,13 @@ pub struct Db<
     /// The location of the last commit operation.
     pub(crate) last_commit_loc: Location<F>,
 
+    /// The durable frontier: the inactivity floor declared by the newest commit proven
+    /// durable in the log, up to that commit's operation count.
+    pub(crate) durable: std::ops::Range<Location<F>>,
+
+    /// A commit frontier that may be covered by the log's next durable barrier.
+    pub(crate) pending_commit: Option<std::ops::Range<Location<F>>>,
+
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
@@ -440,16 +447,57 @@ where
             ));
         }
 
+        // The prune target must be justified by a durable commit: recovery then lands on a
+        // commit whose floor covers everything pruned. Commit first only when no durable
+        // commit justifies the target yet.
         let boundary;
-        (self.log, boundary) = self.log.prune(prune_loc).await?;
+        if self.barrier().start < prune_loc {
+            (self.log, boundary) = self.log.prune_with_commit(prune_loc).await?;
+            self.mark_commit_durable();
+        } else {
+            (self.log, boundary) = self.log.prune(prune_loc).await?;
+        }
         Ok((self, boundary))
+    }
+
+    /// Advance [Self::durable] when the pending commit is proven durable.
+    pub(crate) fn advance_durable(&mut self) {
+        let bounds = self.log.bounds();
+        let durable = self.log.durable();
+        assert_eq!(
+            durable.start, bounds.start,
+            "journal durable range must start at the retained boundary"
+        );
+        assert!(
+            durable.end >= bounds.start && durable.end <= bounds.end,
+            "journal durable range must be a retained prefix"
+        );
+        let barrier = Location::new(durable.end);
+        if let Some(window) = self.pending_commit.take_if(|window| window.end <= barrier) {
+            self.durable = window;
+        }
+    }
+
+    /// Observe the journal barrier and return [Self::durable]. Durable claims (pruning
+    /// boundaries, watermarks) must be computed from this frontier, never from live state.
+    pub(crate) fn barrier(&mut self) -> std::ops::Range<Location<F>> {
+        self.advance_durable();
+        self.durable.clone()
+    }
+
+    /// Record that the current commit is proven durable.
+    pub(crate) fn mark_commit_durable(&mut self) {
+        self.pending_commit = None;
+        self.durable = self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1);
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
-    /// uncommitted operations are not guaranteed to survive.
+    /// uncommitted operations are not guaranteed to survive. When a durable commit already
+    /// justifies `prune_loc`, pruning skips its internal durability pass. Otherwise it first
+    /// makes the log durable.
     #[tracing::instrument(
         name = "qmdb.any.db.prune",
         level = "info",
@@ -694,6 +742,8 @@ where
             ))?;
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
+        self.pending_commit = None;
+        self.durable = Location::new(0)..Location::new(0);
         self.root = self
             .log
             .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
@@ -823,6 +873,8 @@ where
             inactivity_floor_loc,
             snapshot: index,
             last_commit_loc,
+            durable: inactivity_floor_loc..Location::new(*last_commit_loc + 1),
+            pending_commit: None,
             active_keys,
             bitmap,
             metrics,
@@ -848,6 +900,7 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.log = self.log.sync().await?;
+        self.mark_commit_durable();
         Ok(self)
     }
 
@@ -873,8 +926,14 @@ where
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
         self.metrics.start_sync_calls.inc();
+        let pending = self.inactivity_floor_loc..Location::new(*self.last_commit_loc + 1);
         let (log, handle) = self.log.start_sync().await?;
         self.log = log;
+
+        // Installing the journal's new barrier observes its predecessor. Promote any commit
+        // covered by that barrier before tracking the state covered by this sync.
+        self.advance_durable();
+        self.pending_commit = Some(pending);
         Ok((self, handle))
     }
 
@@ -895,6 +954,7 @@ where
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         self.log = self.log.commit().await?;
+        self.mark_commit_durable();
         Ok(self)
     }
 

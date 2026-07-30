@@ -223,6 +223,20 @@ impl merkle::Family for Family {
 impl Graftable for Family {
     type PendingChunk<D: Digest> = merkle::Unused;
 
+    fn subtree_root_birth_size(leaf_start: Location, height: u32) -> u64 {
+        let width = 1u64.checked_shl(height).expect("height excessively large");
+        if leaf_start.as_u64() & (width - 1) != 0 {
+            return Self::MAX_LEAVES
+                .as_u64()
+                .checked_add(1)
+                .expect("MAX_LEAVES must permit an unreachable sentinel");
+        }
+        leaf_start
+            .as_u64()
+            .checked_add(width)
+            .expect("birth size overflow")
+    }
+
     fn chunk_peaks(
         size: Position,
         chunk_idx: u64,
@@ -304,6 +318,14 @@ mod tests {
             let pos = Position::try_from(*loc).unwrap();
             assert_eq!(pos, *expected_pos);
         }
+    }
+
+    #[test]
+    fn test_subtree_root_birth_size_rejects_unaligned_start() {
+        assert!(
+            Family::subtree_root_birth_size(Location::new(1), 1) > *MAX_LEAVES,
+            "a subtree without a canonical root must be unreachable"
+        );
     }
 
     #[test]

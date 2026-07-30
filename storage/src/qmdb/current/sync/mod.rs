@@ -237,7 +237,7 @@ where
         root,
         metrics,
         #[cfg(test)]
-        halt_before_prune_log: false,
+        halt_before_prune_log: None,
     };
     current_db.update_metrics();
 

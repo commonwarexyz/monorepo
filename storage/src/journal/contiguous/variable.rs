@@ -6,10 +6,11 @@
 //! # Durability
 //!
 //! Data blobs follow the same rollover pipeline as the fixed journal: filling the tail seals it
-//! and starts its fsync after awaiting the previous rollover's fsync, so only the tail and its
+//! and begins syncing it after the previous rollover's sync completes, so only the tail and its
 //! predecessor can ever hold non-durable data. Recovery forward-validates those two blobs for
-//! interior fsync holes, and the offsets journal only advances after the data it indexes is
-//! durable. See the [`fixed`] module docs for the full model.
+//! missing data. The offsets journal is derived state: entries above the recovery
+//! watermark are discarded on reopen and rebuilt by replaying data. See the [`fixed`] module
+//! docs for the full model.
 
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
@@ -377,6 +378,14 @@ impl<C> Config<C> {
     }
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct PruneHalt {
+    reached: std::sync::atomic::AtomicBool,
+    offsets_barrier: std::sync::atomic::AtomicU64,
+    offsets_watermark: std::sync::atomic::AtomicU64,
+}
+
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
 struct Inner<E: Context, V: Codec> {
     /// The data blobs: sealed history plus the writable tail.
@@ -392,7 +401,7 @@ struct Inner<E: Context, V: Codec> {
     /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
     /// so tests can drop the pending future at that exact point.
     #[cfg(test)]
-    halt_before_offsets_prune: bool,
+    halt_before_offsets_prune: Option<Arc<PruneHalt>>,
 
     /// The number of items per blob.
     ///
@@ -411,9 +420,7 @@ struct Inner<E: Context, V: Codec> {
     /// Journal and Reader metrics.
     metrics: Arc<Metrics<E>>,
 
-    /// The size proven durable for both the data and offsets journals. The offsets watermark
-    /// only ever takes this joint value: a one-sided size could exceed the other journal's
-    /// surviving data after a crash, which init rejects as corruption.
+    /// The known-durable size of the data blobs. The offsets journal tracks its own barrier.
     barrier: Barrier,
 }
 
@@ -1163,14 +1170,18 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         metrics.update(bounds.end, bounds.start, items_per_blob);
 
         // The offsets watermark is this journal's recovery anchor. Init validated it against
-        // both journals, so it is a proven size to start from.
-        let barrier = Barrier::new(offsets.recovery_watermark());
+        // both journals, so it is a proven size to start from. A prune that collapses the
+        // journal persists no watermark and an empty-aligned reopen skips the offsets sync
+        // that would heal it, so the recovered watermark can trail the pruning boundary.
+        // Pruned positions were durably justified before removal, so the boundary is a
+        // durable floor.
+        let barrier = Barrier::new(offsets.recovery_watermark().max(bounds.start));
         Ok(Self {
             blobs,
             offsets,
             bounds,
             #[cfg(test)]
-            halt_before_offsets_prune: false,
+            halt_before_offsets_prune: None,
             items_per_blob: cfg.items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
@@ -1234,7 +1245,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             offsets,
             bounds: size..size,
             #[cfg(test)]
-            halt_before_offsets_prune: false,
+            halt_before_offsets_prune: None,
             items_per_blob: cfg.items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
@@ -1546,29 +1557,40 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             return Ok((self, false));
         }
 
+        // Blob removal is durable, so the new boundary must not outrun the data barrier. If it
+        // did, a crash could tear the first retained blob and leave recovery below the physical
+        // boundary. Once the barrier covers the boundary, recovery can safely fall back to it;
+        // the caller supplies the semantic durability proof required by [Mutable::prune].
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
+        if self.barrier.size() < new_boundary {
+            let data_sync = self.blobs.start_sync().await;
+            data_sync.await?;
+            self.barrier.mark_durable(self.bounds.end);
+        }
 
-        // Make all data durable before removing any: the prune target may be justified by an
-        // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this sync could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The sync also covers unsynced
-        // survivors above the boundary: removal may be interrupted, and recovery truncates at
-        // the first torn item, so an unsynced survivor could discard every synced blob behind
-        // it. Offsets entries for retained items must survive the same crash: recovery rebuilds
+        // Offsets entries for retained items must survive the same crash: recovery rebuilds
         // offsets that end behind the surviving data's end by replaying data, but offsets that
         // end behind its start are unrecoverable because the data needed to rebuild the missing
-        // entries is about to be removed. Data is flushed first, matching the ordering every
-        // other durability path maintains.
-        let data_sync = self.blobs.start_sync().await;
-        data_sync.await?;
-        self.offsets = self.offsets.commit().await?;
-        self.barrier.mark_durable(self.bounds.end);
+        // entries is about to be removed. The offsets barrier reaching the new boundary proves
+        // exactly that, so the commit is skipped. Offsets durable ahead of the data are not a
+        // hazard: recovery rewinds them to the watermark and replays data forward.
+        if self.offsets.barrier() < new_boundary {
+            self.offsets = self.offsets.commit().await?;
+        }
 
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
         #[cfg(test)]
-        if self.halt_before_offsets_prune {
+        if let Some(halt) = &self.halt_before_offsets_prune {
+            halt.offsets_barrier
+                .store(self.offsets.barrier(), std::sync::atomic::Ordering::SeqCst);
+            halt.offsets_watermark.store(
+                self.offsets.recovery_watermark(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            halt.reached
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             std::future::pending::<()>().await;
         }
 
@@ -1591,6 +1613,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data = self.blobs.start_sync().await;
         let (offsets_journal, offsets) = self.offsets.start_data_sync().await;
 
+        // The barrier proves only the data. `start_watermark_sync` caps the request at the
+        // offsets journal's own barrier, so the persisted anchor is durable in both journals.
         let size = self.barrier.size();
         let (offsets_journal, watermark_handle) =
             offsets_journal.start_watermark_sync(size).await?;
@@ -1613,8 +1637,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
+        let size = self.bounds.end;
         let handle = self.blobs.start_sync().await;
         handle.await?;
+        self.barrier.mark_durable(size);
         Ok(self)
     }
 
@@ -2310,6 +2336,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
     ///
+    /// The retained boundary must be justified by durable data (see [`Mutable::prune`]): a
+    /// successful prune does not make newer appends durable.
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
@@ -2443,6 +2472,11 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
+    }
+
+    fn durable(&mut self) -> Range<u64> {
+        let start = Contiguous::bounds(self).start;
+        start..self.0.barrier.size()
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {
@@ -2619,6 +2653,204 @@ mod tests {
         });
     }
 
+    /// With both barriers covering the boundary, a prune completes without starting (or
+    /// waiting on) any sync, including the offsets commit, and the durable prefix
+    /// survives reopen.
+    #[test_traced]
+    fn test_prune_skips_sync_when_barrier_covers_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-prune-fast".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            // Make two full sections durable, proving the barrier past the boundary.
+            let open = Inner::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg.clone(),
+            );
+            let mut journal = Box::new(drive_pending_syncs(&pending, open).await.unwrap());
+
+            drive_pending_syncs(
+                &pending,
+                journal.append_many(Many::Flat(&[0, 1, 2, 3, 4, 5])),
+            )
+            .await
+            .unwrap();
+            let mut journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+
+            // Park a newer sync covering a fresh append.
+            drive_pending_syncs(&pending, journal.append(&6))
+                .await
+                .unwrap();
+            let (journal, parked) = journal.start_sync().await.unwrap();
+
+            // The barrier covers the boundary, so the prune must neither start a new sync
+            // nor wait on the parked one.
+            let starts_before = pending.starts();
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(pruned);
+            assert_eq!(pending.starts(), starts_before);
+            assert_eq!(journal.bounds().start, 3);
+
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, parked).await.unwrap();
+            pending.unblock();
+            drop(journal);
+
+            // The pruned boundary and the released append both survive reopen.
+            let journal = Inner::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+            assert_eq!(journal.bounds(), 3..7);
+            for i in 3..7u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+        });
+    }
+
+    /// A prune whose offsets commit ran past the data barrier leaves the offsets ahead. The next
+    /// prune below that point must sync the data and skip the offsets commit.
+    #[test_traced]
+    fn test_prune_skips_offsets_commit_when_offsets_barrier_covers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-prune-offsets-covered".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..6u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+
+            // Commit proves the data through 6, then append past it so the following prune's
+            // offsets commit lands on a larger size than the data barrier holds.
+            let mut journal = journal.commit().await.unwrap();
+            for i in 6..9u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let (mut journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.0.barrier.size(), 6);
+            assert_eq!(journal.0.offsets.barrier(), 9);
+
+            // The data barrier trails the boundary and the offsets barrier covers it, so only
+            // the data leg runs.
+            for i in 9..12u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let (mut journal, pruned) = journal.prune(9).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.0.barrier.size(), 12);
+            assert_eq!(
+                journal.0.offsets.barrier(),
+                9,
+                "offsets commit must be skipped"
+            );
+            assert_eq!(journal.bounds(), 9..12);
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 9..12);
+            for i in 9..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Recovery rewinds offsets beyond the durable data prefix and rebuilds them from retained
+    /// data.
+    #[test_traced]
+    fn test_recovery_rewinds_offsets_ahead_of_data() {
+        let partition = "variable-recovery-offsets-ahead".to_string();
+        let executor = deterministic::Runner::default();
+        let ((), checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            |context| async move {
+                let cfg = Config {
+                    partition,
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(2048),
+                };
+                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg)
+                    .await
+                    .unwrap();
+                for i in 0..6u64 {
+                    (journal, _) = journal.append(&i).await.unwrap();
+                }
+
+                // Commit through 6, then leave positions 6..9 in a partial data blob while
+                // pruning makes their offsets durable.
+                let mut journal = journal.commit().await.unwrap();
+                for i in 6..9u64 {
+                    (journal, _) = journal.append(&i).await.unwrap();
+                }
+                let (mut journal, pruned) = journal.prune(5).await.unwrap();
+                assert!(pruned);
+                assert_eq!(journal.bounds(), 5..9);
+                assert_eq!(journal.0.barrier.size(), 6);
+                assert_eq!(journal.0.offsets.barrier(), 9);
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let cfg = Config {
+                partition,
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 5..6);
+            assert_eq!(journal.test_offsets_size(), 6);
+            assert_eq!(journal.read(5).await.unwrap(), 5);
+
+            (journal, _) = journal.append(&6).await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 5..7);
+            for i in 5..7u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_start_sync_advances_offsets_watermark_lagged() {
         let executor = deterministic::Runner::default();
@@ -2643,8 +2875,13 @@ mod tests {
             };
             let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
-            // Nothing proven while the first sync is parked: the anchor must not move.
+            // A data-only commit must not move the recovery anchor past the offsets barrier.
             journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let mut journal = drive_pending_syncs(&pending, journal.commit())
+                .await
+                .unwrap();
+            assert_eq!(journal.barrier.size(), 3);
+            assert_eq!(journal.offsets.barrier(), 0);
             let (mut journal, h1) = journal.start_sync().await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 0);
 
@@ -4007,10 +4244,10 @@ mod tests {
         });
     }
 
-    /// A crash after data pruning but before offsets pruning must remain recoverable even when
-    /// the last durable offsets end is below the new data boundary.
+    /// Cancellation after data pruning but before offsets pruning remains recoverable when the
+    /// offsets recovery watermark trails the new data boundary.
     #[test_traced]
-    fn test_variable_recovery_prune_crash_offsets_end_behind() {
+    fn test_variable_recovery_prune_cancelled_with_offsets_watermark_behind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -4026,8 +4263,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Persist offsets only through position 7, then append enough unsynced items for a
-            // prune to advance the data boundary beyond that durable offsets end.
+            // Persist the recovery watermark through position 7, then append enough items for a
+            // prune to advance the data boundary beyond that watermark.
             for i in 0..7u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
@@ -4035,11 +4272,11 @@ mod tests {
             for i in 7..12u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
+            assert_eq!(journal.0.offsets.recovery_watermark(), 7);
 
-            // Drop the production prune future while it is parked after the data-blob
-            // removal, before offsets.prune has made the appended offsets durable: a
-            // genuine cancellation at that await.
-            journal.0.halt_before_offsets_prune = true;
+            // Cancel pruning after data-blob removal but before `offsets.prune`.
+            let halt = Arc::new(PruneHalt::default());
+            journal.0.halt_before_offsets_prune = Some(halt.clone());
             {
                 let fut = journal.prune(10);
                 futures::pin_mut!(fut);
@@ -4047,12 +4284,27 @@ mod tests {
                     futures::poll!(fut.as_mut()).is_pending(),
                     "prune must park before offsets.prune"
                 );
+                assert!(
+                    halt.reached.load(std::sync::atomic::Ordering::SeqCst),
+                    "prune must reach the post-data-removal cancellation point"
+                );
+                assert_eq!(
+                    halt.offsets_barrier
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    12
+                );
+                assert_eq!(
+                    halt.offsets_watermark
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    7
+                );
             }
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
-                .expect("prune crash must leave a recoverable journal");
+                .expect("cancelled prune must leave a recoverable journal");
             assert_eq!(journal.bounds(), 10..12);
+            assert_eq!(journal.test_offsets_size(), 12);
             for i in 10..12u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }

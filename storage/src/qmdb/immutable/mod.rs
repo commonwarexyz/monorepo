@@ -518,7 +518,7 @@ where
                 self.inactivity_floor_loc,
             ));
         }
-        (self.journal, _) = self.journal.prune(loc).await?;
+        (self.journal, _) = self.journal.prune_with_commit(loc).await?;
         self.update_metrics();
         Ok(self)
     }
@@ -1083,9 +1083,12 @@ pub(super) mod test {
         let buffered_floor = db.bounds().end;
         let key = Sha256::fill(100);
         let value = Sha256::fill(101);
+        let second_key = Sha256::fill(102);
+        let second_value = Sha256::fill(103);
         let merkleized = db
             .new_batch()
             .set(key, value)
+            .set(second_key, second_value)
             .merkleize(&db, None, buffered_floor)
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();

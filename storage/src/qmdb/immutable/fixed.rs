@@ -321,6 +321,47 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_fixed_prune_durably_justifies_buffered_floor() {
+        let executor = deterministic::Runner::default();
+        let (expected, checkpoint) = executor.start_and_recover(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("first")).await;
+
+            let mut batch = db.new_batch();
+            for i in 0..6u8 {
+                batch = batch.set(Sha256::fill(i), Sha256::fill(i.wrapping_add(10)));
+            }
+            let merkleized = batch
+                .merkleize(&db, None, crate::merkle::Location::new(0))
+                .await;
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.sync().await.unwrap();
+
+            let floor = db.bounds().end;
+            let merkleized = db
+                .new_batch()
+                .set(Sha256::fill(100), Sha256::fill(101))
+                .set(Sha256::fill(102), Sha256::fill(103))
+                .merkleize(&db, None, floor)
+                .await;
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.prune(floor).await.unwrap();
+            assert_eq!(*db.bounds().start, 5);
+            let expected = (db.root(), db.inactivity_floor_loc(), db.bounds());
+            drop(db);
+            expected
+        });
+
+        deterministic::Runner::from(checkpoint).start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("second")).await;
+            assert_eq!(
+                (db.root(), db.inactivity_floor_loc(), db.bounds()),
+                expected
+            );
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_fixed_batch_chain() {
         let executor = deterministic::Runner::default();
