@@ -160,9 +160,7 @@ fn update_timerfd(descriptor: libc::c_int, deadline: Option<Deadline>) -> io::Re
     };
     retry_interrupted(|| {
         // SAFETY: `descriptor` is an owned timerfd and `specification` is initialized.
-        unsafe {
-            libc::timerfd_settime(descriptor, flags, &specification, std::ptr::null_mut())
-        }
+        unsafe { libc::timerfd_settime(descriptor, flags, &specification, std::ptr::null_mut()) }
     })?;
     Ok(())
 }
