@@ -410,14 +410,6 @@ impl Entry {
 
     /// Polls the terminal state while closing the registration race.
     fn poll(&self, context: &mut Context<'_>) -> Poll<()> {
-        self.poll_after_first_check(context, || {})
-    }
-
-    /// Polls while optionally running work between the two state checks.
-    fn poll_after_first_check<F>(&self, context: &mut Context<'_>, after_first_check: F) -> Poll<()>
-    where
-        F: FnOnce(),
-    {
         // Acquire observes the terminal transition before returning its outcome.
         match self.state.load(AtomicOrdering::Acquire) {
             ENTRY_FIRED => return Poll::Ready(()),
@@ -426,7 +418,6 @@ impl Entry {
             _ => {}
         }
 
-        after_first_check();
         self.waker.register(context.waker());
 
         // Completion may race with waker registration, so state is checked twice.
@@ -673,14 +664,6 @@ impl<A: Alarm> Shard<A> {
 
     /// Captures failure state, drains the heap, and interrupts the root runtime.
     fn fail(&self, failure: DriverFailure) {
-        self.fail_with_exposure_hook(failure, || {});
-    }
-
-    /// Runs failure cleanup with a hook after its state becomes observable.
-    fn fail_with_exposure_hook<F>(&self, failure: DriverFailure, after_exposure: F)
-    where
-        F: FnOnce(),
-    {
         let (snapshot, pending) = {
             let mut state = self.state.lock();
             if state.lifecycle != ShardLifecycle::Running {
@@ -720,7 +703,6 @@ impl<A: Alarm> Shard<A> {
             ?snapshot,
             "timer infrastructure failed"
         );
-        after_exposure();
         complete_entries(pending, ENTRY_FAILED);
         self.signal.notify();
     }

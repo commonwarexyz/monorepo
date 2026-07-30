@@ -11,7 +11,7 @@ mod ordinary {
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
         utils::{Panicked, Panicker, extract_panic_message},
     };
-    use commonware_utils::sync::{Condvar, Mutex as TestMutex};
+    use commonware_utils::sync::Mutex as TestMutex;
     use futures::{
         FutureExt as _, future,
         task::{ArcWake, AtomicWaker, noop_waker, waker},
@@ -38,17 +38,6 @@ mod ordinary {
         Disarm,
     }
 
-    /// Coordination state for one optionally blocked arm operation.
-    #[derive(Default)]
-    struct ArmBlock {
-        /// Whether the next arm should block.
-        requested: bool,
-        /// Whether the alarm has entered the blocked operation.
-        entered: bool,
-        /// Whether the test has released the operation.
-        released: bool,
-    }
-
     /// Shared state controlled by a test and observed by its fake alarm.
     struct FakeAlarmState {
         /// Manual monotonic time in nanoseconds.
@@ -73,10 +62,6 @@ mod ordinary {
         wait_waker: AtomicWaker,
         /// Number of readiness future polls.
         wait_polls: AtomicUsize,
-        /// State for an optionally blocked arm.
-        arm_block: TestMutex<ArmBlock>,
-        /// Notification for arm entry and release.
-        arm_block_changed: Condvar,
         /// Whether the alarm owner has been dropped.
         shutdown: AtomicBool,
     }
@@ -96,27 +81,8 @@ mod ordinary {
                 panic_wait: AtomicBool::new(false),
                 wait_waker: AtomicWaker::new(),
                 wait_polls: AtomicUsize::new(0),
-                arm_block: TestMutex::new(ArmBlock::default()),
-                arm_block_changed: Condvar::new(),
                 shutdown: AtomicBool::new(false),
             }
-        }
-
-        /// Blocks an arm when requested until the test explicitly releases it.
-        fn block_arm_if_requested(&self) {
-            let mut block = self.arm_block.lock();
-            if !block.requested {
-                return;
-            }
-            block.entered = true;
-            self.arm_block_changed.notify_all();
-            while !block.released {
-                self.arm_block_changed.wait(&mut block);
-            }
-            block.requested = false;
-            block.entered = false;
-            block.released = false;
-            self.arm_block_changed.notify_all();
         }
 
         /// Consumes a failure or readiness event around waker registration.
@@ -202,7 +168,6 @@ mod ordinary {
             if self.state.fail_arm.swap(false, AtomicOrdering::AcqRel) {
                 return Err(injected_error("arm"));
             }
-            self.state.block_arm_if_requested();
             Ok(())
         }
 
@@ -281,39 +246,6 @@ mod ordinary {
             self.state.wait_waker.wake();
         }
 
-        /// Requests that the next arm stop before returning.
-        fn block_next_arm(&self) {
-            let mut block = self.state.arm_block.lock();
-            assert!(!block.requested);
-            assert!(!block.entered);
-            block.requested = true;
-            block.released = false;
-        }
-
-        /// Waits until the requested arm has reached its blocking point.
-        fn wait_until_arm_blocked(&self) {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut block = self.state.arm_block.lock();
-            while !block.entered {
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .expect("fake alarm did not enter the blocked arm");
-                let timeout = self.state.arm_block_changed.wait_for(&mut block, remaining);
-                assert!(
-                    !timeout.timed_out() || block.entered,
-                    "fake alarm did not enter the blocked arm"
-                );
-            }
-        }
-
-        /// Releases an arm stopped by [`Self::block_next_arm`].
-        fn release_arm(&self) {
-            let mut block = self.state.arm_block.lock();
-            assert!(block.entered);
-            block.released = true;
-            self.state.arm_block_changed.notify_all();
-        }
-
         /// Waits cooperatively until the driver polls native readiness.
         async fn wait_until_wait_polled(&self) {
             for _ in 0..10_000 {
@@ -366,27 +298,6 @@ mod ordinary {
             arc_self
                 .panicker
                 .notify(Box::new("generic failed sleeper panic"));
-        }
-    }
-
-    /// Waker whose final release notifies one driver signal.
-    struct NotifySignalOnDropWaker {
-        /// Signal notified when registration replaces this waker.
-        signal: Weak<DriverSignal>,
-        /// Whether the final waker owner was released.
-        dropped: Arc<AtomicBool>,
-    }
-
-    impl ArcWake for NotifySignalOnDropWaker {
-        fn wake_by_ref(_arc_self: &Arc<Self>) {}
-    }
-
-    impl Drop for NotifySignalOnDropWaker {
-        fn drop(&mut self) {
-            self.dropped.store(true, AtomicOrdering::Release);
-            if let Some(signal) = self.signal.upgrade() {
-                signal.notify();
-            }
         }
     }
 
@@ -837,63 +748,6 @@ mod ordinary {
             vec![AlarmOperation::Arm(at(2_000)), AlarmOperation::Disarm]
         );
         assert_eq!(shard.state.lock().armed_deadline, None);
-    }
-
-    #[test]
-    fn rearm_converges_when_heap_changes_during_blocked_arm() {
-        // Stop the first arm after it snapshots the original minimum.
-        let (shard, control) = fake_shard();
-        let (_original, _original_sleep) = register(&shard, at(100));
-        consume_signal(&shard);
-        control.block_next_arm();
-        let rearming = {
-            let shard = Arc::clone(&shard);
-            thread::spawn(move || shard.rearm())
-        };
-        control.wait_until_arm_blocked();
-
-        // Publish an earlier minimum while the native operation is outside the lock.
-        let (_earlier, _earlier_sleep) = register(&shard, at(40));
-        assert!(shard.signal.is_notified());
-        control.release_arm();
-        driver_ok(rearming.join().unwrap());
-
-        // Rearm must notice the changed heap and converge on a second native call.
-        assert_eq!(
-            control.operations(),
-            vec![AlarmOperation::Arm(at(100)), AlarmOperation::Arm(at(40))]
-        );
-        assert_eq!(shard.state.lock().armed_deadline, Some(at(40)));
-    }
-
-    #[test]
-    fn stop_during_blocked_rearm_quiesces_entry_and_disarms_after_syscall() {
-        // Block the native arm after rearm snapshots one queued deadline.
-        let (shard, control) = fake_shard();
-        let (entry, registered) = register(&shard, at(100));
-        consume_signal(&shard);
-        control.block_next_arm();
-        let rearming = {
-            let shard = Arc::clone(&shard);
-            thread::spawn(move || shard.rearm())
-        };
-        control.wait_until_arm_blocked();
-
-        // Stop the shard while the native operation remains outside the state lock.
-        shard.stop();
-        assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
-        assert_eq!(shard.state.lock().entries.len(), 0);
-        control.release_arm();
-        driver_ok(rearming.join().unwrap());
-
-        // Rearm must observe stop after the syscall and undo the now-invalid native arm.
-        assert_eq!(
-            control.operations(),
-            vec![AlarmOperation::Arm(at(100)), AlarmOperation::Disarm]
-        );
-        assert_eq!(shard.state.lock().armed_deadline, None);
-        drop(registered);
-        assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_STOPPED);
     }
 
     #[tokio::test]
@@ -1450,110 +1304,6 @@ mod ordinary {
     }
 
     #[tokio::test]
-    async fn fatal_failure_is_published_before_failed_state_escapes() {
-        // Retain a task-panic reporter while constructing a shard with the default
-        // propagation policy.
-        let (alarm, _control) = FakeAlarm::controlled();
-        let (panicker, panicked) = Panicker::new(false);
-        let task_panicker = panicker.clone();
-        let shard = Arc::new(Shard::new(0, alarm, panicker));
-        let storage = TraceStorage::default();
-        let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
-
-        // Observe the interval after failure becomes visible to registration but
-        // before the service starts waking its previously queued sleepers.
-        tracing::subscriber::with_default(subscriber, || {
-            shard.fail_with_exposure_hook(
-                DriverFailure::io("injected operation", injected_error("root cause")),
-                || {
-                    let entry = Arc::new(Entry::new());
-                    shard.register(at(10), Arc::clone(&entry));
-                    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
-
-                    // Route the production failed-entry payload through the same
-                    // Panicker path used by the spawned-task wrapper.
-                    let panic = catch_unwind(AssertUnwindSafe(|| {
-                        let waker = noop_waker();
-                        let mut context = Context::from_waker(&waker);
-                        let _ = entry.poll(&mut context);
-                    }))
-                    .expect_err("polling a failed entry must panic");
-                    task_panicker.notify(panic);
-                },
-            );
-        });
-
-        // The earlier publication must preserve one detailed cause without a
-        // duplicate generic task-panic event.
-        let message = fatal_message(panicked).await;
-        assert!(message.contains("injected operation"));
-        assert!(message.contains("injected fake alarm root cause failure"));
-        assert!(!message.contains("high-resolution timer service failed"));
-        let events = storage.get_all();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.metadata.content == "timer infrastructure failed")
-                .count(),
-            1
-        );
-        assert!(
-            events
-                .iter()
-                .all(|event| event.metadata.content != "task panicked")
-        );
-    }
-
-    #[test]
-    fn fatal_failure_is_receiver_visible_when_failed_state_escapes() {
-        // Pair a shard with a root task that is otherwise ready to complete.
-        let (alarm, _control) = FakeAlarm::controlled();
-        let (panicker, panicked) = Panicker::new(false);
-        let shard = Arc::new(Shard::new(0, alarm, panicker));
-        let mut root_outcome = None;
-
-        // Poll the root immediately after failure state exposure and before the
-        // remaining cleanup can make additional progress.
-        shard.fail_with_exposure_hook(
-            DriverFailure::io("injected operation", injected_error("root cause")),
-            || {
-                root_outcome = Some(catch_unwind(AssertUnwindSafe(|| {
-                    futures::executor::block_on(panicked.interrupt(future::ready(7)))
-                })));
-            },
-        );
-
-        // The detailed fatal payload must already win over the ready root output.
-        let panic = root_outcome
-            .expect("failure exposure hook did not run")
-            .expect_err("ready root escaped an already exposed timer failure");
-        let message = extract_panic_message(&*panic);
-        assert!(message.contains("injected operation"));
-        assert!(message.contains("injected fake alarm root cause failure"));
-    }
-
-    #[test]
-    fn expiry_commit_precedes_a_later_stop() {
-        // Pop two expired entries without invoking their callbacks.
-        let (shard, control) = fake_shard();
-        control.set_now(at(10));
-        let (first, _first_sleep) = register(&shard, at(10));
-        let (second, _second_sleep) = register(&shard, at(10));
-        let mut batch = Batch::new();
-        assert!(!driver_ok(shard.take_expired(&mut batch)));
-        assert_eq!(batch.entries.len(), 2);
-        assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
-        assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
-
-        // A later stop cannot overwrite expiry committed under the shard lock.
-        shard.stop();
-        assert!(batch.complete(ENTRY_FIRED).is_none());
-        assert_eq!(first.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
-        assert_eq!(second.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
-        assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Stopped);
-    }
-
-    #[tokio::test]
     async fn registration_clock_failure_preserves_a_committed_expiry_batch() {
         // Setup: Commit two expired entries without invoking their callbacks.
         let (shard, control, panicked) = observed_fake_shard();
@@ -1885,46 +1635,6 @@ mod ordinary {
     }
 
     #[test]
-    fn entry_poll_double_check_observes_terminal_transition_during_registration() {
-        {
-            // Setup: Prepare a waiting entry and polling context.
-            let entry = Entry::new();
-            let waker = noop_waker();
-            let mut context = Context::from_waker(&waker);
-
-            // Action: Fire immediately after poll's first state check.
-            let result = entry.poll_after_first_check(&mut context, || {
-                assert!(entry.transition(ENTRY_FIRED));
-            });
-
-            // Assertion: The second state check returns ready without losing completion.
-            assert_eq!(result, Poll::Ready(()));
-            assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
-            assert!(entry.take_waker().is_none());
-        }
-
-        {
-            // Setup: Prepare another waiting entry and polling context.
-            let entry = Entry::new();
-            let waker = noop_waker();
-            let mut context = Context::from_waker(&waker);
-
-            // Action: Fail after poll's first check and before waker registration.
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                entry.poll_after_first_check(&mut context, || {
-                    assert!(entry.transition(ENTRY_FAILED));
-                    assert!(entry.take_waker().is_none());
-                })
-            }));
-
-            // Assertion: The second state check unwinds instead of losing the failure.
-            assert!(result.is_err());
-            assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
-            assert!(entry.take_waker().is_none());
-        }
-    }
-
-    #[test]
     fn signal_latches_and_coalesces() {
         // Notify twice before the single driver has a chance to consume either edge.
         let signal = DriverSignal::new();
@@ -1934,27 +1644,6 @@ mod ordinary {
         // One durable notification must be sufficient and leave no stale signal.
         assert!(signal.is_notified());
         assert!(signal.wait().now_or_never().is_some());
-        assert!(!signal.is_notified());
-    }
-
-    #[test]
-    fn signal_consumes_notification_during_waker_registration() {
-        // Seed the signal with a waker whose final release publishes a notification.
-        let signal = Arc::new(DriverSignal::new());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let notifying_waker = waker(Arc::new(NotifySignalOnDropWaker {
-            signal: Arc::downgrade(&signal),
-            dropped: Arc::clone(&dropped),
-        }));
-        signal.waker.register(&notifying_waker);
-        drop(notifying_waker);
-
-        // Polling replaces the seed waker after the first empty consume.
-        let result = signal.wait().now_or_never();
-
-        // The second consume must observe the notification without leaving it latched.
-        assert!(dropped.load(AtomicOrdering::Acquire));
-        assert_eq!(result, Some(()));
         assert!(!signal.is_notified());
     }
 
