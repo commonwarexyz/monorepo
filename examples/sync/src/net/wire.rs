@@ -68,14 +68,14 @@ where
     pub target: compact::Target<mmr::Family, D>,
 }
 
-/// Request for compact authenticated state.
+/// Request for the compact authenticated state at a committed operation count.
+///
+/// The target root does not travel with the request; the client verifies the response against
+/// its own target.
 #[derive(Debug)]
-pub struct GetCompactStateRequest<D>
-where
-    D: Digest,
-{
+pub struct GetCompactStateRequest {
     pub request_id: RequestId,
-    pub target: compact::Target<mmr::Family, D>,
+    pub leaf_count: Location,
 }
 
 /// Response with compact authenticated state.
@@ -100,7 +100,7 @@ where
     GetSyncTargetResponse(GetSyncTargetResponse<D>),
     GetCompactTargetRequest(GetCompactTargetRequest),
     GetCompactTargetResponse(GetCompactTargetResponse<D>),
-    GetCompactStateRequest(GetCompactStateRequest<D>),
+    GetCompactStateRequest(GetCompactStateRequest),
     GetCompactStateResponse(GetCompactStateResponse<Op, D>),
     Error(ErrorResponse),
 }
@@ -413,34 +413,34 @@ where
     }
 }
 
-impl<D> Write for GetCompactStateRequest<D>
-where
-    D: Digest,
-{
+impl Write for GetCompactStateRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
-        self.target.write(buf);
+        self.leaf_count.write(buf);
     }
 }
 
-impl<D> EncodeSize for GetCompactStateRequest<D>
-where
-    D: Digest,
-{
+impl EncodeSize for GetCompactStateRequest {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.target.encode_size()
+        self.request_id.encode_size() + self.leaf_count.encode_size()
     }
 }
 
-impl<D> Read for GetCompactStateRequest<D>
-where
-    D: Digest,
-{
+impl Read for GetCompactStateRequest {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let target = compact::Target::<mmr::Family, D>::read_cfg(buf, &())?;
-        Ok(Self { request_id, target })
+        let leaf_count = Location::read_cfg(buf, &())?;
+        if !leaf_count.is_valid() || leaf_count == 0 {
+            return Err(CodecError::Invalid(
+                "sync::GetCompactStateRequest",
+                "leaf_count must be in 1..=MAX_LEAVES",
+            ));
+        }
+        Ok(Self {
+            request_id,
+            leaf_count,
+        })
     }
 }
 

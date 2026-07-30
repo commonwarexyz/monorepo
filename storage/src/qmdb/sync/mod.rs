@@ -33,18 +33,16 @@ mod requests;
 
 /// A [`Source`] of operations whose associated types match a specific `Database`.
 ///
-/// Blanket-impled for any matching `Source`, so callers never implement this directly.
 /// `'static` is the engine's requirement, not one on sources in general.
 pub trait SourceFor<DB: Database>:
-    Source<source::Request<DB::Family>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static
+    Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static
 {
 }
 
 impl<DB, S> SourceFor<DB> for S
 where
     DB: Database,
-    S: Source<source::Request<DB::Family>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
-        + 'static,
+    S: Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static,
 {
 }
 

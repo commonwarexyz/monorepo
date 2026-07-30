@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            source::{Request, Source, tests::FailSource},
+            source::{Source, tests::FailSource},
         },
     },
 };
@@ -120,8 +120,7 @@ where
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -184,8 +183,7 @@ where
 pub(crate) fn test_sync_empty_to_nonempty<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -233,8 +231,7 @@ where
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
@@ -300,8 +297,7 @@ where
 pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -382,8 +378,7 @@ where
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -430,8 +425,7 @@ where
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -485,8 +479,7 @@ where
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -537,8 +530,7 @@ where
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -601,8 +593,7 @@ where
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -660,8 +651,7 @@ where
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -732,8 +722,7 @@ where
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1163,7 +1152,7 @@ mod compact_variable_mmr {
         sync::source::ValidityTx,
     );
 
-    impl sync::source::Source<sync::compact::Target<mmr::Family, sha256::Digest>> for SequenceSource {
+    impl sync::source::Source for SequenceSource {
         type Family = mmr::Family;
         type Digest = sha256::Digest;
         type Op = variable::Operation<mmr::Family, Vec<u8>>;
@@ -1171,7 +1160,7 @@ mod compact_variable_mmr {
 
         async fn serve(
             &self,
-            _target: sync::compact::Target<Self::Family, Self::Digest>,
+            _request: sync::Request<Self::Family>,
         ) -> Result<CompactResponse, Self::Error> {
             self.responses
                 .lock()
@@ -1180,7 +1169,7 @@ mod compact_variable_mmr {
         }
     }
 
-    /// Serve compact state for `target` from `source`.
+    /// Serve the compact state for `target` from `source`.
     async fn fetch_compact_state<R>(
         source: &R,
         target: sync::compact::Target<mmr::Family, sha256::Digest>,
@@ -1192,13 +1181,16 @@ mod compact_variable_mmr {
         R::Error,
     >
     where
-        R: sync::source::Source<
-                sync::compact::Target<mmr::Family, sha256::Digest>,
-                Family = mmr::Family,
-                Digest = sha256::Digest,
-            >,
+        R: sync::source::Source<Family = mmr::Family, Digest = sha256::Digest>,
     {
-        source.serve(target).await
+        source
+            .serve(sync::Request {
+                size: target.leaf_count,
+                start: Location::new(*target.leaf_count - 1),
+                max_ops: NZU64!(1),
+                retain_from: Some(target.leaf_count),
+            })
+            .await
     }
 
     #[test_traced("WARN")]
@@ -1569,7 +1561,7 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_full_source_rejects_stale_target() {
+    fn test_compact_full_source_serves_historical_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-stale-full-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
@@ -1601,12 +1593,20 @@ mod compact_variable_mmr {
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
-            let result = fetch_compact_state(&source, stale_target.clone()).await;
-            assert!(matches!(
-                result,
-                Err(sync::ServeError::StaleTarget { requested, current })
-                    if requested == stale_target && current == current_target
-            ));
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                source: source.clone(),
+                target: stale_target.clone(),
+                db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(client.root(), stale_target.root);
+            assert_ne!(client.root(), current_target.root);
+            client.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
@@ -1742,10 +1742,27 @@ mod compact_variable_mmr {
             .await;
             assert!(matches!(
                 stale_result,
-                Err(sync::Error::Source(sync::ServeError::StaleTarget {
-                    requested,
-                    current
-                })) if requested == target2 && current == target3
+                Err(sync::Error::Engine(sync::EngineError::InvalidProof))
+            ));
+
+            // A target below the retained tip is refused outright: the witness prunes
+            // everything before its latest commit.
+            let size_stale_result: Result<ClientDb, _> =
+                sync::compact::sync(sync::compact::Config {
+                    context: context.child("size_stale_client"),
+                    source: source.clone(),
+                    target: target1.clone(),
+                    db_config: client_config(&format!("{suffix}-size-stale"), &context),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                })
+                .await;
+            assert!(matches!(
+                size_stale_result,
+                Err(sync::Error::Source(qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(_)
+                )))
             ));
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
@@ -1985,7 +2002,7 @@ mod compact_variable_mmb {
         sync::source::ValidityTx,
     );
 
-    impl sync::source::Source<sync::compact::Target<mmb::Family, sha256::Digest>> for SequenceSource {
+    impl sync::source::Source for SequenceSource {
         type Family = mmb::Family;
         type Digest = sha256::Digest;
         type Op = variable::Operation<mmb::Family, Vec<u8>>;
@@ -1993,7 +2010,7 @@ mod compact_variable_mmb {
 
         async fn serve(
             &self,
-            _target: sync::compact::Target<Self::Family, Self::Digest>,
+            _request: sync::Request<Self::Family>,
         ) -> Result<CompactResponse, Self::Error> {
             self.responses
                 .lock()
@@ -2002,7 +2019,7 @@ mod compact_variable_mmb {
         }
     }
 
-    /// Serve compact state for `target` from `source`.
+    /// Serve the compact state for `target` from `source`.
     async fn fetch_compact_state<R>(
         source: &R,
         target: sync::compact::Target<mmb::Family, sha256::Digest>,
@@ -2014,13 +2031,16 @@ mod compact_variable_mmb {
         R::Error,
     >
     where
-        R: sync::source::Source<
-                sync::compact::Target<mmb::Family, sha256::Digest>,
-                Family = mmb::Family,
-                Digest = sha256::Digest,
-            >,
+        R: sync::source::Source<Family = mmb::Family, Digest = sha256::Digest>,
     {
-        source.serve(target).await
+        source
+            .serve(sync::Request {
+                size: target.leaf_count,
+                start: Location::new(*target.leaf_count - 1),
+                max_ops: NZU64!(1),
+                retain_from: Some(target.leaf_count),
+            })
+            .await
     }
 
     #[test_traced("WARN")]
@@ -2323,7 +2343,7 @@ mod compact_variable_mmb {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_full_source_rejects_stale_target() {
+    fn test_compact_full_source_serves_historical_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-stale-full-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
@@ -2355,12 +2375,20 @@ mod compact_variable_mmb {
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
-            let result = fetch_compact_state(&source, stale_target.clone()).await;
-            assert!(matches!(
-                result,
-                Err(sync::ServeError::StaleTarget { requested, current })
-                    if requested == stale_target && current == current_target
-            ));
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                source: source.clone(),
+                target: stale_target.clone(),
+                db_config: client_config(&suffix, &context),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(client.root(), stale_target.root);
+            assert_ne!(client.root(), current_target.root);
+            client.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
@@ -2497,10 +2525,27 @@ mod compact_variable_mmb {
             .await;
             assert!(matches!(
                 stale_result,
-                Err(sync::Error::Source(sync::ServeError::StaleTarget {
-                    requested,
-                    current
-                })) if requested == target2 && current == target3
+                Err(sync::Error::Engine(sync::EngineError::InvalidProof))
+            ));
+
+            // A target below the retained tip is refused outright: the witness prunes
+            // everything before its latest commit.
+            let size_stale_result: Result<ClientDb, _> =
+                sync::compact::sync(sync::compact::Config {
+                    context: context.child("size_stale_client"),
+                    source: source.clone(),
+                    target: target1.clone(),
+                    db_config: client_config(&format!("{suffix}-size-stale"), &context),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                })
+                .await;
+            assert!(matches!(
+                size_stale_result,
+                Err(sync::Error::Source(qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(_)
+                )))
             ));
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));

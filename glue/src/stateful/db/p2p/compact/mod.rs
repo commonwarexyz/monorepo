@@ -10,4 +10,4 @@ pub use actor::{Actor, Config};
 mod handler;
 
 mod mailbox;
-pub use mailbox::{Mailbox, ResponseDropped};
+pub use mailbox::{FetchError, Mailbox};

@@ -35,7 +35,7 @@ use commonware_storage::{
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         operation::Key,
-        sync::{self, Request, Source, Target as AnySyncTarget},
+        sync::{self, Source, Target as AnySyncTarget},
     },
     translator::Translator,
 };
@@ -685,7 +685,6 @@ where
     T: Translator,
     S: Strategy,
     R: Source<
-            Request<F>,
             Family = F,
             Op = Operation<F, unordered::Update<K, FixedEncoding<V>>>,
             Digest = H::Digest,
@@ -741,7 +740,6 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     R: Source<
-            Request<F>,
             Family = F,
             Op = Operation<F, unordered::Update<K, VariableEncoding<V>>>,
             Digest = H::Digest,

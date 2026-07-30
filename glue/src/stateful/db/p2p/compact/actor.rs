@@ -4,17 +4,14 @@ use super::{Mailbox, handler, mailbox};
 use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
-use commonware_cryptography::{Hasher, PublicKey};
+use commonware_cryptography::{Digest as CDigest, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_storage::{
-    merkle::{Family, Location},
-    qmdb::{
-        self,
-        sync::{Response, Source, compact},
-    },
+    merkle::Family,
+    qmdb::sync::{Response, Source},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
@@ -27,14 +24,12 @@ use tracing::info;
 const COMPACT_RESPONSE_CFG: (usize, ()) = (1, ());
 
 /// The operation type the local database serves compact state in.
-type DbOp<DB, F, D> = <Shared<DB> as Source<compact::Target<F, D>>>::Op;
+type DbOp<DB> = <Shared<DB> as Source>::Op;
 /// The client-facing mailbox paired with an [`Actor`].
-type ActorMailbox<DB, F, H> = Mailbox<DB, F, DbOp<DB, F, <H as Hasher>::Digest>, H>;
+type ActorMailbox<DB, F, D> = Mailbox<DB, F, DbOp<DB>, D>;
 /// Where an [`Actor`] receives its client requests.
-type MailboxReceiver<DB, F, H> = actor_mailbox::Receiver<
-    mailbox::Message<DB, F, DbOp<DB, F, <H as Hasher>::Digest>, <H as Hasher>::Digest>,
->;
-type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<mailbox::ResponseTx<F, Op, D>>>;
+type MailboxReceiver<DB, F, D> = actor_mailbox::Receiver<mailbox::Message<DB, F, DbOp<DB>, D>>;
+type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F>, Vec<mailbox::ResponseTx<F, Op, D>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -79,46 +74,46 @@ enum State<DB> {
     HasDb(Shared<DB>),
 }
 
-enum MailboxAction<F: Family, D: commonware_cryptography::Digest> {
+enum MailboxAction<F: Family> {
     None,
-    Fetch(handler::Request<F, D>),
-    Cancel(handler::Request<F, D>),
+    Fetch(handler::Request<F>),
+    Cancel(handler::Request<F>),
 }
 
 /// Runs a compact QMDB sync resolver service over P2P.
-pub struct Actor<E, P, D, B, F, DB, H>
+pub struct Actor<E, P, D, B, F, DB, G>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    H: Hasher,
+    G: CDigest,
     DB: 'static,
-    Shared<DB>: Source<compact::Target<F, H::Digest>, Family = F, Digest = H::Digest>,
-    DbOp<DB, F, H::Digest>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    Shared<DB>: Source<Family = F, Digest = G>,
+    DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
-    mailbox_rx: MailboxReceiver<DB, F, H>,
+    mailbox_rx: MailboxReceiver<DB, F, G>,
     state: State<DB>,
-    pending: PendingSubs<F, DbOp<DB, F, H::Digest>, H::Digest>,
+    pending: PendingSubs<F, DbOp<DB>, G>,
 }
 
-impl<E, P, D, B, F, DB, H> Actor<E, P, D, B, F, DB, H>
+impl<E, P, D, B, F, DB, G> Actor<E, P, D, B, F, DB, G>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    H: Hasher,
+    G: CDigest,
     DB: 'static,
-    Shared<DB>: Source<compact::Target<F, H::Digest>, Family = F, Digest = H::Digest>,
-    DbOp<DB, F, H::Digest>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    Shared<DB>: Source<Family = F, Digest = G>,
+    DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     /// Create a new compact resolver actor and mailbox.
-    pub fn new(context: E, mut config: Config<P, D, B, DB>) -> (Self, ActorMailbox<DB, F, H>) {
+    pub fn new(context: E, mut config: Config<P, D, B, DB>) -> (Self, ActorMailbox<DB, F, G>) {
         let state = config.database.take().map_or(State::NoDb, State::HasDb);
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -147,7 +142,7 @@ where
     ) {
         let (handler_tx, mut handler_rx) =
             actor_mailbox::new(self.context.child("handler"), self.config.mailbox_size);
-        let handler = handler::Handler::<F, H::Digest>::new(handler_tx);
+        let handler = handler::Handler::<F>::new(handler_tx);
         let (engine, mut resolver_mailbox) = p2p::Engine::new(
             self.context.as_present().child("resolver"),
             p2p::Config {
@@ -216,8 +211,8 @@ where
 
     fn handle_mailbox_message(
         &mut self,
-        message: mailbox::Message<DB, F, DbOp<DB, F, H::Digest>, H::Digest>,
-    ) -> MailboxAction<F, H::Digest> {
+        message: mailbox::Message<DB, F, DbOp<DB>, G>,
+    ) -> MailboxAction<F> {
         match message {
             mailbox::Message::AttachDatabase(db) => {
                 let replacing_existing = matches!(self.state, State::HasDb(_));
@@ -246,7 +241,7 @@ where
         }
     }
 
-    fn should_cancel_request(&mut self, request: &handler::Request<F, H::Digest>) -> bool {
+    fn should_cancel_request(&mut self, request: &handler::Request<F>) -> bool {
         let Some(subscribers) = self.pending.get_mut(request) else {
             return false;
         };
@@ -260,7 +255,7 @@ where
 
     async fn handle_deliver(
         &mut self,
-        key: handler::Request<F, H::Digest>,
+        key: handler::Request<F>,
         value: bytes::Bytes,
         validity_tx: oneshot::Sender<bool>,
     ) {
@@ -269,10 +264,7 @@ where
             return;
         };
 
-        let response = match Response::<F, DbOp<DB, F, H::Digest>, H::Digest>::decode_cfg(
-            value,
-            &COMPACT_RESPONSE_CFG,
-        ) {
+        let response = match Response::<F, DbOp<DB>, G>::decode_cfg(value, &COMPACT_RESPONSE_CFG) {
             Ok(response) => response,
             Err(_) => {
                 self.pending.insert(key, subscribers);
@@ -304,53 +296,48 @@ where
             return;
         }
 
-        let mut peer_valid = true;
+        let mut approved_any = false;
+        let mut rejected_any = false;
         for approval in approvals {
             if let Ok(approved) = approval.await {
-                peer_valid &= approved;
+                approved_any |= approved;
+                rejected_any |= !approved;
             }
         }
-        validity_tx.send_lossy(peer_valid);
+        // The response satisfied a subscriber, or nobody actively rejected it: either way the
+        // peer is not at fault. Subscribers on a different fork may reject a response that is
+        // valid for another; only a lone rejection faults the peer.
+        validity_tx.send_lossy(approved_any || !rejected_any);
     }
 
     /// Check a peer's compact response against the requested target before handing it to
     /// subscribers. Compact state is exactly one operation, the final commit, plus the pins at
     /// the tip; the proof is what makes the pins believable.
-    fn validate_response(
-        key: &handler::Request<F, H::Digest>,
-        response: &Response<F, DbOp<DB, F, H::Digest>, H::Digest>,
-    ) -> bool {
-        let target = key.to_target();
-        if response.proof.leaves != target.leaf_count || target.leaf_count == Location::new(0) {
+    /// Check the response's shape against the request. Whether it authenticates against the
+    /// client's target root is decided by the subscriber, which reports back per delivery.
+    fn validate_response(key: &handler::Request<F>, response: &Response<F, DbOp<DB>, G>) -> bool {
+        let leaf_count = key.leaf_count();
+        if response.proof.leaves != leaf_count {
             return false;
         }
-        let [last_commit_op] = &response.operations[..] else {
+        if response.operations.len() != 1 {
             return false;
-        };
+        }
         let Some(pinned_nodes) = &response.pinned_nodes else {
             return false;
         };
-        if pinned_nodes.len() != F::nodes_to_pin(target.leaf_count).count() {
-            return false;
-        }
-
-        qmdb::verify_proof::<H, _, _>(
-            &response.proof,
-            Location::new(*target.leaf_count - 1),
-            std::slice::from_ref(last_commit_op),
-            &target.root,
-        )
+        pinned_nodes.len() == F::nodes_to_pin(leaf_count).count()
     }
 
     async fn handle_produce(
         &mut self,
-        key: handler::Request<F, H::Digest>,
+        key: handler::Request<F>,
         response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             return;
         };
-        let Ok((response, _)) = database.serve(key.to_target()).await else {
+        let Ok((response, _)) = database.serve(key.to_request()).await else {
             return;
         };
         response_tx.send_lossy(response.encode());
@@ -412,7 +399,7 @@ mod tests {
         DummyBlocker,
         mmr::Family,
         TestDb,
-        Sha256,
+        sha256::Digest,
     >;
     type TestOp = KeylessOp<mmr::Family, U64>;
 
@@ -461,7 +448,7 @@ mod tests {
     async fn compact_state(
         context: deterministic::Context,
     ) -> (
-        compact::Target<mmr::Family, sha256::Digest>,
+        commonware_storage::qmdb::sync::compact::Target<mmr::Family, sha256::Digest>,
         Response<mmr::Family, TestOp, sha256::Digest>,
     ) {
         let db = init_db(context).await;
@@ -475,21 +462,17 @@ mod tests {
 
         let target = db.target();
         let (state, _) = Shared::new("test", db)
-            .serve(target.clone())
+            .serve(handler::Request::new(target.leaf_count).to_request())
             .await
             .expect("compact state should be available");
         (target, state)
     }
 
     #[test]
-    fn invalid_proof_is_rejected() {
+    fn mismatched_leaf_count_is_rejected() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
-            let target = compact::Target {
-                root: sha256::Digest::from([7; 32]),
-                leaf_count: mmr::Location::new(1),
-            };
-            let request = handler::Request::from_target(target);
+            let request = handler::Request::new(mmr::Location::new(2));
             let (pending_tx, _pending_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![pending_tx]);
 
@@ -518,7 +501,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, mut state) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = handler::Request::new(target.leaf_count);
             let (pending_tx, _pending_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![pending_tx]);
             state
@@ -538,20 +521,16 @@ mod tests {
     }
 
     #[test]
-    fn valid_state_after_invalid_proof_completes_request() {
+    fn valid_state_after_invalid_shape_completes_request() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, state) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = handler::Request::new(target.leaf_count);
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![subscriber_tx]);
 
             let mut bad_state = state.clone();
-            bad_state.proof = Proof {
-                leaves: bad_state.proof.leaves,
-                inactive_peaks: 0,
-                digests: Vec::new(),
-            };
+            bad_state.pinned_nodes = Some(Vec::new());
 
             let (bad_tx, bad_rx) = oneshot::channel();
             actor
@@ -591,7 +570,7 @@ mod tests {
             let target = db.target();
             let db = Shared::new("test", db);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
-            let request = handler::Request::from_target(target.clone());
+            let request = handler::Request::new(target.leaf_count);
             let (response_tx, response_rx) = oneshot::channel();
 
             actor.handle_produce(request, response_tx).await;
@@ -611,7 +590,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, state) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = handler::Request::new(target.leaf_count);
 
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![subscriber_tx]);
@@ -639,7 +618,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, state) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = handler::Request::new(target.leaf_count);
 
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
             actor.pending.insert(request.clone(), vec![subscriber_tx]);
@@ -664,7 +643,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, _) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = handler::Request::new(target.leaf_count);
 
             let (subscriber_tx, subscriber_rx) = oneshot::channel();
             drop(subscriber_rx);
@@ -684,7 +663,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let (target, _) = compact_state(context.child("state")).await;
-            let request = handler::Request::from_target(target);
+            let request = handler::Request::new(target.leaf_count);
 
             let (stale_tx, stale_rx) = oneshot::channel();
             drop(stale_rx);

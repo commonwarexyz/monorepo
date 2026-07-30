@@ -128,7 +128,6 @@ async fn test_sync<F, R>(
 where
     F: MerkleFamily,
     R: sync::source::Source<
-            sync::source::Request<F>,
             Family = F,
             Digest = commonware_cryptography::sha256::Digest,
             Op = FixedOperation<F, Key, Value>,

@@ -423,15 +423,15 @@ mod tests {
         stale_request_tx: mpsc::Sender<()>,
     }
 
-    impl sync::Source<sync::compact::Target<mmr::Family, Digest>> for SupersedingCompactSource {
+    impl sync::Source for SupersedingCompactSource {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
-        type Error = sync::ServeError<mmr::Family, Digest>;
+        type Error = <Arc<FixedDb> as sync::Source>::Error;
 
         async fn serve(
             &self,
-            target: sync::compact::Target<Self::Family, Self::Digest>,
+            request: sync::Request<Self::Family>,
         ) -> Result<
             (
                 sync::Response<Self::Family, Self::Op, Self::Digest>,
@@ -439,12 +439,12 @@ mod tests {
             ),
             Self::Error,
         > {
-            if target == self.stale_target {
+            if request.size == self.stale_target.leaf_count {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
 
-            self.source.serve(target).await
+            self.source.serve(request).await
         }
     }
 

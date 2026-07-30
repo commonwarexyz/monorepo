@@ -26,13 +26,12 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Op<F, DB> = <Shared<DB> as Source<Request<F>>>::Op;
-type DatabaseRoot<F, DB> = <Shared<DB> as Source<Request<F>>>::Digest;
-type SyncMailbox<F, DB> = Mailbox<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
-type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
+type Op<DB> = <Shared<DB> as Source>::Op;
+type DatabaseRoot<DB> = <Shared<DB> as Source>::Digest;
+type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
+type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>;
 type Pending<F, Op, D> = mailbox::ResponseTx<F, Op, D>;
-type PendingSubs<F, DB> =
-    BTreeMap<handler::Request<F>, Vec<Pending<F, Op<F, DB>, DatabaseRoot<F, DB>>>>;
+type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -99,8 +98,8 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     DB: Send + Sync + 'static,
-    Shared<DB>: Source<Request<F>, Family = F>,
-    Op<F, DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    Shared<DB>: Source<Family = F>,
+    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
@@ -118,8 +117,8 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     DB: Send + Sync + 'static,
-    Shared<DB>: Source<Request<F>, Family = F>,
-    Op<F, DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    Shared<DB>: Source<Family = F>,
+    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
     pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
@@ -290,18 +289,17 @@ where
 
         // `max_ops` is sourced from the original local request key above.
         let max_ops = key.max_ops.get() as usize;
-        let decoded = match handler::Response::<F, Op<F, DB>, DatabaseRoot<F, DB>>::decode_cfg(
-            value, &max_ops,
-        ) {
-            Ok(decoded) => decoded,
-            Err(_) => {
-                self.pending.insert(key, subscribers);
-                let _ = self.metrics.pending_requests.try_set(self.pending.len());
-                self.metrics.deliveries.inc(status::Status::Invalid);
-                validity_tx.send_lossy(false);
-                return;
-            }
-        };
+        let decoded =
+            match handler::Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &max_ops) {
+                Ok(decoded) => decoded,
+                Err(_) => {
+                    self.pending.insert(key, subscribers);
+                    let _ = self.metrics.pending_requests.try_set(self.pending.len());
+                    self.metrics.deliveries.inc(status::Status::Invalid);
+                    validity_tx.send_lossy(false);
+                    return;
+                }
+            };
 
         let mut approvals = Vec::new();
         for subscriber in subscribers {
@@ -440,7 +438,7 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Shared<TestDb> as Source<Request<mmr::Family>>>::Op;
+    type TestOp = <Shared<TestDb> as Source>::Op;
 
     type TestActor = Actor<
         deterministic::Context,

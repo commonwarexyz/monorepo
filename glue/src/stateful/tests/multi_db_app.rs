@@ -611,7 +611,7 @@ impl EngineDefinition for MultiDbEngine {
             _,
             mmr::Family,
             QmdbB<_>,
-            Sha256,
+            sha256::Digest,
         >::new(
             context.child("qmdb_resolver_b"),
             compact_resolver::Config {

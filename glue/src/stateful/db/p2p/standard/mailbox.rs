@@ -129,7 +129,7 @@ impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
     }
 }
 
-impl<DB, F, Op, D> Source<Request<F>> for Mailbox<DB, F, Op, D>
+impl<DB, F, Op, D> Source for Mailbox<DB, F, Op, D>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,

@@ -80,7 +80,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{Response, Source, ValidityTx};
+use commonware_storage::qmdb::sync::{Request, Response, Source, ValidityTx};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -184,20 +184,19 @@ impl<DB> WriteSlot<'_, DB> {
     }
 }
 
-impl<DB, Req> Source<Req> for Shared<DB>
+impl<DB> Source for Shared<DB>
 where
     DB: Send + Sync + 'static,
-    Req: Send + 'static,
-    Inner<DB>: Source<Req>,
+    Inner<DB>: Source,
 {
-    type Family = <Inner<DB> as Source<Req>>::Family;
-    type Digest = <Inner<DB> as Source<Req>>::Digest;
-    type Op = <Inner<DB> as Source<Req>>::Op;
-    type Error = <Inner<DB> as Source<Req>>::Error;
+    type Family = <Inner<DB> as Source>::Family;
+    type Digest = <Inner<DB> as Source>::Digest;
+    type Op = <Inner<DB> as Source>::Op;
+    type Error = <Inner<DB> as Source>::Error;
 
     async fn serve(
         &self,
-        request: Req,
+        request: Request<Self::Family>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         self.0.serve(request).await
     }

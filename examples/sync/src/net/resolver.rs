@@ -99,15 +99,15 @@ where
         }
     }
 
-    /// Returns compact authenticated state for the given target.
+    /// Returns the compact authenticated state at the given committed operation count.
     pub async fn get_compact_state(
         &self,
-        target: compact::Target<mmr::Family, D>,
+        leaf_count: mmr::Location,
     ) -> Result<sync::Response<mmr::Family, Op, D>, crate::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetCompactStateRequest(wire::GetCompactStateRequest {
             request_id,
-            target,
+            leaf_count,
         });
         let (tx, rx) = oneshot::channel();
         self.request_tx
@@ -132,7 +132,7 @@ where
     }
 }
 
-impl<Op, D> sync::Source<sync::Request<mmr::Family>> for Resolver<Op, D>
+impl<Op, D> sync::Source for Resolver<Op, D>
 where
     Op: Clone + Read + EncodeShared,
     Op::Cfg: IsUnit,
@@ -191,9 +191,20 @@ where
     }
 }
 
-impl<Op, D> sync::Source<compact::Target<mmr::Family, D>> for Resolver<Op, D>
+/// A [`Resolver`] that fetches compact state.
+///
+/// A separate type from [`Resolver`] because the two fetch paths use different wire messages:
+/// a compact-mode server only answers compact state requests.
+#[derive(Clone)]
+pub struct CompactResolver<Op, D>(pub Resolver<Op, D>)
 where
-    Op: Clone + Read + EncodeShared,
+    Op: Read + EncodeShared + 'static,
+    Op::Cfg: IsUnit,
+    D: Digest;
+
+impl<Op, D> sync::Source for CompactResolver<Op, D>
+where
+    Op: Clone + Read + EncodeShared + 'static,
     Op::Cfg: IsUnit,
     D: Digest,
 {
@@ -204,7 +215,7 @@ where
 
     async fn serve(
         &self,
-        target: compact::Target<mmr::Family, D>,
+        request: sync::Request<mmr::Family>,
     ) -> Result<
         (
             sync::Response<Self::Family, Self::Op, Self::Digest>,
@@ -212,6 +223,6 @@ where
         ),
         Self::Error,
     > {
-        Ok((self.get_compact_state(target).await?, None))
+        Ok((self.0.get_compact_state(request.size).await?, None))
     }
 }

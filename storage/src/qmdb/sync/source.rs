@@ -123,11 +123,11 @@ where
     }
 }
 
-/// Where to report whether a fetched response verified, so a remote peer can be scored.
+/// Where to report whether a fetched response verified, so a remote peer can be given feedback.
 pub type ValidityTx = Option<oneshot::Sender<bool>>;
 
 /// A source for proofs and operations.
-pub trait Source<Req: Send + 'static>: Send + Sync {
+pub trait Source: Send + Sync {
     /// The merkle family backing this source's proofs.
     type Family: Family;
 
@@ -144,17 +144,16 @@ pub trait Source<Req: Send + 'static>: Send + Sync {
     #[allow(clippy::type_complexity)]
     fn serve<'a>(
         &'a self,
-        request: Req,
+        request: Request<Self::Family>,
     ) -> impl Future<
         Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>,
     > + Send
     + 'a;
 }
 
-impl<T, Req> Source<Req> for Arc<T>
+impl<T> Source for Arc<T>
 where
-    T: Source<Req> + ?Sized,
-    Req: Send + 'static,
+    T: Source + ?Sized,
 {
     type Family = T::Family;
     type Digest = T::Digest;
@@ -163,7 +162,7 @@ where
 
     fn serve<'a>(
         &'a self,
-        request: Req,
+        request: Request<Self::Family>,
     ) -> impl Future<
         Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>,
     > + Send
@@ -172,20 +171,19 @@ where
     }
 }
 
-impl<T, Req> Source<Req> for Option<T>
+impl<T> Source for Option<T>
 where
-    T: Source<Req>,
-    Req: Send + 'static,
-    ServeError<T::Family, T::Digest>: From<T::Error>,
+    T: Source,
+    ServeError<T::Family>: From<T::Error>,
 {
     type Family = T::Family;
     type Digest = T::Digest;
     type Op = T::Op;
-    type Error = ServeError<T::Family, T::Digest>;
+    type Error = ServeError<T::Family>;
 
     async fn serve(
         &self,
-        request: Req,
+        request: Request<Self::Family>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
         Ok(source.serve(request).await?)
@@ -194,10 +192,9 @@ where
 
 macro_rules! impl_locked_source {
     ($lock:ident) => {
-        impl<T, Req> Source<Req> for $lock<T>
+        impl<T> Source for $lock<T>
         where
-            T: Source<Req>,
-            Req: Send + 'static,
+            T: Source,
         {
             type Family = T::Family;
             type Digest = T::Digest;
@@ -206,7 +203,7 @@ macro_rules! impl_locked_source {
 
             async fn serve(
                 &self,
-                request: Req,
+                request: Request<Self::Family>,
             ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>
             {
                 self.read().await.serve(request).await
@@ -218,7 +215,7 @@ macro_rules! impl_locked_source {
 impl_locked_source!(AsyncRwLock);
 impl_locked_source!(TracedAsyncRwLock);
 
-impl<F, E, C, H, S> Source<Request<F>> for authenticated::Journal<F, E, C, H, S>
+impl<F, E, C, H, S> Source for authenticated::Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
@@ -270,7 +267,7 @@ where
     }
 }
 
-impl<F, E, U, C, I, H, const N: usize, S> Source<Request<F>>
+impl<F, E, U, C, I, H, const N: usize, S> Source
     for crate::qmdb::any::db::Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
@@ -294,8 +291,7 @@ where
         self.log.serve(request).await
     }
 }
-impl<F, E, K, V, C, H, T, S> Source<Request<F>>
-    for crate::qmdb::immutable::Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> Source for crate::qmdb::immutable::Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -321,7 +317,7 @@ where
     }
 }
 
-impl<F, E, V, C, H, S> Source<Request<F>> for crate::qmdb::keyless::Keyless<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> Source for crate::qmdb::keyless::Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
@@ -362,22 +358,22 @@ pub(crate) mod tests {
 
     macro_rules! assert_source_variants {
         ($db:ty) => {
-            assert_serves::<mmr::Family, Arc<$db>>();
-            assert_serves::<mmr::Family, Arc<AsyncRwLock<$db>>>();
-            assert_serves::<mmr::Family, Arc<AsyncRwLock<Option<$db>>>>();
-            assert_serves::<mmr::Family, Arc<TracedAsyncRwLock<$db>>>();
-            assert_serves::<mmr::Family, Arc<TracedAsyncRwLock<Option<$db>>>>();
+            assert_serves::<Arc<$db>>();
+            assert_serves::<Arc<AsyncRwLock<$db>>>();
+            assert_serves::<Arc<AsyncRwLock<Option<$db>>>>();
+            assert_serves::<Arc<TracedAsyncRwLock<$db>>>();
+            assert_serves::<Arc<TracedAsyncRwLock<Option<$db>>>>();
         };
     }
 
-    fn assert_serves<F: Family, S: Source<Request<F>>>() {}
+    fn assert_serves<S: Source>() {}
 
     /// A source that always fails. Not `Clone`, which the engine must not require.
     pub struct FailSource<F: Family, Op, D> {
         _phantom: PhantomData<(F, Op, D)>,
     }
 
-    impl<F, Op, D> Source<Request<F>> for FailSource<F, Op, D>
+    impl<F, Op, D> Source for FailSource<F, Op, D>
     where
         F: Family,
         D: Digest,
@@ -527,6 +523,44 @@ pub(crate) mod tests {
         assert_source_variants!(ImmutableVariable);
         assert_source_variants!(KeylessFixed);
         assert_source_variants!(KeylessVariable);
+
+        type KeylessFixedCompactDb = crate::qmdb::keyless::fixed::CompactDb<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            Sha256,
+            Rayon,
+        >;
+        type KeylessVariableCompactDb = crate::qmdb::keyless::variable::CompactDb<
+            mmr::Family,
+            deterministic::Context,
+            Vec<u8>,
+            Sha256,
+            (commonware_codec::RangeCfg<usize>, ()),
+            Rayon,
+        >;
+        type ImmutableFixedCompactDb = crate::qmdb::immutable::fixed::CompactDb<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            ShaDigest,
+            Sha256,
+            Rayon,
+        >;
+        type ImmutableVariableCompactDb = crate::qmdb::immutable::variable::CompactDb<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            Vec<u8>,
+            Sha256,
+            ((), (commonware_codec::RangeCfg<usize>, ())),
+            Rayon,
+        >;
+
+        assert_source_variants!(KeylessFixedCompactDb);
+        assert_source_variants!(KeylessVariableCompactDb);
+        assert_source_variants!(ImmutableFixedCompactDb);
+        assert_source_variants!(ImmutableVariableCompactDb);
     }
 
     /// A source behind a lock reaches the source and reports its error.

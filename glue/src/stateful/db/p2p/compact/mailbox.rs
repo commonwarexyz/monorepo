@@ -3,32 +3,39 @@
 use super::handler;
 use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel::CancelGuard};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Digest;
 use commonware_storage::{
-    merkle::Family,
-    qmdb::sync::{Response, Source, ValidityTx, compact},
+    merkle::{Family, Location},
+    qmdb::sync::{Request, Response, Source, ValidityTx},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
 
-/// The resolver actor dropped the response before completion.
+/// Why a fetch through the resolver mailbox failed.
 #[derive(Debug, thiserror::Error)]
-#[error("response dropped before completion")]
-pub struct ResponseDropped;
+pub enum FetchError {
+    /// The resolver actor dropped the response before completion.
+    #[error("response dropped before completion")]
+    ResponseDropped,
+    /// The request does not name a single committed compact state, which is all this resolver
+    /// can fetch.
+    #[error("request is not a compact state request")]
+    UnsupportedRequest,
+}
 
 /// Where the actor delivers a fetched response, along with the channel the caller reports
 /// peer validity on.
 pub(super) type ResponseTx<F, Op, D> =
-    oneshot::Sender<Result<(Response<F, Op, D>, ValidityTx), ResponseDropped>>;
+    oneshot::Sender<Result<(Response<F, Op, D>, ValidityTx), FetchError>>;
 
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     AttachDatabase(Shared<DB>),
     GetState {
-        request: handler::Request<F, D>,
+        request: handler::Request<F>,
         response: ResponseTx<F, Op, D>,
     },
     CancelState {
-        request: handler::Request<F, D>,
+        request: handler::Request<F>,
     },
 }
 
@@ -102,11 +109,11 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
 }
 
 /// Client-facing resolver mailbox used by compact QMDB sync.
-pub struct Mailbox<DB, F: Family, Op, H: Hasher> {
-    sender: Sender<Message<DB, F, Op, H::Digest>>,
+pub struct Mailbox<DB, F: Family, Op, D: Digest> {
+    sender: Sender<Message<DB, F, Op, D>>,
 }
 
-impl<DB, F: Family, Op, H: Hasher> Clone for Mailbox<DB, F, Op, H> {
+impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -114,35 +121,43 @@ impl<DB, F: Family, Op, H: Hasher> Clone for Mailbox<DB, F, Op, H> {
     }
 }
 
-impl<DB, F: Family, Op, H: Hasher> Mailbox<DB, F, Op, H> {
-    pub(super) const fn new(sender: Sender<Message<DB, F, Op, H::Digest>>) -> Self {
+impl<DB, F: Family, Op, D: Digest> Mailbox<DB, F, Op, D> {
+    pub(super) const fn new(sender: Sender<Message<DB, F, Op, D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<DB: Send + Sync, F: Family, Op: Send, H: Hasher> Mailbox<DB, F, Op, H> {
+impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
     pub fn attach_database(&self, db: Shared<DB>) {
         let _ = self.sender.enqueue(Message::AttachDatabase(db));
     }
 }
 
-impl<DB, F, Op, H> Source<compact::Target<F, H::Digest>> for Mailbox<DB, F, Op, H>
+impl<DB, F, Op, D> Source for Mailbox<DB, F, Op, D>
 where
     DB: Send + Sync + 'static,
     F: Family,
     Op: Send + Sync + Clone + 'static,
-    H: Hasher,
+    D: Digest,
 {
-    type Digest = H::Digest;
-    type Error = ResponseDropped;
     type Family = F;
+    type Digest = D;
     type Op = Op;
+    type Error = FetchError;
 
     async fn serve(
         &self,
-        target: compact::Target<Self::Family, Self::Digest>,
+        request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
-        let request = handler::Request::from_target(target);
+        // The wire key carries only the operation count; anything but the request for a single
+        // committed compact state cannot be expressed to the peer.
+        if *request.size == 0
+            || request.start != Location::new(*request.size - 1)
+            || request.retain_from != Some(request.size)
+        {
+            return Err(FetchError::UnsupportedRequest);
+        }
+        let request = handler::Request::new(request.size);
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetState {
             request: request.clone(),
@@ -151,16 +166,16 @@ where
         let mut cancel = CancelGuard::new(self.sender.clone(), Message::CancelState { request });
         let result = receiver.await;
         cancel.disarm();
-        result.map_err(|_| ResponseDropped)?
+        result.map_err(|_| FetchError::ResponseDropped)?
     }
 }
 
-impl<DB, F, Op, H> AttachableResolver<DB> for Mailbox<DB, F, Op, H>
+impl<DB, F, Op, D> AttachableResolver<DB> for Mailbox<DB, F, Op, D>
 where
     DB: Send + Sync + 'static,
     F: Family,
     Op: Send + Sync + Clone + 'static,
-    H: Hasher,
+    D: Digest,
 {
     fn attach_database(&self, db: Shared<DB>) -> impl Future<Output = ()> + Send {
         Self::attach_database(self, db);
@@ -171,35 +186,54 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::sha256::Sha256;
+    use commonware_cryptography::sha256;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_storage::mmr;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZU64, NZUsize};
     use futures::future::poll_fn;
     use std::task::Poll;
+
+    fn state_request(leaf_count: u64) -> Request<mmr::Family> {
+        handler::Request::new(mmr::Location::new(leaf_count)).to_request()
+    }
 
     #[test]
     fn serve_sends_request() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
-            let mailbox = Mailbox::<(), mmr::Family, u64, Sha256>::new(sender);
-            let target = compact::Target {
-                root: [1u8; 32].into(),
-                leaf_count: mmr::Location::new(7),
-            };
+            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
 
-            let get = mailbox.serve(target.clone());
+            let get = mailbox.serve(state_request(7));
             let observe = async move {
                 let message = receiver.recv().await.expect("request should be queued");
                 let Message::GetState { request, response } = message else {
                     panic!("unexpected attach message");
                 };
-                assert_eq!(request.to_target(), target);
+                assert_eq!(request.leaf_count(), mmr::Location::new(7));
                 drop(response);
             };
 
             let (result, _) = futures::join!(get, observe);
-            assert!(matches!(result, Err(ResponseDropped)));
+            assert!(matches!(result, Err(FetchError::ResponseDropped)));
+        });
+    }
+
+    #[test]
+    fn serve_refuses_other_request_shapes() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, _receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
+            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+
+            let request = Request {
+                size: mmr::Location::new(7),
+                start: mmr::Location::new(0),
+                max_ops: NZU64!(4),
+                retain_from: None,
+            };
+            assert!(matches!(
+                mailbox.serve(request).await,
+                Err(FetchError::UnsupportedRequest)
+            ));
         });
     }
 
@@ -207,13 +241,9 @@ mod tests {
     fn dropped_request_sends_cancel_message() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
-            let mailbox = Mailbox::<(), mmr::Family, u64, Sha256>::new(sender);
-            let target = compact::Target {
-                root: [2u8; 32].into(),
-                leaf_count: mmr::Location::new(9),
-            };
+            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
 
-            let mut get = Box::pin(mailbox.serve(target.clone()));
+            let mut get = Box::pin(mailbox.serve(state_request(9)));
             poll_fn(|cx| {
                 assert!(matches!(get.as_mut().poll(cx), Poll::Pending));
                 Poll::Ready(())
@@ -225,12 +255,12 @@ mod tests {
             let Message::GetState { request, response } = message else {
                 panic!("unexpected attach message");
             };
-            assert_eq!(request.to_target(), target);
+            assert_eq!(request.leaf_count(), mmr::Location::new(9));
             drop(response);
 
             match receiver.recv().await.expect("cancel should be queued") {
                 Message::CancelState { request } => {
-                    assert_eq!(request.to_target(), target);
+                    assert_eq!(request.leaf_count(), mmr::Location::new(9));
                 }
                 Message::AttachDatabase(_) => panic!("unexpected attach message"),
                 Message::GetState { .. } => panic!("unexpected duplicate request"),

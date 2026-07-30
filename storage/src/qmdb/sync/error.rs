@@ -2,36 +2,23 @@
 
 use crate::{
     merkle::{Family, Location},
-    qmdb::{
-        self,
-        sync::{Target, compact},
-    },
+    qmdb::{self, sync::Target},
 };
 use commonware_cryptography::Digest;
 
 /// Errors a [`Source`](crate::qmdb::sync::source::Source) returns instead of a response.
 ///
 /// Serving reads local storage, so these describe the source's own state, not a bad request from
-/// a peer. A peer that sends something unusable is scored through
+/// a peer. A peer that sends something unusable is given feedback through
 /// [`ValidityTx`](crate::qmdb::sync::source::ValidityTx) instead.
 #[derive(Debug, thiserror::Error)]
-pub enum ServeError<F: Family, D: Digest> {
+pub enum ServeError<F: Family> {
     /// The source database failed while building the response.
     #[error("source database error: {0}")]
     Database(#[from] qmdb::Error<F>),
-    /// The request named a target this source cannot serve.
-    #[error("invalid target: {0}")]
-    InvalidTarget(&'static str),
     /// The wrapper holding this source has no database attached right now.
     #[error("source missing")]
     MissingSource,
-    /// The requested compact state is not the one this source currently holds. Compact sources
-    /// serve only their latest committed state, so they cannot answer for an older root.
-    #[error("stale target - requested {requested:?}, current {current:?}")]
-    StaleTarget {
-        requested: compact::Target<F, D>,
-        current: compact::Target<F, D>,
-    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,18 +50,12 @@ pub enum EngineError<F: Family, D: Digest> {
         old: Target<F, D>,
         new: Target<F, D>,
     },
-    /// Sync already completed
-    #[error("sync already completed")]
-    AlreadyComplete,
     /// Sync stalled - no pending fetches
     #[error("sync stalled - no pending fetches")]
     SyncStalled,
     /// Sync finish signal channel closed before finish was requested.
     #[error("sync finish signal channel closed before finish was requested")]
     FinishChannelClosed,
-    /// Error extracting pinned nodes
-    #[error("error extracting pinned nodes: {0}")]
-    PinnedNodes(String),
 }
 
 /// Errors that can occur during database synchronization.

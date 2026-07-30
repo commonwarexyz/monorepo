@@ -10,7 +10,7 @@ pub use request_id::RequestId;
 pub mod io;
 pub mod resolver;
 pub mod wire;
-pub use resolver::Resolver;
+pub use resolver::{CompactResolver, Resolver};
 
 /// A message that can be sent over the wire.
 pub(super) trait Message: Encode + DecodeExt<()> + Sized + Send + Sync + 'static {

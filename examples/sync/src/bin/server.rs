@@ -14,8 +14,13 @@ use commonware_runtime::{
     tokio as tokio_runtime,
 };
 use commonware_storage::{
-    mmr,
-    qmdb::sync::{self, Source as _, Target, compact},
+    journal::Error as JournalError,
+    merkle::Error as MerkleError,
+    mmr::{self, Location},
+    qmdb::{
+        self,
+        sync::{self, Source as _, Target},
+    },
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
@@ -25,7 +30,7 @@ use commonware_sync::{
     net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE, wire},
 };
 use commonware_utils::{
-    DurationExt,
+    DurationExt, NZU64,
     channel::mpsc,
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
@@ -347,27 +352,37 @@ where
 /// Handle a GetCompactStateRequest and return compact authenticated state.
 async fn handle_get_compact_state<DB>(
     state: &State<DB>,
-    request: wire::GetCompactStateRequest<Key>,
+    request: wire::GetCompactStateRequest,
 ) -> Result<wire::GetCompactStateResponse<DB::Operation, Key>, Error>
 where
     DB: CompactSyncable<Family = mmr::Family>,
     Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
-            compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
-            Error = sync::ServeError<mmr::Family, Key>,
+            Error = sync::ServeError<mmr::Family>,
         >,
 {
     state.request_counter.inc();
 
-    let (compact_state, _) = state.database.serve(request.target).await.map_err(|err| {
+    let leaf_count = request.leaf_count;
+    let serve_request = sync::Request {
+        size: leaf_count,
+        start: Location::new(*leaf_count - 1),
+        max_ops: NZU64!(1),
+        retain_from: Some(leaf_count),
+    };
+    let (compact_state, _) = state.database.serve(serve_request).await.map_err(|err| {
         warn!(?err, "failed to serve compact state");
         match err {
+            // A compact server retains only its latest committed state, so a request outside it
+            // means the client's target is stale and it should fetch a fresh one.
+            sync::ServeError::Database(
+                qmdb::Error::Journal(JournalError::ItemPruned(_))
+                | qmdb::Error::Merkle(MerkleError::RangeOutOfBounds(_)),
+            ) => Error::StaleTarget(err.to_string()),
             sync::ServeError::Database(err) => Error::Database(err),
-            sync::ServeError::StaleTarget { .. } => Error::StaleTarget(err.to_string()),
             sync::ServeError::MissingSource => Error::DatabaseUnavailable,
-            sync::ServeError::InvalidTarget(_) => Error::InvalidRequest(err.to_string()),
         }
     })?;
 
@@ -415,11 +430,10 @@ where
     DB::Operation: Read + Encode + Send,
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
-            compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
-            Error = sync::ServeError<mmr::Family, Key>,
+            Error = sync::ServeError<mmr::Family>,
         >,
 {
     const LISTENING_MESSAGE: &'static str =
@@ -692,11 +706,10 @@ where
     <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + Rng + Send,
     Arc<AsyncRwLock<Option<DB>>>: sync::source::Source<
-            compact::Target<mmr::Family, Key>,
             Family = mmr::Family,
             Op = DB::Operation,
             Digest = Key,
-            Error = sync::ServeError<mmr::Family, Key>,
+            Error = sync::ServeError<mmr::Family>,
         >,
 {
     let database = initialize_compact_database(database, &config, &mut context).await?;

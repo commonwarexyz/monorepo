@@ -36,7 +36,7 @@ use crate::{
             witness::{self, VerifiedWitness, Witness},
         },
         operation::Key,
-        sync::{Response, ServeError, Source, ValidityTx, compact as compact_sync},
+        sync::{Request, Response, Source, ValidityTx, compact as compact_sync},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -592,7 +592,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S> Source<compact_sync::Target<F, H::Digest>> for Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, C, S> Source for Db<F, E, K, V, H, C, S>
 where
     F: Family,
     E: Context,
@@ -606,15 +606,15 @@ where
     type Family = F;
     type Digest = H::Digest;
     type Op = Operation<F, K, V>;
-    type Error = ServeError<F, H::Digest>;
+    type Error = qmdb::Error<F>;
 
     async fn serve(
         &self,
-        target: compact_sync::Target<F, H::Digest>,
+        request: Request<F>,
     ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), Self::Error> {
         Ok((
             self.witness
-                .compact_state(&self.commit_codec_config, target)?,
+                .compact_state(&self.commit_codec_config, request)?,
             None,
         ))
     }

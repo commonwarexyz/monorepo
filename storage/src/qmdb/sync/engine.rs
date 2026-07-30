@@ -29,11 +29,8 @@ use mpsc::error::TryRecvError;
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64, sync::Arc};
 
 /// Type alias for sync engine errors
-type Error<DB, S> = qmdb::sync::Error<
-    <DB as Database>::Family,
-    <S as Source<Request<<DB as Database>::Family>>>::Error,
-    <DB as Database>::Digest,
->;
+type Error<DB, S> =
+    qmdb::sync::Error<<DB as Database>::Family, <S as Source>::Error, <DB as Database>::Digest>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -876,7 +873,7 @@ mod tests {
     #[derive(Clone)]
     struct TestSource;
 
-    impl Source<Request<MmrFamily>> for TestSource {
+    impl Source for TestSource {
         type Digest = sha256::Digest;
         type Error = Infallible;
         type Family = MmrFamily;

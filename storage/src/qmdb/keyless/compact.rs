@@ -35,7 +35,7 @@ use crate::{
             batch as compact_batch,
             witness::{self, VerifiedWitness, Witness},
         },
-        sync::{Response, ServeError, Source, ValidityTx, compact as compact_sync},
+        sync::{Request, Response, Source, ValidityTx, compact as compact_sync},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -572,7 +572,7 @@ where
     }
 }
 
-impl<F, E, V, H, C, S> Source<compact_sync::Target<F, H::Digest>> for Db<F, E, V, H, C, S>
+impl<F, E, V, H, C, S> Source for Db<F, E, V, H, C, S>
 where
     F: Family,
     E: Context,
@@ -585,15 +585,15 @@ where
     type Family = F;
     type Digest = H::Digest;
     type Op = Operation<F, V>;
-    type Error = ServeError<F, H::Digest>;
+    type Error = qmdb::Error<F>;
 
     async fn serve(
         &self,
-        target: compact_sync::Target<F, H::Digest>,
+        request: Request<F>,
     ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), Self::Error> {
         Ok((
             self.witness
-                .compact_state(&self.commit_codec_config, target)?,
+                .compact_state(&self.commit_codec_config, request)?,
             None,
         ))
     }
@@ -646,6 +646,84 @@ mod tests {
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
         let cfg = witness_config(partition, &context);
         witness::Journal::init(context, cfg).await.unwrap()
+    }
+
+    /// The witness serves only the request matching its single committed state; each mismatch
+    /// reports the same error a pruned operation log would.
+    #[test_traced("INFO")]
+    fn test_serve_refuses_requests_outside_witness() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-serve-refusal").await;
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.sync().await.unwrap();
+            let n = db.target().leaf_count;
+            let request = |size: Location<mmr::Family>,
+                           start: Location<mmr::Family>,
+                           retain_from: Option<Location<mmr::Family>>| {
+                Request {
+                    size,
+                    start,
+                    max_ops: NZU64!(1),
+                    retain_from,
+                }
+            };
+
+            let beyond = Location::new(*n + 1);
+            assert!(matches!(
+                db.serve(request(beyond, Location::new(*n), Some(beyond)))
+                    .await,
+                Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
+            ));
+            assert!(matches!(
+                db.serve(request(Location::new(*n - 1), Location::new(*n - 2), None))
+                    .await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
+            assert!(matches!(
+                db.serve(request(n, n, Some(n))).await,
+                Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
+            ));
+            assert!(matches!(
+                db.serve(request(n, Location::new(*n - 2), Some(n))).await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
+            assert!(matches!(
+                db.serve(request(
+                    n,
+                    Location::new(*n - 1),
+                    Some(Location::new(*n - 1))
+                ))
+                .await,
+                Err(Error::Merkle(crate::merkle::Error::ElementPruned(_)))
+            ));
+
+            // Requests without pins, or asking for more operations than the witness holds, are
+            // served from the single retained state.
+            let (response, validity_tx) = db
+                .serve(request(n, Location::new(*n - 1), None))
+                .await
+                .unwrap();
+            assert!(validity_tx.is_none());
+            assert!(response.pinned_nodes.is_none());
+            assert_eq!(response.operations.len(), 1);
+            let (response, _) = db
+                .serve(Request {
+                    size: n,
+                    start: Location::new(*n - 1),
+                    max_ops: NZU64!(5),
+                    retain_from: Some(n),
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.operations.len(), 1);
+            assert!(response.pinned_nodes.is_some());
+        });
     }
 
     #[test_traced("INFO")]

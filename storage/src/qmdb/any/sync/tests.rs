@@ -138,7 +138,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -184,7 +184,7 @@ where
 pub(crate) fn test_sync_source_fails<H: SyncTestHarness>()
 where
     source::tests::FailSource<H::Family, OpOf<H>, Digest>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -219,7 +219,7 @@ where
 /// Test basic sync functionality with various batch sizes
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -293,7 +293,7 @@ where
 /// Test syncing to a subset of the target database (target has additional ops beyond sync range)
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_ops: usize)
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -359,7 +359,7 @@ where
 /// Tests the scenario where sync_db already has partial data and needs to sync additional ops.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(original_ops: usize)
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -453,7 +453,7 @@ where
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>(num_ops: usize)
 where
     source::tests::FailSource<H::Family, OpOf<H>, Digest>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -536,7 +536,7 @@ where
 /// Test that the client fails to sync if the lower bound is decreased via target update.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -611,7 +611,7 @@ where
 /// Test that the client fails to sync if the upper bound is decreased via target update.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -680,7 +680,7 @@ where
 /// Test that the client succeeds when bounds are updated (increased).
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -765,7 +765,7 @@ where
 /// Test that target updates can be sent even after the client is done (no panic).
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -834,7 +834,7 @@ where
 /// Test that prune-only target updates are rejected as backward target movement.
 pub(crate) fn test_target_update_prune_only_rejected<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -901,7 +901,7 @@ where
 /// Test that explicit finish control waits for a finish signal even after reaching target.
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1019,7 +1019,7 @@ pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_fin
     H: SyncTestHarness,
 >()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1140,7 +1140,7 @@ where
 /// Test that a finish signal received before target completion still allows full sync.
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1203,7 +1203,7 @@ where
 /// Test that dropping finish sender without sending is treated as an error.
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1252,7 +1252,7 @@ where
 /// Test that dropping reached-target receiver does not fail sync.
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1306,8 +1306,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
 ) where
-    Arc<AsyncRwLock<Option<DbOf<H>>>>:
-        Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<Option<DbOf<H>>>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1418,7 +1417,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 /// Test demonstrating that a synced database can be reopened and retain its state.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1491,7 +1490,7 @@ where
 /// Test post-sync usability: after syncing, the database supports normal operations.
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1781,10 +1780,10 @@ struct CorruptFirstPinnedNodesSource<R> {
     corrupted: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl<R, F> Source<Request<F>> for CorruptFirstPinnedNodesSource<R>
+impl<R, F> Source for CorruptFirstPinnedNodesSource<R>
 where
     F: crate::merkle::Family,
-    R: Source<Request<F>, Family = F, Digest = Digest>,
+    R: Source<Family = F, Digest = Digest>,
 {
     type Family = R::Family;
     type Digest = Digest;
@@ -1814,7 +1813,7 @@ where
 /// succeeds on retry when the source returns correct data.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1875,10 +1874,10 @@ struct ReplayFreshBoundarySource<R, F: crate::merkle::Family> {
     boundary_attempts: Arc<AtomicUsize>,
 }
 
-impl<R, F> Source<Request<F>> for ReplayFreshBoundarySource<R, F>
+impl<R, F> Source for ReplayFreshBoundarySource<R, F>
 where
     F: crate::merkle::Family,
-    R: Source<Request<F>, Family = F, Digest = Digest>,
+    R: Source<Family = F, Digest = Digest>,
 {
     type Family = R::Family;
     type Digest = Digest;
@@ -1932,7 +1931,7 @@ where
 /// boundary retry is still outstanding.
 pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {

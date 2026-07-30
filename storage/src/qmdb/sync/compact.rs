@@ -1,13 +1,11 @@
 //! Compact sync for compact-storage qmdbs.
 //!
-//! Compact sync does not transfer or reconstruct the full historical operation log. Instead, the
-//! source serves the minimum authenticated state needed to recreate the latest committed compact db
-//! state:
-//!
-//! - the total committed leaf count,
-//! - the frontier pins at that leaf count,
-//! - the final commit operation, and
-//! - a proof authenticating that final commit against the requested root.
+//! Compact sync does not transfer or reconstruct the full historical operation log. The client
+//! asks an ordinary [`Source`] for the minimum authenticated state needed to recreate the latest
+//! committed compact db state: the final commit operation, proven at the target size, plus the
+//! frontier pins at that size. There is no separate serving protocol: a full database answers
+//! from its operation log like any other request, and a compact database answers from its
+//! witness, refusing requests outside the single state it retains.
 //!
 //! # What compact dbs store
 //!
@@ -43,26 +41,20 @@
 //! with `DataCorrupted` rather than silently serving or restoring mismatched state.
 
 use crate::{
-    journal::contiguous::Mutable,
     merkle::{Family, Location, Proof},
     qmdb::{
         self,
-        any::value::ValueEncoding,
-        immutable::{Immutable, Operation as ImmutableOp},
-        keyless::{Keyless, Operation as KeylessOp},
-        operation::{Floored, Key},
+        operation::Floored,
         sync::{
-            EngineError, Error, ServeError,
-            source::{Request, Response, Source, ValidityTx},
+            EngineError, Error,
+            source::{Request, Response, Source},
         },
         verify_proof,
     },
-    translator::Translator,
 };
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{boxed, select};
-use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor, reschedule};
 use commonware_utils::{NZU64, channel::mpsc};
 use futures::future::{Either, pending};
@@ -173,24 +165,15 @@ pub struct ValidatedState<F: Family, Op, D: Digest> {
 }
 
 /// A [`Source`] of compact state whose associated types match a specific [`Database`].
-///
-/// Blanket-impled for any matching `Source`, so callers never implement this directly. No
-/// `'static`, unlike [`crate::qmdb::sync::SourceFor`]: compact sync reads one response through
-/// a borrow.
 pub trait SourceFor<DB: Database>:
-    Source<Target<DB::Family, DB::Digest>, Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+    Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static
 {
 }
 
 impl<DB, S> SourceFor<DB> for S
 where
     DB: Database,
-    S: Source<
-            Target<DB::Family, DB::Digest>,
-            Family = DB::Family,
-            Op = DB::Op,
-            Digest = DB::Digest,
-        >,
+    S: Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static,
 {
 }
 
@@ -384,18 +367,40 @@ where
     DB: Database,
     S: SourceFor<DB>,
 {
+    // Request exactly the final commit, proven at the target size, plus the pins at the tip.
+    let leaf_count = target.leaf_count;
+    let request = Request {
+        size: leaf_count,
+        start: Location::new(*leaf_count - 1),
+        max_ops: NZU64!(1),
+        retain_from: Some(leaf_count),
+    };
+
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Source errors and local construction failures remain terminal.
+    let mut last_rejected: Option<Vec<u8>> = None;
     loop {
-        let (response, validity_tx) = source.serve(target.clone()).await.map_err(Error::Source)?;
+        let (response, validity_tx) = source.serve(request).await.map_err(Error::Source)?;
+
+        // Encode before validation consumes the response; a source with no validity channel
+        // that repeats a rejected response will never produce anything new.
+        let encoded = validity_tx.is_none().then(|| response.encode().to_vec());
 
         // Validation failures describe a bad compact response. Reject it if the source supplied
         // feedback, then fetch another candidate.
         let validated_state = match validate_compact_state::<DB>(target, response) {
             Ok(state) => state,
             Err(err) => {
-                if let Some(validity_tx) = validity_tx {
-                    let _ = validity_tx.send(false);
+                match validity_tx {
+                    Some(validity_tx) => {
+                        let _ = validity_tx.send(false);
+                    }
+                    None => {
+                        if last_rejected == encoded {
+                            return Err(Error::Engine(err));
+                        }
+                        last_rejected = encoded;
+                    }
                 }
                 tracing::debug!(error = ?err, "compact state failed validation, will retry");
                 continue;
@@ -524,105 +529,17 @@ where
     })
 }
 
-/// Derive compact state from a source that still holds its operation log.
-///
-/// A full database has no persisted witness, so its compact state is synthesized on demand.
-/// This is the same request the operation-log path makes, at the degenerate range: prove the
-/// final commit, and pin at the tip, because a compact client retains no operations at all.
-async fn compact_state_from_log<S, F, D>(
-    source: &S,
-    current: Target<F, D>,
-    target: Target<F, D>,
-) -> Result<Response<F, S::Op, D>, ServeError<F, D>>
-where
-    F: Family,
-    D: Digest,
-    S: crate::qmdb::sync::Source<Request<F>, Family = F, Digest = D, Error = qmdb::Error<F>>,
-{
-    target.validate().map_err(ServeError::InvalidTarget)?;
-    if target.root != current.root || target.leaf_count != current.leaf_count {
-        return Err(ServeError::StaleTarget {
-            requested: target,
-            current,
-        });
-    }
-
-    let leaf_count = target.leaf_count;
-    let last_commit_loc = Location::new(*leaf_count - 1);
-    let request = Request {
-        size: leaf_count,
-        start: last_commit_loc,
-        max_ops: NZU64!(1),
-        retain_from: Some(leaf_count),
-    };
-    let (response, _validity_tx) = source.serve(request).await?;
-
-    Ok(response)
-}
-
-impl<F, E, K, V, C, H, T, S> Source<Target<F, H::Digest>> for Immutable<F, E, K, V, C, H, T, S>
-where
-    F: Family,
-    E: crate::Context,
-    K: Key,
-    V: ValueEncoding,
-    C: Mutable<Item = ImmutableOp<F, K, V>>,
-    C::Item: commonware_codec::EncodeShared,
-    H: Hasher,
-    T: Translator + Send + Sync,
-    T::Key: Send + Sync,
-    S: Strategy,
-{
-    type Family = F;
-    type Digest = H::Digest;
-    type Op = ImmutableOp<F, K, V>;
-    type Error = ServeError<F, H::Digest>;
-
-    async fn serve(
-        &self,
-        target: Target<F, H::Digest>,
-    ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), Self::Error> {
-        let current = Target::new(self.root(), self.bounds().end);
-        Ok((compact_state_from_log(self, current, target).await?, None))
-    }
-}
-
-impl<F, E, V, C, H, S> Source<Target<F, H::Digest>> for Keyless<F, E, V, C, H, S>
-where
-    F: Family,
-    E: crate::Context,
-    V: ValueEncoding,
-    C: Mutable<Item = KeylessOp<F, V>>,
-    KeylessOp<F, V>: commonware_codec::EncodeShared,
-    H: Hasher,
-    S: Strategy,
-{
-    type Family = F;
-    type Digest = H::Digest;
-    type Op = KeylessOp<F, V>;
-    type Error = ServeError<F, H::Digest>;
-
-    async fn serve(
-        &self,
-        target: Target<F, H::Digest>,
-    ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), Self::Error> {
-        let current = Target::new(self.root(), self.bounds().end);
-        Ok((compact_state_from_log(self, current, target).await?, None))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Config, Database, Response, Source, Target, ValidityTx};
+    use super::{Config, Database, Request, Response, Source, Target};
     use crate::{
         merkle::{Location, mmr},
         qmdb,
+        qmdb::sync::ValidityTx,
     };
-    use commonware_codec::{DecodeExt as _, Encode as _, RangeCfg};
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
-    use commonware_parallel::Rayon;
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::sync::{AsyncRwLock, TracedAsyncRwLock};
     use std::{
         collections::VecDeque,
         convert::Infallible,
@@ -631,18 +548,6 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
-
-    macro_rules! assert_source_variants {
-        ($db:ty) => {
-            assert_serves::<Arc<$db>>();
-            assert_serves::<Arc<AsyncRwLock<$db>>>();
-            assert_serves::<Arc<AsyncRwLock<Option<$db>>>>();
-            assert_serves::<Arc<TracedAsyncRwLock<$db>>>();
-            assert_serves::<Arc<TracedAsyncRwLock<Option<$db>>>>();
-        };
-    }
-
-    fn assert_serves<S: Source<Target<mmr::Family, Digest>>>() {}
 
     impl<F: crate::merkle::Family> crate::qmdb::operation::Floored<F> for u8 {
         fn has_floor(&self) -> Option<Location<F>> {
@@ -687,7 +592,7 @@ mod tests {
         responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
     }
 
-    impl Source<Target<mmr::Family, Digest>> for SequenceSource {
+    impl Source for SequenceSource {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = u8;
@@ -695,7 +600,7 @@ mod tests {
 
         async fn serve(
             &self,
-            _target: Target<Self::Family, Self::Digest>,
+            _request: Request<Self::Family>,
         ) -> Result<CompactResponse, Self::Error> {
             Ok(self
                 .responses
@@ -734,47 +639,6 @@ mod tests {
             },
             Target::<mmr::Family, Digest> { root, leaf_count },
         )
-    }
-
-    #[test]
-    fn test_all_compact_qmdb_variants_implement_source() {
-        type KeylessFixedCompactDb = crate::qmdb::keyless::fixed::CompactDb<
-            mmr::Family,
-            deterministic::Context,
-            Digest,
-            commonware_cryptography::Sha256,
-            Rayon,
-        >;
-        type KeylessVariableCompactDb = crate::qmdb::keyless::variable::CompactDb<
-            mmr::Family,
-            deterministic::Context,
-            Vec<u8>,
-            commonware_cryptography::Sha256,
-            (RangeCfg<usize>, ()),
-            Rayon,
-        >;
-        type ImmutableFixedCompactDb = crate::qmdb::immutable::fixed::CompactDb<
-            mmr::Family,
-            deterministic::Context,
-            Digest,
-            Digest,
-            commonware_cryptography::Sha256,
-            Rayon,
-        >;
-        type ImmutableVariableCompactDb = crate::qmdb::immutable::variable::CompactDb<
-            mmr::Family,
-            deterministic::Context,
-            Digest,
-            Vec<u8>,
-            commonware_cryptography::Sha256,
-            ((), (RangeCfg<usize>, ())),
-            Rayon,
-        >;
-
-        assert_source_variants!(KeylessFixedCompactDb);
-        assert_source_variants!(KeylessVariableCompactDb);
-        assert_source_variants!(ImmutableFixedCompactDb);
-        assert_source_variants!(ImmutableVariableCompactDb);
     }
 
     #[test]
@@ -819,6 +683,83 @@ mod tests {
             .await
             .unwrap();
 
+            assert!(good_rx.await.expect("valid feedback should arrive"));
+            assert_eq!(constructions.load(Ordering::SeqCst), 1);
+            assert_eq!(db.root(), target.root);
+        });
+    }
+
+    /// A source with no validity channel that repeats a rejected response is not retried again.
+    #[test]
+    fn test_compact_sync_repeated_invalid_without_feedback_is_terminal() {
+        deterministic::Runner::default().start(|context| async move {
+            let (good_state, target) = valid_state_and_target();
+            let mut bad_state = good_state.clone();
+            bad_state
+                .pinned_nodes
+                .as_mut()
+                .expect("valid state carries pins")
+                .push(Sha256::hash(&[b"extra pin"]));
+            let constructions = Arc::new(AtomicUsize::new(0));
+
+            let result = super::sync::<TestDb, _>(Config {
+                context,
+                source: SequenceSource {
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state.clone(), None),
+                        (bad_state, None),
+                        (good_state, None),
+                    ]))),
+                },
+                target: target.clone(),
+                db_config: (target.root, constructions.clone()),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await;
+
+            assert!(matches!(result, Err(super::Error::Engine(_))));
+            assert_eq!(constructions.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    /// A source that provides feedback is retried even when it repeats a rejected response.
+    #[test]
+    fn test_compact_sync_repeated_invalid_with_feedback_retries() {
+        deterministic::Runner::default().start(|context| async move {
+            let (good_state, target) = valid_state_and_target();
+            let mut bad_state = good_state.clone();
+            bad_state
+                .pinned_nodes
+                .as_mut()
+                .expect("valid state carries pins")
+                .push(Sha256::hash(&[b"extra pin"]));
+            let (bad_tx1, bad_rx1) = commonware_utils::channel::oneshot::channel();
+            let (bad_tx2, bad_rx2) = commonware_utils::channel::oneshot::channel();
+            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
+            let constructions = Arc::new(AtomicUsize::new(0));
+
+            let db = super::sync::<TestDb, _>(Config {
+                context,
+                source: SequenceSource {
+                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        (bad_state.clone(), Some(bad_tx1)),
+                        (bad_state, Some(bad_tx2)),
+                        (good_state, Some(good_tx)),
+                    ]))),
+                },
+                target: target.clone(),
+                db_config: (target.root, constructions.clone()),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+
+            assert!(!bad_rx1.await.expect("first rejection should arrive"));
+            assert!(!bad_rx2.await.expect("second rejection should arrive"));
             assert!(good_rx.await.expect("valid feedback should arrive"));
             assert_eq!(constructions.load(Ordering::SeqCst), 1);
             assert_eq!(db.root(), target.root);

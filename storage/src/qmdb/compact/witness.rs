@@ -21,7 +21,7 @@ use crate::{
     },
     qmdb::{
         self, Error,
-        sync::{Response, ServeError, compact::Target},
+        sync::{Response, compact::Target},
     },
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
@@ -168,24 +168,37 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         f(&self.tip_witness.read())
     }
 
-    /// Return the compact-sync state for `target`, or a stale-target error if the current
-    /// witness no longer matches.
+    /// Serve `request` from the single committed state this witness retains.
     ///
-    /// The target is compared without further validation: the witness holds exactly one
-    /// servable state, so any non-matching target is stale by definition.
+    /// The witness holds exactly the final commit operation and the frontier pins at the
+    /// committed leaf count; anything else is refused with the same errors a pruned
+    /// operation log reports.
     pub(crate) fn compact_state<Op: Read>(
         &self,
         cfg: &Op::Cfg,
-        target: Target<F, D>,
-    ) -> Result<Response<F, Op, D>, ServeError<F, D>> {
-        // Hold the witness lock only long enough to verify the requested target and snapshot the
-        // entry; decode outside it so concurrent readers do not contend.
-        let entry = self.with(|w| {
-            if target.root != w.root || target.leaf_count != w.leaf_count() {
-                return Err(ServeError::StaleTarget {
-                    requested: target.clone(),
-                    current: w.target(),
-                });
+        request: crate::qmdb::sync::Request<F>,
+    ) -> Result<Response<F, Op, D>, Error<F>> {
+        // Hold the witness lock only long enough to check the request and snapshot the entry;
+        // decode outside it so concurrent readers do not contend.
+        let entry = self.with(|w| -> Result<Witness<F, D>, Error<F>> {
+            let current = w.leaf_count();
+            if request.size > current {
+                return Err(merkle::Error::RangeOutOfBounds(request.size).into());
+            }
+            if request.size < current {
+                return Err(crate::journal::Error::ItemPruned(*request.size - 1).into());
+            }
+            if request.start >= request.size {
+                return Err(merkle::Error::RangeOutOfBounds(request.start).into());
+            }
+            if *request.start < *current - 1 {
+                return Err(crate::journal::Error::ItemPruned(*request.start).into());
+            }
+            if let Some(boundary) = request.retain_from
+                && boundary != current
+                && let Some(missing) = F::nodes_to_pin(boundary).next()
+            {
+                return Err(merkle::Error::ElementPruned(missing).into());
             }
             Ok(w.witness.clone())
         })?;
@@ -195,11 +208,19 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             pinned_nodes,
         } = entry;
         let op = Op::decode_cfg(op_bytes.as_ref(), cfg)
-            .map_err(|_| ServeError::Database(Error::DataCorrupted("invalid commit operation")))?;
+            .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
+        let pinned_nodes = request.retain_from.map(|boundary| {
+            // Any other boundary that survived the checks above pins nothing.
+            if boundary == request.size {
+                pinned_nodes
+            } else {
+                Vec::new()
+            }
+        });
         Ok(Response {
             proof: last_commit_proof,
             operations: vec![op],
-            pinned_nodes: Some(pinned_nodes),
+            pinned_nodes,
         })
     }
 

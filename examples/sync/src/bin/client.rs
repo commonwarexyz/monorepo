@@ -18,7 +18,7 @@ use commonware_sync::{
     Error, Key, any, crate_version, current,
     databases::{DatabaseType, SyncMode},
     immutable, immutable_compact, keyless, keyless_compact,
-    net::{ErrorCode, Resolver},
+    net::{CompactResolver, ErrorCode, Resolver},
 };
 use commonware_utils::{
     DurationExt,
@@ -356,9 +356,9 @@ where
     loop {
         let source = Resolver::<Op, Key>::connect(context.child("resolver"), config.server).await?;
         let target = source.get_compact_target().await?;
-        let sync_config = compact::Config::<DB, Resolver<Op, Key>> {
+        let sync_config = compact::Config::<DB, CompactResolver<Op, Key>> {
             context: context.child("sync"),
-            source,
+            source: CompactResolver(source),
             target,
             db_config: make_db_config(&context),
             update_rx: None,
@@ -374,6 +374,16 @@ where
                 warn!(
                     sync_iteration = iteration,
                     "{label} target went stale before state fetch: {message}; retrying"
+                );
+                continue;
+            }
+            Err(sync::Error::Engine(
+                err @ (sync::EngineError::RootMismatch { .. } | sync::EngineError::InvalidProof),
+            )) => {
+                warn!(
+                    sync_iteration = iteration,
+                    ?err,
+                    "{label} fetched state did not match the target; refetching target"
                 );
                 continue;
             }
