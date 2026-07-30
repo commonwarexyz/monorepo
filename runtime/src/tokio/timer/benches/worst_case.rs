@@ -312,7 +312,7 @@ struct ProducerResult {
     /// Individual cancellation durations for this partition.
     cancellation: Vec<Duration>,
     /// Time immediately after this producer's final cancellation.
-    last_cancellation: Option<Instant>,
+    last_cancellation: Instant,
     /// Uncanceled timers retained until the measured phase completes.
     survivors: Vec<BenchSleep>,
     /// Whether a supposedly long timer completed during setup.
@@ -506,32 +506,30 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
 
 /// Drops timers with per-cancellation latency instrumentation.
 #[inline(never)]
-fn measure_cancellation_latency(
-    sleeps: &mut Vec<BenchSleep>,
-    samples: &mut [Duration],
-) -> Option<Instant> {
+fn measure_cancellation_latency(sleeps: &mut Vec<BenchSleep>, samples: &mut [Duration]) -> Instant {
     debug_assert_eq!(sleeps.len(), samples.len());
-    let mut last_cancellation = None;
-    for (sleep, sample) in sleeps.drain(..).zip(samples) {
-        let start = Instant::now();
-        drop(sleep);
-        let finished = Instant::now();
-        *sample = finished.saturating_duration_since(start);
-        last_cancellation = Some(finished);
-    }
-    last_cancellation
+    sleeps
+        .drain(..)
+        .zip(samples)
+        .map(|(sleep, sample)| {
+            let start = Instant::now();
+            drop(sleep);
+            let finished = Instant::now();
+            *sample = finished.saturating_duration_since(start);
+            finished
+        })
+        .last()
+        .expect("validated cancellation partitions are nonempty")
 }
 
 /// Drops timers without per-cancellation instrumentation.
 #[inline(never)]
-fn drain_cancellations(sleeps: &mut Vec<BenchSleep>) -> Option<Instant> {
-    if sleeps.is_empty() {
-        return None;
-    }
+fn drain_cancellations(sleeps: &mut Vec<BenchSleep>) -> Instant {
+    debug_assert!(!sleeps.is_empty());
     for sleep in sleeps.drain(..) {
         drop(sleep);
     }
-    Some(Instant::now())
+    Instant::now()
 }
 
 /// Waits for registration, releases cancellation, and joins every producer.
@@ -552,17 +550,9 @@ fn coordinate_cancellation(
     let drain_start = Instant::now();
     gate.start();
     collect_producers(handles, &mut results)?;
-    if results
-        .iter()
-        .any(|result| result.last_cancellation.is_none())
-    {
-        return Err(io::Error::other(
-            "cancellation producer completed without canceling a timer",
-        ));
-    }
     let drain = report::elapsed_through_last(
         drain_start,
-        results.iter().filter_map(|result| result.last_cancellation),
+        results.iter().map(|result| result.last_cancellation),
     )?;
     Ok(CoordinatedCancellation {
         results,

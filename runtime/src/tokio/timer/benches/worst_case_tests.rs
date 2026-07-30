@@ -71,7 +71,7 @@ fn cancellation_orchestration_handles_one_and_multiple_producers() {
 
 #[test]
 fn cancellation_collection_joins_after_first_panic() {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // Setup: Put a panicking producer before one returning a result, and
     // reserve coordinator storage before either producer is joined.
@@ -82,7 +82,7 @@ fn cancellation_collection_joins_after_first_panic() {
         Some(super::ProducerResult {
             setup: Duration::ZERO,
             cancellation: Vec::new(),
-            last_cancellation: None,
+            last_cancellation: Instant::now(),
             survivors: Vec::new(),
             completed_early: false,
         })
