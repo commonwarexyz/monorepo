@@ -185,7 +185,7 @@ mod tests {
     use commonware_utils::{NZU64, NZUsize};
 
     /// A caller that abandons its fetch drops the future, which retracts the request from the
-    /// actor. Nothing fires a channel: the drop guard is the whole mechanism.
+    /// actor.
     #[test]
     fn dropping_get_operations_sends_cancel_message() {
         deterministic::Runner::default().start(|context| async move {

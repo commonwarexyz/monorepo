@@ -543,17 +543,14 @@ where
 
     /// Handle the result of a fetch operation.
     ///
-    /// Discards results for requests no longer tracked (removed by
-    /// `remove_before` during a target update). For tracked requests,
-    /// verifies the proof against the current root first, then falls back
+    /// Verifies the proof against the current root first, then falls back
     /// to a matching historical root from `retained_roots` if available.
     fn handle_fetch_result(
         &mut self,
         fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, R::Error>,
     ) -> Result<(), Error<DB, R>> {
-        // Discard results for stale requests (removed by a target update).
-        // Using the request ID prevents a stale future from consuming the
-        // tracking entry of a fresh request at the same location.
+        // Defensive: removal aborts a request's future, so a result for an
+        // untracked ID should be unreachable.
         let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
             return Ok(());
         };
@@ -1069,5 +1066,21 @@ mod tests {
         let new_id = add(&mut requests, 5);
         assert_ne!(old_id, new_id);
         assert!(requests.remove(new_id).is_some());
+    }
+
+    #[test]
+    fn test_remove_before_aborts_future() {
+        deterministic::Runner::default().start(|_context| async move {
+            let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
+            let id = requests.next_id();
+            requests.insert(
+                id,
+                Location::new(5),
+                Location::new(5),
+                std::future::pending(),
+            );
+            requests.remove_before(Location::new(10));
+            assert!(matches!(requests.next_completed().await, Err(Aborted)));
+        });
     }
 }

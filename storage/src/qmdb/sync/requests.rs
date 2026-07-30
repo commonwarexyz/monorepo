@@ -1,9 +1,8 @@
 //! Manages outstanding fetch requests with monotonically increasing request IDs.
 //!
 //! Each request is assigned a unique ID and remembers the tree size it was issued
-//! against. This prevents stale futures from colliding with fresh requests at the
-//! same location after a target update, and lets the engine reject replies that
-//! do not match the requested historical view.
+//! against, letting the engine reject replies that do not match the requested
+//! historical view. Removing a request aborts its future.
 
 use crate::{
     merkle::{Family, Location},
@@ -128,7 +127,8 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         self.by_location.contains_key(loc)
     }
 
-    /// Resolve to the next fetch result, or [`Aborted`] if that request was cancelled.
+    /// Resolves to the next fetch result, or [`Aborted`] if the request was cancelled.
+    /// Never resolves while no requests are outstanding.
     pub async fn next_completed(&mut self) -> Result<IndexedFetchResult<F, Op, D, E>, Aborted> {
         self.futures.next_completed().await
     }

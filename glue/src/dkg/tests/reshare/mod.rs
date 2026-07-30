@@ -406,11 +406,9 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
         .expect("test epoch should be supported");
     let crash_window_start = state_sync_floor.get() + EPOCH_LENGTH.get() / 2;
     // The node processes nothing until state sync finishes, and sync converges
-    // only once two fetch round trips fit inside one block interval. On the
-    // default 10ms link a round trip is ~24ms against a ~40ms interval, so two
-    // never fit and the node lands on whatever height the coincidence happens
-    // to occur at. The fast link below converges it promptly, which is what lets
-    // the processed hold park the node at `crash_window_start` and crash there.
+    // only when two fetch round trips fit inside one block interval. The fast
+    // link below guarantees that, so the processed hold, not sync timing, parks
+    // the node at `crash_window_start`.
     let crash_window_end = FixedEpocher::new(EPOCH_LENGTH)
         .first(next_player_epoch.next())
         .expect("test epoch should be supported");
