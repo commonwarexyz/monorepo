@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::source::{Request, Response, Source as SyncSource},
+    qmdb::sync::source::{Request, Response, ResponseConfig, Source as SyncSource},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
@@ -31,8 +31,7 @@ type DatabaseRoot<F, DB> = <Shared<DB> as SyncSource<Request<F>>>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
 type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
 type Pending<F, Op, D> = mailbox::Delivery<F, Op, D>;
-type PendingSubs<F, DB> =
-    BTreeMap<handler::Request<F>, Vec<Pending<F, Op<F, DB>, DatabaseRoot<F, DB>>>>;
+type PendingSubs<F, DB> = BTreeMap<Request<F>, Vec<Pending<F, Op<F, DB>, DatabaseRoot<F, DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -86,8 +85,8 @@ enum State<DB> {
 /// An action dispatched by incoming mailbox messages.
 enum MailboxAction<F: Family> {
     None,
-    Fetch(handler::Request<F>),
-    Cancel(handler::Request<F>),
+    Fetch(Request<F>),
+    Cancel(Request<F>),
 }
 
 /// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
@@ -242,7 +241,7 @@ where
                         return MailboxAction::None;
                     }
                 }
-                self.pending.insert(request.clone(), vec![response]);
+                self.pending.insert(request, vec![response]);
                 self.metrics.fetch_requests.inc();
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
                 MailboxAction::Fetch(request)
@@ -260,7 +259,7 @@ where
     }
 
     /// Returns `true` if a request should be cancelled.
-    fn should_cancel_request(&mut self, request: &handler::Request<F>) -> bool {
+    fn should_cancel_request(&mut self, request: &Request<F>) -> bool {
         let Some(subscribers) = self.pending.get_mut(request) else {
             return false;
         };
@@ -275,7 +274,7 @@ where
     /// Decode a peer's response, fan it out to pending subscribers, and aggregate approvals.
     async fn handle_deliver(
         &mut self,
-        key: handler::Request<F>,
+        key: Request<F>,
         value: bytes::Bytes,
         response: oneshot::Sender<bool>,
     ) {
@@ -288,11 +287,15 @@ where
         };
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
 
-        // `max_ops` is sourced from the original local request key above.
-        let max_ops = key.max_ops.get() as usize;
-        let decoded = match handler::Response::<F, Op<F, DB>, DatabaseRoot<F, DB>>::decode_cfg(
-            value, &max_ops,
-        ) {
+        // Decode limits derive from the original local request key above. Saturating the
+        // conversion only ever tightens the limit.
+        let cfg = ResponseConfig {
+            max_ops: usize::try_from(key.max_ops.get()).unwrap_or(usize::MAX),
+            // The per-request proof bound is the effective cap.
+            max_proof_digests: usize::MAX,
+            op: (),
+        };
+        let decoded = match Response::<F, Op<F, DB>, DatabaseRoot<F, DB>>::decode_cfg(value, &cfg) {
             Ok(decoded) => decoded,
             Err(_) => {
                 self.pending.insert(key, subscribers);
@@ -345,11 +348,7 @@ where
     }
 
     /// Serve a peer's request by querying the local database.
-    async fn handle_produce(
-        &mut self,
-        key: handler::Request<F>,
-        response: oneshot::Sender<bytes::Bytes>,
-    ) {
+    async fn handle_produce(&mut self, key: Request<F>, response: oneshot::Sender<bytes::Bytes>) {
         let State::HasDb(database) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
@@ -358,27 +357,14 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let mut request = Request::new(key.op_count, key.start_loc, key.max_ops);
-        if key.include_pinned_nodes {
-            // The wire format only carries a flag, and a peer's retention floor is always the
-            // start of the range it asked for.
-            request = request.retaining_from(key.start_loc);
-        }
-        let result = database.serve(request).await;
+        let result = database.serve(key).await;
 
         let Ok((served, _validity_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
             return;
         };
 
-        response.send_lossy(
-            handler::Response {
-                proof: served.proof,
-                operations: served.operations,
-                pinned_nodes: served.pinned_nodes,
-            }
-            .encode(),
-        );
+        response.send_lossy(served.encode());
         self.metrics.serve_requests.inc(status::Status::Success);
     }
 }
@@ -467,13 +453,8 @@ mod tests {
         }
     }
 
-    fn test_request_at(op_count: Location) -> handler::Request<mmr::Family> {
-        handler::Request {
-            op_count,
-            start_loc: Location::new(0),
-            max_ops: NonZeroU64::new(1).unwrap(),
-            include_pinned_nodes: false,
-        }
+    fn test_request_at(op_count: Location) -> Request<mmr::Family> {
+        Request::new(op_count, Location::new(0), NonZeroU64::new(1).unwrap())
     }
 
     type TestPending = Pending<mmr::Family, TestOp, sha256::Digest>;
@@ -523,15 +504,15 @@ mod tests {
     }
 
     fn encoded_fetch_payload() -> Bytes {
-        handler::Response::<mmr::Family, TestOp, sha256::Digest> {
-            proof: Proof {
+        Response::<mmr::Family, TestOp, sha256::Digest>::new(
+            Proof {
                 leaves: Location::new(0),
                 inactive_peaks: 0,
                 digests: Vec::new(),
             },
-            operations: Vec::new(),
-            pinned_nodes: None,
-        }
+            Vec::new(),
+            None,
+        )
         .encode()
     }
 
@@ -576,12 +557,7 @@ mod tests {
             let op_count = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
-            let request = handler::Request {
-                op_count,
-                start_loc: Location::new(0),
-                max_ops: NonZeroU64::new(1_000).unwrap(),
-                include_pinned_nodes: false,
-            };
+            let request = Request::new(op_count, Location::new(0), NonZeroU64::new(1_000).unwrap());
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(request, response_tx).await;
 
@@ -597,7 +573,7 @@ mod tests {
 
             let (subscriber_tx, subscriber_rx) = test_subscriber();
             drop(subscriber_rx);
-            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+            actor.pending.insert(request, vec![subscriber_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             actor
@@ -616,9 +592,7 @@ mod tests {
 
             let (sub1_tx, sub1_rx) = test_subscriber();
             let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request.clone(), vec![sub1_tx, sub2_tx]);
+            actor.pending.insert(request, vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
@@ -651,9 +625,7 @@ mod tests {
 
             let (sub1_tx, sub1_rx) = test_subscriber();
             let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request.clone(), vec![sub1_tx, sub2_tx]);
+            actor.pending.insert(request, vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
@@ -682,7 +654,7 @@ mod tests {
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, _subscriber_rx) = test_subscriber();
-            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+            actor.pending.insert(request, vec![subscriber_tx]);
             actor.pending.remove(&request);
             assert!(!actor.pending.contains_key(&request));
 
@@ -702,11 +674,11 @@ mod tests {
 
             let (stale_tx, stale_rx) = test_subscriber();
             drop(stale_rx);
-            actor.pending.insert(request.clone(), vec![stale_tx]);
+            actor.pending.insert(request, vec![stale_tx]);
 
             let (fresh_tx, _fresh_rx) = test_subscriber();
             let action = actor.handle_mailbox_message(mailbox::Message::GetOperations {
-                request: request.clone(),
+                request,
                 response: fresh_tx,
             });
 

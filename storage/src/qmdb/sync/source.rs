@@ -751,6 +751,72 @@ pub(crate) mod tests {
 
     /// A source behind a lock reaches the source and reports its error.
     #[test]
+    fn test_response_decode_allows_pinned_nodes_above_max_ops() {
+        use commonware_codec::{Decode as _, Encode as _};
+        let response = Response::<mmr::Family, u64, ShaDigest>::new(
+            Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![ShaDigest::from([7; 32])],
+            },
+            vec![1],
+            Some(vec![ShaDigest::from([9; 32]); 3]),
+        );
+        let cfg = ResponseConfig {
+            max_ops: 1,
+            max_proof_digests: usize::MAX,
+            op: (),
+        };
+        let decoded =
+            Response::<mmr::Family, u64, ShaDigest>::decode_cfg(response.encode(), &cfg).unwrap();
+        assert_eq!(decoded.operations, vec![1]);
+        assert_eq!(decoded.pinned_nodes.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_response_decode_absolute_digest_cap_tightens() {
+        use commonware_codec::{Decode as _, Encode as _};
+        let response = Response::<mmr::Family, u64, ShaDigest>::new(
+            Proof {
+                leaves: Location::new(10),
+                inactive_peaks: 0,
+                digests: vec![ShaDigest::from([7; 32]); 3],
+            },
+            vec![1],
+            None,
+        );
+        let cfg = ResponseConfig {
+            max_ops: 1,
+            max_proof_digests: 2,
+            op: (),
+        };
+        assert!(
+            Response::<mmr::Family, u64, ShaDigest>::decode_cfg(response.encode(), &cfg).is_err()
+        );
+    }
+
+    #[test]
+    fn test_request_decode_rejects_contradictions() {
+        use commonware_codec::{DecodeExt as _, Encode as _};
+        let valid = Request::<mmr::Family>::new(Location::new(128), Location::new(64), NZU64!(16));
+        let decoded = Request::<mmr::Family>::decode(valid.encode()).unwrap();
+        assert_eq!(decoded, valid);
+
+        // start >= size
+        let mut bad = valid;
+        bad.start = Location::new(128);
+        assert!(Request::<mmr::Family>::decode(bad.encode()).is_err());
+
+        // retain_from > size
+        let bad = valid.retaining_from(Location::new(129));
+        assert!(Request::<mmr::Family>::decode(bad.encode()).is_err());
+
+        // boundary at the tip is allowed
+        let tip = valid.retaining_from(Location::new(128));
+        assert_eq!(Request::<mmr::Family>::decode(tip.encode()).unwrap(), tip);
+    }
+
+    #[test]
     fn test_locked_source_reaches_source() {
         deterministic::Runner::default().start(|_context| async move {
             let lock = AsyncRwLock::new(FailSource::<mmr::Family, u8, ShaDigest>::new());

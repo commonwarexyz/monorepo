@@ -1,6 +1,5 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
-use super::handler;
 use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel::CancelGuard};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
@@ -28,11 +27,11 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     AttachDatabase(Shared<DB>),
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
-        request: handler::Request<F>,
+        request: Request<F>,
         response: Delivery<F, Op, D>,
     },
     /// Cancel a previously requested operation fetch.
-    CancelOperations { request: handler::Request<F> },
+    CancelOperations { request: Request<F> },
 }
 
 impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
@@ -145,16 +144,9 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, Validity), Self::Error> {
-        let request = handler::Request {
-            op_count: request.size,
-            start_loc: request.start,
-            max_ops: request.max_ops,
-            include_pinned_nodes: request.retain_from.is_some(),
-        };
-
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {
-            request: request.clone(),
+            request,
             response: response_tx,
         });
         let mut cancel =
@@ -206,10 +198,10 @@ mod tests {
 
             match receiver.recv().await.expect("request should be queued") {
                 Message::GetOperations { request, .. } => {
-                    assert_eq!(request.op_count, op_count);
-                    assert_eq!(request.start_loc, start_loc);
+                    assert_eq!(request.size, op_count);
+                    assert_eq!(request.start, start_loc);
                     assert_eq!(request.max_ops, max_ops);
-                    assert!(!request.include_pinned_nodes);
+                    assert!(request.retain_from.is_none());
                 }
                 Message::AttachDatabase(_) => panic!("unexpected attach message"),
                 Message::CancelOperations { .. } => panic!("cancel should come after request"),
@@ -217,10 +209,10 @@ mod tests {
 
             match receiver.recv().await.expect("cancel should be queued") {
                 Message::CancelOperations { request } => {
-                    assert_eq!(request.op_count, op_count);
-                    assert_eq!(request.start_loc, start_loc);
+                    assert_eq!(request.size, op_count);
+                    assert_eq!(request.start, start_loc);
                     assert_eq!(request.max_ops, max_ops);
-                    assert!(!request.include_pinned_nodes);
+                    assert!(request.retain_from.is_none());
                 }
                 Message::AttachDatabase(_) => panic!("unexpected attach message"),
                 Message::GetOperations { .. } => panic!("unexpected duplicate request"),
