@@ -197,10 +197,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// for shutdown or another condition that prevents the implementation from ever producing
         /// a verdict.
         ///
-        /// If the receiver remains open forever and no dependent notarization or finalization
-        /// establishes success, the validator is unavailable for executions that require that
-        /// verdict. The validator therefore does not count as live for the consensus liveness
-        /// guarantee.
+        /// If the receiver remains open forever, no dependent notarization establishes success,
+        /// and no finalization makes the request obsolete, the validator is unavailable for
+        /// executions that require that verdict. The validator therefore does not count as live
+        /// for the consensus liveness guarantee.
         ///
         /// Consensus can request certification again after restart if the previous result was not
         /// durably recorded.

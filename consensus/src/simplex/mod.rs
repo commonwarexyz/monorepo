@@ -106,32 +106,14 @@
 //! proposal or notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
-//! Simplex keeps a certification request open until the application returns a verdict or protocol
-//! evidence establishes success. A later notarization that names the pending proposal as its parent
-//! establishes success because its quorum contains an honest validator that accepted the parent as
-//! certified before voting. A finalization at the same or a higher view also makes the request obsolete.
-//! Nullification alone does neither, so certification continues after a nullification certificate
-//! arrives. This lets the validator vote on a later honest proposal that builds on the pending
-//! parent.
+//! Simplex keeps a certification request open until the application returns a verdict, a verified
+//! later notarization names the proposal as its parent, or a finalization at or above that view
+//! makes the request obsolete. A timeout or nullification does not establish that the payload is
+//! uncertifiable, so application work continues.
 //!
-//! A view timeout and a certification verdict serve different purposes. A timeout lets the voter
-//! leave the current view and emit a nullify vote while application work continues. It does not
-//! establish that the notarized payload is uncertifiable. The notarization remains valid across
-//! views and may be selected as the parent of a later proposal.
-//!
-//! This distinction is required for liveness, not just for certificate fetching. With `3f + 1`
-//! validators and `f` Byzantine validators silent, consensus needs all `2f + 1` honest validators
-//! to form a quorum. If one honest validator leaves a required certification pending forever, only
-//! `2f` responsive validators remain. A covering nullification cannot be assumed to rescue that
-//! validator: one may never form, and a notarization and nullification may coexist without either
-//! invalidating the other.
-//!
-//! Consequently, a pending certification excludes that validator from proposals that depend on the
-//! result until the application responds or a dependent notarization establishes success. If neither
-//! occurs, an indefinitely pending request is equivalent to losing the validator for that execution.
-//! Simplex remains responsive while certification is delayed, but its liveness guarantee assumes
-//! that every live validator eventually returns a deterministic verdict when protocol evidence does
-//! not resolve the request first. See [Fetching Missing Certificates](#fetching-missing-certificates).
+//! A live application must return a deterministic verdict when protocol evidence does not resolve
+//! the request. An unresolved request prevents the validator from voting on dependent proposals.
+//! If enough validators are blocked this way, no quorum can form.
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -326,100 +308,32 @@
 //!
 //! ### Fetching Missing Certificates
 //!
-//! Instead of trying to fetch all possible certificates above the floor, we only attempt to fetch
-//! nullifications for all views from the floor (last certified notarization or finalization) to the current view.
-//! This technique, however, is not sufficient to guarantee progress.
+//! Background repair fetches nullifications between the local certified or finalized floor and the
+//! current view. This is insufficient when honest participants complete a view with different
+//! certificate types. For example, one may certify a notarization while others hold a nullification.
 //!
-//! For example, one honest participant may have certified a notarization at view `v` while the other honest
-//! participants hold a nullification at `v`. Both sides consider `v` complete, but they choose different parents
-//! and cannot initially verify each other's proposals.
+//! Proposal verification therefore requests the first missing ancestry certificate directly from
+//! the leader, even below the certified floor. Later proposals can add leaders for the same view.
+//! Targeted requests share resolver work with background repair without restricting its peer set.
 //!
-//! The local certified floor bounds background repair, but it does not bound ancestry validation. A participant may
-//! still lack certificates between its last finalization and its certified floor. Proposal verification checks the
-//! named parent and every skipped view, requesting the first missing certificate from the leader even when that view
-//! is below the local certified floor. Only finalization makes ancestry below its view invalid.
+//! A request identifies a view, not a certificate type. The responder returns its certified or
+//! finalized floor when that covers the view. Otherwise, it returns a covering nullification. A
+//! valid response may not justify an older or Byzantine proposal, but it still records the
+//! responder's current ancestry preference. The voter requests each missing view once per proposal
+//! and votes only if the resulting ancestry is valid.
 //!
-//! A proposal makes this otherwise invisible split actionable. An honest leader that skips a view must hold a
-//! covering nullification. An honest leader that names a parent must hold its certified notarization or finalization.
-//! A participant missing either certificate requests its exact view from that leader. An ancestry-only request
-//! targets the leader and has no fallback. Later ancestry-only requests for the same view can add their leaders as
-//! targets. A Byzantine proposal cannot make the request fall back to unrelated peers.
+//! A notarization response remains parked while its certification is pending. Success supplies the
+//! parent. Failure rejects the response and resumes background nullification repair. A covering
+//! nullification retires matching nullification demand, but not demand for a certified parent.
+//! Finalization retires all demand at or below its view. Raising the certified floor alone does not
+//! prove that the ancestry exposed by a proposal is locally available.
 //!
-//! Resolver work is deduplicated by view. If unrestricted background repair already owns the key, ancestry demand
-//! attaches as another subscriber. It does not restrict the shared fetch or install its leader as a target. The shared
-//! delivery follows the normal background path. Background demand that arrives during validation does not reclassify
-//! a targeted-only delivery. A certificate delivered only to targeted subscribers is recorded normally. Fetching it
-//! does not cause immediate gossip. Timeout retry may later include it as a view-entry certificate. Every honest
-//! participant missing the certificate can also request it directly from the proposal's leader.
+//! Targeted repair limits fanout. Same-view recovery succeeds only if fetching and verification
+//! beat the timeout, but outstanding demand can still help a later proposal. While finalization
+//! stalls, targeted bookkeeping can grow linearly with views, like other retained per-view state.
 //!
-//! The local fetch purpose records why the view was requested. This distinction is not added to the wire. Every
-//! admitted certificate updates resolver state. This includes gossip verified by the batcher. A covering
-//! nullification retires background repair and targeted nullification demand throughout its term. It preserves a
-//! targeted request for a certified parent.
-//!
-//! A terminal certification verdict retires targeted parent demand only at its exact view. Success supplies the
-//! parent. Failure permanently rules out the parent and starts background nullification repair. A certified-floor
-//! increase alone retires neither kind of targeted demand. It does not prove that the ancestry exposed by a proposal
-//! is now available.
-//!
-//! A valid resolver response completes the subscribers that received it. This remains true when its certificate kind
-//! does not satisfy an older proposal. The response still communicates the producer's current ancestry preference. A
-//! kind mismatch alone is not a validation failure or a fault by the serving peer. A response receives a failure
-//! verdict only when its evidence is malformed, incompatible with the key, or cryptographically invalid. An
-//! unsuccessfully certified notarization also receives a failure verdict.
-//!
-//! The request is parked while a certification verdict is pending. No further request is sent for the view. Later
-//! demand, including a targeted request from a new proposal, attaches to the parked fetch without reaching the
-//! network. Repair therefore waits for the certification verdict. The
-//! [`CertifiableAutomaton`](crate::CertifiableAutomaton) liveness contract requires a live request to finish unless
-//! finalization cancels it. See [Certification](#certification). Success raises the floor. Failure blocks the serving
-//! peer and requeues the pending request. An eligible honest peer can then supply the covering nullification.
-//! Finalization at or above the requested view retires every subscriber. It also prevents delayed proposal work from
-//! recreating the request.
-//!
-//! Finalization is the lifecycle boundary for unsatisfied demand. The age of the triggering proposal is not. Distinct
-//! Byzantine proposals can leave distinct targeted keys pending while finalization stalls. Targets are tracked per
-//! resolver key. A target made obsolete by local evidence can remain attached while another subscriber keeps that key
-//! active. This local request state has no independent bound while finalization is stalled. The next finalization
-//! removes every target key at or below its floor. This is the resource cost of preserving useful repair without a
-//! timing or view-age heuristic.
-//!
-//! The request deliberately does not encode a certificate kind. The responder applies the deterministic preference
-//! used for proposal ancestry. It returns its certified or finalized floor when that floor covers the requested view.
-//! Otherwise, it returns a covering nullification. The certified floor wins when both certificates exist. The
-//! response therefore describes the ancestry the leader would use now. The requester does not select the ancestry.
-//!
-//! Usually the response also justifies the triggering proposal. One important race can prevent this. A leader may
-//! construct a proposal using a nullification and then certify a notarization before handling the request. It returns
-//! the newly preferred notarization. That response may not make the older proposal verifiable. It does align the
-//! requester with the leader's current ancestry for the next proposal. Certification is a property of the proposal.
-//! Another valid aggregate certificate for an already-certified proposal is accepted without waiting for a second
-//! certification result.
-//!
-//! A valid response can be the wrong kind for ancestry named by a Byzantine proposal. For example, a leader can name
-//! an uncertified parent but serve the nullification it currently prefers for that view. A round requests each missing
-//! view at most once. This prevents a loop against a leader that repeatedly serves the same valid preference. The
-//! participant does not vote if the response fails to complete the proposal's ancestry. A later proposal can arm a
-//! new request for the same view.
-//!
-//! Targeted repair trades latency after detection for lower fanout. Broadcasting conflicting evidence can put the
-//! holder's certificate in front of every participant after one additional network delay. A request and response take
-//! two network delays. The broadcast carries evidence the requester already has. It generally cannot make the
-//! triggering proposal valid. A targeted fetch instead retrieves the ancestry evidence the leader currently prefers.
-//! It uses only point-to-point traffic between each requester and that leader.
-//!
-//! Targeted repair can rescue the triggering proposal only if the response and application verification finish before
-//! the timer expires. Same-view recovery is an optimization, not a liveness assumption. The request remains active if
-//! the timer wins while the response is outstanding. Matching local evidence or finalization can retire it. If
-//! application verification loses the race after the response completes, the evidence remains locally available even
-//! though the fetch is complete. An honest later proposal can benefit in either case. This avoids turning many
-//! simultaneous discrepancies into all-peer certificate broadcasts. Without a background request for the same view,
-//! a silent Byzantine leader consumes only resolver capacity directed at itself.
-//!
-//! A parent below the verifier's finalized view is refused without a request. An honest proposer names such a
-//! parent only when it holds a nullification for the same term. Vote safety rules out that nullification alongside
-//! the finalization. Reaching this state requires more than `f` participants to double-sign. There is no honest peer
-//! to converge with.
+//! A proposal whose parent is below the finalized view is rejected without fetching. Such a parent
+//! can coexist with a covering nullification only if more than `f` participants double-signed.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -519,11 +433,10 @@
 //!
 //! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
-//! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
-//! a fast-skip signal and can halt progress because certification requests are not retried during
-//! the same run. Keep the request pending while its verdict depends on temporary data. A live
-//! implementation must eventually send a verdict unless a dependent notarization or a finalization
-//! establishes success first. In that case, Simplex drops the receiver.
+//! uncertifiable for that round and also causes a local nullify. Closing `certify` is terminal and
+//! can halt progress because the request is not retried during the same run. Keep it pending while
+//! its verdict depends on temporary data. Simplex drops the receiver after a dependent notarization
+//! establishes success or a finalization makes the request obsolete.
 
 pub mod elector;
 pub mod scheme;
@@ -5716,32 +5629,18 @@ mod tests {
 
     test_for_all_fixtures!(split_views_no_lockup);
 
-    /// A single-holder certificate split must heal without waiting for the
-    /// holder's leader turn.
+    /// Heals a certified-notarization/nullification split before the holder leads.
     ///
-    /// Setup (n=4, f=1, quorum=3, so every honest vote is required):
-    /// - View 2: notarized and finalized, seen by all honest participants.
-    /// - View 3: one honest validator (`lone`) receives Notarization(3) and
-    ///   certifies it, while the other two honest validators (`group`)
-    ///   receive only Nullification(3).
-    /// - Views 4..=9: nullifications seen by all honest participants.
-    /// - The remaining validator is Byzantine and stays silent forever.
-    ///
-    /// Once connected, group leaders build on parent 2. `lone` cannot verify
-    /// it because it lacks Nullification(3). Its resolver never requests a
-    /// nullification at or below its certified-notarization floor. The
-    /// proposal identifies a holder, so `lone` fetches Nullification(3)
-    /// directly from that group leader. It then verifies the same proposal.
-    /// The first group-led view after GST finalizes before `lone`'s first
-    /// leader turn. See the module documentation on fetching missing
-    /// certificates for the recovery design.
+    /// One honest validator certifies Notarization(3), two hold Nullification(3), and
+    /// the fourth Byzantine validator stays silent. A group leader builds on parent 2.
+    /// Targeted repair supplies the missing nullification, so group-led view 11
+    /// finalizes before the notarization holder leads view 13.
     fn certified_split_heals_without_lone_leader_turn<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        // Create context
         let n = 4;
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 3);
@@ -5750,7 +5649,6 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Register participants
             let Fixture {
                 participants,
                 schemes,
@@ -5764,12 +5662,7 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Assign roles from the leader schedule. Everyone enters view 10
-            // from the injected certificates. The silent Byzantine leads
-            // view 10. The group leads views 11 and 12. `lone` leads view 13.
-            // This makes the heal window deterministic. The elector must
-            // ignore the entry certificate, as round-robin does, for this
-            // precomputation to be valid.
+            // Entry-independent schedule: silent leads 10, group 11..=12, and lone 13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);
@@ -5781,12 +5674,7 @@ mod tests {
             let lone_leader_view = View::new(13);
             assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
 
-            // Build the certificates manually. Signatures use the first
-            // `quorum` fixture keys regardless of role. Certificates are
-            // self-certifying. The scenario constrains only who holds each
-            // certificate. In that scenario, the group notarized view 3
-            // before timing out. A Byzantine nullify vote then completed
-            // Nullification(3).
+            // Delivery roles, not the arbitrary quorum signers, define the split.
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
@@ -5820,8 +5708,6 @@ mod tests {
             let b3_notarization = build_notarization(&proposal_b3);
             let null_3 = build_nullification(3);
 
-            // Create a non-participant injector with one-way links to all
-            // participants.
             let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
@@ -5848,8 +5734,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            // Preload the split. View 2 goes to everyone, the view-3
-            // certificates split by role, and views 4..=9 go to everyone.
+            // Split the view-3 certificates by role and share all other evidence.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
             injector_sender.send(Recipients::All, msg, true);
             let msg = Certificate::<_, D>::Finalization(b2_finalization).encode();
@@ -5869,11 +5754,7 @@ mod tests {
                 injector_sender.send(Recipients::All, msg, true);
             }
 
-            // Start engines for the honest participants only. The Byzantine
-            // stays silent. The participants are not linked to each other yet.
-            // One-shot certificate rebroadcasts triggered by the preload are
-            // therefore lost. This mirrors broadcasts during the partition
-            // that produced the split.
+            // Start honest engines before GST so preload rebroadcasts are lost.
             let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
@@ -5949,12 +5830,10 @@ mod tests {
                 engine.start(pending, recovered, resolver);
             }
 
-            // Allow started engines to consume the preloaded certificates.
+            // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
 
-            // Assert the split state: everyone finalized view 2, `lone`
-            // certified Notarization(3) without Nullification(3), and the
-            // group holds Nullification(3) without Notarization(3).
+            // Confirm the intended view-3 split before GST.
             let view_2 = View::new(2);
             let view_3 = View::new(3);
             for (idx, reporter) in honest_reporters.iter() {
@@ -5974,11 +5853,9 @@ mod tests {
                 }
             }
 
-            // Connect all participants (GST).
+            // End the partition.
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
-            // Wait until every honest reporter finalizes a view past the
-            // preloaded Finalization(2).
             {
                 let target = View::new(3);
                 let mut finalizers = Vec::new();
@@ -5997,9 +5874,7 @@ mod tests {
                 join_all(finalizers).await;
             }
 
-            // The first group-led proposal after GST identifies a holder of
-            // the missing Nullification(3), allowing view 11 itself to
-            // finalize without waiting for `lone` to lead.
+            // Group-led view 11 finalizes before `lone` leads.
             for (idx, reporter) in honest_reporters.iter() {
                 let first = {
                     let finalizations = reporter.finalizations.lock();
@@ -6018,9 +5893,7 @@ mod tests {
             }
             assert!(View::new(11) < lone_leader_view);
 
-            // Only the targeted response can initially deliver this
-            // certificate to `lone`. Background repair considers view 3
-            // complete on both sides.
+            // Background repair considers view 3 complete, so this proves targeted delivery.
             assert!(
                 honest_reporters[&lone]
                     .nullifications
@@ -6029,7 +5902,6 @@ mod tests {
                 "lone did not resolve Nullification(3) from the group leader"
             );
 
-            // Sanity checks: no faults/invalid signatures, and no peers blocked
             for reporter in honest_reporters.values() {
                 reporter.assert_no_faults();
                 reporter.assert_no_invalid();
@@ -6039,31 +5911,22 @@ mod tests {
         });
     }
 
-    // A single fixture: the role assignment precomputes the leader schedule,
-    // which requires an elector (like round-robin) whose choice is
-    // independent of the view-entry certificate.
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_without_lone_leader_turn() {
         certified_split_heals_without_lone_leader_turn::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    /// The mirror ordering of [certified_split_heals_without_lone_leader_turn]:
-    /// the certified-notarization holder leads first.
+    /// Heals a certified-notarization/nullification split when the holder leads first.
     ///
-    /// Same split as that test, but roles are assigned so `lone` leads view
-    /// 11. The group cannot verify `lone`'s parent-3 proposal (Notarization(3)
-    /// is not certified on their side), so they fetch the parent certificate
-    /// directly from `lone`. They certify it, allowing the batcher to assemble
-    /// a finalization for the recovered parent at view 3 before view 11
-    /// completes. The split therefore heals without another leader turn.
+    /// The group fetches and certifies Notarization(3) from the leader. The
+    /// recovered parent finalizes before the triggering proposal completes.
     fn certified_split_heals_when_lone_holder_leads_first<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        // Create context
         let n = 4;
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 3);
@@ -6072,7 +5935,6 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Register participants
             let Fixture {
                 participants,
                 schemes,
@@ -6086,10 +5948,7 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Assign roles from the leader schedule. The silent Byzantine
-            // leads view 10. `lone` leads view 11. The group leads views 12
-            // and 13. The elector must ignore the entry certificate, as
-            // round-robin does, for this precomputation to be valid.
+            // Entry-independent schedule: silent leads 10, lone 11, and group 12..=13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);
@@ -6100,8 +5959,7 @@ mod tests {
             let group = [leader_of(12), leader_of(13)];
             assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
 
-            // Build the certificates manually (see
-            // certified_split_heals_without_lone_leader_turn on signers).
+            // Delivery roles, not the arbitrary quorum signers, define the split.
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
@@ -6135,8 +5993,6 @@ mod tests {
             let b3_notarization = build_notarization(&proposal_b3);
             let null_3 = build_nullification(3);
 
-            // Create a non-participant injector with one-way links to all
-            // participants.
             let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
@@ -6163,8 +6019,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            // Preload the split. View 2 goes to everyone, the view-3
-            // certificates split by role, and views 4..=9 go to everyone.
+            // Split the view-3 certificates by role and share all other evidence.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
             injector_sender.send(Recipients::All, msg, true);
             let msg = Certificate::<_, D>::Finalization(b2_finalization).encode();
@@ -6184,11 +6039,7 @@ mod tests {
                 injector_sender.send(Recipients::All, msg, true);
             }
 
-            // Start engines for the honest participants only. The Byzantine
-            // stays silent. The participants are not linked to each other yet.
-            // One-shot certificate rebroadcasts triggered by the preload are
-            // therefore lost. This mirrors broadcasts during the partition
-            // that produced the split.
+            // Start honest engines before GST so preload rebroadcasts are lost.
             let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
@@ -6264,12 +6115,10 @@ mod tests {
                 engine.start(pending, recovered, resolver);
             }
 
-            // Allow started engines to consume the preloaded certificates.
+            // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
 
-            // Assert the split state: everyone finalized view 2, `lone`
-            // certified Notarization(3) without Nullification(3), and the
-            // group holds Nullification(3) without Notarization(3).
+            // Confirm the intended view-3 split before GST.
             let view_2 = View::new(2);
             let view_3 = View::new(3);
             for (idx, reporter) in honest_reporters.iter() {
@@ -6289,11 +6138,9 @@ mod tests {
                 }
             }
 
-            // Connect all participants (GST).
+            // End the partition.
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
-            // Wait until every honest reporter finalizes a view past the
-            // preloaded Finalization(2).
             {
                 let target = View::new(3);
                 let mut finalizers = Vec::new();
@@ -6312,9 +6159,7 @@ mod tests {
                 join_all(finalizers).await;
             }
 
-            // The group resolves Notarization(3) from `lone`. Once certified,
-            // the recovered proposal finalizes before the triggering proposal
-            // at view 11 completes.
+            // The recovered parent finalizes before the triggering proposal.
             for (idx, reporter) in honest_reporters.iter() {
                 let first = {
                     let finalizations = reporter.finalizations.lock();
@@ -6331,9 +6176,7 @@ mod tests {
                 );
             }
 
-            // Background repair treats Nullification(3) as complete, so the
-            // group can learn Notarization(3) only through proposal-targeted
-            // resolution in this setup.
+            // Background repair considers view 3 complete, so this proves targeted delivery.
             for idx in group {
                 let reporter = &honest_reporters[&idx];
                 assert!(
@@ -6346,7 +6189,6 @@ mod tests {
                 );
             }
 
-            // Sanity checks: no faults/invalid signatures, and no peers blocked
             for reporter in honest_reporters.values() {
                 reporter.assert_no_faults();
                 reporter.assert_no_invalid();
@@ -6356,39 +6198,23 @@ mod tests {
         });
     }
 
-    // A single fixture, for the same reason as
-    // certified_split_heals_without_lone_leader_turn.
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_when_lone_holder_leads_first() {
         certified_split_heals_when_lone_holder_leads_first::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    /// A variant of [certified_split_heals_without_lone_leader_turn] where the
-    /// certified view sits ABOVE the first non-nullified view of the skipped
-    /// range.
+    /// Repairs ancestry gaps below a displaced certified view.
     ///
-    /// Setup (n=4, f=1, quorum=3, so every honest vote is required):
-    /// - View 2: notarized and finalized, seen by all honest participants.
-    /// - View 5: one honest validator (`lone`) receives Notarization(5) and
-    ///   certifies it (a notarization needs no ancestry), never holding
-    ///   Nullification(3..=5). The other two honest validators (`group`)
-    ///   receive Nullification(3..=5) and never see Notarization(5).
-    /// - Views 6..=9: nullifications seen by all honest participants.
-    /// - The remaining validator is Byzantine and stays silent forever.
-    ///
-    /// Group leaders build on parent 2, which `lone` cannot verify (it lacks
-    /// Nullification(3), a view it holds no evidence for). `lone` resolves
-    /// each newly exposed gap, Nullification(3..=5), from that leader and
-    /// verifies the same proposal. This exercises recovery when the local
-    /// certified view is displaced above the first missing view.
+    /// One validator certifies Notarization(5) but lacks Nullification(3..=5),
+    /// which the group holds. Targeted repair fetches each gap in order and lets
+    /// the first group-led proposal finalize.
     fn certified_split_heals_with_displaced_certified_view<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        // Create context
         let n = 4;
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 3);
@@ -6397,7 +6223,6 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Register participants
             let Fixture {
                 participants,
                 schemes,
@@ -6411,12 +6236,7 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Assign roles from the leader schedule. Everyone enters view 10
-            // from the injected certificates. The silent Byzantine leads
-            // view 10. The group leads views 11 and 12. `lone` leads view 13.
-            // This makes the heal window deterministic. The elector must
-            // ignore the entry certificate, as round-robin does, for this
-            // precomputation to be valid.
+            // Entry-independent schedule: silent leads 10, group 11..=12, and lone 13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);
@@ -6428,8 +6248,7 @@ mod tests {
             let lone_leader_view = View::new(13);
             assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
 
-            // Build the certificates manually (see
-            // certified_split_heals_without_lone_leader_turn on signers).
+            // Delivery roles, not the arbitrary quorum signers, define the split.
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
@@ -6462,8 +6281,6 @@ mod tests {
             let b2_finalization = build_finalization(&proposal_b2);
             let b5_notarization = build_notarization(&proposal_b5);
 
-            // Create a non-participant injector with one-way links to all
-            // participants.
             let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
@@ -6490,9 +6307,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            // Preload the split. View 2 goes to everyone, Notarization(5)
-            // goes to `lone` only, Nullification(3..=5) go to the group
-            // only, and views 6..=9 go to everyone.
+            // Split view-5 notarization from nullifications 3 through 5.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
             injector_sender.send(Recipients::All, msg, true);
             let msg = Certificate::<_, D>::Finalization(b2_finalization).encode();
@@ -6514,11 +6329,7 @@ mod tests {
                 injector_sender.send(Recipients::All, msg, true);
             }
 
-            // Start engines for the honest participants only. The Byzantine
-            // stays silent. The participants are not linked to each other yet.
-            // One-shot certificate rebroadcasts triggered by the preload are
-            // therefore lost. This mirrors broadcasts during the partition
-            // that produced the split.
+            // Start honest engines before GST so preload rebroadcasts are lost.
             let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
@@ -6594,13 +6405,10 @@ mod tests {
                 engine.start(pending, recovered, resolver);
             }
 
-            // Allow started engines to consume the preloaded certificates.
+            // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
 
-            // Assert the split state: everyone finalized view 2, `lone`
-            // certified Notarization(5) without any of Nullification(3..=5),
-            // and the group holds Nullification(3..=5) without
-            // Notarization(5).
+            // Confirm the intended certificate split before GST.
             let view_2 = View::new(2);
             let view_5 = View::new(5);
             for (idx, reporter) in honest_reporters.iter() {
@@ -6627,11 +6435,9 @@ mod tests {
                 }
             }
 
-            // Connect all participants (GST).
+            // End the partition.
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
-            // Wait until every honest reporter finalizes a view past the
-            // preloaded Finalization(2).
             {
                 let target = View::new(3);
                 let mut finalizers = Vec::new();
@@ -6650,9 +6456,7 @@ mod tests {
                 join_all(finalizers).await;
             }
 
-            // Each targeted response exposes the next missing nullification.
-            // All three arrive soon enough to finalize the first group-led
-            // proposal after GST.
+            // All three targeted recoveries complete before group-led view 11 finalizes.
             for (idx, reporter) in honest_reporters.iter() {
                 let first = {
                     let finalizations = reporter.finalizations.lock();
@@ -6682,7 +6486,6 @@ mod tests {
                 );
             }
 
-            // Sanity checks: no faults/invalid signatures, and no peers blocked
             for reporter in honest_reporters.values() {
                 reporter.assert_no_faults();
                 reporter.assert_no_invalid();
@@ -6692,8 +6495,6 @@ mod tests {
         });
     }
 
-    // A single fixture, for the same reason as
-    // certified_split_heals_without_lone_leader_turn.
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_with_displaced_certified_view() {
