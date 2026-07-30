@@ -48,11 +48,11 @@
 //! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
 //! is in progress are delivered the same accepted response locally.
 //!
-//! A response being validated parks its key. No further request is sent while validation is in
-//! progress. New fetches for the key only attach subscribers or targets. Acceptance completes the
-//! fetch. Rejection blocks the serving peer and retries. A consumer that withholds its verdict
-//! stalls the fetch for that key. Consumers that wait on external input must guarantee that
-//! validation eventually concludes.
+//! While a response is being validated, its key remains in flight, so no further request is sent.
+//! New fetches for the key only attach subscribers or targets. Acceptance completes the fetch.
+//! Rejection blocks the serving peer and retries. A consumer that withholds its verdict stalls the
+//! fetch for that key. Consumers that wait on external input must guarantee that validation
+//! eventually concludes.
 //!
 //! # Peer Selection
 //!
