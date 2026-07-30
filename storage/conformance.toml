@@ -502,6 +502,22 @@ hash = "c59085de482697991f0202388605c751020e257b858d4af35386495d4db7c14c"
 n_cases = 65536
 hash = "290187801284530d0d7e82c33bb6ce975a5f4daa4b104230291cea9cffcd7686"
 
+["commonware_storage::qmdb::sync::source::conformance::CodecConformance<Request<mmb::Family>>"]
+n_cases = 65536
+hash = "7aab926c413ec010aeb7f8d8e5b9b818c3ecc419b72ad0ae7cfb82ef5c6b9714"
+
+["commonware_storage::qmdb::sync::source::conformance::CodecConformance<Request<mmr::Family>>"]
+n_cases = 65536
+hash = "e332a8d322e7adf8abddaa65ef0b074d3a2c2c8ed0895bf483dda780d5837a9b"
+
+["commonware_storage::qmdb::sync::source::conformance::CodecConformance<Response<mmb::Family,u64,Sha256Digest>>"]
+n_cases = 65536
+hash = "c3a66044cb110fbd41baf8aced41989de15375d858f13ced524981de30ca7302"
+
+["commonware_storage::qmdb::sync::source::conformance::CodecConformance<Response<mmr::Family,u64,Sha256Digest>>"]
+n_cases = 65536
+hash = "7ca1ff124e5835f5be5d9b915233b9df088db121a0f5c3baa54b9ab8daf8bd78"
+
 ["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<MmrFamily,sha256::Digest>>"]
 n_cases = 65536
 hash = "f742d92a0af0af78a9519bf637bc52ea869965a85a84101a4c53f53eb39325ca"

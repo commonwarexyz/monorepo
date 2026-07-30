@@ -122,6 +122,39 @@ impl<F: Family, D: Digest> PartialEq for Target<F, D> {
 
 impl<F: Family, D: Digest> Eq for Target<F, D> {}
 
+impl<F: Family, D: Digest> PartialOrd for Target<F, D> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<F: Family, D: Digest> Ord for Target<F, D> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.root
+            .cmp(&other.root)
+            .then_with(|| self.leaf_count.cmp(&other.leaf_count))
+    }
+}
+
+impl<F: Family, D: Digest> std::hash::Hash for Target<F, D> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.root.hash(state);
+        self.leaf_count.hash(state);
+    }
+}
+
+impl<F: Family, D: Digest> std::fmt::Display for Target<F, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Target(root={}, leaf_count={})",
+            self.root, self.leaf_count
+        )
+    }
+}
+
+impl<F: Family, D: Digest> commonware_utils::Span for Target<F, D> {}
+
 impl<F: Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);

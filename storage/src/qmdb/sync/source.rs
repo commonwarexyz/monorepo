@@ -5,7 +5,9 @@ use crate::{
     translator::Translator,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadRangeExt as _, Write};
+use commonware_codec::{
+    EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _, Write,
+};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -30,6 +32,8 @@ pub struct Request<F: Family> {
 }
 
 impl<F: Family> Request<F> {
+    const INVALID: &'static str = "start and retain_from must lie within a valid size";
+
     /// Request operations at `start`, proven against the tree at `size`.
     pub const fn new(size: Location<F>, start: Location<F>, max_ops: NonZeroU64) -> Self {
         Self {
@@ -44,6 +48,20 @@ impl<F: Family> Request<F> {
     pub const fn retaining_from(mut self, boundary: Location<F>) -> Self {
         self.retain_from = Some(boundary);
         self
+    }
+
+    /// Validate a request that may have been constructed programmatically.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.size.is_valid()
+            || self.size == 0
+            || self.start >= self.size
+            || self
+                .retain_from
+                .is_some_and(|boundary| boundary > self.size)
+        {
+            return Err(Self::INVALID);
+        }
+        Ok(())
     }
 }
 
@@ -63,6 +81,119 @@ impl<F: Family> std::fmt::Debug for Request<F> {
             .field("max_ops", &self.max_ops)
             .field("retain_from", &self.retain_from)
             .finish()
+    }
+}
+
+impl<F: Family> PartialEq for Request<F> {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size
+            && self.start == other.start
+            && self.max_ops == other.max_ops
+            && self.retain_from == other.retain_from
+    }
+}
+
+impl<F: Family> Eq for Request<F> {}
+
+impl<F: Family> PartialOrd for Request<F> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<F: Family> Ord for Request<F> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.size
+            .cmp(&other.size)
+            .then_with(|| self.start.cmp(&other.start))
+            .then_with(|| self.max_ops.cmp(&other.max_ops))
+            .then_with(|| self.retain_from.cmp(&other.retain_from))
+    }
+}
+
+impl<F: Family> std::hash::Hash for Request<F> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.size.hash(state);
+        self.start.hash(state);
+        self.max_ops.hash(state);
+        self.retain_from.hash(state);
+    }
+}
+
+impl<F: Family> std::fmt::Display for Request<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Request(size={}, start={}, max={}, retain_from=",
+            self.size, self.start, self.max_ops,
+        )?;
+        match self.retain_from {
+            Some(boundary) => write!(f, "{boundary})"),
+            None => write!(f, "none)"),
+        }
+    }
+}
+
+impl<F: Family> Write for Request<F> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.size.write(buf);
+        self.start.write(buf);
+        self.max_ops.get().write(buf);
+        self.retain_from.write(buf);
+    }
+}
+
+impl<F: Family> EncodeSize for Request<F> {
+    fn encode_size(&self) -> usize {
+        self.size.encode_size()
+            + self.start.encode_size()
+            + self.max_ops.get().encode_size()
+            + self.retain_from.encode_size()
+    }
+}
+
+impl<F: Family> Read for Request<F> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let size = Location::<F>::read(buf)?;
+        let start = Location::<F>::read(buf)?;
+        let max_ops = NonZeroU64::new(u64::read(buf)?).ok_or(CodecError::Invalid(
+            "storage::qmdb::sync::source::Request",
+            "max_ops cannot be zero",
+        ))?;
+        let retain_from = Option::<Location<F>>::read(buf)?;
+        let request = Self {
+            size,
+            start,
+            max_ops,
+            retain_from,
+        };
+        request.validate().map_err(|reason| {
+            CodecError::Invalid("storage::qmdb::sync::source::Request", reason)
+        })?;
+        Ok(request)
+    }
+}
+
+impl<F: Family> commonware_utils::Span for Request<F> {}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let size = u.int_in_range(1..=*F::MAX_LEAVES)?;
+        let start = Location::new(u.int_in_range(0..=size - 1)?);
+        let max_ops = NonZeroU64::new(u.int_in_range(1..=u64::MAX)?).unwrap();
+        let retain_from = u
+            .arbitrary::<bool>()?
+            .then(|| u.int_in_range(0..=size).map(Location::new))
+            .transpose()?;
+        Ok(Self {
+            size: Location::new(size),
+            start,
+            max_ops,
+            retain_from,
+        })
     }
 }
 
@@ -128,15 +259,31 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
     }
 }
 
+/// Decode limits for a [`Response`], derived from the request it answers.
+///
+/// Named fields so an absolute digest cap cannot be mistaken for an operation count and then
+/// multiplied into a much larger proof allowance.
+#[derive(Clone, Debug)]
+pub struct ResponseConfig<C> {
+    /// Maximum operations the request asked for.
+    pub max_ops: usize,
+    /// Absolute cap on proof digests, independent of `max_ops`.
+    pub max_proof_digests: usize,
+    /// Configuration for decoding one operation.
+    pub op: C,
+}
+
 impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D>
 where
     Op::Cfg: Clone,
 {
-    /// The `max_ops` the request asked for, and the configuration for decoding one operation.
-    type Cfg = (usize, Op::Cfg);
+    type Cfg = ResponseConfig<Op::Cfg>;
 
-    fn read_cfg(buf: &mut impl Buf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
-        let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let max_proof_digests = cfg
+            .max_proof_digests
+            .min(cfg.max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT));
+        let (max_ops, op_cfg) = (&cfg.max_ops, &cfg.op);
         let proof = Proof::<F, D>::read_cfg(buf, &max_proof_digests)?;
         let operations = Vec::<Op>::read_cfg(buf, &((..=*max_ops).into(), op_cfg.clone()))?;
         // Pins are the fold-prefix peaks at the requested boundary, independent of `max_ops`.
@@ -145,6 +292,21 @@ where
             proof,
             operations,
             pinned_nodes,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family, Op, D: Digest> arbitrary::Arbitrary<'_> for Response<F, Op, D>
+where
+    Op: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            proof: u.arbitrary()?,
+            operations: u.arbitrary()?,
+            pinned_nodes: u.arbitrary()?,
         })
     }
 }
@@ -557,5 +719,20 @@ pub(crate) mod tests {
             let result = lock.serve(request).await;
             assert!(matches!(result, Err(crate::qmdb::Error::KeyNotFound)));
         });
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use crate::merkle::{mmb, mmr};
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Request<mmr::Family>>,
+        CodecConformance<Request<mmb::Family>>,
+        CodecConformance<Response<mmr::Family, u64, Sha256Digest>>,
+        CodecConformance<Response<mmb::Family, u64, Sha256Digest>>,
     }
 }
