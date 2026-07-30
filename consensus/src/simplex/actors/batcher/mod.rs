@@ -982,8 +982,8 @@ mod tests {
                     } => {
                         assert_eq!(notarization.proposal, proposal);
 
-                        // Complete the quorum only after the notarization has
-                        // restored the network votes.
+                        // Complete the quorum only after the notarization has made
+                        // the buffered network votes eligible.
                         let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
                         batcher_mailbox.constructed(Vote::Finalize(finalize));
                         saw_notarization = true;

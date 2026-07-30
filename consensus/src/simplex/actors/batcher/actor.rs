@@ -513,8 +513,8 @@ where
                     .record_certificate(&message);
                 voter.recovered(message);
 
-                // Reprocess buffered votes only if the notarization changed the
-                // round's proposal.
+                // A notarization may make buffered finalize votes newly eligible,
+                // requiring another verification and construction pass.
                 if !reprocess_votes {
                     // Otherwise, certificates are already forwarded to voter,
                     // no need for construction.
