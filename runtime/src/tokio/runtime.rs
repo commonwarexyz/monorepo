@@ -1094,11 +1094,22 @@ mod tests {
             let endpoint = TcpEndpoint::Dns {
                 host: "127.0.0.1".to_string(),
                 port,
+                allow_private_ips: true,
             };
 
             let (dialed, accepted) = futures::join!(context.dial(&endpoint), listener.accept());
             dialed.unwrap().split();
             accepted.unwrap().split();
+
+            let endpoint = TcpEndpoint::Dns {
+                host: "127.0.0.1".to_string(),
+                port,
+                allow_private_ips: false,
+            };
+            assert!(matches!(
+                context.dial(&endpoint).await,
+                Err(Error::ResolveFailed(_))
+            ));
         });
     }
 }

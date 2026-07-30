@@ -384,6 +384,7 @@ fn attachment_config(
         },
         admission: ExactPeerAdmission { expected_peer },
         mailbox_size: NZUsize!(128),
+        max_concurrent_handshakes: commonware_utils::NZU32!(8),
         send_batch_size: NZUsize!(8),
         ping_frequency: Duration::from_secs(30),
         tracked_peer_sets: NZUsize!(1),

@@ -1,5 +1,34 @@
 use commonware_macros::stability_scope;
 
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    async fn resolve_tcp_endpoint(
+        endpoint: &crate::TcpEndpoint,
+    ) -> Result<Vec<std::net::SocketAddr>, crate::Error> {
+        use commonware_utils::IpAddrExt;
+        use rand::seq::SliceRandom as _;
+
+        let (host, port, allow_private_ips) = match endpoint {
+            crate::TcpEndpoint::Socket(address) => return Ok(vec![*address]),
+            crate::TcpEndpoint::Dns {
+                host,
+                port,
+                allow_private_ips,
+            } => (host, port, allow_private_ips),
+        };
+
+        let mut addresses: Vec<_> = ::tokio::net::lookup_host((host.as_str(), *port))
+            .await
+            .map_err(|error| crate::Error::ResolveFailed(error.to_string()))?
+            .filter(|address| *allow_private_ips || IpAddrExt::is_global(&address.ip()))
+            .collect();
+        if addresses.is_empty() {
+            return Err(crate::Error::ResolveFailed("no addresses returned".into()));
+        }
+        addresses.shuffle(&mut commonware_utils::sys_rng());
+        Ok(addresses)
+    }
+});
+
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod audited;
     pub(crate) mod deterministic;

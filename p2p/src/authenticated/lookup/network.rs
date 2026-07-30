@@ -91,6 +91,7 @@ impl<
             cfg.stream.clone(),
             cfg.admission,
             cfg.mailbox_size,
+            cfg.max_concurrent_handshakes,
         );
 
         (

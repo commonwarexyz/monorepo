@@ -461,6 +461,7 @@ async fn recv_loop<DB, E, Mode>(
     state: Arc<State<DB>>,
     mut stream: StreamOf<E>,
     response_sender: mpsc::Sender<wire::Message<DB::Operation, Key>>,
+    client_addr: String,
 ) where
     DB: ExampleDatabase<Family = mmr::Family> + Send + Sync + 'static,
     DB::Operation: Read + Encode + Send,
@@ -472,7 +473,7 @@ async fn recv_loop<DB, E, Mode>(
         let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
             Ok(data) => data,
             Err(err) => {
-                debug!(?err, "client disconnected");
+                debug!(?err, client_addr = %client_addr, "client disconnected");
                 return;
             }
         };
@@ -480,7 +481,7 @@ async fn recv_loop<DB, E, Mode>(
         let message = match wire::Message::decode(message_data.coalesce()) {
             Ok(msg) => msg,
             Err(err) => {
-                warn!(?err, "failed to parse message");
+                warn!(client_addr = %client_addr, ?err, "failed to parse message");
                 state.error_counter.inc();
                 continue;
             }
@@ -489,10 +490,11 @@ async fn recv_loop<DB, E, Mode>(
         context.child("request_handler").spawn({
             let state = state.clone();
             let response_sender = response_sender.clone();
+            let client_addr = client_addr.clone();
             move |_| async move {
                 let response = Mode::handle_message(state.as_ref(), message).await;
                 if let Err(err) = response_sender.send(response).await {
-                    warn!(?err, "failed to send response to main loop");
+                    warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
                 }
             }
         });
@@ -509,6 +511,7 @@ async fn handle_client<DB, E, Mode>(
     state: Arc<State<DB>>,
     mut sink: SinkOf<E>,
     stream: StreamOf<E>,
+    client_addr: String,
 ) -> Result<(), BoxError>
 where
     DB: ExampleDatabase<Family = mmr::Family> + Send + Sync + 'static,
@@ -517,7 +520,7 @@ where
     E: Storage + Clock + Metrics + Acceptor<Bind = SocketAddr> + Spawner,
     Mode: ServeMode<DB> + 'static,
 {
-    info!("client connected");
+    info!(client_addr = %client_addr, "client connected");
 
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
@@ -525,7 +528,10 @@ where
     let recv_handle = context.child("recv").spawn({
         let state = state.clone();
         let response_sender = response_sender.clone();
-        move |context| recv_loop::<DB, E, Mode>(context, state, stream, response_sender)
+        let client_addr = client_addr.clone();
+        move |context| {
+            recv_loop::<DB, E, Mode>(context, state, stream, response_sender, client_addr)
+        }
     });
 
     drop(response_sender);
@@ -533,7 +539,7 @@ where
     while let Some(response) = response_receiver.recv().await {
         let response_data = response.encode();
         if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
-            info!(?err, "send failed (client likely disconnected)");
+            info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
             state.error_counter.inc();
             break;
         }
@@ -648,11 +654,12 @@ where
         },
         client_result = listener.accept() => match client_result {
             Ok(connection) => {
-                let (sink, stream, _) = connection.split();
+                let (sink, stream, info) = connection.split();
+                let client_addr = format!("{:?}", info.origin);
                 let state = state.clone();
                 context.child("client").spawn(move |context| async move {
-                    if let Err(err) = handle_client::<DB, _, Mode>(context, state, sink, stream).await {
-                        error!(?err, "error handling client");
+                    if let Err(err) = handle_client::<DB, _, Mode>(context, state, sink, stream, client_addr.clone()).await {
+                        error!(client_addr = %client_addr, ?err, "error handling client");
                     }
                 });
             }

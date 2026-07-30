@@ -1513,7 +1513,11 @@ impl Dialer for Context {
     async fn dial(&self, endpoint: &Self::Endpoint) -> Result<Self::Connection, Error> {
         let sockets = match endpoint {
             TcpEndpoint::Socket(socket) => vec![*socket],
-            TcpEndpoint::Dns { host, port } => {
+            TcpEndpoint::Dns {
+                host,
+                port,
+                allow_private_ips,
+            } => {
                 let executor = self.executor();
                 let result = executor.dns.lock().get(host).cloned();
                 executor.auditor.event(b"resolve", |hasher| {
@@ -1521,14 +1525,22 @@ impl Dialer for Context {
                     hasher.update(result.encode());
                 });
                 let mut addresses = result.ok_or_else(|| Error::ResolveFailed(host.clone()))?;
+                if addresses.is_empty() {
+                    return Err(Error::ResolveFailed(host.clone()));
+                }
                 executor.auditor.event(b"rand", |hasher| {
                     hasher.update(b"dns_shuffle");
                 });
                 addresses.shuffle(&mut **executor.rng.lock());
-                addresses
+                let addresses: Vec<_> = addresses
                     .into_iter()
+                    .filter(|ip| *allow_private_ips || commonware_utils::IpAddrExt::is_global(ip))
                     .map(|ip| SocketAddr::new(ip, *port))
-                    .collect()
+                    .collect();
+                if addresses.is_empty() {
+                    return Err(Error::ResolveFailed(host.clone()));
+                }
+                addresses
             }
         };
 
@@ -1881,6 +1893,7 @@ mod tests {
             let endpoint = TcpEndpoint::Dns {
                 host: host.to_string(),
                 port: socket.port(),
+                allow_private_ips: true,
             };
 
             let (dialed, accepted) = futures::join!(context.dial(&endpoint), listener.accept());
@@ -2373,6 +2386,7 @@ mod tests {
             let endpoint = TcpEndpoint::Dns {
                 host: "example.com".to_string(),
                 port: socket.port(),
+                allow_private_ips: true,
             };
             let (dialed, accepted) = futures::join!(context.dial(&endpoint), listener.accept());
             dialed.unwrap().split();
@@ -2382,8 +2396,28 @@ mod tests {
             let unknown = TcpEndpoint::Dns {
                 host: "unknown.com".to_string(),
                 port: socket.port(),
+                allow_private_ips: true,
             };
             let result = context.dial(&unknown).await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // An empty successful response is also a resolution failure.
+            context.resolver_register("empty.com", Some(Vec::new()));
+            let empty = TcpEndpoint::Dns {
+                host: "empty.com".to_string(),
+                port: socket.port(),
+                allow_private_ips: true,
+            };
+            let result = context.dial(&empty).await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // Private DNS results are rejected before a connection is attempted.
+            let private = TcpEndpoint::Dns {
+                host: "example.com".to_string(),
+                port: socket.port(),
+                allow_private_ips: false,
+            };
+            let result = context.dial(&private).await;
             assert!(matches!(result, Err(Error::ResolveFailed(_))));
 
             // Remove mapping

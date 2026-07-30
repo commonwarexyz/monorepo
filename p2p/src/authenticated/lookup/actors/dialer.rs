@@ -120,7 +120,7 @@ where
                 let timeout = context.sleep(dial_timeout);
                 let dial = async {
                     // Attempt to dial peer
-                    let endpoint = TcpEndpoint::from(&ingress);
+                    let endpoint = ingress.tcp_endpoint(allow_private_ips);
                     let connection = match context.dial(&endpoint).await {
                         Ok(connection) => connection,
                         Err(err) => {

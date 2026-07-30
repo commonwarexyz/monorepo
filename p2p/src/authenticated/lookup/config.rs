@@ -128,6 +128,9 @@ pub struct AttachmentConfig<C: Signer, A> {
     /// Message backlog allowed for internal actors.
     pub mailbox_size: NonZeroUsize,
 
+    /// Maximum number of connection handshakes in progress.
+    pub max_concurrent_handshakes: NonZeroU32,
+
     /// Maximum number of queued outbound messages combined into one write.
     pub send_batch_size: NonZeroUsize,
 

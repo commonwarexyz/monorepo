@@ -186,8 +186,7 @@ impl WebRtcStream {
     }
 
     async fn recv_inner(&mut self, len: usize) -> Result<IoBufs, Error> {
-        let recv_timeout = self.inner.config.recv_timeout;
-        let receive = poll_fn(|context| {
+        poll_fn(|context| {
             self.drain_shared();
             if self.buffered.len() >= len {
                 let chunks = self.buffered.take_exact(len);
@@ -212,13 +211,8 @@ impl WebRtcStream {
                 return Poll::Ready(Ok(IoBufs::from(chunks)));
             }
             Poll::Pending
-        });
-        let timeout = Delay::new(recv_timeout)?;
-        pin_mut!(receive, timeout);
-        match select(receive, timeout).await {
-            Either::Left((result, _)) => result,
-            Either::Right(_) => Err(Error::Timeout),
-        }
+        })
+        .await
     }
 }
 

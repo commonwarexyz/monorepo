@@ -372,19 +372,7 @@ impl Dialer for Network {
 
     async fn dial(&self, endpoint: &TcpEndpoint) -> Result<Self::Connection, crate::Error> {
         let connect = async {
-            let addresses = match endpoint {
-                TcpEndpoint::Socket(socket) => vec![*socket],
-                TcpEndpoint::Dns { host, port } => {
-                    let addresses: Vec<_> = tokio::net::lookup_host((host.as_str(), *port))
-                        .await
-                        .map_err(|error| Error::ResolveFailed(error.to_string()))?
-                        .collect();
-                    if addresses.is_empty() {
-                        return Err(Error::ResolveFailed("no addresses returned".into()));
-                    }
-                    addresses
-                }
-            };
+            let addresses = super::resolve_tcp_endpoint(endpoint).await?;
 
             TcpStream::connect(addresses.as_slice())
                 .await

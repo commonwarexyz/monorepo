@@ -1,4 +1,20 @@
 //! Carry Commonware reliable byte streams over established browser WebRTC data channels.
+//!
+//! This crate owns the message-to-byte-stream adapter only. Applications establish the peer
+//! connection and exchange SDP and ICE outside Commonware, then pass an open, reliable, ordered
+//! data channel to `WebRtcConnection`. Peer identity and encryption remain the responsibility of
+//! `commonware-stream` and `commonware-p2p`.
+//!
+//! Keeping the adapter separate from `commonware-runtime` prevents RTC-specific browser APIs and
+//! negotiation policy from becoming runtime capabilities.
+//!
+//! The adapter accepts binary messages only and requires an open, reliable, ordered channel using
+//! [`PROTOCOL`] as both its label and subprotocol. It removes message boundaries to provide exact
+//! length reads, bounds queued inbound bytes, and applies browser-side buffered-amount
+//! backpressure. Canceling an in-progress read or write poisons the connection, as required by the
+//! runtime stream contract. Dropping either half closes the data channel and peer connection.
+//! WebRTC does not expose a trustworthy peer origin, so the returned connection metadata has no
+//! origin. Changing [`PROTOCOL`] is a transport compatibility break.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -34,8 +50,6 @@ stability_scope!(ALPHA {
         pub send_low_watermark: u32,
         /// Maximum time a send may wait for backpressure relief.
         pub send_timeout: Duration,
-        /// Maximum time a receive may wait for enough bytes.
-        pub recv_timeout: Duration,
     }
 
     impl WebRtcConfig {
@@ -53,9 +67,6 @@ stability_scope!(ALPHA {
             if self.send_timeout.is_zero() {
                 return Err(ConfigError::ZeroSendTimeout);
             }
-            if self.recv_timeout.is_zero() {
-                return Err(ConfigError::ZeroRecvTimeout);
-            }
             Ok(())
         }
     }
@@ -68,7 +79,6 @@ stability_scope!(ALPHA {
                 send_high_watermark: 1024 * 1024,
                 send_low_watermark: 512 * 1024,
                 send_timeout: Duration::from_secs(30),
-                recv_timeout: Duration::from_secs(30),
             }
         }
     }
@@ -84,8 +94,6 @@ stability_scope!(ALPHA {
         InvalidWatermarks,
         #[error("send timeout must be non-zero")]
         ZeroSendTimeout,
-        #[error("receive timeout must be non-zero")]
-        ZeroRecvTimeout,
         #[error("peer connection must be connected")]
         PeerNotConnected,
         #[error("data channel must be open")]

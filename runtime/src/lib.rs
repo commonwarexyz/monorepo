@@ -118,8 +118,6 @@ stability_scope!(BETA {
         ProtocolViolation(String),
         #[error("incoming buffer limit exceeded")]
         IncomingBufferExceeded,
-        #[error("backpressure limit exceeded")]
-        BackpressureExceeded,
         #[error("dns resolution failed: {0}")]
         ResolveFailed(String),
         #[error(
@@ -507,22 +505,30 @@ stability_scope!(BETA {
 
     /// An established reliable byte stream.
     pub trait Connection: PlatformSend + PlatformSync + 'static {
+        /// Write half of the reliable byte stream.
         type Sink: Sink;
+        /// Read half of the reliable byte stream.
         type Stream: Stream;
+        /// Transport-observed source metadata.
         type Origin: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
 
+        /// Separates the connection into independent byte-stream halves and transport metadata.
         fn split(self) -> (Self::Sink, Self::Stream, ConnectionInfo<Self::Origin>);
     }
 
     /// Outbound connection capability.
     pub trait Dialer: PlatformSend + PlatformSync + 'static {
+        /// Transport-specific instructions for establishing a connection.
         type Endpoint: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
+        /// Connection returned after transport establishment.
         type Connection: Connection;
 
+        /// Returns whether this dialer understands an endpoint without performing I/O.
         fn supports(&self, _endpoint: &Self::Endpoint) -> bool {
             true
         }
 
+        /// Establishes a connection to `endpoint`.
         fn dial<'a>(
             &'a self,
             endpoint: &'a Self::Endpoint,
@@ -531,10 +537,14 @@ stability_scope!(BETA {
 
     /// Inbound connection capability.
     pub trait Acceptor: PlatformSend + PlatformSync + 'static {
+        /// Transport-specific local binding instructions.
         type Bind: Clone + std::fmt::Debug + PlatformSend + PlatformSync + 'static;
+        /// Connection produced by this acceptor.
         type Connection: Connection;
+        /// Bound listener that accepts connections.
         type Listener: Listener<Connection = Self::Connection>;
 
+        /// Binds a listener according to `bind`.
         fn bind<'a>(
             &'a self,
             bind: &'a Self::Bind,
@@ -543,8 +553,10 @@ stability_scope!(BETA {
 
     /// Accepts established connections from a bound transport.
     pub trait Listener: PlatformSend + PlatformSync + 'static {
+        /// Connection returned by [`Self::accept`].
         type Connection: Connection;
 
+        /// Waits for the next established inbound connection.
         fn accept(
             &mut self,
         ) -> impl Future<Output = Result<Self::Connection, Error>> + PlatformSend;
@@ -556,16 +568,29 @@ stability_scope!(BETA {
         fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
     }
 
+    /// Connection returned by a [`Dialer`].
     pub type ConnectionOf<D> = <D as Dialer>::Connection;
+    /// Write half returned by a dialer's connection.
     pub type SinkOf<D> = <<D as Dialer>::Connection as Connection>::Sink;
+    /// Read half returned by a dialer's connection.
     pub type StreamOf<D> = <<D as Dialer>::Connection as Connection>::Stream;
+    /// Origin metadata returned by a dialer's connection.
     pub type OriginOf<D> = <<D as Dialer>::Connection as Connection>::Origin;
 
     /// TCP dial location.
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     pub enum TcpEndpoint {
+        /// Connect directly to a socket address.
         Socket(SocketAddr),
-        Dns { host: String, port: u16 },
+        /// Resolve a hostname and try the resulting addresses in randomized order.
+        Dns {
+            /// Hostname to resolve.
+            host: String,
+            /// Destination port.
+            port: u16,
+            /// Whether resolved private addresses may be contacted.
+            allow_private_ips: bool,
+        },
     }
 
     impl From<SocketAddr> for TcpEndpoint {
@@ -577,6 +602,7 @@ stability_scope!(BETA {
     /// Source observed by a TCP acceptor.
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     pub struct TcpOrigin {
+        /// Remote socket observed by the transport.
         pub remote: SocketAddr,
     }
 
@@ -933,7 +959,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_clock_sleep<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             // Capture initial time
@@ -952,7 +978,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_clock_sleep_until<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock + Metrics,
+        R::Context: Spawner + Clock + Metrics,
     {
         runner.start(|context| async move {
             // Trigger sleep
@@ -970,7 +996,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_clock_sleep_until_far_future<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             let sleep = context.sleep_until(SystemTime::limit());
@@ -984,7 +1010,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_clock_timeout<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             // Future completes before timeout
@@ -1015,7 +1041,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_root_finishes<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler,
+        R::Context: Spawner,
     {
         runner.start(|context| async move {
             context.spawn(|_| async move {
@@ -1032,7 +1058,7 @@ mod tests {
     fn test_spawn_after_abort<R>(#[case] runner: R)
     where
         R: Runner,
-        R::Context: Scheduler,
+        R::Context: Spawner,
     {
         runner.start(|context| async move {
             // Create a child context
@@ -1103,7 +1129,7 @@ mod tests {
     #[should_panic(expected = "blah")]
     fn test_panic_aborts_spawn<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             context.child("panic").spawn(|_| async move {
@@ -1124,7 +1150,7 @@ mod tests {
     #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
     fn test_panic_aborts_spawn_caught<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
             let result = context.child("panic").spawn(|_| async move {
@@ -1141,7 +1167,7 @@ mod tests {
     #[should_panic(expected = "boom")]
     fn test_multiple_panics<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             context.child("panic").spawn(|_| async move {
@@ -1168,7 +1194,7 @@ mod tests {
     #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
     fn test_multiple_panics_caught<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         let (res1, res2, res3) = runner.start(|context| async move {
             let handle1 = context.child("panic").spawn(|_| async move {
@@ -1557,7 +1583,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_blob_clone_and_concurrent_read<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Storage + Metrics,
+        R::Context: Spawner + Storage + Metrics,
     {
         runner.start(|context| async move {
             let partition = "test_partition";
@@ -1628,7 +1654,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_shutdown<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Metrics + Clock,
+        R::Context: Spawner + Metrics + Clock,
     {
         let kill = 9;
         runner.start(|context| async move {
@@ -1663,7 +1689,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_shutdown_multiple_signals<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Metrics + Clock,
+        R::Context: Spawner + Metrics + Clock,
     {
         let kill = 42;
         runner.start(|context| async move {
@@ -1717,7 +1743,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_shutdown_timeout<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Metrics + Clock,
+        R::Context: Spawner + Metrics + Clock,
     {
         let kill = 42;
         runner.start(|context| async move {
@@ -1746,7 +1772,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_shutdown_multiple_stop_calls<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Metrics + Clock,
+        R::Context: Spawner + Metrics + Clock,
     {
         let kill1 = 42;
         let kill2 = 43;
@@ -1811,7 +1837,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_unfulfilled_shutdown<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Metrics,
+        R::Context: Spawner + Metrics,
     {
         runner.start(|context| async move {
             // Spawn a task that waits for signal
@@ -1847,7 +1873,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1888,7 +1914,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_abort_on_parent_abort<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1926,7 +1952,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_abort_on_parent_completion<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1961,7 +1987,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_cascading_abort<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             // We create the following tree of tasks. All tasks will run
@@ -2039,7 +2065,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_child_survives_sibling_completion<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             let (child_started_tx, child_started_rx) = oneshot::channel();
@@ -2100,7 +2126,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_clone_chain<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             let (parent_started_tx, parent_started_rx) = oneshot::channel();
@@ -2156,7 +2182,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_spawn_sparse_clone_chain<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Clock,
+        R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
             let (leaf_started_tx, leaf_started_rx) = oneshot::channel();
@@ -2324,7 +2350,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_late_waker<R: Runner>(#[case] runner: R)
     where
-        R::Context: Metrics + Scheduler,
+        R::Context: Metrics + Spawner,
     {
         // A future that captures its waker and sends it to the caller, then
         // stays pending forever.
@@ -2610,7 +2636,7 @@ mod tests {
     #[case::tokio(tokio::Runner::default())]
     fn test_metrics_spawn_attribute_cardinality<R: Runner>(#[case] runner: R)
     where
-        R::Context: Scheduler + Metrics + Clock,
+        R::Context: Spawner + Metrics + Clock,
     {
         runner.start(|context| async move {
             const ROUNDS: u64 = 128;

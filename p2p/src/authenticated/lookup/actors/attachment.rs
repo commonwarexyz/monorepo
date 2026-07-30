@@ -12,7 +12,7 @@ use commonware_runtime::{
     PlatformSync, Scheduler, spawn_cell,
 };
 use commonware_stream::encrypted::{self, Config as StreamConfig};
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, concurrency::Limiter};
 use rand_core::CryptoRng;
 use std::{collections::VecDeque, future::Future, sync::Arc};
 use thiserror::Error;
@@ -29,6 +29,9 @@ pub enum Error {
     /// The attachment actor is no longer available.
     #[error("attachment actor unavailable")]
     Unavailable,
+    /// The network is already authenticating the configured maximum number of connections.
+    #[error("too many connection handshakes")]
+    Busy,
     /// The application's admission policy rejected the connection.
     #[error("connection rejected")]
     Rejected,
@@ -142,6 +145,7 @@ pub struct Actor<
     context: ContextCell<E>,
     stream_cfg: StreamConfig<C>,
     admission: Arc<A>,
+    handshake_limiter: Limiter,
     receiver: mailbox::UnreliableReceiver<Message<N, C::PublicKey>>,
 }
 
@@ -157,6 +161,7 @@ impl<
         stream_cfg: StreamConfig<C>,
         admission: A,
         mailbox_size: std::num::NonZeroUsize,
+        max_concurrent_handshakes: std::num::NonZeroU32,
     ) -> (Self, Attachments<N, C::PublicKey>) {
         let (mailbox, receiver) = Mailbox::new(context.child("mailbox"), mailbox_size);
         (
@@ -164,6 +169,7 @@ impl<
                 context: ContextCell::new(context),
                 stream_cfg,
                 admission: Arc::new(admission),
+                handshake_limiter: Limiter::new(max_concurrent_handshakes),
                 receiver,
             },
             Attachments { mailbox },
@@ -192,11 +198,19 @@ impl<
                 debug!("attachment mailbox closed");
                 break;
             } => {
+                let Some(handshake_reservation) = self.handshake_limiter.try_acquire() else {
+                    let responder = match message {
+                        Message::Outbound { responder, .. } | Message::Inbound { responder, .. } => responder,
+                    };
+                    let _ = responder.send(Err(Error::Busy));
+                    continue;
+                };
                 let stream_cfg = self.stream_cfg.clone();
                 let admission = self.admission.clone();
                 let tracker = tracker.clone();
                 let spawner = spawner.clone();
                 self.context.child("handshake").spawn(move |context| async move {
+                    let _handshake_reservation = handshake_reservation;
                     let (result, responder) = match message {
                         Message::Outbound { expected_peer, connection, responder } => {
                             (
@@ -412,6 +426,7 @@ mod tests {
                 stream_config(local),
                 admission,
                 NZUsize!(16),
+                commonware_utils::NZU32!(1),
             );
             let (_tracker_sender, tracker_receiver) =
                 mailbox::new(context.child("tracker_mailbox"), NZUsize!(1));
@@ -458,6 +473,7 @@ mod tests {
                 stream_config(local.clone()),
                 admission,
                 NZUsize!(16),
+                commonware_utils::NZU32!(1),
             );
             let (spawner, mut spawned) =
                 crate::authenticated::Mailbox::new(context.child("spawner_mailbox"), NZUsize!(16));
@@ -485,6 +501,45 @@ mod tests {
             assert_eq!(authenticated.lock().as_slice(), &[remote_public]);
             drop(remote_connection);
             drop(connection);
+        });
+    }
+
+    #[test]
+    fn limits_concurrent_handshakes() {
+        deterministic::Runner::default().start(|context| async move {
+            let local = PrivateKey::from_seed(21);
+            let remote = PrivateKey::from_seed(22).public_key();
+            let admission = Allow {
+                authenticated: Arc::new(Mutex::new(Vec::new())),
+            };
+            let (first, _first_remote) = connections();
+            let (second, _second_remote) = connections();
+            let (actor, attachments) = Actor::new(
+                context.child("attachments"),
+                stream_config(local),
+                admission,
+                NZUsize!(16),
+                commonware_utils::NZU32!(1),
+            );
+            let (_tracker_sender, tracker_receiver) =
+                mailbox::new(context.child("tracker_mailbox"), NZUsize!(1));
+            let tracker = tracker::Mailbox::new(_tracker_sender);
+            let (spawner, _spawner_receiver) =
+                crate::authenticated::Mailbox::new(context.child("spawner_mailbox"), NZUsize!(1));
+            let _actor = actor.start(tracker, spawner);
+
+            let first_attachment = attachments.clone();
+            let first_remote = remote.clone();
+            let _first = context.child("first").spawn(move |_| async move {
+                first_attachment.attach_outbound(first_remote, first).await
+            });
+            context.sleep(Duration::from_millis(1)).await;
+
+            assert_eq!(
+                attachments.attach_outbound(remote, second).await,
+                Err(Error::Busy)
+            );
+            drop(tracker_receiver);
         });
     }
 }

@@ -117,7 +117,8 @@ where
                 let timeout = context.sleep(dial_timeout);
                 let dial = async {
                     // Attempt to dial peer
-                    let connection = match context.dial(&TcpEndpoint::from(&ingress)).await {
+                    let endpoint = ingress.tcp_endpoint(allow_private_ips);
+                    let connection = match context.dial(&endpoint).await {
                         Ok(connection) => connection,
                         Err(err) => {
                             debug!(?err, "failed to dial peer");

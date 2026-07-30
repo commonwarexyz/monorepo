@@ -194,13 +194,15 @@ impl Ingress {
     }
 }
 
-impl From<&Ingress> for TcpEndpoint {
-    fn from(value: &Ingress) -> Self {
-        match value {
-            Ingress::Socket(address) => Self::Socket(*address),
-            Ingress::Dns { host, port } => Self::Dns {
+impl Ingress {
+    /// Converts this advertised ingress into a TCP dial attempt.
+    pub fn tcp_endpoint(&self, allow_private_ips: bool) -> TcpEndpoint {
+        match self {
+            Self::Socket(address) => TcpEndpoint::Socket(*address),
+            Self::Dns { host, port } => TcpEndpoint::Dns {
                 host: host.to_string(),
                 port: *port,
+                allow_private_ips,
             },
         }
     }

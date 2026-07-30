@@ -3,6 +3,7 @@ import { join, sep } from "node:path";
 import {
   cacheControl,
   parseIceServers,
+  RateLimiter,
   resolveStaticPath,
   selectApplicationUrl,
 } from "./server";
@@ -56,4 +57,14 @@ describe("ICE configuration", () => {
   test("allows isolated same-LAN testing without an ICE server", () => {
     expect(parseIceServers("[]")).toEqual([]);
   });
+});
+
+test("rate limiter releases expired keys", () => {
+  const limiter = new RateLimiter(1, 1_000);
+  expect(limiter.allow("peer", 0)).toBeTrue();
+  expect(limiter.size).toBe(1);
+
+  limiter.cleanup(1_000);
+
+  expect(limiter.size).toBe(0);
 });

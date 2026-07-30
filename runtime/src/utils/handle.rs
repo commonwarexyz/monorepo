@@ -161,13 +161,15 @@ where
     {
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let metric_handle = metric.clone();
+        let cleanup_metric = metric.clone();
         let task = async move {
+            let _cleanup = LocalTaskCleanup {
+                tree,
+                metric: cleanup_metric,
+            };
             if let Ok(result) = Abortable::new(future, abort_registration).await {
                 let _ = sender.send(Ok(result));
             }
-            tree.abort();
-            metric_handle.finish();
         };
 
         (
@@ -256,6 +258,20 @@ where
             } => Some(Aborter::new(abort_handle.clone(), metric.clone())),
             HandleState::Completion { .. } => None,
         }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct LocalTaskCleanup {
+    tree: Arc<Tree>,
+    metric: MetricHandle,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for LocalTaskCleanup {
+    fn drop(&mut self) {
+        self.tree.abort();
+        self.metric.finish();
     }
 }
 

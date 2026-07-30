@@ -1,4 +1,4 @@
-use crate::{Acceptor, Dialer, Error, IoBufs, deterministic::Auditor};
+use crate::{Acceptor, Connection as _, Dialer, Error, IoBufs, deterministic::Auditor};
 use std::sync::Arc;
 
 /// A sink that audits network operations.
@@ -64,16 +64,23 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
     }
 }
 
-pub struct Connection<C: crate::Connection> {
+pub struct Connection<S, St, O> {
     auditor: Arc<Auditor>,
-    inner: C,
-    remote: Option<String>,
+    sink: S,
+    stream: St,
+    info: crate::ConnectionInfo<O>,
+    remote: String,
 }
 
-impl<C: crate::Connection> crate::Connection for Connection<C> {
-    type Sink = Sink<C::Sink>;
-    type Stream = Stream<C::Stream>;
-    type Origin = C::Origin;
+impl<S, St, O> crate::Connection for Connection<S, St, O>
+where
+    S: crate::Sink,
+    St: crate::Stream,
+    O: Clone + std::fmt::Debug + crate::PlatformSend + crate::PlatformSync + 'static,
+{
+    type Sink = Sink<S>;
+    type Stream = Stream<St>;
+    type Origin = O;
 
     fn split(
         self,
@@ -82,20 +89,18 @@ impl<C: crate::Connection> crate::Connection for Connection<C> {
         Self::Stream,
         crate::ConnectionInfo<Self::Origin>,
     ) {
-        let (sink, stream, info) = self.inner.split();
-        let remote = self.remote.unwrap_or_else(|| format!("{:?}", info.origin));
         (
             Sink {
                 auditor: Arc::clone(&self.auditor),
-                inner: sink,
-                remote: remote.clone(),
+                inner: self.sink,
+                remote: self.remote.clone(),
             },
             Stream {
                 auditor: self.auditor,
-                inner: stream,
-                remote,
+                inner: self.stream,
+                remote: self.remote,
             },
-            info,
+            self.info,
         )
     }
 }
@@ -108,7 +113,11 @@ pub struct Listener<L: crate::Listener> {
 }
 
 impl<L: crate::Listener> crate::Listener for Listener<L> {
-    type Connection = Connection<L::Connection>;
+    type Connection = Connection<
+        <L::Connection as crate::Connection>::Sink,
+        <L::Connection as crate::Connection>::Stream,
+        <L::Connection as crate::Connection>::Origin,
+    >;
 
     async fn accept(&mut self) -> Result<Self::Connection, Error> {
         self.auditor.event(b"accept_attempt", |hasher| {
@@ -121,14 +130,20 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
                 hasher.update(e.to_string().as_bytes());
             });
         })?;
+        let (sink, stream, info) = inner.split();
+        let remote = format!("{:?}", info.origin);
         self.auditor.event(b"accept_success", |hasher| {
             hasher.update(self.bind.as_bytes());
+            hasher.update(info.transport.as_bytes());
+            hasher.update(remote.as_bytes());
         });
 
         Ok(Connection {
             auditor: Arc::clone(&self.auditor),
-            inner,
-            remote: None,
+            sink,
+            stream,
+            info,
+            remote,
         })
     }
 }
@@ -150,7 +165,11 @@ impl<N> Network<N> {
 
 impl<N: Acceptor> Acceptor for Network<N> {
     type Bind = N::Bind;
-    type Connection = Connection<N::Connection>;
+    type Connection = Connection<
+        <N::Connection as crate::Connection>::Sink,
+        <N::Connection as crate::Connection>::Stream,
+        <N::Connection as crate::Connection>::Origin,
+    >;
     type Listener = Listener<N::Listener>;
 
     async fn bind(&self, bind: &Self::Bind) -> Result<Self::Listener, Error> {
@@ -180,7 +199,11 @@ impl<N: Acceptor> Acceptor for Network<N> {
 
 impl<N: Dialer> Dialer for Network<N> {
     type Endpoint = N::Endpoint;
-    type Connection = Connection<N::Connection>;
+    type Connection = Connection<
+        <N::Connection as crate::Connection>::Sink,
+        <N::Connection as crate::Connection>::Stream,
+        <N::Connection as crate::Connection>::Origin,
+    >;
 
     fn supports(&self, endpoint: &Self::Endpoint) -> bool {
         self.inner.supports(endpoint)
@@ -203,10 +226,13 @@ impl<N: Dialer> Dialer for Network<N> {
             hasher.update(remote.as_bytes());
         });
 
+        let (sink, stream, info) = inner.split();
         Ok(Connection {
             auditor: Arc::clone(&self.auditor),
-            inner,
-            remote: Some(remote),
+            sink,
+            stream,
+            info,
+            remote,
         })
     }
 }
@@ -257,6 +283,74 @@ mod tests {
         fn peek(&self, _max_len: usize) -> &[u8] {
             &[]
         }
+    }
+
+    struct OriginConnection {
+        origin: u64,
+        sink: RecordingSink,
+        stream: RecordingStream,
+    }
+
+    impl crate::Connection for OriginConnection {
+        type Sink = RecordingSink;
+        type Stream = RecordingStream;
+        type Origin = u64;
+
+        fn split(
+            self,
+        ) -> (
+            Self::Sink,
+            Self::Stream,
+            crate::ConnectionInfo<Self::Origin>,
+        ) {
+            (
+                self.sink,
+                self.stream,
+                crate::ConnectionInfo {
+                    origin: Some(self.origin),
+                    transport: "test",
+                },
+            )
+        }
+    }
+
+    struct OriginListener(Option<OriginConnection>);
+
+    impl crate::Listener for OriginListener {
+        type Connection = OriginConnection;
+
+        async fn accept(&mut self) -> Result<Self::Connection, Error> {
+            self.0.take().ok_or(Error::Closed)
+        }
+    }
+
+    fn origin_listener(origin: u64, auditor: Arc<Auditor>) -> super::Listener<OriginListener> {
+        super::Listener {
+            auditor,
+            inner: OriginListener(Some(OriginConnection {
+                origin,
+                sink: RecordingSink {
+                    chunk_counts: Arc::new(Mutex::new(Vec::new())),
+                },
+                stream: RecordingStream {
+                    bufs: Arc::new(Mutex::new(None)),
+                },
+            })),
+            bind: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_origin_is_audited_before_split() {
+        let first = Arc::new(Auditor::default());
+        let second = Arc::new(Auditor::default());
+        let mut first_listener = origin_listener(1, first.clone());
+        let mut second_listener = origin_listener(2, second.clone());
+
+        let _first_connection = first_listener.accept().await.unwrap();
+        let _second_connection = second_listener.accept().await.unwrap();
+
+        assert_ne!(first.state(), second.state());
     }
 
     #[tokio::test]

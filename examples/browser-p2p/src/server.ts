@@ -24,7 +24,10 @@ const applicationUrl = selectApplicationUrl(
 );
 
 if (import.meta.main) {
-  const cleanup = setInterval(() => store.cleanup(), 30_000);
+  const cleanup = setInterval(() => {
+    store.cleanup();
+    rateLimiter.cleanup();
+  }, 30_000);
   cleanup.unref();
 
   Bun.serve<SocketData>({
@@ -113,7 +116,7 @@ class BunSocketPeer implements RendezvousPeer {
   }
 }
 
-class RateLimiter {
+export class RateLimiter {
   readonly #entries = new Map<string, { start: number; count: number }>();
 
   constructor(private readonly limit: number, private readonly windowMs: number) {}
@@ -126,6 +129,18 @@ class RateLimiter {
     }
     entry.count += 1;
     return entry.count <= this.limit;
+  }
+
+  cleanup(now = Date.now()): void {
+    for (const [key, entry] of this.#entries) {
+      if (entry.start + this.windowMs <= now) {
+        this.#entries.delete(key);
+      }
+    }
+  }
+
+  get size(): number {
+    return this.#entries.size;
   }
 }
 
