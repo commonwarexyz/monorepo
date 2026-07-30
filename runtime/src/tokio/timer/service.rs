@@ -1,14 +1,23 @@
 //! Native sharded timer service and concurrency protocols.
 
+mod sync;
+
+use self::sync::{AtomicWaker, Mutex};
 use super::heap::{Heap, HeapItem};
+pub(super) use self::sync::EntryArc;
 #[cfg(target_os = "linux")]
 use super::linux::NativeAlarm;
 #[cfg(target_os = "macos")]
 use super::macos::NativeAlarm;
 use crate::utils::Panicker;
 use commonware_macros::select;
-use commonware_utils::sync::Mutex;
-use futures::{FutureExt as _, task::AtomicWaker};
+use futures::FutureExt as _;
+#[cfg(feature = "loom")]
+use loom::sync::atomic::{
+    AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering,
+};
+#[cfg(not(feature = "loom"))]
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 use std::{
     any::Any,
     cell::RefCell,
@@ -17,13 +26,11 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
-    },
+    sync::{Arc, Weak, atomic::AtomicU64},
     task::{Context, Poll, Waker},
     time::{Duration, SystemTime},
 };
+use thiserror::Error;
 use tokio::{runtime::Builder, task::JoinHandle};
 
 /// Maximum difference covered by an already armed slightly later alarm.
@@ -185,6 +192,7 @@ impl Setup {
         Self {
             affinity: Arc::new(Affinity {
                 runtime_id,
+                lifetime: Arc::new(()),
                 worker_threads,
                 next_worker: AtomicUsize::new(0),
                 next_fallback: AtomicUsize::new(0),
@@ -309,12 +317,7 @@ impl Timer {
     #[cfg(test)]
     /// Returns this runtime's assignment cached on the current thread.
     pub(crate) fn current_assignment(&self) -> Option<(usize, AssignmentKind)> {
-        THREAD_ASSIGNMENTS.with(|assignments| {
-            assignments
-                .borrow()
-                .get(self.affinity.runtime_id)
-                .map(|current| (current.index, current.kind))
-        })
+        THREAD_ASSIGNMENTS.with(|assignments| assignments.borrow().get(self.affinity.runtime_id))
     }
 }
 
@@ -375,7 +378,7 @@ struct RegisteredSleep<A: Alarm> {
     /// Non-owning reference to the shard selected at construction.
     shard: Weak<Shard<A>>,
     /// Heap entry shared with the driver.
-    entry: Arc<Entry>,
+    entry: EntryArc<Entry>,
 }
 
 impl<A: Alarm> Drop for RegisteredSleep<A> {
@@ -401,7 +404,10 @@ pub(super) struct Entry {
 
 impl Entry {
     /// Creates one unregistered waiting entry.
-    pub(super) const fn new() -> Self {
+    ///
+    /// Loom's modeled atomic waker constructor is not const.
+    #[allow(clippy::missing_const_for_fn)]
+    pub(super) fn new() -> Self {
         Self {
             state: AtomicU8::new(ENTRY_WAITING),
             waker: AtomicWaker::new(),
@@ -436,7 +442,10 @@ impl Entry {
                 self.waker.take();
                 Poll::Ready(())
             }
-            ENTRY_FAILED => panic!("high-resolution timer service failed"),
+            ENTRY_FAILED => {
+                self.waker.take();
+                panic!("high-resolution timer service failed");
+            }
             _ => Poll::Pending,
         }
     }
@@ -466,6 +475,8 @@ struct Shard<A: Alarm> {
     index: usize,
     /// Platform alarm used only by this shard's driver.
     alarm: A,
+    /// Largest deadline accepted by this shard's platform alarm.
+    max_deadline: Deadline,
     /// Coalesced producer-to-driver notification.
     signal: DriverSignal,
     /// Authoritative heap and lifecycle state.
@@ -477,9 +488,11 @@ struct Shard<A: Alarm> {
 impl<A: Alarm> Shard<A> {
     /// Creates an empty running shard around one validated alarm.
     fn new(index: usize, alarm: A, panicker: Panicker) -> Self {
+        let max_deadline = alarm.max_deadline();
         Self {
             index,
             alarm,
+            max_deadline,
             signal: DriverSignal::new(),
             state: Mutex::new(ShardState::new()),
             panicker,
@@ -488,9 +501,12 @@ impl<A: Alarm> Shard<A> {
 
     /// Reads monotonic time and eagerly registers a relative sleep.
     fn register_after(self: &Arc<Self>, duration: Duration) -> RegisteredSleep<A> {
-        let entry = Arc::new(Entry::new());
-        let deadline = match self.alarm.now() {
-            Ok(now) => now.saturating_add(duration, self.alarm.max_deadline()),
+        // Establish the requested duration before allocator contention can
+        // consume part of it.
+        let now = self.alarm.now();
+        let entry = EntryArc::new(Entry::new());
+        let deadline = match now {
+            Ok(now) => now.saturating_add(duration, self.max_deadline),
             Err(error) => {
                 // This entry is not heap-resident, so fail it directly before shard cleanup.
                 // Release publishes failure before the returned future can be polled.
@@ -505,7 +521,7 @@ impl<A: Alarm> Shard<A> {
                 };
             }
         };
-        self.register(deadline, Arc::clone(&entry));
+        self.register(deadline, EntryArc::clone(&entry));
         RegisteredSleep {
             shard: Arc::downgrade(self),
             entry,
@@ -513,7 +529,7 @@ impl<A: Alarm> Shard<A> {
     }
 
     /// Inserts an entry and signals only when the current arm is insufficient.
-    fn register(&self, deadline: Deadline, entry: Arc<Entry>) {
+    fn register(&self, deadline: Deadline, entry: EntryArc<Entry>) {
         let notify = {
             let mut state = self.state.lock();
             if state.stopped || state.failed {
@@ -540,7 +556,7 @@ impl<A: Alarm> Shard<A> {
     }
 
     /// Removes a canceled entry from its original shard immediately.
-    fn cancel(&self, entry: &Arc<Entry>) {
+    fn cancel(&self, entry: &EntryArc<Entry>) {
         let notify = {
             let mut state = self.state.lock();
             let index = entry.heap_index.load(AtomicOrdering::Relaxed);
@@ -622,7 +638,7 @@ impl<A: Alarm> Shard<A> {
                 .is_some_and(|item| item.deadline <= now)
         {
             let item = state.entries.pop().expect("timer heap minimum disappeared");
-            state.in_flight.push(Arc::clone(&item.entry));
+            state.in_flight.push(EntryArc::clone(&item.entry));
             batch.entries.push(item.entry);
         }
         Ok(state
@@ -673,7 +689,15 @@ impl<A: Alarm> Shard<A> {
 
     /// Captures failure state, drains the heap, and interrupts the root runtime.
     fn fail(&self, failure: DriverFailure) {
-        let (snapshot, pending) = {
+        self.fail_with_exposure_hook(failure, || {});
+    }
+
+    /// Runs failure cleanup with a hook after its state becomes observable.
+    fn fail_with_exposure_hook<F>(&self, failure: DriverFailure, after_exposure: F)
+    where
+        F: FnOnce(),
+    {
+        let (snapshot, pending, reported) = {
             let mut state = self.state.lock();
             if state.failed || state.stopped {
                 return;
@@ -685,28 +709,34 @@ impl<A: Alarm> Shard<A> {
                 armed: state.armed_deadline,
                 notified: self.signal.is_notified(),
             };
+            let message = format!(
+                "{} timer shard {} failed during {}: {}; snapshot={snapshot:?}",
+                A::PLATFORM,
+                self.index,
+                failure.operation,
+                failure.cause
+            );
+            // Publish root interruption while the shard lock prevents a newly
+            // failed sleep from escaping and reporting a generic task panic.
+            let reported = self.panicker.notify_fatal(Box::new(message));
             state.failed = true;
             state.stopped = true;
             state.armed_deadline = None;
-            (snapshot, drain_pending(&mut state))
+            (snapshot, drain_pending(&mut state), reported)
         };
+        after_exposure();
         fail_entries(pending);
         self.signal.notify();
 
-        let message = format!(
-            "{} timer shard {} failed during {}: {}; snapshot={snapshot:?}",
-            A::PLATFORM,
-            self.index,
-            failure.operation,
-            failure.cause
-        );
         // Infrastructure failure bypasses the ordinary catch-panics policy.
-        if self.panicker.notify_fatal(Box::new(message)) {
+        if reported {
             tracing::error!(
                 platform = A::PLATFORM,
                 shard = self.index,
                 operation = failure.operation,
                 error = %failure.cause,
+                error_kind = ?failure.cause.error_kind(),
+                raw_os_error = ?failure.cause.raw_os_error(),
                 ?snapshot,
                 "timer infrastructure failed"
             );
@@ -724,7 +754,7 @@ struct ShardState {
     /// Indexed 4-ary minimum heap.
     entries: Heap,
     /// Popped entries still exposed to synchronous teardown.
-    in_flight: Vec<Arc<Entry>>,
+    in_flight: Vec<EntryArc<Entry>>,
     /// Wrapping tie breaker for equal deadlines.
     sequence: u64,
     /// Deadline most recently confirmed armed by the driver.
@@ -753,16 +783,45 @@ impl ShardState {
 struct DriverFailure {
     /// Operation active when failure occurred.
     operation: &'static str,
-    /// Displayable source or panic message.
-    cause: String,
+    /// Original I/O error or classified panic payload.
+    cause: DriverFailureCause,
+}
+
+/// Source retained by one fatal driver failure.
+#[derive(Debug, Error)]
+enum DriverFailureCause {
+    /// Original operating-system or reactor error.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// Stable message extracted from a panic payload or invariant failure.
+    #[error("{0}")]
+    Message(String),
+}
+
+impl DriverFailureCause {
+    /// Returns the structured I/O error kind when this failure came from I/O.
+    fn error_kind(&self) -> Option<io::ErrorKind> {
+        match self {
+            Self::Io(error) => Some(error.kind()),
+            Self::Message(_) => None,
+        }
+    }
+
+    /// Returns the raw operating-system error code when one is available.
+    fn raw_os_error(&self) -> Option<i32> {
+        match self {
+            Self::Io(error) => error.raw_os_error(),
+            Self::Message(_) => None,
+        }
+    }
 }
 
 impl DriverFailure {
     /// Wraps an I/O error with stable operation context.
-    fn io(operation: &'static str, error: io::Error) -> Self {
+    const fn io(operation: &'static str, error: io::Error) -> Self {
         Self {
             operation,
-            cause: error.to_string(),
+            cause: DriverFailureCause::Io(error),
         }
     }
 
@@ -775,7 +834,7 @@ impl DriverFailure {
             .unwrap_or_else(|| "non-string panic".to_string());
         Self {
             operation: "driver panic",
-            cause,
+            cause: DriverFailureCause::Message(cause),
         }
     }
 }
@@ -810,7 +869,7 @@ impl fmt::Debug for ShardSnapshot {
 /// Reusable driver scratch storage with unwind and abortion cleanup.
 struct Batch {
     /// Entries removed from the heap but not yet fully completed.
-    entries: Vec<Arc<Entry>>,
+    entries: Vec<EntryArc<Entry>>,
 }
 
 impl Batch {
@@ -909,7 +968,9 @@ async fn run_driver<A: Alarm>(shard: Arc<Shard<A>>) {
         Ok(Ok(())) if shard.is_stopped() => return,
         Ok(Ok(())) => DriverFailure {
             operation: "driver exit",
-            cause: "driver exited while its shard was running".to_string(),
+            cause: DriverFailureCause::Message(
+                "driver exited while its shard was running".to_string(),
+            ),
         },
         Ok(Err(failure)) => failure,
         Err(panic) => DriverFailure::panic(&*panic),
@@ -928,7 +989,10 @@ struct DriverSignal {
 
 impl DriverSignal {
     /// Creates an unnotified signal.
-    const fn new() -> Self {
+    ///
+    /// Loom's modeled atomic waker constructor is not const.
+    #[allow(clippy::missing_const_for_fn)]
+    fn new() -> Self {
         Self {
             notified: AtomicBool::new(false),
             waker: AtomicWaker::new(),
@@ -977,14 +1041,28 @@ pub(crate) enum AssignmentKind {
 }
 
 /// Shard assignment scoped to one runtime identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 struct ThreadAssignment {
     /// Identity of the runtime that owns this assignment.
     runtime_id: u64,
+    /// Weak token used to discard assignments after their runtime is dropped.
+    lifetime: Weak<()>,
     /// Provisional or stable worker classification.
     kind: AssignmentKind,
     /// Selected shard index.
     index: usize,
+}
+
+impl ThreadAssignment {
+    /// Returns the cached selection without cloning its liveness token.
+    const fn selection(&self) -> (usize, AssignmentKind) {
+        (self.index, self.kind)
+    }
+
+    /// Returns whether the runtime that owns this assignment is still alive.
+    fn is_live(&self) -> bool {
+        self.lifetime.strong_count() != 0
+    }
 }
 
 /// Per-thread assignments with a fast path for the most recently used runtime.
@@ -1006,39 +1084,48 @@ impl ThreadAssignments {
 
     /// Returns a cached assignment without changing the fast-path runtime.
     #[cfg(test)]
-    fn get(&self, runtime_id: u64) -> Option<ThreadAssignment> {
+    fn get(&self, runtime_id: u64) -> Option<(usize, AssignmentKind)> {
         self.current
+            .as_ref()
             .filter(|assignment| assignment.runtime_id == runtime_id)
             .or_else(|| {
                 self.inactive
                     .iter()
                     .find(|assignment| assignment.runtime_id == runtime_id)
-                    .copied()
             })
+            .map(ThreadAssignment::selection)
     }
 
     /// Makes a cached runtime current and returns its assignment.
-    fn activate(&mut self, runtime_id: u64) -> Option<ThreadAssignment> {
-        if let Some(current) = self.current
+    fn activate(&mut self, runtime_id: u64) -> Option<(usize, AssignmentKind)> {
+        if let Some(current) = self.current.as_ref()
             && current.runtime_id == runtime_id
         {
-            return Some(current);
+            return Some(current.selection());
         }
+        // Cache misses are already the cold path, so retire assignments whose
+        // runtimes have ended before searching the inactive set.
+        self.inactive.retain(ThreadAssignment::is_live);
         let position = self
             .inactive
             .iter()
             .position(|assignment| assignment.runtime_id == runtime_id)?;
         let assignment = self.inactive.swap_remove(position);
-        if let Some(previous) = self.current.replace(assignment) {
+        let selection = assignment.selection();
+        if let Some(previous) = self.current.replace(assignment)
+            && previous.is_live()
+        {
             self.inactive.push(previous);
         }
-        Some(assignment)
+        Some(selection)
     }
 
     /// Installs a new or upgraded assignment as the fast-path runtime.
     fn install(&mut self, assignment: ThreadAssignment) {
+        let runtime_id = assignment.runtime_id;
         if let Some(previous) = self.current.replace(assignment)
-            && previous.runtime_id != assignment.runtime_id
+            && previous.runtime_id != runtime_id
+            && previous.is_live()
         {
             self.inactive.push(previous);
         }
@@ -1049,6 +1136,8 @@ impl ThreadAssignments {
 struct Affinity {
     /// Identity checked by every thread-local lookup.
     runtime_id: u64,
+    /// Token retained for exactly as long as this runtime's affinity exists.
+    lifetime: Arc<()>,
     /// Number of native timer shards.
     worker_threads: usize,
     /// Allocator consumed only by worker park callbacks.
@@ -1062,14 +1151,15 @@ impl Affinity {
     fn select(&self) -> usize {
         THREAD_ASSIGNMENTS.with(|assignments| {
             let mut assignments = assignments.borrow_mut();
-            if let Some(current) = assignments.activate(self.runtime_id) {
-                return current.index;
+            if let Some((index, _)) = assignments.activate(self.runtime_id) {
+                return index;
             }
             // Relaxed ordering is sufficient because this counter allocates unique claims only.
             let index =
                 self.next_fallback.fetch_add(1, AtomicOrdering::Relaxed) % self.worker_threads;
             assignments.install(ThreadAssignment {
                 runtime_id: self.runtime_id,
+                lifetime: Arc::downgrade(&self.lifetime),
                 kind: AssignmentKind::Provisional,
                 index,
             });
@@ -1083,10 +1173,7 @@ impl Affinity {
             let mut assignments = assignments.borrow_mut();
             if matches!(
                 assignments.activate(self.runtime_id),
-                Some(ThreadAssignment {
-                    kind: AssignmentKind::Worker,
-                    ..
-                })
+                Some((_, AssignmentKind::Worker))
             ) {
                 return;
             }
@@ -1098,6 +1185,7 @@ impl Affinity {
             );
             assignments.install(ThreadAssignment {
                 runtime_id: self.runtime_id,
+                lifetime: Arc::downgrade(&self.lifetime),
                 kind: AssignmentKind::Worker,
                 index,
             });
@@ -1118,7 +1206,7 @@ fn arm_covers(armed: Option<Deadline>, desired: Option<Deadline>) -> bool {
 }
 
 /// Removes every heap item and returns its shared entry.
-fn drain_heap(heap: &mut Heap) -> Vec<Arc<Entry>> {
+fn drain_heap(heap: &mut Heap) -> Vec<EntryArc<Entry>> {
     let mut entries = Vec::with_capacity(heap.len());
     while let Some(item) = heap.pop() {
         entries.push(item.entry);
@@ -1127,19 +1215,19 @@ fn drain_heap(heap: &mut Heap) -> Vec<Arc<Entry>> {
 }
 
 /// Removes every queued and popped entry while holding the shard mutex.
-fn drain_pending(state: &mut ShardState) -> Vec<Arc<Entry>> {
+fn drain_pending(state: &mut ShardState) -> Vec<EntryArc<Entry>> {
     let mut entries = drain_heap(&mut state.entries);
     entries.append(&mut state.in_flight);
     entries
 }
 
 /// Fails entries and contains each individual callback unwind.
-fn fail_entries(entries: Vec<Arc<Entry>>) {
+fn fail_entries(entries: Vec<EntryArc<Entry>>) {
     let mut batch = Batch { entries };
     let _ = batch.complete(ENTRY_FAILED);
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 mod tests;
 
 #[cfg(all(test, feature = "loom"))]

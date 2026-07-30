@@ -1,7 +1,10 @@
 //! Indexed 4-ary min-heap for registered timers.
 
-use super::service::{Deadline, Entry, NOT_IN_HEAP};
-use std::sync::{Arc, atomic::Ordering};
+use super::service::{Deadline, Entry, EntryArc, NOT_IN_HEAP};
+#[cfg(feature = "loom")]
+use loom::sync::atomic::Ordering;
+#[cfg(not(feature = "loom"))]
+use std::sync::atomic::Ordering;
 
 /// Number of children assigned to each heap item.
 const ARITY: usize = 4;
@@ -13,7 +16,7 @@ pub(super) struct HeapItem {
     /// Sequence used to order timers with the same deadline.
     pub(super) sequence: u64,
     /// Shared timer state.
-    pub(super) entry: Arc<Entry>,
+    pub(super) entry: EntryArc<Entry>,
 }
 
 impl HeapItem {
@@ -73,11 +76,11 @@ impl Heap {
     /// Remove the timer at `index` if it contains `expected`.
     ///
     /// Pointer identity prevents a stale index from removing a different timer.
-    pub(super) fn remove(&mut self, index: usize, expected: &Arc<Entry>) -> Option<HeapItem> {
+    pub(super) fn remove(&mut self, index: usize, expected: &EntryArc<Entry>) -> Option<HeapItem> {
         if !self
             .items
             .get(index)
-            .is_some_and(|item| Arc::ptr_eq(&item.entry, expected))
+            .is_some_and(|item| EntryArc::ptr_eq(&item.entry, expected))
         {
             return None;
         }
@@ -182,5 +185,5 @@ const fn child_index(index: usize, offset: usize) -> Option<usize> {
 }
 
 /// Unit tests for heap ordering and indexed removal.
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 mod tests;

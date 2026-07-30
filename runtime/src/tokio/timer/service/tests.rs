@@ -1,8 +1,9 @@
 use super::{
     Affinity, Alarm, AlarmInitError, AssignmentKind, Batch, Deadline, DriverFailure, DriverLoop,
     DriverSignal, ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_WAITING, EXPIRY_YIELD_BUDGET,
-    Entry, InitError, NEXT_RUNTIME_ID, NOT_IN_HEAP, RegisteredSleep, Shard, Sleep, ThreadAssignment,
-    ThreadAssignments, WAKE_BATCH, allocate_runtime_id, arm_covers, initialize_shards, run_driver,
+    Entry, InitError, NEXT_RUNTIME_ID, NOT_IN_HEAP, RegisteredSleep, Shard, Sleep,
+    ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id, arm_covers,
+    initialize_shards, run_driver,
 };
 use crate::utils::{Panicked, Panicker, extract_panic_message};
 use commonware_utils::sync::{Condvar, Mutex as TestMutex};
@@ -48,6 +49,8 @@ struct ArmBlock {
 struct FakeAlarmState {
     /// Manual monotonic time in nanoseconds.
     now: AtomicU64,
+    /// Number of platform-limit queries made through the alarm.
+    max_deadline_reads: AtomicUsize,
     /// Ordered native operations requested by the service.
     operations: TestMutex<Vec<AlarmOperation>>,
     /// One latched readiness event.
@@ -79,6 +82,7 @@ impl FakeAlarmState {
     fn new() -> Self {
         Self {
             now: AtomicU64::new(0),
+            max_deadline_reads: AtomicUsize::new(0),
             operations: TestMutex::new(Vec::new()),
             ready: AtomicBool::new(false),
             fail_now: AtomicBool::new(false),
@@ -171,6 +175,9 @@ impl Alarm for FakeAlarm {
     }
 
     fn max_deadline(&self) -> Deadline {
+        self.state
+            .max_deadline_reads
+            .fetch_add(1, AtomicOrdering::Relaxed);
         Deadline::from_duration(Duration::from_nanos(u64::MAX))
     }
 
@@ -216,6 +223,13 @@ struct FakeAlarmControl {
 }
 
 impl FakeAlarmControl {
+    /// Returns the number of times the platform deadline limit was requested.
+    fn max_deadline_reads(&self) -> usize {
+        self.state
+            .max_deadline_reads
+            .load(AtomicOrdering::Relaxed)
+    }
+
     /// Advances or rewinds the manual monotonic clock.
     fn set_now(&self, deadline: Deadline) {
         let nanoseconds = u64::try_from(deadline.as_duration().as_nanos()).unwrap();
@@ -336,6 +350,23 @@ impl ArcWake for CountingWaker {
     }
 }
 
+/// Waker that simulates an awakened task reporting its generic failure panic.
+struct NotifyPanickerWaker {
+    /// Root interruption handle used by the simulated task wrapper.
+    panicker: Panicker,
+    /// Whether failure cleanup invoked this callback.
+    notified: AtomicBool,
+}
+
+impl ArcWake for NotifyPanickerWaker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.notified.store(true, AtomicOrdering::Release);
+        arc_self
+            .panicker
+            .notify(Box::new("generic failed sleeper panic"));
+    }
+}
+
 /// Waker whose final release notifies one driver signal.
 struct NotifySignalOnDropWaker {
     /// Signal notified when registration replaces this waker.
@@ -435,7 +466,7 @@ impl ArcWake for YieldCheckingWaker {
 }
 
 /// Constructs a compact deadline for fake-clock tests.
-fn at(nanoseconds: u64) -> Deadline {
+const fn at(nanoseconds: u64) -> Deadline {
     Deadline::from_duration(Duration::from_nanos(nanoseconds))
 }
 
@@ -585,9 +616,10 @@ async fn final_expiry_observes_competitor(entry_count: usize) -> bool {
 fn affinity(worker_threads: usize) -> Affinity {
     Affinity {
         runtime_id: allocate_runtime_id(&NEXT_RUNTIME_ID),
+        lifetime: Arc::new(()),
         worker_threads,
-        next_worker: AtomicUsize::new(0),
-        next_fallback: AtomicUsize::new(0),
+        next_worker: super::AtomicUsize::new(0),
+        next_fallback: super::AtomicUsize::new(0),
     }
 }
 
@@ -786,6 +818,25 @@ fn registration_is_eager_and_cancellation_is_immediate() {
 }
 
 #[test]
+fn registration_reuses_the_shard_platform_deadline_limit() {
+    // Create one shard, which snapshots its platform alarm limit during setup.
+    let (shard, control) = fake_shard();
+    assert_eq!(control.max_deadline_reads(), 1);
+
+    // Register multiple sleeps after moving the fake monotonic clock.
+    control.set_now(at(10));
+    let first = shard.register_after(Duration::from_nanos(20));
+    control.set_now(at(20));
+    let second = shard.register_after(Duration::from_nanos(30));
+
+    // Registration must reuse the cached limit instead of recomputing it per timer.
+    assert_eq!(control.max_deadline_reads(), 1);
+    assert_eq!(shard.state.lock().entries.len(), 2);
+    drop(first);
+    drop(second);
+}
+
+#[test]
 fn waiting_sleep_cancels_after_its_destroyed_shard_releases_alarm() {
     // Register one waiting sleep, then destroy its only strong shard owner.
     let (shard, control) = fake_shard();
@@ -981,7 +1032,10 @@ fn expiry_clock_failure_preserves_queue_and_operation_context() {
         Err(failure) => failure,
     };
     assert_eq!(failure.operation, "read monotonic clock during expiry");
-    assert_eq!(failure.cause, "injected fake alarm now failure");
+    assert_eq!(
+        failure.cause.to_string(),
+        "injected fake alarm now failure"
+    );
     assert_eq!(shard.state.lock().entries.len(), 1);
     assert!(batch.entries.is_empty());
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_WAITING);
@@ -1371,6 +1425,101 @@ async fn duplicate_failure_and_failure_after_stop_are_ignored() {
     assert_eq!(panicked.interrupt(future::ready(7)).await, 7);
 }
 
+#[tokio::test]
+async fn fatal_failure_precedes_failed_sleeper_notification() {
+    // Use the default panic policy and install a sleeper waker that reports an
+    // ordinary task panic as soon as failure cleanup invokes it.
+    let (alarm, _control) = FakeAlarm::controlled();
+    let (panicker, panicked) = Panicker::new(false);
+    let notifying = Arc::new(NotifyPanickerWaker {
+        panicker: panicker.clone(),
+        notified: AtomicBool::new(false),
+    });
+    let shard = Arc::new(Shard::new(0, alarm, panicker));
+    let (entry, _registered) = register(&shard, at(10));
+    let task_waker = waker(Arc::clone(&notifying));
+    let mut context = Context::from_waker(&task_waker);
+    assert_eq!(entry.poll(&mut context), Poll::Pending);
+
+    // The infrastructure payload must claim root interruption before waking the
+    // failed sleeper, so its generic task panic cannot replace diagnostics.
+    shard.fail(DriverFailure::io(
+        "injected operation",
+        injected_error("root cause"),
+    ));
+    assert!(notifying.notified.load(AtomicOrdering::Acquire));
+    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+    let message = fatal_message(panicked).await;
+    assert!(message.contains("injected operation"));
+    assert!(message.contains("injected fake alarm root cause failure"));
+    assert!(!message.contains("generic failed sleeper panic"));
+}
+
+#[tokio::test]
+async fn fatal_failure_is_published_before_failed_state_escapes() {
+    // Retain a task-panic reporter while constructing a shard with the default
+    // propagation policy.
+    let (alarm, _control) = FakeAlarm::controlled();
+    let (panicker, panicked) = Panicker::new(false);
+    let task_panicker = panicker.clone();
+    let shard = Arc::new(Shard::new(0, alarm, panicker));
+
+    // Observe the interval after failure becomes visible to registration but
+    // before the service starts waking its previously queued sleepers.
+    shard.fail_with_exposure_hook(
+        DriverFailure::io("injected operation", injected_error("root cause")),
+        || {
+            let entry = Arc::new(Entry::new());
+            shard.register(at(10), Arc::clone(&entry));
+            assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
+
+            // Simulate the task wrapper reporting this newly failed sleep's
+            // generic panic as soon as the failed state escapes.
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                let waker = noop_waker();
+                let mut context = Context::from_waker(&waker);
+                let _ = entry.poll(&mut context);
+            }))
+            .expect_err("polling a failed entry must panic");
+            task_panicker.notify(panic);
+        },
+    );
+
+    // The earlier publication must preserve the detailed infrastructure cause.
+    let message = fatal_message(panicked).await;
+    assert!(message.contains("injected operation"));
+    assert!(message.contains("injected fake alarm root cause failure"));
+    assert!(!message.contains("high-resolution timer service failed"));
+}
+
+#[test]
+fn fatal_failure_is_receiver_visible_when_failed_state_escapes() {
+    // Pair a shard with a root task that is otherwise ready to complete.
+    let (alarm, _control) = FakeAlarm::controlled();
+    let (panicker, panicked) = Panicker::new(false);
+    let shard = Arc::new(Shard::new(0, alarm, panicker));
+    let mut root_outcome = None;
+
+    // Poll the root immediately after failure state exposure and before the
+    // remaining cleanup can make additional progress.
+    shard.fail_with_exposure_hook(
+        DriverFailure::io("injected operation", injected_error("root cause")),
+        || {
+            root_outcome = Some(catch_unwind(AssertUnwindSafe(|| {
+                futures::executor::block_on(panicked.interrupt(future::ready(7)))
+            })));
+        },
+    );
+
+    // The detailed fatal payload must already win over the ready root output.
+    let panic = root_outcome
+        .expect("failure exposure hook did not run")
+        .expect_err("ready root escaped an already exposed timer failure");
+    let message = extract_panic_message(&*panic);
+    assert!(message.contains("injected operation"));
+    assert!(message.contains("injected fake alarm root cause failure"));
+}
+
 #[test]
 fn stop_fails_entries_popped_into_an_in_progress_batch() {
     // Pop two expired entries without completing their driver batch.
@@ -1512,9 +1661,28 @@ fn driver_failure_preserves_owned_and_classifies_non_string_panics() {
 
     // Owned strings remain intact while opaque payloads receive a stable classification.
     assert_eq!(owned_failure.operation, "driver panic");
-    assert_eq!(owned_failure.cause, "owned panic payload");
+    assert_eq!(owned_failure.cause.to_string(), "owned panic payload");
+    assert_eq!(owned_failure.cause.error_kind(), None);
+    assert_eq!(owned_failure.cause.raw_os_error(), None);
     assert_eq!(non_string_failure.operation, "driver panic");
-    assert_eq!(non_string_failure.cause, "non-string panic");
+    assert_eq!(non_string_failure.cause.to_string(), "non-string panic");
+    assert_eq!(non_string_failure.cause.error_kind(), None);
+    assert_eq!(non_string_failure.cause.raw_os_error(), None);
+}
+
+#[test]
+fn driver_failure_retains_structured_io_metadata() {
+    // Construct an OS error and retain its portable kind before moving it.
+    let error = io::Error::from_raw_os_error(libc::EINVAL);
+    let kind = error.kind();
+
+    // Wrap the error through the same path used by native driver operations.
+    let failure = DriverFailure::io("injected operation", error);
+
+    // The original error object remains available for structured diagnostics.
+    assert_eq!(failure.operation, "injected operation");
+    assert_eq!(failure.cause.error_kind(), Some(kind));
+    assert_eq!(failure.cause.raw_os_error(), Some(libc::EINVAL));
 }
 
 #[tokio::test]
@@ -1747,7 +1915,7 @@ fn entry_poll_double_check_observes_failure_during_registration() {
     // The second state check must unwind instead of returning a lost pending wake.
     assert!(result.is_err());
     assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
-    assert!(entry.take_waker().is_some());
+    assert!(entry.take_waker().is_none());
 }
 
 #[test]
@@ -1847,6 +2015,39 @@ fn worker_threads_claim_distinct_affinity_indices() {
 }
 
 #[test]
+fn fallback_threads_receive_balanced_round_robin_shards() {
+    // Setup: Release sixteen fresh fallback threads against four timer shards.
+    let affinity = Arc::new(affinity(4));
+    let barrier = Arc::new(Barrier::new(16));
+    let threads: Vec<_> = (0..16)
+        .map(|_| {
+            let affinity = Arc::clone(&affinity);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                affinity.select()
+            })
+        })
+        .collect();
+
+    // Action: Count the production fallback selections made under contention.
+    let mut counts = [0_usize; 4];
+    for index in threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+    {
+        counts[index] += 1;
+    }
+
+    // Assertion: Consecutive claims balance exactly across every native shard.
+    assert_eq!(counts, [4; 4]);
+    assert_eq!(
+        affinity.next_fallback.load(AtomicOrdering::Relaxed),
+        16
+    );
+}
+
+#[test]
 fn provisional_upgrade_does_not_invalidate_registered_sleep() {
     // Reserve worker zero elsewhere, then provisionally select shard zero here.
     let affinity = Arc::new(affinity(2));
@@ -1889,28 +2090,43 @@ fn runtime_identity_cache_preserves_assignments_across_switches() {
 }
 
 #[test]
-fn thread_assignment_cache_reads_empty_and_inactive_state() {
-    // Construct an isolated assignment cache outside the thread-local initializer.
+fn thread_assignment_cache_prunes_dropped_runtimes_on_cold_paths() {
+    // Cache two live runtimes, leaving the first assignment inactive.
     let mut assignments = ThreadAssignments::new();
-    let empty = assignments.get(1);
-
-    // No runtime may appear current or inactive before its first installation.
-    assert!(assignments.current.is_none());
-    assert!(assignments.inactive.is_empty());
-    assert_eq!(empty, None);
-
-    // Store one inactive assignment without changing the empty current slot.
-    let inactive = ThreadAssignment {
+    let first_lifetime = Arc::new(());
+    assignments.install(ThreadAssignment {
         runtime_id: 1,
+        lifetime: Arc::downgrade(&first_lifetime),
         kind: AssignmentKind::Provisional,
         index: 3,
-    };
-    assignments.inactive.push(inactive);
-    let recovered = assignments.get(1);
+    });
+    let second_lifetime = Arc::new(());
+    assignments.install(ThreadAssignment {
+        runtime_id: 2,
+        lifetime: Arc::downgrade(&second_lifetime),
+        kind: AssignmentKind::Worker,
+        index: 4,
+    });
+    assert_eq!(assignments.get(1), Some((3, AssignmentKind::Provisional)));
+    assert_eq!(assignments.inactive.len(), 1);
 
-    // Lookup must inspect the inactive cache and return the exact assignment.
-    assert!(assignments.current.is_none());
-    assert_eq!(recovered, Some(inactive));
+    // A cache miss prunes the inactive assignment after its runtime ends.
+    drop(first_lifetime);
+    assert_eq!(assignments.activate(3), None);
+    assert!(assignments.inactive.is_empty());
+    assert_eq!(assignments.get(2), Some((4, AssignmentKind::Worker)));
+
+    // Replacing a dead current assignment does not preserve it as inactive.
+    drop(second_lifetime);
+    let third_lifetime = Arc::new(());
+    assignments.install(ThreadAssignment {
+        runtime_id: 3,
+        lifetime: Arc::downgrade(&third_lifetime),
+        kind: AssignmentKind::Provisional,
+        index: 5,
+    });
+    assert!(assignments.inactive.is_empty());
+    assert_eq!(assignments.get(3), Some((5, AssignmentKind::Provisional)));
 }
 
 #[test]

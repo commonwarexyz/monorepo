@@ -43,9 +43,10 @@
 //! 32 expired entries per lock acquisition and yield after 512 entries only
 //! when more expired work is ready.
 //!
-//! Driver errors and panics fail every affected sleep and interrupt the root
-//! runtime even when ordinary task panics are configured to be caught. Service
-//! teardown also fails queued sleeps, signals drivers, and aborts their tasks.
+//! Driver errors and panics claim root interruption before waking failed
+//! sleepers, so an ordinary task panic cannot replace the infrastructure
+//! diagnostic. This bypasses ordinary task-panic catching. Service teardown
+//! also fails queued sleeps, signals drivers, and aborts their tasks.
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "linux", target_os = "macos"))] {

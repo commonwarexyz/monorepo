@@ -1,264 +1,347 @@
-use super::{ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_WAITING};
+use super::{
+    Alarm, AlarmInitError, Batch, Deadline, DriverFailure, DriverSignal, ENTRY_CANCELED,
+    ENTRY_FAILED, ENTRY_FIRED, ENTRY_WAITING, Entry, NOT_IN_HEAP, Shard,
+};
+use crate::utils::{Panicker, extract_panic_message};
 use loom::{
+    future::block_on,
     model,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        Arc as LoomArc, Mutex as LoomMutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
 };
+use std::{
+    future::{Future, pending},
+    io,
+    panic::{AssertUnwindSafe, catch_unwind},
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
-/// Latches one notification and records its false-to-true wake call.
-fn notify(notified: &AtomicBool, edges: &AtomicUsize, wakes: &AtomicUsize) {
-    if !notified.swap(true, Ordering::Release) {
-        edges.fetch_add(1, Ordering::Relaxed);
-        wakes.fetch_add(1, Ordering::Release);
+/// Future adapter that polls the production timer entry.
+struct EntryFuture {
+    /// Entry shared with the completing thread.
+    entry: LoomArc<Entry>,
+}
+
+impl Future for EntryFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.entry.poll(context)
     }
 }
 
-/// Runs the signal's consume, register, and consume wait protocol.
-fn consume_notification(
-    notified: &AtomicBool,
-    registered: &AtomicBool,
-    parked: &AtomicBool,
-    wakes: &AtomicUsize,
-) {
-    if notified.swap(false, Ordering::AcqRel) {
-        return;
-    }
-    let prior_wakes = wakes.load(Ordering::Acquire);
-    registered.store(true, Ordering::Release);
-    if notified.swap(false, Ordering::AcqRel) {
-        registered.store(false, Ordering::Release);
-        return;
-    }
-
-    // A real task returns pending here, then resumes after the registered wake.
-    parked.store(true, Ordering::Release);
-    while wakes.load(Ordering::Acquire) == prior_wakes {
-        thread::yield_now();
-    }
-    assert!(notified.swap(false, Ordering::AcqRel));
-    registered.store(false, Ordering::Release);
+/// Native-alarm state exposed to the forced rearm interleaving.
+struct ModelAlarmState {
+    /// Deadline most recently installed at the alarm boundary.
+    armed: LoomMutex<Option<Deadline>>,
+    /// Whether the first arm has reached the syscall boundary.
+    first_arm_started: AtomicBool,
+    /// Whether the concurrent shard update has completed.
+    update_finished: AtomicBool,
 }
 
-/// State protected by the production shard mutex during rearm.
-struct RearmState {
-    /// Deadline currently desired by the heap.
-    desired: Option<u64>,
-    /// Deadline last recorded as armed.
-    armed: Option<u64>,
-    /// Whether teardown invalidated ordinary driver work.
-    stopped: bool,
+impl ModelAlarmState {
+    /// Creates an alarm that pauses its first arm until a producer updates the shard.
+    fn new() -> Self {
+        Self {
+            armed: LoomMutex::new(None),
+            first_arm_started: AtomicBool::new(false),
+            update_finished: AtomicBool::new(false),
+        }
+    }
+
+    /// Waits until rearm reaches its first native arm.
+    fn wait_for_first_arm(&self) {
+        while !self.first_arm_started.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+    }
+
+    /// Releases the first native arm after publishing the shard update.
+    fn finish_update(&self) {
+        self.update_finished.store(true, Ordering::Release);
+    }
+
+    /// Returns the deadline currently installed at the modeled native boundary.
+    fn armed(&self) -> Option<Deadline> {
+        *self.armed.lock().expect("modeled alarm mutex poisoned")
+    }
+
+    /// Installs a sentinel native state without exercising the arm protocol.
+    fn set_armed(&self, deadline: Deadline) {
+        *self.armed.lock().expect("modeled alarm mutex poisoned") = Some(deadline);
+    }
 }
 
-/// Concurrent heap or lifecycle update explored by the rearm model.
+/// Alarm stub that leaves all synchronization in the production shard code.
+struct ModelAlarm {
+    /// Narrow replacement for the native arm, disarm, and clock boundary.
+    state: LoomArc<ModelAlarmState>,
+}
+
+impl Alarm for ModelAlarm {
+    const PLATFORM: &'static str = "loom";
+
+    fn new(_shard: usize) -> Result<Self, AlarmInitError> {
+        unreachable!("Loom tests construct the modeled alarm directly")
+    }
+
+    fn max_deadline(&self) -> Deadline {
+        deadline(u64::MAX)
+    }
+
+    fn now(&self) -> io::Result<Deadline> {
+        Ok(deadline(0))
+    }
+
+    fn arm(&self, deadline: Deadline) -> io::Result<()> {
+        *self
+            .state
+            .armed
+            .lock()
+            .expect("modeled alarm mutex poisoned") = Some(deadline);
+
+        // Force the producer update into the real rearm syscall window. Later
+        // convergence arms proceed without additional coordination.
+        if !self.state.first_arm_started.swap(true, Ordering::AcqRel) {
+            while !self.state.update_finished.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+        }
+        Ok(())
+    }
+
+    fn disarm(&self) -> io::Result<()> {
+        *self
+            .state
+            .armed
+            .lock()
+            .expect("modeled alarm mutex poisoned") = None;
+        Ok(())
+    }
+
+    fn wait(&self) -> impl Future<Output = io::Result<()>> + Send {
+        pending()
+    }
+}
+
+/// Concurrent update forced into one production rearm operation.
 #[derive(Clone, Copy)]
 enum RearmUpdate {
     /// Remove the final entry.
     Disarm,
-    /// Move 50 ns earlier within tolerance.
+    /// Move 50 nanoseconds earlier within the rearm tolerance.
     Tolerated,
-    /// Move 51 ns earlier beyond tolerance.
+    /// Move 51 nanoseconds earlier beyond the rearm tolerance.
     Earlier,
-    /// Move the minimum later.
+    /// Remove the minimum and expose a later entry.
     Later,
-    /// Stop while an arm may be outside the lock.
+    /// Stop the shard while its native arm is in progress.
     Stop,
 }
 
-/// Mirrors the service's one-sided 50 ns coverage rule.
-fn arm_covers(armed: Option<u64>, desired: Option<u64>) -> bool {
-    match (armed, desired) {
-        (None, None) => true,
-        (Some(armed), Some(desired)) if armed == desired => true,
-        (Some(armed), Some(desired)) if desired < armed => armed - desired <= 50,
-        _ => false,
-    }
+/// Constructs one compact monotonic deadline.
+const fn deadline(nanoseconds: u64) -> Deadline {
+    Deadline::from_duration(Duration::from_nanos(nanoseconds))
 }
 
-/// Performs one snapshot, native update, and convergence recheck.
-fn rearm_once(state: &Mutex<RearmState>, native_arm: &Mutex<Option<u64>>) {
-    let (armed, desired, stopped) = {
-        let state = state.lock().unwrap();
-        (state.armed, state.desired, state.stopped)
+/// Extracts a successful driver result without requiring failure Debug output.
+fn driver_ok<T>(result: Result<T, DriverFailure>) -> T {
+    result.unwrap_or_else(|_| panic!("modeled timer driver operation failed"))
+}
+
+/// Constructs one production shard around the narrow modeled alarm boundary.
+fn model_shard() -> (Arc<Shard<ModelAlarm>>, LoomArc<ModelAlarmState>) {
+    let alarm_state = LoomArc::new(ModelAlarmState::new());
+    let alarm = ModelAlarm {
+        state: LoomArc::clone(&alarm_state),
     };
-    if stopped {
-        *native_arm.lock().unwrap() = None;
-        return;
-    }
-    if arm_covers(armed, desired) {
-        return;
-    }
-
-    // The native update intentionally runs without the state mutex.
-    *native_arm.lock().unwrap() = desired;
-    thread::yield_now();
-    let mut state = state.lock().unwrap();
-    if state.stopped {
-        state.armed = None;
-        drop(state);
-        *native_arm.lock().unwrap() = None;
-    } else {
-        state.armed = desired;
-    }
+    let (panicker, _panicked) = Panicker::new(true);
+    // Loom 0.7 has no Weak model, so shard lifetime remains in std Arc while
+    // every state transition, mutex, waker, and heap entry is Loom-backed.
+    (Arc::new(Shard::new(0, alarm, panicker)), alarm_state)
 }
 
 #[test]
-fn entry_poll_and_completion_cannot_lose_terminal_wake() {
-    for terminal in [ENTRY_FIRED, ENTRY_FAILED] {
-        model(move || {
-            // Race one poll registration against each completion transition.
-            let state = Arc::new(AtomicU8::new(ENTRY_WAITING));
-            let registered = Arc::new(Mutex::new(false));
-            let observed_terminal = Arc::new(AtomicBool::new(false));
-            let wakes = Arc::new(AtomicUsize::new(0));
-            let completer = {
-                let state = Arc::clone(&state);
-                let registered = Arc::clone(&registered);
-                let wakes = Arc::clone(&wakes);
-                thread::spawn(move || {
-                    assert!(
-                        state
-                            .compare_exchange(
-                                ENTRY_WAITING,
-                                terminal,
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            )
-                            .is_ok()
-                    );
-                    let mut registered = registered.lock().unwrap();
-                    if *registered {
-                        *registered = false;
-                        wakes.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-            };
-
-            // Model the future's check, register, and second-check sequence.
-            if state.load(Ordering::Acquire) == ENTRY_WAITING {
-                *registered.lock().unwrap() = true;
-                if state.load(Ordering::Acquire) != ENTRY_WAITING {
-                    *registered.lock().unwrap() = false;
-                    observed_terminal.store(true, Ordering::Release);
-                }
-            } else {
-                observed_terminal.store(true, Ordering::Release);
-            }
-            completer.join().unwrap();
-
-            // Completion is visible either directly or through the registered wake.
-            assert_eq!(state.load(Ordering::Acquire), terminal);
-            assert!(
-                observed_terminal.load(Ordering::Acquire) || wakes.load(Ordering::Acquire) == 1
-            );
-            assert!(!*registered.lock().unwrap());
-        });
-    }
-}
-
-#[test]
-fn entry_has_exactly_one_fire_cancel_or_failure_winner() {
+fn production_entry_poll_cannot_lose_firing_wake() {
     model(|| {
-        // Race every legal terminal transition against one WAITING entry.
-        let state = Arc::new(AtomicU8::new(ENTRY_WAITING));
-        let mut contenders = Vec::new();
-        for terminal in [ENTRY_FIRED, ENTRY_CANCELED, ENTRY_FAILED] {
-            let state = Arc::clone(&state);
-            contenders.push(thread::spawn(move || {
-                match state.compare_exchange(
-                    ENTRY_WAITING,
-                    terminal,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => (true, terminal),
-                    Err(observed) => (false, observed),
-                }
-            }));
-        }
+        // Race the production Entry poll protocol against its firing transition.
+        let entry = LoomArc::new(Entry::new());
+        let completer = {
+            let mut batch = Batch::new();
+            batch.entries.push(LoomArc::clone(&entry));
+            thread::spawn(move || {
+                assert!(batch.complete(ENTRY_FIRED).is_none());
+            })
+        };
+        block_on(EntryFuture {
+            entry: LoomArc::clone(&entry),
+        });
+        completer.join().unwrap();
 
-        // One transition wins and both losers leave the terminal state unchanged.
+        // Either state check or the registered production AtomicWaker must
+        // complete the future, with firing as the only terminal state.
+        assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_FIRED);
+    });
+}
+
+#[test]
+fn production_entry_poll_observes_failure_without_retaining_waker() {
+    model(|| {
+        // Race the production Entry poll protocol against failure completion.
+        let entry = LoomArc::new(Entry::new());
+        let completer = {
+            let mut batch = Batch::new();
+            batch.entries.push(LoomArc::clone(&entry));
+            thread::spawn(move || {
+                assert!(batch.complete(ENTRY_FAILED).is_none());
+            })
+        };
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            block_on(EntryFuture {
+                entry: LoomArc::clone(&entry),
+            });
+        }));
+        completer.join().unwrap();
+
+        // Every interleaving must observe failure as an unwind and release a
+        // waker registered between the two production state checks.
+        let panic = outcome.expect_err("modeled failed entry completed without unwinding");
+        assert_eq!(
+            extract_panic_message(&*panic),
+            "high-resolution timer service failed"
+        );
+        assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_FAILED);
+        assert!(entry.take_waker().is_none());
+    });
+}
+
+#[test]
+fn production_entry_has_exactly_one_terminal_winner() {
+    model(|| {
+        // Race every legal terminal transition through Entry::transition.
+        let entry = LoomArc::new(Entry::new());
+        let contenders: Vec<_> = [ENTRY_FIRED, ENTRY_CANCELED, ENTRY_FAILED]
+            .into_iter()
+            .map(|terminal| {
+                let entry = LoomArc::clone(&entry);
+                thread::spawn(move || (entry.transition(terminal), terminal))
+            })
+            .collect();
         let outcomes: Vec<_> = contenders
             .into_iter()
             .map(|contender| contender.join().unwrap())
             .collect();
-        let terminal = state.load(Ordering::Acquire);
+
+        // One compare-exchange wins and both losing attempts preserve its state.
+        let terminal = entry.state.load(Ordering::Acquire);
         assert_eq!(outcomes.iter().filter(|(won, _)| *won).count(), 1);
-        assert_eq!(outcomes.iter().filter(|(won, _)| !*won).count(), 2);
         assert!(
             outcomes
                 .iter()
-                .filter(|(won, _)| !*won)
-                .all(|(_, observed)| *observed == terminal)
+                .any(|(won, state)| *won && *state == terminal)
         );
         assert_ne!(terminal, ENTRY_WAITING);
     });
 }
 
 #[test]
-fn signal_registration_races_coalescing_and_renotification_are_durable() {
+fn production_registered_sleep_drop_races_driver_completion() {
     model(|| {
-        // Start two concurrent producers before the driver consumes either signal.
-        let notified = Arc::new(AtomicBool::new(false));
-        let registered = Arc::new(AtomicBool::new(false));
-        let published = Arc::new(AtomicUsize::new(0));
-        let edges = Arc::new(AtomicUsize::new(0));
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let mut producers = Vec::new();
-        for publication in [1, 2] {
-            let notified = Arc::clone(&notified);
-            let published = Arc::clone(&published);
-            let edges = Arc::clone(&edges);
-            let wakes = Arc::clone(&wakes);
-            producers.push(thread::spawn(move || {
-                published.fetch_or(publication, Ordering::Relaxed);
-                notify(&notified, &edges, &wakes);
-            }));
-        }
-        for producer in producers {
-            producer.join().unwrap();
-        }
+        // Setup: Register one immediately expired sleep through the production shard.
+        let (shard, _alarm) = model_shard();
+        let sleep = shard.register_after(Duration::ZERO);
+        let entry = LoomArc::clone(&sleep.entry);
 
-        // Both first-phase publications coalesce into one false-to-true edge.
-        assert_eq!(published.load(Ordering::Acquire), 3);
-        assert_eq!(edges.load(Ordering::Acquire), 1);
-        assert_eq!(wakes.load(Ordering::Acquire), 1);
-        let first_parked = AtomicBool::new(false);
-        consume_notification(&notified, &registered, &first_parked, &wakes);
-        assert!(!first_parked.load(Ordering::Acquire));
-
-        // Race a new notification against the driver's full registration protocol.
-        let post_producer = {
-            let notified = Arc::clone(&notified);
-            let published = Arc::clone(&published);
-            let edges = Arc::clone(&edges);
-            let wakes = Arc::clone(&wakes);
+        // Action: Race RegisteredSleep::drop against the driver's production
+        // heap-pop and batch-completion sequence.
+        let dropper = thread::spawn(move || drop(sleep));
+        let driver = {
+            let shard = Arc::clone(&shard);
             thread::spawn(move || {
-                published.fetch_or(4, Ordering::Relaxed);
-                notify(&notified, &edges, &wakes);
+                let mut batch = Batch::new();
+                assert!(!driver_ok(shard.take_expired(&mut batch)));
+                assert!(shard
+                    .complete_batch(&mut batch, ENTRY_FIRED)
+                    .is_none());
             })
         };
-        let second_parked = AtomicBool::new(false);
-        consume_notification(&notified, &registered, &second_parked, &wakes);
+        dropper.join().unwrap();
+        driver.join().unwrap();
 
-        // Acquire consumption observes publication before thread join can synchronize it.
-        assert_eq!(published.load(Ordering::Acquire), 7);
-        post_producer.join().unwrap();
-
-        // Re-notification creates one new edge and one new wake call.
-        assert_eq!(edges.load(Ordering::Acquire), 2);
-        assert_eq!(wakes.load(Ordering::Acquire), 2);
-
-        // Re-notification leaves no stale signal or registered waiter.
-        assert!(!notified.load(Ordering::Acquire));
-        assert!(!registered.load(Ordering::Acquire));
+        // Assertion: Either legal terminal winner leaves no resident or
+        // in-flight entry and publishes the nonresident heap index.
+        assert!(matches!(
+            entry.state.load(Ordering::Acquire),
+            ENTRY_CANCELED | ENTRY_FIRED
+        ));
+        let state = shard.state.lock();
+        assert_eq!(state.entries.len(), 0);
+        assert!(state.in_flight.is_empty());
+        assert_eq!(entry.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
     });
 }
 
 #[test]
-fn rearm_converges_across_disarm_tolerance_and_shutdown() {
+fn production_driver_signal_coalesces_and_cannot_lose_registration_race() {
+    model(|| {
+        // Two notifications before a wait coalesce in the production signal.
+        let signal = LoomArc::new(DriverSignal::new());
+        signal.notify();
+        signal.notify();
+        assert!(signal.is_notified());
+        block_on(signal.wait());
+        assert!(!signal.is_notified());
+
+        // Race a published payload and notification against the production
+        // consume-register-consume wait protocol.
+        let payload = LoomArc::new(AtomicUsize::new(0));
+        let producer = {
+            let signal = LoomArc::clone(&signal);
+            let payload = LoomArc::clone(&payload);
+            thread::spawn(move || {
+                payload.store(7, Ordering::Relaxed);
+                signal.notify();
+            })
+        };
+        block_on(signal.wait());
+
+        // The signal's Release and Acquire operations must publish producer
+        // writes in addition to preventing a lost wake.
+        assert_eq!(payload.load(Ordering::Relaxed), 7);
+        producer.join().unwrap();
+        assert!(!signal.is_notified());
+    });
+}
+
+#[test]
+fn production_rearm_does_not_touch_native_alarm_after_prior_stop() {
+    model(|| {
+        // Leave a sentinel native arm behind, then stop through the production
+        // lifecycle path before rearm snapshots shard state.
+        let (shard, alarm) = model_shard();
+        let sentinel = deadline(777);
+        alarm.set_armed(sentinel);
+        let entry = LoomArc::new(Entry::new());
+        shard.register(deadline(100), LoomArc::clone(&entry));
+        shard.stop();
+        assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_FAILED);
+
+        // Teardown owns native resource cleanup once stop is already visible.
+        // Rearm must return without issuing either an arm or disarm operation.
+        assert!(shard.rearm().is_ok());
+        assert_eq!(alarm.armed(), Some(sentinel));
+    });
+}
+
+#[test]
+fn production_rearm_converges_across_concurrent_shard_updates() {
     for update in [
         RearmUpdate::Disarm,
         RearmUpdate::Tolerated,
@@ -267,71 +350,78 @@ fn rearm_converges_across_disarm_tolerance_and_shutdown() {
         RearmUpdate::Stop,
     ] {
         model(move || {
-            // Begin with 100 ns desired and an in-progress arm only for shutdown.
-            let initial_arm = if matches!(update, RearmUpdate::Stop) {
-                None
-            } else {
-                Some(100)
-            };
-            let state = Arc::new(Mutex::new(RearmState {
-                desired: Some(100),
-                armed: initial_arm,
-                stopped: false,
-            }));
-            let native_arm = Arc::new(Mutex::new(initial_arm));
+            // Register the initial minimum through the complete production path.
+            let (shard, alarm) = model_shard();
+            let first = shard.register_after(Duration::from_nanos(100));
+            let first_entry = LoomArc::clone(&first.entry);
+            if matches!(update, RearmUpdate::Later) {
+                shard.register(deadline(150), LoomArc::new(Entry::new()));
+            }
+
+            // Force one heap or lifecycle update while rearm is outside the
+            // production shard mutex in ModelAlarm::arm.
             let producer = {
-                let state = Arc::clone(&state);
+                let shard = Arc::clone(&shard);
+                let alarm = LoomArc::clone(&alarm);
                 thread::spawn(move || {
-                    thread::yield_now();
-                    let mut state = state.lock().unwrap();
+                    alarm.wait_for_first_arm();
                     match update {
-                        RearmUpdate::Disarm => state.desired = None,
-                        RearmUpdate::Tolerated => state.desired = Some(50),
-                        RearmUpdate::Earlier => state.desired = Some(49),
-                        RearmUpdate::Later => state.desired = Some(150),
-                        RearmUpdate::Stop => {
-                            state.desired = None;
-                            state.armed = None;
-                            state.stopped = true;
+                        RearmUpdate::Disarm | RearmUpdate::Later => {}
+                        RearmUpdate::Tolerated => {
+                            shard.register(deadline(50), LoomArc::new(Entry::new()));
                         }
+                        RearmUpdate::Earlier => {
+                            shard.register(deadline(49), LoomArc::new(Entry::new()));
+                        }
+                        RearmUpdate::Stop => shard.stop(),
                     }
+                    // Exercise RegisteredSleep::drop rather than reproducing its
+                    // transition and shard-removal sequence in this model.
+                    drop(first);
+                    alarm.finish_update();
                 })
             };
-
-            // Race one rearm attempt with the update, then converge after it quiesces.
-            rearm_once(&state, &native_arm);
+            assert!(shard.rearm().is_ok());
             producer.join().unwrap();
-            rearm_once(&state, &native_arm);
 
-            // Every update must end in its precise covered or disarmed state.
-            let state = state.lock().unwrap();
+            // The single production rearm call must converge to the update
+            // that raced its first native operation.
+            let state = shard.state.lock();
+            let desired = state.entries.peek().map(|item| item.deadline);
             match update {
                 RearmUpdate::Disarm => {
-                    assert_eq!(state.desired, None);
-                    assert_eq!(state.armed, None);
-                    assert_eq!(*native_arm.lock().unwrap(), None);
+                    assert_eq!(desired, None);
+                    assert_eq!(state.armed_deadline, None);
+                    assert_eq!(alarm.armed(), None);
                 }
                 RearmUpdate::Tolerated => {
-                    assert_eq!(state.desired, Some(50));
-                    assert_eq!(state.armed, Some(100));
-                    assert_eq!(*native_arm.lock().unwrap(), Some(100));
+                    assert_eq!(desired, Some(deadline(50)));
+                    assert_eq!(state.armed_deadline, Some(deadline(100)));
+                    assert_eq!(alarm.armed(), Some(deadline(100)));
                 }
                 RearmUpdate::Earlier => {
-                    assert_eq!(state.desired, Some(49));
-                    assert_eq!(state.armed, Some(49));
-                    assert_eq!(*native_arm.lock().unwrap(), Some(49));
+                    assert_eq!(desired, Some(deadline(49)));
+                    assert_eq!(state.armed_deadline, Some(deadline(49)));
+                    assert_eq!(alarm.armed(), Some(deadline(49)));
                 }
                 RearmUpdate::Later => {
-                    assert_eq!(state.desired, Some(150));
-                    assert_eq!(state.armed, Some(150));
-                    assert_eq!(*native_arm.lock().unwrap(), Some(150));
+                    assert_eq!(desired, Some(deadline(150)));
+                    assert_eq!(state.armed_deadline, Some(deadline(150)));
+                    assert_eq!(alarm.armed(), Some(deadline(150)));
                 }
                 RearmUpdate::Stop => {
                     assert!(state.stopped);
-                    assert_eq!(state.armed, None);
-                    assert_eq!(*native_arm.lock().unwrap(), None);
+                    assert_eq!(desired, None);
+                    assert_eq!(state.armed_deadline, None);
+                    assert_eq!(alarm.armed(), None);
                 }
             }
+            let expected = if matches!(update, RearmUpdate::Stop) {
+                ENTRY_FAILED
+            } else {
+                ENTRY_CANCELED
+            };
+            assert_eq!(first_entry.state.load(Ordering::Acquire), expected);
         });
     }
 }

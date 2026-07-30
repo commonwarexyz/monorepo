@@ -1,7 +1,7 @@
 use super::*;
 use commonware_utils::TestRng;
 use rand::RngExt;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// A timer retained by the reference model.
 struct LiveTimer {
@@ -14,7 +14,7 @@ struct LiveTimer {
 }
 
 /// Create a deadline from a compact test value.
-fn deadline(nanos: u64) -> Deadline {
+const fn deadline(nanos: u64) -> Deadline {
     Deadline::from_duration(Duration::from_nanos(nanos))
 }
 
@@ -30,7 +30,7 @@ fn item(deadline_nanos: u64, sequence: u64) -> (Arc<Entry>, HeapItem) {
 }
 
 /// Return the comparable key of a heap item.
-fn key(item: &HeapItem) -> (Duration, u64) {
+const fn key(item: &HeapItem) -> (Duration, u64) {
     (item.deadline.as_duration(), item.sequence)
 }
 

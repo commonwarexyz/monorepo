@@ -9,8 +9,7 @@ use commonware_utils::{
 };
 use futures::{
     FutureExt as _,
-    future::{Either, select},
-    pin_mut,
+    future::poll_fn,
     stream::{AbortHandle, Abortable, Aborted},
 };
 use std::{
@@ -315,15 +314,14 @@ impl Panicker {
 
     /// Sends the first root-interrupting panic and ignores later failures.
     fn send(&self, panic: Box<dyn Any + Send + 'static>) -> bool {
-        // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock();
-        let Some(sender) = sender.take() else {
+        // Claim the sender before publishing so wake callbacks run without this lock.
+        let sender = self.sender.lock().take();
+        let Some(sender) = sender else {
             return false;
         };
 
-        // Send the panic
-        let _ = sender.send(panic);
-        true
+        // Report a win only when the root receiver still accepts the payload.
+        sender.send(panic).is_ok()
     }
 }
 
@@ -338,25 +336,41 @@ impl Panicked {
     where
         Fut: Future,
     {
-        // Wait for task to complete or panic
-        let panicked = self.receiver;
-        pin_mut!(panicked);
-        pin_mut!(task);
-        match select(panicked, task).await {
-            Either::Left((panic, task)) => match panic {
-                // If there is a panic, resume the unwind
-                Ok(panic) => {
-                    resume_unwind(panic);
+        let mut panicked = std::pin::pin!(self.receiver);
+        // Capture root-task panics long enough to arbitrate them against a
+        // detailed infrastructure failure published during the same poll.
+        let mut task = std::pin::pin!(AssertUnwindSafe(task).catch_unwind());
+        let mut interruption_open = true;
+        poll_fn(|context| {
+            // Give an already-published panic priority over polling the task.
+            if interruption_open {
+                match panicked.as_mut().poll(context) {
+                    Poll::Ready(Ok(panic)) => resume_unwind(panic),
+                    Poll::Ready(Err(_)) => interruption_open = false,
+                    Poll::Pending => {}
                 }
-                // If there can never be a panic (oneshot is closed), wait for the task to complete
-                // and return the output
-                Err(_) => task.await,
-            },
-            Either::Right((output, _)) => {
-                // Return the output
-                output
             }
-        }
+
+            match task.as_mut().poll(context) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) if interruption_open => {
+                    // Atomically arbitrate root completion against a concurrent
+                    // sender, then observe any panic that won before closure.
+                    let panicked = panicked.as_mut().get_mut();
+                    panicked.close();
+                    if let Ok(panic) = panicked.try_recv() {
+                        resume_unwind(panic);
+                    }
+                    match result {
+                        Ok(output) => Poll::Ready(output),
+                        Err(panic) => resume_unwind(panic),
+                    }
+                }
+                Poll::Ready(Ok(output)) => Poll::Ready(output),
+                Poll::Ready(Err(panic)) => resume_unwind(panic),
+            }
+        })
+        .await
     }
 }
 
@@ -384,13 +398,17 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::{Handle, Panicker};
+    use super::{Handle, Panicker, extract_panic_message};
     use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
     use futures::future;
-    use std::sync::{
-        Arc, Barrier,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::Poll,
     };
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
@@ -444,6 +462,94 @@ mod tests {
                 .downcast_ref::<String>()
                 .is_some_and(|message| message.starts_with("fatal "))
         );
+    }
+
+    #[test]
+    fn fatal_notification_during_final_task_poll_interrupts_completion() {
+        // Build a root task that publishes a fatal failure and completes in the
+        // same poll, after the interrupt receiver was first observed pending.
+        let (panicker, panicked) = Panicker::new(true);
+        let task = async move {
+            assert!(panicker.notify_fatal(Box::new("fatal during final poll")));
+            7
+        };
+
+        // The newly published fatal payload must win over the ready task output.
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            futures::executor::block_on(panicked.interrupt(task))
+        }))
+        .expect_err("root task completion discarded its fatal notification");
+        assert_eq!(extract_panic_message(&*panic), "fatal during final poll");
+    }
+
+    #[test]
+    fn fatal_notification_during_panicking_task_poll_preserves_detail() {
+        // Build a root task that publishes a detailed infrastructure failure
+        // and then raises a generic panic during the same poll.
+        let (panicker, panicked) = Panicker::new(true);
+        let task = async move {
+            assert!(panicker.notify_fatal(Box::new("detailed fatal failure")));
+            panic!("generic root panic");
+        };
+
+        // The fatal receiver must win the same-poll arbitration so callers see
+        // the actionable infrastructure diagnostic instead of the generic panic.
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            futures::executor::block_on(panicked.interrupt(task))
+        }))
+        .expect_err("generic root panic replaced its fatal notification");
+        assert_eq!(extract_panic_message(&*panic), "detailed fatal failure");
+    }
+
+    #[test]
+    fn fatal_notification_reports_closed_root_receiver() {
+        // Close the root receiver before attempting an infrastructure notification.
+        let (panicker, panicked) = Panicker::new(true);
+        drop(panicked);
+
+        // A consumed sender without a receiver must not be reported as an interrupt.
+        assert!(!panicker.notify_fatal(Box::new("unobserved fatal failure")));
+    }
+
+    #[test]
+    fn closed_interruption_sender_allows_ready_task_completion() {
+        // Close the only panic sender before polling an otherwise ready root task.
+        let (panicker, panicked) = Panicker::new(false);
+        drop(panicker);
+
+        // Receiver closure disables interruption and preserves the task output.
+        let output = futures::executor::block_on(panicked.interrupt(future::ready(7)));
+        assert_eq!(output, 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_cooperative_budget_allows_ready_task_completion() {
+        // Build enough ready Tokio receivers for the root task to exhaust its
+        // cooperative budget and still return Ready from that same poll.
+        let (panicker, panicked) = Panicker::new(false);
+        let mut budget_consumers = std::collections::VecDeque::new();
+        for _ in 0..1_024 {
+            let (sender, receiver) = oneshot::channel();
+            sender.send(()).unwrap();
+            budget_consumers.push_back(receiver);
+        }
+        let task = future::poll_fn(move |context| loop {
+            let receiver = budget_consumers
+                .front_mut()
+                .expect("Tokio cooperative budget exceeded test capacity");
+            match std::future::Future::poll(std::pin::Pin::new(receiver), context) {
+                Poll::Ready(Ok(())) => {
+                    budget_consumers.pop_front();
+                }
+                Poll::Ready(Err(_)) => panic!("budget-consumer sender closed without a value"),
+                Poll::Pending => return Poll::Ready(7),
+            }
+        });
+
+        // Final interruption arbitration must not poll the budget-aware channel.
+        let output = panicked.interrupt(task).await;
+        assert_eq!(output, 7);
+        drop(panicker);
     }
 
     #[test]

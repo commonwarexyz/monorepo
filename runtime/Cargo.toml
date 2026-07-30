@@ -31,7 +31,7 @@ futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
 libc.workspace = true
-loom = { workspace = true, optional = true }
+loom = { workspace = true, features = ["futures"], optional = true }
 opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
