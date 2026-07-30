@@ -28,7 +28,7 @@ stability_scope!(BETA {
     pub mod types;
     pub mod utils;
 
-    pub use types::{Address, Ingress};
+    pub use types::{Address, Advertisement, Ingress, PeerEndpoint, Reachability};
 
     /// Tuple representing a message received from a given public key.
     ///

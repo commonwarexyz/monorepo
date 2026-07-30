@@ -1,9 +1,16 @@
 //! Shared address types for p2p networking.
 
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    Codec, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write, config::RangeCfg,
+};
 use commonware_runtime::{Buf, BufMut, TcpEndpoint};
-use commonware_utils::{Hostname, IpAddrExt};
-use std::net::{IpAddr, SocketAddr};
+use commonware_utils::{Hostname, IpAddrExt, PlatformSend, PlatformSync};
+use std::{
+    collections::HashSet,
+    fmt::Debug,
+    hash::Hash,
+    net::{IpAddr, SocketAddr},
+};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
 const INGRESS_DNS_PREFIX: u8 = 1;
@@ -11,8 +18,153 @@ const INGRESS_DNS_PREFIX: u8 = 1;
 const ADDRESS_SYMMETRIC_PREFIX: u8 = 0;
 const ADDRESS_ASYMMETRIC_PREFIX: u8 = 1;
 
+const REACHABILITY_DIALABLE_PREFIX: u8 = 0;
+const REACHABILITY_OUTBOUND_ONLY_PREFIX: u8 = 1;
+
+/// An endpoint that can be advertised to and dialed by peers.
+pub trait PeerEndpoint:
+    Clone
+    + Debug
+    + Eq
+    + Hash
+    + Codec<Cfg = ()>
+    + EncodeSize
+    + PlatformSend
+    + PlatformSync
+    + 'static
+{
+}
+
+/// An ordered list of endpoints where earlier entries are preferred.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Advertisement<E: PeerEndpoint> {
+    endpoints: Vec<E>,
+}
+
+impl<E: PeerEndpoint> Advertisement<E> {
+    /// Maximum number of endpoints in an advertisement.
+    pub const MAX_ENDPOINTS: usize = 8;
+
+    /// Maximum encoded size of one endpoint.
+    pub const MAX_ENDPOINT_SIZE: usize = 2_048;
+
+    /// Maximum encoded size of an advertisement.
+    pub const MAX_SIZE: usize = 8_192;
+
+    /// Creates an advertisement, preserving the order of `endpoints`.
+    pub fn new(endpoints: Vec<E>) -> Result<Self, CodecError> {
+        if endpoints.is_empty() || endpoints.len() > Self::MAX_ENDPOINTS {
+            return Err(CodecError::InvalidLength(endpoints.len()));
+        }
+
+        let mut unique = HashSet::with_capacity(endpoints.len());
+        for endpoint in &endpoints {
+            if endpoint.encode_size() > Self::MAX_ENDPOINT_SIZE {
+                return Err(CodecError::Invalid(
+                    "Advertisement",
+                    "endpoint exceeds maximum encoded size",
+                ));
+            }
+            if !unique.insert(endpoint) {
+                return Err(CodecError::Invalid(
+                    "Advertisement",
+                    "duplicate endpoint",
+                ));
+            }
+        }
+
+        if endpoints.encode_size() > Self::MAX_SIZE {
+            return Err(CodecError::Invalid(
+                "Advertisement",
+                "advertisement exceeds maximum encoded size",
+            ));
+        }
+
+        Ok(Self { endpoints })
+    }
+
+    /// Returns endpoints in dialing preference order.
+    pub fn endpoints(&self) -> &[E] {
+        &self.endpoints
+    }
+
+    /// Consumes the advertisement and returns endpoints in dialing preference order.
+    pub fn into_endpoints(self) -> Vec<E> {
+        self.endpoints
+    }
+}
+
+impl<E: PeerEndpoint> Write for Advertisement<E> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.endpoints.write(buf);
+    }
+}
+
+impl<E: PeerEndpoint> EncodeSize for Advertisement<E> {
+    fn encode_size(&self) -> usize {
+        self.endpoints.encode_size()
+    }
+}
+
+impl<E: PeerEndpoint> Read for Advertisement<E> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let endpoints = Vec::<E>::read_cfg(
+            buf,
+            &(RangeCfg::new(1..=Self::MAX_ENDPOINTS), ()),
+        )?;
+        Self::new(endpoints)
+    }
+}
+
+/// Whether and how a peer can be reached.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Reachability<E: PeerEndpoint> {
+    /// The peer can be dialed using the advertised endpoints.
+    Dialable(Advertisement<E>),
+    /// The peer must establish outbound connections to participate.
+    OutboundOnly,
+}
+
+impl<E: PeerEndpoint> Write for Reachability<E> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Dialable(advertisement) => {
+                REACHABILITY_DIALABLE_PREFIX.write(buf);
+                advertisement.write(buf);
+            }
+            Self::OutboundOnly => REACHABILITY_OUTBOUND_ONLY_PREFIX.write(buf),
+        }
+    }
+}
+
+impl<E: PeerEndpoint> EncodeSize for Reachability<E> {
+    fn encode_size(&self) -> usize {
+        u8::SIZE
+            + match self {
+                Self::Dialable(advertisement) => advertisement.encode_size(),
+                Self::OutboundOnly => 0,
+            }
+    }
+}
+
+impl<E: PeerEndpoint> Read for Reachability<E> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            REACHABILITY_DIALABLE_PREFIX => {
+                Ok(Self::Dialable(Advertisement::<E>::read(buf)?))
+            }
+            REACHABILITY_OUTBOUND_ONLY_PREFIX => Ok(Self::OutboundOnly),
+            other => Err(CodecError::InvalidEnum(other)),
+        }
+    }
+}
+
 /// What we dial to connect to a peer.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Ingress {
     /// IP-based ingress address.
     Socket(SocketAddr),
@@ -24,6 +176,8 @@ pub enum Ingress {
         port: u16,
     },
 }
+
+impl PeerEndpoint for Ingress {}
 
 impl Ingress {
     /// Returns the port number for this ingress address.
@@ -243,6 +397,41 @@ impl arbitrary::Arbitrary<'_> for Address {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<'a, E> arbitrary::Arbitrary<'a> for Advertisement<E>
+where
+    E: PeerEndpoint + arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let len = u.int_in_range(1..=Self::MAX_ENDPOINTS)?;
+        let mut endpoints = Vec::with_capacity(len);
+
+        while endpoints.len() < len {
+            let endpoint = E::arbitrary(u)?;
+            if endpoint.encode_size() > Self::MAX_ENDPOINT_SIZE || endpoints.contains(&endpoint) {
+                continue;
+            }
+            endpoints.push(endpoint);
+        }
+
+        Self::new(endpoints).map_err(|_| arbitrary::Error::IncorrectFormat)
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a, E> arbitrary::Arbitrary<'a> for Reachability<E>
+where
+    E: PeerEndpoint + arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        if u.arbitrary::<bool>()? {
+            return Ok(Self::OutboundOnly);
+        }
+
+        Ok(Self::Dialable(u.arbitrary::<Advertisement<E>>()?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +439,103 @@ mod tests {
     use commonware_runtime::IoBuf;
     use commonware_utils::hostname;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct TestEndpoint(Vec<u8>);
+
+    impl Write for TestEndpoint {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl EncodeSize for TestEndpoint {
+        fn encode_size(&self) -> usize {
+            self.0.encode_size()
+        }
+    }
+
+    impl Read for TestEndpoint {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+            Vec::<u8>::read_cfg(buf, &(RangeCfg::new(..), ())).map(Self)
+        }
+    }
+
+    impl PeerEndpoint for TestEndpoint {}
+
+    fn assert_invalid_advertisement(endpoints: Vec<TestEndpoint>) {
+        assert!(Advertisement::new(endpoints.clone()).is_err());
+        assert!(Advertisement::<TestEndpoint>::decode(endpoints.encode()).is_err());
+    }
+
+    #[test]
+    fn test_advertisement_roundtrip_preserves_preference() {
+        let preferred = Ingress::Socket(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080));
+        let fallback = Ingress::Dns {
+            host: hostname!("fallback.example.com"),
+            port: 443,
+        };
+        let advertisement =
+            Advertisement::new(vec![preferred.clone(), fallback.clone()]).unwrap();
+
+        let decoded = Advertisement::<Ingress>::decode(advertisement.encode()).unwrap();
+        assert_eq!(decoded.endpoints(), &[preferred, fallback]);
+        assert_eq!(decoded, advertisement);
+    }
+
+    #[test]
+    fn test_advertisement_rejects_invalid_endpoints() {
+        assert_invalid_advertisement(Vec::new());
+        assert_invalid_advertisement(vec![TestEndpoint(vec![0]); 2]);
+        assert_invalid_advertisement(
+            (0..=Advertisement::<TestEndpoint>::MAX_ENDPOINTS)
+                .map(|value| TestEndpoint(vec![value as u8]))
+                .collect(),
+        );
+
+        let oversized_endpoint = vec![0; Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE];
+        assert!(TestEndpoint(oversized_endpoint.clone()).encode_size()
+            > Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE);
+        assert_invalid_advertisement(vec![TestEndpoint(oversized_endpoint)]);
+
+        let endpoints = (0..5)
+            .map(|value| {
+                let mut bytes = vec![0; 2_045];
+                bytes[0] = value;
+                TestEndpoint(bytes)
+            })
+            .collect::<Vec<_>>();
+        assert!(endpoints
+            .iter()
+            .all(|endpoint| endpoint.encode_size()
+                <= Advertisement::<TestEndpoint>::MAX_ENDPOINT_SIZE));
+        assert!(endpoints.encode_size() > Advertisement::<TestEndpoint>::MAX_SIZE);
+        assert_invalid_advertisement(endpoints);
+    }
+
+    #[test]
+    fn test_reachability_roundtrip() {
+        let endpoint = Ingress::Socket(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080));
+        let cases = [
+            Reachability::Dialable(Advertisement::new(vec![endpoint]).unwrap()),
+            Reachability::OutboundOnly,
+        ];
+
+        for reachability in cases {
+            let decoded = Reachability::<Ingress>::decode(reachability.encode()).unwrap();
+            assert_eq!(decoded, reachability);
+        }
+    }
+
+    #[test]
+    fn test_reachability_rejects_invalid_prefix() {
+        assert!(matches!(
+            Reachability::<Ingress>::decode([2].as_slice()),
+            Err(CodecError::InvalidEnum(2))
+        ));
+    }
 
     #[test]
     fn test_ingress_socket_roundtrip() {
@@ -447,6 +733,8 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Ingress>,
             CodecConformance<Address>,
+            CodecConformance<Advertisement<Ingress>>,
+            CodecConformance<Reachability<Ingress>>,
         }
     }
 }
