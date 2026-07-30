@@ -1,7 +1,7 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
 use super::handler;
-use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel::CancelGuard};
+use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -155,10 +155,11 @@ where
             request: request.clone(),
             response: response_tx,
         });
-        let mut cancel =
-            CancelGuard::new(self.sender.clone(), Message::CancelOperations { request });
+
+        let mut guard =
+            cancel::Guard::new(self.sender.clone(), Message::CancelOperations { request });
         let result = response_rx.await;
-        cancel.disarm();
+        guard.disarm();
         result.map_err(|_| ResponseDropped)?
     }
 }

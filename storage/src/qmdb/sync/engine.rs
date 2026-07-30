@@ -549,8 +549,8 @@ where
         &mut self,
         fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, R::Error>,
     ) -> Result<(), Error<DB, R>> {
-        // Defensive: removal aborts a request's future, so a result for an
-        // untracked ID should be unreachable.
+        // Request metadata binds a result to the target it was fetched against. Ignore
+        // results whose request has already been canceled or superseded.
         let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
             return Ok(());
         };
@@ -667,6 +667,7 @@ where
                 if let Ok(fetch_result) = fetch_result {
                     self.handle_fetch_result(fetch_result)?;
                 }
+
                 self.schedule_requests()?;
                 let mut engine = self.apply_operations().await?;
                 engine.record_progress();

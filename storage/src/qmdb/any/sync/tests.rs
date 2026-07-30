@@ -1894,8 +1894,9 @@ impl<R: Resolver<Digest = Digest>> Resolver for ReplayFreshBoundaryResolver<R> {
     ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         if op_count == self.historical_target_size {
             if include_pinned_nodes {
-                // Never answers. The engine abandons this request when the target moves,
-                // which drops this future.
+                // Simulate a resolver that has not answered the old target's pinned-nodes
+                // request when the target changes. The update cancels the request and drops
+                // this pending future.
                 return std::future::pending().await;
             }
 

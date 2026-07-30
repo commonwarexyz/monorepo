@@ -234,7 +234,7 @@ where
 
     fn should_cancel_request(&mut self, request: &handler::Request<F, H::Digest>) -> bool {
         let Some(subscribers) = self.pending.get_mut(request) else {
-            return false;
+            return true;
         };
         subscribers.retain(|subscriber| !subscriber.is_closed());
         if !subscribers.is_empty() {
@@ -692,6 +692,24 @@ mod tests {
                 .expect("request should remain pending");
             assert_eq!(subscribers.len(), 1);
             assert!(!subscribers[0].is_closed());
+        });
+    }
+
+    #[test]
+    fn cancel_state_cancels_pruned_request() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let target = compact::Target {
+                root: sha256::Digest::from([7; 32]),
+                leaf_count: mmr::Location::new(1),
+            };
+            let request = handler::Request::from_target(target);
+
+            let action = actor.handle_mailbox_message(mailbox::Message::CancelState {
+                request: request.clone(),
+            });
+
+            assert!(matches!(action, MailboxAction::Cancel(ref key) if key == &request));
         });
     }
 }

@@ -1,7 +1,7 @@
 //! Mailbox for the compact QMDB P2P resolver.
 
 use super::handler;
-use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel::CancelGuard};
+use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{merkle::Family, qmdb::sync::compact};
@@ -140,9 +140,10 @@ where
             request: request.clone(),
             response,
         });
-        let mut cancel = CancelGuard::new(self.sender.clone(), Message::CancelState { request });
+
+        let mut guard = cancel::Guard::new(self.sender.clone(), Message::CancelState { request });
         let result = receiver.await;
-        cancel.disarm();
+        guard.disarm();
         result.map_err(|_| ResponseDropped)?
     }
 }
