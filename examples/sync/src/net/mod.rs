@@ -123,7 +123,7 @@ mod tests {
     };
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::sha256;
-    use commonware_storage::{mmr::Location, qmdb::sync::source::Response};
+    use commonware_storage::{mmr::Location, qmdb::sync::Response};
     use commonware_utils::NZU64;
     use rstest::rstest;
 

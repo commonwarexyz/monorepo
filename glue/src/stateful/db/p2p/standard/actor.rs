@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::source::{Request, Response, Source as SyncSource},
+    qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
@@ -26,11 +26,11 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Op<F, DB> = <Shared<DB> as SyncSource<Request<F>>>::Op;
-type DatabaseRoot<F, DB> = <Shared<DB> as SyncSource<Request<F>>>::Digest;
+type Op<F, DB> = <Shared<DB> as Source<Request<F>>>::Op;
+type DatabaseRoot<F, DB> = <Shared<DB> as Source<Request<F>>>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
 type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<F, DB>, DatabaseRoot<F, DB>>;
-type Pending<F, Op, D> = mailbox::Delivery<F, Op, D>;
+type Pending<F, Op, D> = mailbox::ResponseTx<F, Op, D>;
 type PendingSubs<F, DB> =
     BTreeMap<handler::Request<F>, Vec<Pending<F, Op<F, DB>, DatabaseRoot<F, DB>>>>;
 
@@ -99,7 +99,7 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     DB: Send + Sync + 'static,
-    Shared<DB>: SyncSource<Request<F>, Family = F>,
+    Shared<DB>: Source<Request<F>, Family = F>,
     Op<F, DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
@@ -118,7 +118,7 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     DB: Send + Sync + 'static,
-    Shared<DB>: SyncSource<Request<F>, Family = F>,
+    Shared<DB>: Source<Request<F>, Family = F>,
     Op<F, DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
@@ -277,13 +277,13 @@ where
         &mut self,
         key: handler::Request<F>,
         value: bytes::Bytes,
-        response: oneshot::Sender<bool>,
+        validity_tx: oneshot::Sender<bool>,
     ) {
         // Only accept responses for keys we currently have in-flight.
         // Unknown keys are unsolicited/stale deliveries and are ignored.
         let Some(subscribers) = self.pending.remove(&key) else {
             self.metrics.deliveries.inc(status::Status::Dropped);
-            response.send_lossy(true);
+            validity_tx.send_lossy(true);
             return;
         };
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
@@ -298,7 +298,7 @@ where
                 self.pending.insert(key, subscribers);
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
                 self.metrics.deliveries.inc(status::Status::Invalid);
-                response.send_lossy(false);
+                validity_tx.send_lossy(false);
                 return;
             }
         };
@@ -324,7 +324,7 @@ where
 
         if approvals.is_empty() {
             self.metrics.deliveries.inc(status::Status::Success);
-            response.send_lossy(true);
+            validity_tx.send_lossy(true);
             return;
         }
 
@@ -341,14 +341,14 @@ where
             self.metrics.deliveries.inc(status::Status::Failure);
             debug!(?key, "downstream marked response as peer-invalid");
         }
-        response.send_lossy(peer_valid);
+        validity_tx.send_lossy(peer_valid);
     }
 
     /// Serve a peer's request by querying the local database.
     async fn handle_produce(
         &mut self,
         key: handler::Request<F>,
-        response: oneshot::Sender<bytes::Bytes>,
+        response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
@@ -366,16 +366,16 @@ where
         }
         let result = database.serve(request).await;
 
-        let Ok((served, _validity_tx)) = result else {
+        let Ok((response, _validity_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
             return;
         };
 
-        response.send_lossy(
+        response_tx.send_lossy(
             handler::Response {
-                proof: served.proof,
-                operations: served.operations,
-                pinned_nodes: served.pinned_nodes,
+                proof: response.proof,
+                operations: response.operations,
+                pinned_nodes: response.pinned_nodes,
             }
             .encode(),
         );
@@ -438,7 +438,7 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Shared<TestDb> as SyncSource<Request<mmr::Family>>>::Op;
+    type TestOp = <Shared<TestDb> as Source<Request<mmr::Family>>>::Op;
 
     type TestActor = Actor<
         deterministic::Context,
@@ -481,7 +481,7 @@ mod tests {
         Result<
             (
                 Response<mmr::Family, TestOp, sha256::Digest>,
-                commonware_storage::qmdb::sync::source::Validity,
+                commonware_storage::qmdb::sync::Validity,
             ),
             mailbox::ResponseDropped,
         >,

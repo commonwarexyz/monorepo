@@ -430,10 +430,7 @@ where
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
     // responses. Source errors and local construction failures remain terminal.
     loop {
-        let (response, validity_tx) = source
-            .serve(target.clone())
-            .await
-            .map_err(Error::Source)?;
+        let (response, validity_tx) = source.serve(target.clone()).await.map_err(Error::Source)?;
 
         // Validation failures describe a bad compact response. Reject it if the source supplied
         // feedback, then fetch another candidate.
@@ -595,19 +592,15 @@ where
 
     let leaf_count = target.leaf_count;
     let last_commit_loc = Location::new(*leaf_count - 1);
-    let request = Request::new(leaf_count, last_commit_loc, NZU64!(1))
-        .retaining_from(leaf_count);
+    let request = Request::new(leaf_count, last_commit_loc, NZU64!(1)).retaining_from(leaf_count);
     let (response, _validity_tx) = source.serve(request).await?;
 
     Ok(response)
 }
 
-/// Implement [`Source<Target>`] for a database.
-///
-/// A `full` database has no persisted witness, so its state is synthesized on demand from
-/// the current tip commit plus the frontier pins at the requested tree size; a `compact`
-/// database reads its witness directly. The `keyless` arms exist because those databases
-/// have no key or translator parameter.
+/// A `full` database has no persisted witness, so its compact state is synthesized on demand
+/// from the current tip commit plus the frontier pins at the requested tree size; a `compact`
+/// database reads its witness directly.
 macro_rules! impl_compact_source {
     (full $db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
         impl<F, E, K, V, H, T, S> Source<Target<F, H::Digest>> for $db<F, E, K, V, H, T, S>
