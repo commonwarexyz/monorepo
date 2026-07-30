@@ -1,16 +1,16 @@
 //! Target-dependent thread-safety bounds.
 
-/// A value that may cross the runtime's scheduling boundary.
+/// A value that may cross a platform scheduling boundary.
 ///
-/// Native runtimes may schedule work on another thread, so this requires
-/// [`Send`]. The browser runtime stays on one event-loop thread and does not.
+/// Native targets may move work to another thread, so this requires [`Send`].
+/// Browser WASM stays on one event-loop thread and does not.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait PlatformSend: Send {}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: Send + ?Sized> PlatformSend for T {}
 
-/// A value that may cross the runtime's scheduling boundary.
+/// A value that may cross a platform scheduling boundary.
 ///
 /// Browser tasks remain on the current event-loop thread.
 #[cfg(target_arch = "wasm32")]
@@ -19,18 +19,17 @@ pub trait PlatformSend {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> PlatformSend for T {}
 
-/// A value that may be shared by runtime capabilities.
+/// A value that may be shared across a platform scheduling boundary.
 ///
-/// Native runtimes may access capabilities from multiple threads, so this
-/// requires [`Sync`]. The browser runtime stays on one event-loop thread and
-/// does not.
+/// Native targets may access shared state from multiple threads, so this
+/// requires [`Sync`]. Browser WASM stays on one event-loop thread and does not.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait PlatformSync: Sync {}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: Sync + ?Sized> PlatformSync for T {}
 
-/// A value that may be shared by runtime capabilities.
+/// A value that may be shared across a platform scheduling boundary.
 ///
 /// Browser tasks remain on the current event-loop thread.
 #[cfg(target_arch = "wasm32")]

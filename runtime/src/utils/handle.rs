@@ -1,5 +1,5 @@
 use crate::{
-    Error,
+    Error, PlatformSend,
     telemetry::metrics::raw::Gauge,
     utils::{extract_panic_message, supervision::Tree},
 };
@@ -30,7 +30,7 @@ use tracing::error;
 /// work.
 pub struct Handle<T>
 where
-    T: Send + 'static,
+    T: PlatformSend + 'static,
 {
     state: HandleState<T>,
 }
@@ -38,7 +38,7 @@ where
 /// Distinguishes handles that own spawned work from handles that only wait on completion.
 enum HandleState<T>
 where
-    T: Send + 'static,
+    T: PlatformSend + 'static,
 {
     Task {
         receiver: oneshot::Receiver<Result<T, Error>>,
@@ -54,17 +54,23 @@ where
 /// Normalizes receiver-backed and future-backed completions behind one abortable future.
 enum Completion<T>
 where
-    T: Send + 'static,
+    T: PlatformSend + 'static,
 {
     Receiver(oneshot::Receiver<Result<T, Error>>),
-    Future(Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'static>>),
+    Future(BoxedCompletion<T>),
 }
 
-impl<T> Unpin for Completion<T> where T: Send + 'static {}
+#[cfg(not(target_arch = "wasm32"))]
+type BoxedCompletion<T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'static>>;
+
+#[cfg(target_arch = "wasm32")]
+type BoxedCompletion<T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'static>>;
+
+impl<T> Unpin for Completion<T> where T: PlatformSend + 'static {}
 
 impl<T> Future for Completion<T>
 where
-    T: Send + 'static,
+    T: PlatformSend + 'static,
 {
     type Output = Result<T, Error>;
 
@@ -80,7 +86,7 @@ where
 
 impl<T> Handle<T>
 where
-    T: Send + 'static,
+    T: PlatformSend + 'static,
 {
     #[inline(always)]
     pub(crate) fn init<F>(
@@ -90,7 +96,7 @@ where
         tree: Arc<Tree>,
     ) -> (impl Future<Output = ()>, Self)
     where
-        F: Future<Output = T> + Send + 'static,
+        F: Future<Output = T> + PlatformSend + 'static,
     {
         // Initialize channels to handle result/abort
         let (sender, receiver) = oneshot::channel();
@@ -152,7 +158,7 @@ where
     /// Returns a handle backed by a completion future.
     pub fn from_future<F>(future: F) -> Self
     where
-        F: Future<Output = Result<T, Error>> + Send + 'static,
+        F: Future<Output = Result<T, Error>> + PlatformSend + 'static,
     {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Self {
@@ -217,7 +223,7 @@ where
 
 impl<T> Future for Handle<T>
 where
-    T: Send + 'static,
+    T: PlatformSend + 'static,
 {
     type Output = Result<T, Error>;
 

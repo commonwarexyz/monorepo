@@ -27,19 +27,14 @@ use commonware_macros::stability_scope;
 mod macros;
 
 mod network;
-#[cfg(not(any(
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))]
-mod platform;
 mod process;
 mod storage;
 
 stability_scope!(ALPHA {
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
+});
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod deterministic;
     pub mod mocks;
 });
@@ -59,7 +54,7 @@ stability_scope!(BETA {
     use commonware_parallel::Rayon;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
-    pub use platform::{PlatformSend, PlatformSync};
+    pub use commonware_utils::{PlatformSend, PlatformSync};
     use iobuf::PoolError;
     use std::{
         future::Future,
@@ -430,18 +425,21 @@ stability_scope!(BETA {
     pub trait Clock:
         governor::clock::Clock<Instant = SystemTime>
         + governor::clock::ReasonablyRealtime
-        + Send
-        + Sync
+        + PlatformSend
+        + PlatformSync
         + 'static
     {
         /// Returns the current time.
         fn current(&self) -> SystemTime;
 
         /// Sleep for the given duration.
-        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + PlatformSend + 'static;
 
         /// Sleep until the given deadline.
-        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep_until(
+            &self,
+            deadline: SystemTime,
+        ) -> impl Future<Output = ()> + PlatformSend + 'static;
 
         /// Await a future with a timeout, returning `Error::Timeout` if it expires.
         ///
@@ -467,10 +465,10 @@ stability_scope!(BETA {
             &self,
             duration: Duration,
             future: F,
-        ) -> impl Future<Output = Result<T, Error>> + Send + '_
+        ) -> impl Future<Output = Result<T, Error>> + PlatformSend + '_
         where
-            F: Future<Output = T> + Send + 'static,
-            T: Send + 'static,
+            F: Future<Output = T> + PlatformSend + 'static,
+            T: PlatformSend + 'static,
         {
             async move {
                 select! {
@@ -492,7 +490,7 @@ stability_scope!(BETA {
 
     /// Interface that any runtime must implement to create
     /// network connections.
-    pub trait Network: Send + Sync + 'static {
+    pub trait Network: PlatformSend + PlatformSync + 'static {
         /// The type of [Listener] that's returned when binding to a socket.
         /// Accepting a connection returns a [Sink] and [Stream] which are defined
         /// by the [Listener] and used to send and receive data over the connection.
@@ -502,29 +500,29 @@ stability_scope!(BETA {
         fn bind(
             &self,
             socket: SocketAddr,
-        ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
+        ) -> impl Future<Output = Result<Self::Listener, Error>> + PlatformSend;
 
         /// Dial the given socket address.
         fn dial(
             &self,
             socket: SocketAddr,
-        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
+        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + PlatformSend;
     }
 
     /// Interface for DNS resolution.
-    pub trait Resolver: Send + Sync + 'static {
+    pub trait Resolver: PlatformSend + PlatformSync + 'static {
         /// Resolve a hostname to IP addresses.
         ///
         /// Returns a list of IP addresses that the hostname resolves to.
         fn resolve(
             &self,
             host: &str,
-        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
+        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + PlatformSend;
     }
 
     /// Interface that any runtime must implement to handle
     /// incoming network connections.
-    pub trait Listener: Sync + Send + 'static {
+    pub trait Listener: PlatformSend + PlatformSync + 'static {
         /// The type of [Sink] that's returned when accepting a connection.
         /// This is used to send data to the remote connection.
         type Sink: Sink;
@@ -535,7 +533,7 @@ stability_scope!(BETA {
         /// Accept an incoming connection.
         fn accept(
             &mut self,
-        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + PlatformSend;
 
         /// Returns the local address of the listener.
         fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
@@ -543,7 +541,7 @@ stability_scope!(BETA {
 
     /// Interface that any runtime must implement to send
     /// messages over a network connection.
-    pub trait Sink: Sync + Send + 'static {
+    pub trait Sink: PlatformSend + PlatformSync + 'static {
         /// Send a message to the sink.
         ///
         /// # Warning
@@ -556,13 +554,13 @@ stability_scope!(BETA {
         /// partial write may have occurred.
         fn send(
             &mut self,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
+            bufs: impl Into<IoBufs> + PlatformSend,
+        ) -> impl Future<Output = Result<(), Error>> + PlatformSend;
     }
 
     /// Interface that any runtime must implement to receive
     /// messages over a network connection.
-    pub trait Stream: Sync + Send + 'static {
+    pub trait Stream: PlatformSend + PlatformSync + 'static {
         /// Receive exactly `len` bytes from the stream.
         ///
         /// The runtime allocates the buffer and returns it as `IoBufs`.
@@ -575,7 +573,10 @@ stability_scope!(BETA {
         ///
         /// Dropping the future (e.g. via `select!`) also poisons the stream, since
         /// partially read data may be lost.
-        fn recv(&mut self, len: usize) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+        fn recv(
+            &mut self,
+            len: usize,
+        ) -> impl Future<Output = Result<IoBufs, Error>> + PlatformSend;
 
         /// Peek at buffered data without consuming.
         ///
@@ -768,7 +769,7 @@ stability_scope!(BETA {
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
-    pub trait BufferPooler: Send + Sync + 'static {
+    pub trait BufferPooler: PlatformSend + PlatformSync + 'static {
         /// Returns the network [BufferPool].
         fn network_buffer_pool(&self) -> &BufferPool;
 
@@ -778,7 +779,7 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA, cfg(feature = "external") {
     /// Interface that runtimes can implement to constrain the execution latency of a future.
-    pub trait Pacer: Clock + Send + Sync + 'static {
+    pub trait Pacer: Clock + PlatformSend + PlatformSync + 'static {
         /// Defer completion of a future until a specified `latency` has elapsed. If the future is
         /// not yet ready at the desired time of completion, the runtime will block until the future
         /// is ready.
@@ -802,33 +803,33 @@ stability_scope!(BETA, cfg(feature = "external") {
             &'a self,
             latency: Duration,
             future: F,
-        ) -> impl Future<Output = T> + Send + 'a
+        ) -> impl Future<Output = T> + PlatformSend + 'a
         where
-            F: Future<Output = T> + Send + 'a,
-            T: Send + 'a;
+            F: Future<Output = T> + PlatformSend + 'a,
+            T: PlatformSend + 'a;
     }
 
     /// Extension trait that makes it more ergonomic to use [Pacer].
     ///
     /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
     /// runtime should delay completion relative to the clock.
-    pub trait FutureExt: Future + Send + Sized {
+    pub trait FutureExt: Future + PlatformSend + Sized {
         /// Delay completion of the future until a specified `latency` on `pacer`.
         fn pace<'a, E>(
             self,
             pacer: &'a E,
             latency: Duration,
-        ) -> impl Future<Output = Self::Output> + Send + 'a
+        ) -> impl Future<Output = Self::Output> + PlatformSend + 'a
         where
             E: Pacer + 'a,
-            Self: Send + 'a,
-            Self::Output: Send + 'a,
+            Self: PlatformSend + 'a,
+            Self::Output: PlatformSend + 'a,
         {
             pacer.pace(latency, self)
         }
     }
 
-    impl<F> FutureExt for F where F: Future + Send {}
+    impl<F> FutureExt for F where F: Future + PlatformSend {}
 });
 
 #[cfg(test)]
