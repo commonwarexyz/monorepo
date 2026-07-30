@@ -329,7 +329,7 @@ mod tests {
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
+        Error as RuntimeError, Runner as _, Stream, Supervisor as _, TcpEndpoint, deterministic,
     };
     use commonware_utils::{NZU32, NZUsize};
     use std::{

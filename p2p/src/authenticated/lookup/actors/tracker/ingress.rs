@@ -80,6 +80,16 @@ pub enum Message<C: PublicKey> {
         reservation: oneshot::Sender<Option<(Reservation<C>, Ingress)>>,
     },
 
+    /// Reserve a connection established outside the autonomous transport actors.
+    Attach {
+        /// Authenticated peer identity.
+        public_key: C,
+        /// Whether the connection was accepted inbound.
+        inbound: bool,
+        /// Sender to respond with a reservation.
+        reservation: oneshot::Sender<Option<Reservation<C>>>,
+    },
+
     // ---------- Used by listener ----------
     /// Check if a peer is acceptable (can accept an incoming connection from them).
     Acceptable {
@@ -158,6 +168,17 @@ impl<C: PublicKey> Mailbox<C> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dial {
             public_key,
+            reservation,
+        });
+        receiver.await.ok().flatten()
+    }
+
+    /// Reserve an externally established connection.
+    pub(crate) async fn attach(&self, public_key: C, inbound: bool) -> Option<Reservation<C>> {
+        let (reservation, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Attach {
+            public_key,
+            inbound,
             reservation,
         });
         receiver.await.ok().flatten()

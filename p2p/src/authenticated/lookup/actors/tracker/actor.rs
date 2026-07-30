@@ -192,6 +192,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             } => {
                 let _ = reservation.send(self.directory.dial(&public_key));
             }
+            Message::Attach {
+                public_key,
+                inbound,
+                reservation,
+            } => {
+                let metadata = if inbound {
+                    Metadata::Listener(public_key.clone())
+                } else {
+                    Metadata::Dialer(public_key.clone())
+                };
+                let _ = reservation.send(self.directory.attach(public_key, metadata));
+            }
             Message::Acceptable {
                 public_key,
                 source_ip,

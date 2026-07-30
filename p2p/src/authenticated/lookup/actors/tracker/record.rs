@@ -15,6 +15,9 @@ pub enum Address {
 
     /// Address is provided when peer is tracked.
     Known(types::Address),
+
+    /// Peer is authorized for an attached connection but has no dial endpoint.
+    Undialable,
 }
 
 /// Represents the connection status of a peer.
@@ -92,6 +95,20 @@ impl Record {
         }
     }
 
+    /// Create a persistent record for a peer reached through an attached connection.
+    pub const fn undialable() -> Self {
+        Self {
+            address: Address::Undialable,
+            status: Status::Inert,
+            stale_connection: false,
+            primary_sets: 0,
+            secondary_sets: 0,
+            persistent: true,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
     // ---------- Setters ----------
 
     /// Update the record with a new address.
@@ -100,6 +117,7 @@ impl Record {
     pub fn update(&mut self, addr: types::Address) -> bool {
         match &mut self.address {
             Address::Myself => false,
+            Address::Undialable => false,
             Address::Known(existing) => {
                 if *existing == addr {
                     return false;
@@ -233,7 +251,7 @@ impl Record {
         }
         let ingress = match &self.address {
             Address::Known(addr) => addr.ingress(),
-            Address::Myself => return DialStatus::Unavailable,
+            Address::Myself | Address::Undialable => return DialStatus::Unavailable,
         };
         if !ingress.is_valid(allow_private_ips, allow_dns) {
             return DialStatus::Unavailable;
@@ -260,7 +278,7 @@ impl Record {
         }
         match &self.address {
             Address::Known(addr) => addr.egress_ip() == source_ip,
-            Address::Myself => false,
+            Address::Myself | Address::Undialable => false,
         }
     }
 
@@ -269,6 +287,7 @@ impl Record {
         match &self.address {
             Address::Myself => None,
             Address::Known(addr) => Some(addr.ingress()),
+            Address::Undialable => None,
         }
     }
 
@@ -277,6 +296,7 @@ impl Record {
         match &self.address {
             Address::Myself => None,
             Address::Known(addr) => Some(addr.egress_ip()),
+            Address::Undialable => None,
         }
     }
 
@@ -297,7 +317,7 @@ impl Record {
     pub const fn eligible(&self) -> bool {
         match &self.address {
             Address::Myself => false,
-            Address::Known(_) => {
+            Address::Known(_) | Address::Undialable => {
                 self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
             }
         }

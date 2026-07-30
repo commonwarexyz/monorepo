@@ -1,5 +1,6 @@
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
+use commonware_stream::encrypted;
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -110,6 +111,36 @@ pub struct Config<C: Signer> {
     pub tracked_peer_sets: NonZeroUsize,
 
     /// Duration after which a blocked peer is allowed to reconnect.
+    pub block_duration: Duration,
+}
+
+/// Configuration for an authenticated network using explicitly attached connections.
+pub struct AttachmentConfig<C: Signer, A> {
+    /// Configuration for encrypted streams.
+    ///
+    /// `max_message_size` includes authenticated-network framing overhead. The maximum application
+    /// message size is derived from it.
+    pub stream: encrypted::Config<C>,
+
+    /// Application policy for admitting inbound connections.
+    pub admission: A,
+
+    /// Message backlog allowed for internal actors.
+    pub mailbox_size: NonZeroUsize,
+
+    /// Maximum number of queued outbound messages combined into one write.
+    pub send_batch_size: NonZeroUsize,
+
+    /// Frequency at which connected peers are pinged.
+    pub ping_frequency: Duration,
+
+    /// Number of peer sets retained by the tracker.
+    pub tracked_peer_sets: NonZeroUsize,
+
+    /// Minimum time between reservations for a single peer.
+    pub peer_connection_cooldown: Duration,
+
+    /// Duration after which a blocked peer may reconnect.
     pub block_duration: Duration,
 }
 

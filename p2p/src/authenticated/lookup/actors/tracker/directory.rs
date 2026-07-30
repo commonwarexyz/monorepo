@@ -307,6 +307,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Some((reservation, ingress))
     }
 
+    /// Reserve a peer whose transport connection was established outside the dialer or listener.
+    pub fn attach(&mut self, peer: C, metadata: Metadata<C>) -> Option<Reservation<C>> {
+        if metadata.public_key() != &peer || self.is_blocked(&peer) {
+            return None;
+        }
+
+        if !self.peers.contains_key(&peer) {
+            self.metrics.tracked.inc();
+            self.peers.insert(peer, Record::undialable());
+        }
+        self.reserve(metadata)
+    }
+
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.

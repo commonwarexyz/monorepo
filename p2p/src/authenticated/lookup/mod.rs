@@ -1,9 +1,10 @@
-//! Communicate with a fixed set of authenticated peers with known addresses over encrypted connections.
+//! Communicate with authenticated peers over encrypted connections.
 //!
-//! `lookup` provides multiplexed communication between fully-connected peers
-//! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.).
-//! Unlike `discovery`, peers in `lookup` don't use a discovery mechanism to find each other;
-//! each peer's address is supplied by the application layer.
+//! `lookup` provides multiplexed communication between peers identified by cryptographic
+//! identities (for example, BLS or Ed25519 keys). Applications may either provide a tracked set
+//! of TCP addresses through [`Network`] or supply already-established transport connections
+//! through [`AttachmentNetwork`]. The attachment path supports outbound-only transports and
+//! peers whose identity is learned during an authenticated inbound handshake.
 //!
 //! # Features
 //!
@@ -12,9 +13,9 @@
 //!
 //! # Design
 //!
-//! ## Discovery
+//! ## Address-tracked network
 //!
-//! This module operates under the assumption that all peers are aware of and synchronized on
+//! [`Network`] operates under the assumption that all peers are aware of and synchronized on
 //! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
 //! list of peer `PublicKey`/`SocketAddr` pairs (`(u64, Vec<(PublicKey, SocketAddr)>)`).
 //!
@@ -195,8 +196,9 @@ mod types;
 
 pub use crate::authenticated::channels::{Error, Receiver, Sender};
 pub use actors::tracker::Oracle;
-pub use config::Config;
-pub use network::Network;
+pub use actors::attachment::{Attachments, Error as AttachmentError, PeerAdmission, Rejected};
+pub use config::{AttachmentConfig, Config};
+pub use network::{AttachmentNetwork, Network};
 
 #[cfg(test)]
 mod tests {
