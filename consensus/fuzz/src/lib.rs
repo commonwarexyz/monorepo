@@ -116,10 +116,12 @@ pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 /// run that has not already finished is given a GST transition. Shared by the
 /// ByzzFuzz runner and the marshal multi-node liveness runner.
 pub(crate) const FAULT_PHASE: Duration = Duration::from_secs(30);
-/// Bounded post-GST window: how long honest nodes have to recover once the
-/// network heals (process/byzantine faults stay active). Shared by the ByzzFuzz
-/// runner and the marshal multi-node liveness runner.
-pub(crate) const POST_GST_WINDOW: Duration = Duration::from_secs(360);
+/// Standard's bounded wait on the ordinary 10ms-link network.
+const STANDARD_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
+/// Audit Standard's bounded wait on the ordinary 10ms-link network.
+const AUDITED_STANDARD_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
+/// Twins' bounded wait, including its scripted prefix on 500ms links.
+const TWINS_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -417,6 +419,10 @@ pub struct FuzzInput {
     /// Per-iteration reporter wiring threaded into every honest engine
     /// the harness spawns.
     pub reporting: ReporterWiring,
+}
+
+fn should_bound_standard_liveness(input: &FuzzInput) -> bool {
+    input.partition.is_connected() && input.configuration.is_valid() && !input.degraded_network
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -2003,7 +2009,7 @@ fn run_standard_once<P: simplex::Simplex>(
         )
         .await;
 
-        if input.partition.is_connected() && config.is_valid() {
+        if should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -2020,7 +2026,7 @@ fn run_standard_once<P: simplex::Simplex>(
                 );
             }
             select! {
-                _ = context.sleep(POST_GST_WINDOW) => {
+                _ = context.sleep(STANDARD_LIVENESS_WINDOW) => {
                     let mut diag = String::new();
                     for (idx, (_, reporter)) in reporters.iter().enumerate() {
                         let participant_idx = idx + config.faults as usize;
@@ -2052,7 +2058,7 @@ fn run_standard_once<P: simplex::Simplex>(
                         );
                     }
                     panic!(
-                        "simplex: no progress within {POST_GST_WINDOW:?};{diag}"
+                        "simplex: no progress within {STANDARD_LIVENESS_WINDOW:?};{diag}"
                     );
                 },
                 _ = join_all(finalizers) => {},
@@ -2114,7 +2120,14 @@ fn run_standard_once<P: simplex::Simplex>(
 /// This path exists only for the dedicated Standard audit fuzz targets. The
 /// shared [`run_standard_once`] path continues to use the consensus mock
 /// reporter and application automaton directly.
-fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool, bool) {
+fn run_audited_standard_once<P: simplex::Simplex>(input: FuzzInput) -> (bool, bool) {
+    run_audited_standard_once_with_window::<P>(input, AUDITED_STANDARD_LIVENESS_WINDOW)
+}
+
+fn run_audited_standard_once_with_window<P: simplex::Simplex>(
+    mut input: FuzzInput,
+    post_gst_window: Duration,
+) -> (bool, bool) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -2223,7 +2236,7 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
         )
         .await;
 
-        if input.partition.is_connected() && config.is_valid() {
+        if should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -2239,7 +2252,45 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
                         }),
                 );
             }
-            join_all(finalizers).await;
+            select! {
+                _ = context.sleep(post_gst_window) => {
+                    let mut diag = String::new();
+                    for (idx, (_, reporter)) in reporters.iter().enumerate() {
+                        let participant_idx = idx + config.faults as usize;
+                        let reporter = reporter.inner();
+                        let finalization = reporter
+                            .finalizations
+                            .lock()
+                            .keys()
+                            .copied()
+                            .max()
+                            .unwrap_or_else(View::zero);
+                        let notarization = reporter
+                            .notarizations
+                            .lock()
+                            .keys()
+                            .copied()
+                            .max()
+                            .unwrap_or_else(View::zero);
+                        let nullification = reporter
+                            .nullifications
+                            .lock()
+                            .keys()
+                            .copied()
+                            .max()
+                            .unwrap_or_else(View::zero);
+                        let _ = write!(
+                            diag,
+                            " node{participant_idx}={{finalization={finalization} \
+                             notarization={notarization} nullification={nullification}}}"
+                        );
+                    }
+                    panic!(
+                        "simplex audit: no progress within {post_gst_window:?};{diag}"
+                    );
+                },
+                _ = join_all(finalizers) => {},
+            }
         } else {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
@@ -3328,7 +3379,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             }
         }
         select! {
-            _ = context.sleep(POST_GST_WINDOW) => {
+            _ = context.sleep(TWINS_LIVENESS_WINDOW) => {
                 let mut diag = String::new();
                 for (idx, reporter) in state.honest_indices.iter().copied().zip(
                     state.reporters.iter().skip(state.honest_start)
@@ -3341,7 +3392,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     );
                 }
                 panic!(
-                    "simplex twins: no progress within {POST_GST_WINDOW:?};{diag}"
+                    "simplex twins: no progress within {TWINS_LIVENESS_WINDOW:?};{diag}"
                 );
             },
             _ = join_all(finalizers) => {},
@@ -4023,6 +4074,50 @@ mod tests {
     fn audited_standard_checks_simplex_id_and_certificate_mock() {
         assert!(run_audited_standard_once::<simplex::SimplexId>(audit_input()).0);
         assert!(run_audited_standard_once::<simplex::SimplexCertificateMock>(audit_input()).0);
+    }
+
+    #[test]
+    #[should_panic(expected = "simplex audit: no progress within")]
+    fn audited_standard_progress_wait_is_bounded() {
+        let mut input = audit_input();
+        input.required_containers = u64::MAX;
+        run_audited_standard_once_with_window::<simplex::SimplexId>(input, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn audited_standard_progress_wait_accepts_normal_input() {
+        assert!(
+            run_audited_standard_once_with_window::<simplex::SimplexId>(
+                audit_input(),
+                AUDITED_STANDARD_LIVENESS_WINDOW,
+            )
+            .0
+        );
+    }
+
+    #[test]
+    fn audited_standard_degraded_network_has_no_unproven_deadline() {
+        let mut input = audit_input();
+        input.configuration = N4F1C3;
+        input.degraded_network = true;
+        input.required_containers = u64::MAX;
+        assert!(
+            run_audited_standard_once_with_window::<simplex::SimplexId>(
+                input,
+                Duration::from_secs(1),
+            )
+            .0
+        );
+    }
+
+    #[test]
+    fn standard_liveness_deadline_excludes_degraded_network() {
+        let mut input = audit_input();
+        input.configuration = N4F1C3;
+        assert!(should_bound_standard_liveness(&input));
+
+        input.degraded_network = true;
+        assert!(!should_bound_standard_liveness(&input));
     }
 
     #[test]

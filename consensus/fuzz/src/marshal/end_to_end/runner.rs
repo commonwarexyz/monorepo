@@ -19,7 +19,8 @@
 //! - GST: the network heals (`apply_partition(None)`); the `Disrupter` stays
 //!   active (its faults are not gated by GST).
 //! - Phase 2 (post-GST): each honest marshal must reach its target (`required`,
-//!   or baseline + 1 unless already at `MAX_REQUIRED`) within [`POST_GST_WINDOW`];
+//!   or baseline + 1 unless already at `MAX_REQUIRED`) within the marshal
+//!   runner's post-GST budget;
 //!   failure to make progress panics with a per-node diagnostic.
 //!
 //! Safety invariants then assert in-order delivery and cross-node agreement.
@@ -61,7 +62,7 @@ use super::{
     },
 };
 use crate::{
-    BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW, SimplexCertificateMock,
+    BYZANTINE_IDX, FAULT_PHASE, SimplexCertificateMock,
     simplex::Simplex,
     start_disrupter_with_epoch,
     utils::{SetPartition, apply_partition},
@@ -80,8 +81,10 @@ use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize};
 use std::{fmt::Write as _, num::NonZeroUsize, time::Duration};
 
-/// Tight backlog so manual acknowledgements and backpressure stay observable.
-const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(2);
+/// Backlog large enough to exercise pending-ack depth beyond one.
+const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
+/// Marshal's post-GST recovery budget on its ordinary simulated links.
+const MARSHAL_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
 
 /// Poll interval for observing marshal delivery progress.
 const POLL: Duration = Duration::from_millis(50);
@@ -205,8 +208,13 @@ async fn run_liveness_phases<BL, KEY>(
             .iter()
             .map(|(idx, _, target)| (*idx, *target))
             .collect();
-        let phase2_complete =
-            wait_for_targets(context, honest_apps, &phase2_targets, POST_GST_WINDOW).await;
+        let phase2_complete = wait_for_targets(
+            context,
+            honest_apps,
+            &phase2_targets,
+            MARSHAL_LIVENESS_WINDOW,
+        )
+        .await;
 
         if !phase2_complete {
             let mut diag = String::new();
@@ -220,7 +228,7 @@ async fn run_liveness_phases<BL, KEY>(
                     " node{idx}={{baseline={baseline} target={target} current={current}}}"
                 );
             }
-            panic!("marshal: no post-GST progress within {POST_GST_WINDOW:?};{diag}");
+            panic!("marshal: no post-GST progress within {MARSHAL_LIVENESS_WINDOW:?};{diag}");
         }
     }
 }

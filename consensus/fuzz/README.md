@@ -132,3 +132,8 @@ honest marshal makes post-prefix progress, preserves in-order delivery, and
 agrees on every delivered height. It also passively observes each honest
 marshal wrapper and asserts that certification never reuses a rejection caused
 by verifying the same `(round, digest)` under a different header context.
+
+The Marshal Twins observation wrappers forward automaton completions through
+spawned tasks. Changes to that forwarding can alter deterministic scheduling,
+so saved artifacts from these targets must be re-triaged against the new
+execution before a non-reproduction is classified as fixed.

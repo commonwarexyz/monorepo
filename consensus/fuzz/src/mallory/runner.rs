@@ -31,9 +31,9 @@
 
 use super::{adversary, fault, lifecycle, log, multiplexer, network, policy, state};
 use crate::{
-    BYZANTINE_IDX, CertCfgOf, CertifyChoice, ManagedValidator, N4F0C4, POST_GST_WINDOW,
-    PublicKeyOf, SniffChannel, SniffingReceiver, ValidatorLifecycle, build_validator,
-    build_validator_with_reporter, happens_before, invariants, simplex::Simplex, sniff_sink,
+    BYZANTINE_IDX, CertCfgOf, CertifyChoice, ManagedValidator, N4F0C4, PublicKeyOf, SniffChannel,
+    SniffingReceiver, ValidatorLifecycle, build_validator, build_validator_with_reporter,
+    happens_before, invariants, simplex::Simplex, sniff_sink,
 };
 use commonware_consensus::{
     Monitor as _,
@@ -71,6 +71,8 @@ const MALLORY_EPISODE_STEPS: usize = 12;
 /// past its baseline, or, if the fault suppressed progress, after this
 /// deterministic timeout. Just when Mallory reacts, not a whole observation span.
 const MALLORY_STEP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Mallory's bounded all-live-node recovery wait after its final heal.
+const MALLORY_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
 /// Brief deterministic settle run after a packet fault heals: the quiescence
 /// barrier flushes the pump, then this lets the engine consume the just-flushed
 /// packets so the next-state fingerprint reflects THIS step's fault rather than
@@ -1482,7 +1484,7 @@ fn run_inner<P: Simplex>(
             results = join_all(watchers) => {
                 results.iter().all(|r| matches!(r, Ok(true)))
             },
-            _ = context.sleep(POST_GST_WINDOW) => false,
+            _ = context.sleep(MALLORY_LIVENESS_WINDOW) => false,
         };
         if !live {
             let mut diag = String::new();
@@ -1495,7 +1497,7 @@ fn run_inner<P: Simplex>(
                 );
             }
             panic!(
-                "mallory: no post-episode liveness within {POST_GST_WINDOW:?} (target={target} required_containers={required_containers} max_baseline={max_baseline});{diag}"
+                "mallory: no post-episode liveness within {MALLORY_LIVENESS_WINDOW:?} (target={target} required_containers={required_containers} max_baseline={max_baseline});{diag}"
             );
         }
 

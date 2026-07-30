@@ -18,6 +18,21 @@ use commonware_utils::{
 };
 use std::sync::Arc;
 
+fn verification_header_mismatch<P: Simplex>(
+    marshal: MarshalChoice,
+    context: &Ctx<P>,
+    block_context: &Ctx<P>,
+    digest: Sha256Digest,
+) -> bool {
+    if digest == context.parent.1 {
+        return false;
+    }
+    match marshal {
+        MarshalChoice::Deferred => block_context != context,
+        MarshalChoice::Inline => block_context.parent.1 != context.parent.1,
+    }
+}
+
 /// Passively observes the real marshal automaton calls made by Simplex.
 ///
 /// Completed certification verdicts are compared with other correct replicas
@@ -98,16 +113,19 @@ where
             };
             tx.send_lossy(value);
             if let Some(block_context) = header_mismatch.block_context(&digest) {
-                let mismatched = match header_mismatch.marshal() {
-                    MarshalChoice::Deferred => block_context != context,
-                    MarshalChoice::Inline => block_context.parent.1 != context.parent.1,
-                };
+                let mismatched = verification_header_mismatch::<P>(
+                    header_mismatch.marshal(),
+                    &context,
+                    &block_context,
+                    digest,
+                );
                 assert!(
                     !mismatched || !value,
                     "marshal verified a payload under a header that is not the block's embedded \
-                     header: validator={validator} round={} digest={digest} marshal={} input={}",
-                    context.round,
+                     header: validator={validator} digest={digest} context={context:?} \
+                     embedded_context={block_context:?} marshal={} stack={} input={}",
                     header_mismatch.marshal(),
+                    header_mismatch.stack(),
                     probe_input,
                 );
             }
@@ -141,5 +159,42 @@ where
             tx.send_lossy(value);
         });
         rx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{id_mock, simplex::SimplexId};
+    use commonware_consensus::{
+        simplex::types::Context,
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    fn digest(byte: u8) -> Sha256Digest {
+        Sha256Digest([byte; 32])
+    }
+
+    fn context(view: u64, parent: Sha256Digest) -> Ctx<SimplexId> {
+        Context {
+            round: Round::new(Epoch::zero(), View::new(view)),
+            leader: id_mock::PublicKey::from_index(0),
+            parent: (View::new(view.saturating_sub(1)), parent),
+        }
+    }
+
+    #[test]
+    fn parent_digest_reproposal_is_not_a_header_mismatch() {
+        let parent = digest(0xA);
+        let requested = context(2, parent);
+        let embedded = context(1, digest(0xB));
+
+        assert!(!verification_header_mismatch::<SimplexId>(
+            MarshalChoice::Deferred,
+            &requested,
+            &embedded,
+            parent,
+        ));
     }
 }

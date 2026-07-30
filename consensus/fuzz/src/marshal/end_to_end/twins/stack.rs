@@ -11,7 +11,7 @@ use super::{
     },
     B, Ctx, PublicKeyOf, SchemeOf,
 };
-use crate::{NetworkChannels, POST_GST_WINDOW, simplex::Simplex};
+use crate::{NetworkChannels, simplex::Simplex};
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -47,8 +47,10 @@ use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
-pub(crate) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(2);
+pub(crate) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 const POLL: Duration = Duration::from_millis(50);
+/// Marshal Twins' budget includes its scripted prefix and slower links.
+const MARSHAL_TWINS_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
 const LEADER_TIMEOUT_MILLIS: u64 = 1_000;
 const CERTIFICATION_TIMEOUT_MILLIS: u64 = 2_000;
 const ATTACK_TIMING_MARGIN_MILLIS: u64 = 250;
@@ -387,19 +389,13 @@ pub(crate) async fn setup_validator<P: Simplex>(
     genesis: B<P>,
     max_pending_acks: NonZeroUsize,
 ) -> Validator<P> {
-    let application = if max_pending_acks <= NZUsize!(2) {
-        Application::<B<P>>::manual_ack()
-    } else {
-        Application::<B<P>>::default()
-    };
-    if max_pending_acks <= NZUsize!(2) {
-        let acknowledger = application.clone();
-        context.child("acknowledger").spawn(move |_| async move {
-            loop {
-                acknowledger.acknowledged().await;
-            }
-        });
-    }
+    let application = Application::<B<P>>::manual_ack();
+    let acknowledger = application.clone();
+    context.child("acknowledger").spawn(move |_| async move {
+        loop {
+            acknowledger.acknowledged().await;
+        }
+    });
     let config = Config {
         provider,
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -628,7 +624,7 @@ pub(crate) async fn wait_for_liveness<P: Simplex>(
     stack: Arc<str>,
 ) {
     select! {
-        _ = context.sleep(POST_GST_WINDOW) => {
+        _ = context.sleep(MARSHAL_TWINS_LIVENESS_WINDOW) => {
             let progress = honest
                 .iter()
                 .map(|(idx, application)| {

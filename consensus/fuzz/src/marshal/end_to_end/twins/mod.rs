@@ -536,15 +536,19 @@ fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
             vec![0],
         );
     };
-    // Keep application and wrapper selection independent while preserving the
-    // remaining bytes as identical scenario/runtime entropy.
+    // Keep application, wrapper, and acknowledgement depth independent while
+    // preserving the remaining bytes as identical scenario/runtime entropy.
     let application = ApplicationChoice::from_selector(selector);
     let wrapper = if selector & 0b10 == 0 {
         MarshalChoice::Deferred
     } else {
         MarshalChoice::Inline
     };
-    let max_pending_acks = NZUsize!(2);
+    let max_pending_acks = if selector & 0b100 == 0 {
+        NZUsize!(2)
+    } else {
+        DEFAULT_MAX_PENDING_ACKS
+    };
     let entropy = if entropy.is_empty() {
         vec![0]
     } else {
@@ -578,11 +582,7 @@ fn fuzz_marshal_twins_with<P, A, M>(
     if *VERIFY_PROBE {
         eprintln!("[marshal-twins] selected stack: {stack_label}");
     }
-    let probe_input: Arc<str> = if *VERIFY_PROBE {
-        format!("{stack_label} input={input:?}").into()
-    } else {
-        "".into()
-    };
+    let probe_input: Arc<str> = format!("{input:?}").into();
     let rng = FuzzRng::new(entropy.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -599,4 +599,18 @@ fn fuzz_marshal_twins_with<P, A, M>(
         );
         run_twins_with_backend::<P, _>(&mut context, &mut backend, scenario_entropy).await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn general_stack_samples_tight_and_deep_ack_windows() {
+        assert_eq!(select_general_stack(&[0]).0.max_pending_acks, NZUsize!(2));
+        assert_eq!(
+            select_general_stack(&[0b100]).0.max_pending_acks,
+            DEFAULT_MAX_PENDING_ACKS,
+        );
+    }
 }

@@ -27,7 +27,10 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 type PublicKeyOf<P> =
@@ -128,6 +131,7 @@ impl CertificationAgreementInvariant {
 /// certification of the same payload under its embedded header.
 pub(super) struct HeaderMismatchInvariant<P: Simplex, C: Copy> {
     verified_contexts: Arc<Mutex<VerifiedContexts<P>>>,
+    missing_block_contexts: Arc<AtomicUsize>,
     block_contexts: BlockContextRegistry<Ctx<P>>,
     app_choice: ApplicationChoice,
     app_config: C,
@@ -140,6 +144,7 @@ impl<P: Simplex, C: Copy> Clone for HeaderMismatchInvariant<P, C> {
     fn clone(&self) -> Self {
         Self {
             verified_contexts: self.verified_contexts.clone(),
+            missing_block_contexts: self.missing_block_contexts.clone(),
             block_contexts: self.block_contexts.clone(),
             app_choice: self.app_choice,
             app_config: self.app_config,
@@ -161,6 +166,7 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
     ) -> Self {
         Self {
             verified_contexts: Arc::new(Mutex::new(HashMap::new())),
+            missing_block_contexts: Arc::new(AtomicUsize::new(0)),
             block_contexts,
             app_choice,
             app_config,
@@ -186,8 +192,17 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
         self.marshal
     }
 
+    pub(super) fn stack(&self) -> &str {
+        &self.stack
+    }
+
+    pub(super) fn missing_block_contexts(&self) -> usize {
+        self.missing_block_contexts.load(Ordering::Relaxed)
+    }
+
     fn observed_mismatch(&self, round: Round, digest: Sha256Digest) -> bool {
         let Some(block_context) = self.block_context(&digest) else {
+            self.missing_block_contexts.fetch_add(1, Ordering::Relaxed);
             return false;
         };
         let mismatch = self
@@ -207,8 +222,9 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
         assert!(
             !mismatch,
             "marshal invariant violated: certification reused a \
-             header-scoped verification rejection; stack={}",
+             header-scoped verification rejection; stack={} missing_block_contexts={}",
             self.stack,
+            self.missing_block_contexts(),
         );
     }
 }
@@ -344,9 +360,9 @@ pub(super) fn check_pending_acks<B: Block>(
 /// Walks the arrival-ordered delivery log. Delivery starts either at the
 /// genesis floor block (height 0, surfaced on a fresh start) or at the first
 /// finalized container (height 1), then every subsequent delivery must advance
-/// by exactly one or repeat the identical `(height, digest)`. Because this is
-/// the true arrival sequence, an out-of-order delivery, a gap, or a
-/// same-height fork fails the check.
+/// by exactly one or repeat the identical `(height, digest)` once. Because this
+/// is the true arrival sequence, an out-of-order delivery, a gap, repeated
+/// duplicate, or same-height fork fails the check.
 fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], stack: &str) {
     let first = delivered.first().map_or(0, |(height, _)| height.get());
     assert!(
@@ -354,12 +370,23 @@ fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], s
         "node{idx} first delivery at height {first} is above the genesis floor + 1; \
          sequence={delivered:?}; stack={stack}",
     );
+    let mut previous_was_duplicate = false;
     for window in delivered.windows(2) {
         let (height_0, digest_0) = &window[0];
         let (height_1, digest_1) = &window[1];
+        if height_1 == height_0 && digest_1 == digest_0 {
+            assert!(
+                !previous_was_duplicate,
+                "node{idx} delivered more than one duplicate at height {}; \
+                 sequence={delivered:?}; stack={stack}",
+                height_1.get(),
+            );
+            previous_was_duplicate = true;
+            continue;
+        }
+        previous_was_duplicate = false;
         assert!(
-            (height_1 == height_0 && digest_1 == digest_0)
-                || height_0.get().checked_add(1) == Some(height_1.get()),
+            height_0.get().checked_add(1) == Some(height_1.get()),
             "node{idx} violated in-order delivery (out-of-order, gap, or same-height fork): \
              previous_height={} next_height={}; sequence={delivered:?}; stack={stack}",
             height_0.get(),
@@ -376,8 +403,8 @@ fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], s
 /// comparing finalized heights alone would not detect conflicting blocks.
 ///
 /// [`check_in_order`] establishes that each node's delivery log is contiguous
-/// and permits only exact duplicates at one height. Given that, requiring one
-/// digest per height across all honest delivery logs and current tips is
+/// and permits at most one exact duplicate at one height. Given that, requiring
+/// one digest per height across all honest delivery logs and current tips is
 /// equivalent to pairwise prefix compatibility and also checks that a tip
 /// agrees with any delivered block at the same height. Heights are used instead
 /// of raw sequence indexes because a fresh application may surface genesis at
@@ -469,6 +496,20 @@ mod tests {
                 (Height::new(1), digest(0xA)),
                 (Height::new(1), digest(0xA)),
                 (Height::new(2), digest(0xB)),
+            ],
+            "test",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "more than one duplicate")]
+    fn more_than_one_duplicate_delivery_is_rejected() {
+        check_in_order(
+            0,
+            &[
+                (Height::new(1), digest(0xA)),
+                (Height::new(1), digest(0xA)),
+                (Height::new(1), digest(0xA)),
             ],
             "test",
         );
@@ -569,6 +610,7 @@ mod tests {
         );
 
         assert!(!invariant.observed_mismatch(Round::zero(), digest(0xA)));
+        assert_eq!(invariant.missing_block_contexts(), 1);
     }
 
     #[test]

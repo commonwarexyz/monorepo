@@ -91,19 +91,13 @@ pub(crate) async fn setup_validator_coding(
     max_pending_acks: NonZeroUsize,
     validator_idx: usize,
 ) -> CodingValidator {
-    let application = if max_pending_acks <= NZUsize!(2) {
-        Application::<CodingB>::manual_ack()
-    } else {
-        Application::<CodingB>::default()
-    };
-    if max_pending_acks <= NZUsize!(2) {
-        let acknowledger = application.clone();
-        context.child("acknowledger").spawn(move |_| async move {
-            loop {
-                acknowledger.acknowledged().await;
-            }
-        });
-    }
+    let application = Application::<CodingB>::manual_ack();
+    let acknowledger = application.clone();
+    context.child("acknowledger").spawn(move |_| async move {
+        loop {
+            acknowledger.acknowledged().await;
+        }
+    });
     let delivery_reporter = DeliveryReporter::new(
         validator_idx,
         application.clone(),
