@@ -1798,10 +1798,10 @@ mod tests {
             let mut verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
 
             // Register the certification gate before pruning reconstruction state.
-            // Later ingress can reconstruct and deliver the block.
             context.sleep(Duration::from_millis(100)).await;
             shards.prune(missing_payload);
 
+            // Pruning removes reconstruction state but preserves the live local wait.
             assert!(shards.get(missing_payload).await.is_none());
             assert!(
                 matches!(
