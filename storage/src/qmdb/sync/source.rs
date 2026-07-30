@@ -273,6 +273,18 @@ pub struct ResponseConfig<C> {
     pub op: C,
 }
 
+impl<C> ResponseConfig<C> {
+    /// Limits for a decoder that knows the request it is answering, where the per-request
+    /// proof bound is the only cap.
+    pub const fn request_bounded(max_ops: usize, op: C) -> Self {
+        Self {
+            max_ops,
+            max_proof_digests: max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT),
+            op,
+        }
+    }
+}
+
 impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D>
 where
     Op::Cfg: Clone,
