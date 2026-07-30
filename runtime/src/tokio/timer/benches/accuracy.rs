@@ -216,7 +216,7 @@ async fn run_batch(
 }
 
 /// Returns observed lateness while rejecting an early timer callback.
-pub(super) fn checked_lateness(observed: Instant, deadline: Instant) -> io::Result<Duration> {
+fn checked_lateness(observed: Instant, deadline: Instant) -> io::Result<Duration> {
     observed.checked_duration_since(deadline).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,

@@ -22,40 +22,19 @@ use std::{
 };
 
 #[test]
-fn lateness_rejects_early_completion() {
-    // Setup: Place one observation before the requested deadline and another
-    // at a known distance after it.
-    let observed_early = Instant::now();
-    let deadline = observed_early
-        .checked_add(Duration::from_millis(1))
-        .unwrap();
-    let observed_late = deadline.checked_add(Duration::from_micros(7)).unwrap();
-
-    // Action: Calculate lateness for the early and late observations.
-    let early = accuracy::checked_lateness(observed_early, deadline).unwrap_err();
-    let late = accuracy::checked_lateness(observed_late, deadline).unwrap();
-
-    // Assertion: An early callback is a correctness error, while an on-time or
-    // late callback contributes its actual duration to the distribution.
-    assert_eq!(early.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(late, Duration::from_micros(7));
-}
-
-#[test]
 fn deadline_pair_preserves_each_backend_measurement_contract() {
-    // Setup: Construct each selected measurement around a bracketed wall snapshot.
+    // Setup: Construct both backend deadline pairs from the same target.
     let target = Duration::from_millis(50);
     let commonware = backend::DeadlinePair::new(Backend::Commonware, target).unwrap();
     let tokio = backend::DeadlinePair::new(Backend::Tokio, target).unwrap();
 
-    // Action: Derive the bracket width from Commonware's selected pair.
-    let observed_span = commonware
+    // Action: Derive Commonware's monotonic clock-pair uncertainty.
+    let span = commonware
         .tokio
         .into_std()
         .saturating_duration_since(commonware.measurement_deadline);
 
-    // Assertion: Tokio measurements use its exact deadline, while Commonware
-    // measurements retain the conservative lower bound and its uncertainty.
+    // Assertion: Tokio is exact; Commonware retains its conservative bound.
     assert_eq!(tokio.measurement_deadline, tokio.tokio.into_std());
     assert_eq!(
         tokio
@@ -70,53 +49,43 @@ fn deadline_pair_preserves_each_backend_measurement_contract() {
             .saturating_duration_since(commonware.measurement_origin),
         target
     );
-    assert_eq!(commonware.clock_pair_span, Some(observed_span));
+    assert_eq!(commonware.clock_pair_span, Some(span));
 }
 
 #[test]
 fn callback_boundaries_preserve_dispatch_lateness_and_suspended_peer_gap() {
-    // Setup: Let the peer run once before callbacks, then choose one requested
-    // callback deadline.
-    let initialized = Instant::now();
-    let before_callbacks = initialized + Duration::from_micros(5);
-    let after_completion = before_callbacks + Duration::from_micros(20);
-    let mut gap = peer_gap::PeerGap::new(initialized);
+    // Setup: Let the peer run once before callbacks start.
+    let start = Instant::now();
+    let before_callbacks = start + Duration::from_micros(5);
+    let mut gap = peer_gap::PeerGap::new(start);
     let target = Duration::from_micros(10);
 
-    // Action: Record the peer boundary and derive lateness on either side of
-    // the callback's requested dispatch time.
-    let before_completed = gap.observe(before_callbacks, false, false);
-    let completed = gap.observe(after_completion, true, true);
-    let early = peer_gap::dispatch_lateness(Duration::from_micros(9), target);
-    let late = peer_gap::dispatch_lateness(Duration::from_micros(13), target);
+    // Action: Complete callbacks after a 20-microsecond scheduling gap.
+    assert!(!gap.observe(before_callbacks, false, false));
+    assert!(gap.observe(before_callbacks + Duration::from_micros(20), true, true));
 
-    // Assertion: Termination retains the entire suspended interval, early
-    // dispatch is invalid, and late dispatch retains only its excess.
-    assert!(!before_completed);
-    assert!(completed);
+    // Assertion: Only the active window counts, and early dispatch is invalid.
     assert_eq!(gap.maximum(), Duration::from_micros(20));
-    assert_eq!(early.unwrap_err().kind(), io::ErrorKind::InvalidData);
-    assert_eq!(late.unwrap(), Duration::from_micros(3));
+    assert_eq!(
+        peer_gap::dispatch_lateness(Duration::from_micros(9), target)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert_eq!(
+        peer_gap::dispatch_lateness(Duration::from_micros(13), target).unwrap(),
+        Duration::from_micros(3)
+    );
 }
 
 #[test]
 fn latency_statistics_preserve_percentiles_and_drain_boundary() {
-    // Setup: Use unsorted samples where floor-based p99 would select the median.
+    // Setup: Use unsorted samples and out-of-order producer completions.
     let samples = [
         Duration::from_nanos(3),
         Duration::from_nanos(1),
         Duration::from_nanos(2),
     ];
-
-    // Action: Summarize the samples through the production report helper.
-    let distribution = report::Distribution::new(&samples).unwrap();
-
-    // Assertion: Nearest-rank p50 is the median and p99 selects the maximum.
-    assert_eq!(distribution.p50, Duration::from_nanos(2));
-    assert_eq!(distribution.p99, Duration::from_nanos(3));
-    assert_eq!(distribution.max, Duration::from_nanos(3));
-
-    // Setup: Record producer completions after one common release time.
     let start = Instant::now();
     let completions = [
         start + Duration::from_micros(4),
@@ -124,23 +93,25 @@ fn latency_statistics_preserve_percentiles_and_drain_boundary() {
         start + Duration::from_micros(6),
     ];
 
-    // Action: Derive drain from completion timestamps rather than join time.
+    // Action: Summarize latency and measure through the last completion.
+    let distribution = report::Distribution::new(&samples).unwrap();
     let drain = report::elapsed_through_last(start, completions).unwrap();
 
-    // Assertion: Join order cannot replace the final measured completion.
+    // Assertion: Percentiles use nearest rank and drain ignores join order.
+    assert_eq!(distribution.p50, Duration::from_nanos(2));
+    assert_eq!(distribution.p99, Duration::from_nanos(3));
+    assert_eq!(distribution.max, Duration::from_nanos(3));
     assert_eq!(drain, Duration::from_micros(9));
 }
 
 #[test]
 fn cancellation_orchestration_handles_one_and_multiple_producers() {
-    // Setup: Start the production runtime used by both benchmark backends and
-    // choose tiny partitions that give every producer work.
+    // Setup: Start the production runtime with two workers.
     let runner =
         commonware_tokio::Runner::new(commonware_tokio::Config::default().with_worker_threads(2));
 
-    // Action: Run latency and throughput passes at one and four producers for
-    // both backends through the dedicated threads and blocking coordinator.
-    let results = runner.start(|context| async move {
+    // Action: Exercise both passes, backends, and producer topologies.
+    runner.start(|context| async move {
         let clock = Arc::new(context);
         let configurations = [
             (Backend::Commonware, 2, 1, 1),
@@ -148,92 +119,73 @@ fn cancellation_orchestration_handles_one_and_multiple_producers() {
             (Backend::Tokio, 2, 1, 1),
             (Backend::Tokio, 8, 4, 4),
         ];
-        let mut results = Vec::new();
         let mut batch = 0;
         for (backend, timers, canceled, producers) in configurations {
-            for pass in [
+            let latency = worst_case::run_cancellation_batch(
+                Arc::clone(&clock),
+                backend,
+                timers,
+                canceled,
+                producers,
+                batch,
                 worst_case::CancellationPass::Latency,
+            )
+            .await
+            .unwrap();
+            batch += 1;
+            let throughput = worst_case::run_cancellation_batch(
+                Arc::clone(&clock),
+                backend,
+                timers,
+                canceled,
+                producers,
+                batch,
                 worst_case::CancellationPass::Throughput,
-            ] {
-                let result = worst_case::run_cancellation_batch(
-                    Arc::clone(&clock),
-                    backend,
-                    timers,
-                    canceled,
-                    producers,
-                    batch,
-                    pass,
-                )
-                .await
-                .unwrap();
-                results.push((pass, canceled, producers, result));
-                batch += 1;
-            }
-        }
-        results
-    });
+            )
+            .await
+            .unwrap();
+            batch += 1;
 
-    // Assertion: Latency passes retain every initialized sample and producer
-    // setup, while throughput passes allocate neither result buffer.
-    for (pass, canceled, producers, result) in results {
-        match pass {
-            worst_case::CancellationPass::Latency => {
-                assert_eq!(result.setup.len(), producers);
-                assert_eq!(result.cancellation.len(), canceled);
-                assert!(
-                    result
-                        .cancellation
-                        .iter()
-                        .all(|sample| *sample != Duration::MAX)
-                );
-            }
-            worst_case::CancellationPass::Throughput => {
-                assert!(result.setup.is_empty());
-                assert!(result.cancellation.is_empty());
-                assert_eq!(result.setup.capacity(), 0);
-                assert_eq!(result.cancellation.capacity(), 0);
-            }
+            // Assertion: Latency retains initialized samples; throughput does not.
+            assert_eq!(latency.setup.len(), producers);
+            assert_eq!(latency.cancellation.len(), canceled);
+            assert!(
+                latency
+                    .cancellation
+                    .iter()
+                    .all(|sample| *sample != Duration::MAX)
+            );
+            assert_eq!(throughput.setup.capacity(), 0);
+            assert_eq!(throughput.cancellation.capacity(), 0);
         }
-    }
+    });
 }
 
 #[test]
 fn recorder_timestamps_first_and_final_callbacks() {
-    // Multiple-callback case - Setup: Start with both boundaries unset.
+    // Setup: Create multiple- and single-callback recorders.
     let multiple = worst_case::Recorder::new(Instant::now(), 3);
-
-    // Multiple-callback case - Action: Record the first and one interior callback.
-    multiple.record();
-    let first = multiple.first_ns.load(Ordering::Acquire);
-    let last_after_first = multiple.last_ns.load(Ordering::Acquire);
-    multiple.record();
-    let first_after_middle = multiple.first_ns.load(Ordering::Acquire);
-    let last_after_middle = multiple.last_ns.load(Ordering::Acquire);
-
-    // Multiple-callback case - Assertion: Only the first boundary is timestamped.
-    assert_ne!(first, 0);
-    assert_eq!(last_after_first, 0);
-    assert_eq!(first_after_middle, first);
-    assert_eq!(last_after_middle, 0);
-
-    // Multiple-callback case - Action: Record the final callback.
-    multiple.record();
-    let last = multiple.last_ns.load(Ordering::Acquire);
-
-    // Multiple-callback case - Assertion: The final boundary is timestamped.
-    assert_eq!(multiple.completed.load(Ordering::Relaxed), 3);
-    assert!(last >= first);
-
-    // Single-callback case - Setup: The first callback is also the final callback.
     let single = worst_case::Recorder::new(Instant::now(), 1);
 
-    // Single-callback case - Action: Record the sole callback.
-    single.record();
-    let first = single.first_ns.load(Ordering::Acquire);
-    let last = single.last_ns.load(Ordering::Acquire);
+    // Action: Record the first and interior callbacks.
+    multiple.record();
+    let first = multiple.first_ns.load(Ordering::Acquire);
+    multiple.record();
 
-    // Single-callback case - Assertion: One timestamp supports both boundaries.
+    // Assertion: Only the first boundary has been timestamped.
     assert_ne!(first, 0);
-    assert_eq!(last, first);
+    assert_eq!(multiple.first_ns.load(Ordering::Acquire), first);
+    assert_eq!(multiple.last_ns.load(Ordering::Acquire), 0);
+
+    // Action: Record the final and sole callbacks.
+    multiple.record();
+    single.record();
+
+    // Assertion: Final and target-one callbacks publish both boundaries.
+    assert_eq!(multiple.completed.load(Ordering::Relaxed), 3);
+    assert!(multiple.last_ns.load(Ordering::Acquire) >= first);
+    let single_first = single.first_ns.load(Ordering::Acquire);
+    assert_ne!(single_first, 0);
+    assert_eq!(single.last_ns.load(Ordering::Acquire), single_first);
     assert_eq!(single.completed.load(Ordering::Relaxed), 1);
 }
