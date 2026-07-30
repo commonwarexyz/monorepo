@@ -373,7 +373,7 @@ jobs:
     - name: Build utils
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_utils.wasm"
     - name: Build runtime
-      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml --features web --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
     - name: Check browser runtime and P2P stack
       run: |
         cargo check --target wasm32-unknown-unknown -p commonware-runtime --features web
