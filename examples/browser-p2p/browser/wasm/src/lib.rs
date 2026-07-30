@@ -333,6 +333,7 @@ impl Drop for BrowserChat {
 /// Create a session with a fresh ephemeral Ed25519 identity.
 #[wasm_bindgen(js_name = createBrowserChat)]
 pub fn create_browser_chat(on_event: Function) -> BrowserChat {
+    console_error_panic_hook::set_once();
     let private_key = ed25519::PrivateKey::random(sys_rng());
     let public_key = private_key.public_key().to_string();
     BrowserChat {
