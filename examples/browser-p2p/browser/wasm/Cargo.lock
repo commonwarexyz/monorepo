@@ -396,6 +396,7 @@ dependencies = [
 name = "commonware-browser-p2p"
 version = "0.1.0"
 dependencies = [
+ "chacha20poly1305",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-formatting",
@@ -406,7 +407,9 @@ dependencies = [
  "commonware-utils",
  "commonware-webrtc",
  "futures",
+ "hmac",
  "js-sys",
+ "sha2",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

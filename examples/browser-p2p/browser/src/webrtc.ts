@@ -1,6 +1,6 @@
 import type { BrowserP2pSession } from "./bridge";
 import { AttachmentBarrier } from "./attachment-barrier";
-import type { Invite } from "./invite";
+import { fromBase64Url, type Invite } from "./invite";
 import { RendezvousClient, rendezvousUrl, type ServerEvent } from "./rendezvous";
 import { SignalingCipher, type Role, type Signal } from "./signaling";
 
@@ -40,7 +40,15 @@ export class WebRtcPairing {
     this.#chat = options.chat;
     this.#onState = options.onState;
     this.#connection = new RTCPeerConnection({ iceServers: options.iceServers });
-    this.#cipher = new SignalingCipher(options.invite.session, options.invite.secret, options.role);
+    this.#cipher = new SignalingCipher(
+      options.invite.session,
+      options.invite.secret,
+      options.role,
+      options.chat.createSignalingCipher(
+        fromBase64Url(options.invite.session, 32),
+        fromBase64Url(options.invite.secret, 32),
+      ),
+    );
     this.#rendezvous = new RendezvousClient(
       rendezvousUrl(window.location),
       options.invite.session,

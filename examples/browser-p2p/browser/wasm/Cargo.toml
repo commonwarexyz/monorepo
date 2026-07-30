@@ -24,8 +24,11 @@ commonware-runtime = { path = "../../../../runtime", features = ["web"] }
 commonware-stream = { path = "../../../../stream" }
 commonware-utils = { path = "../../../../utils", features = ["std"] }
 commonware-webrtc = { path = "../../../../webrtc" }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 futures = "0.3.32"
+hmac = "0.13.0"
 js-sys = "0.3.77"
+sha2 = "0.11.0"
 wasm-bindgen = "0.2.100"
 wasm-bindgen-futures = "0.4.50"
 web-sys = { version = "0.3.77", features = [

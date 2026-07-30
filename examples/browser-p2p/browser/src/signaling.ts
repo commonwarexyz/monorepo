@@ -1,4 +1,5 @@
 import { fromBase64Url, toBase64Url } from "./invite";
+import type { SignalingPrimitive } from "./bridge";
 
 export type Role = "initiator" | "responder";
 
@@ -17,7 +18,6 @@ interface Envelope {
   body: string;
 }
 
-const INFO = new TextEncoder().encode("commonware-browser-p2p-signaling-v1");
 const MAX_ENVELOPE_LENGTH = 48 * 1024;
 const MAX_PLAINTEXT_LENGTH = 40 * 1024;
 const PUBLIC_KEY_PATTERN = /^[0-9a-f]{64}$/;
@@ -26,15 +26,15 @@ export class SignalingCipher {
   readonly #session: string;
   readonly #localRole: Role;
   readonly #remoteRole: Role;
-  readonly #key: Promise<CryptoKey>;
+  readonly #cipher: SignalingPrimitive;
   #sendSequence = 0;
   #receiveSequence = 0;
 
-  constructor(session: string, secret: string, localRole: Role) {
+  constructor(session: string, secret: string, localRole: Role, cipher: SignalingPrimitive) {
     this.#session = session;
     this.#localRole = localRole;
     this.#remoteRole = localRole === "initiator" ? "responder" : "initiator";
-    this.#key = deriveKey(session, secret);
+    this.#cipher = cipher;
   }
 
   async seal(signal: Signal): Promise<string> {
@@ -47,13 +47,9 @@ export class SignalingCipher {
     const seq = this.#sendSequence;
     this.#sendSequence += 1;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await crypto.subtle.encrypt(
-      {
-        name: "AES-GCM",
-        iv: asArrayBuffer(iv),
-        additionalData: asArrayBuffer(aad(this.#session, this.#localRole, seq)),
-      },
-      await this.#key,
+    const ciphertext = this.#cipher.seal(
+      iv,
+      aad(this.#session, this.#localRole, seq),
       plaintext,
     );
     return JSON.stringify({
@@ -62,7 +58,7 @@ export class SignalingCipher {
       from: this.#localRole,
       seq,
       iv: toBase64Url(iv),
-      body: toBase64Url(new Uint8Array(ciphertext)),
+      body: toBase64Url(ciphertext),
     } satisfies Envelope);
   }
 
@@ -80,16 +76,12 @@ export class SignalingCipher {
       throw new Error("The signaling envelope is out of sequence.");
     }
 
-    let plaintext: ArrayBuffer;
+    let plaintext: Uint8Array;
     try {
-      plaintext = await crypto.subtle.decrypt(
-        {
-          name: "AES-GCM",
-          iv: asArrayBuffer(fromBase64Url(envelope.iv, 12)),
-          additionalData: asArrayBuffer(aad(envelope.s, envelope.from, envelope.seq)),
-        },
-        await this.#key,
-        asArrayBuffer(fromBase64Url(envelope.body)),
+      plaintext = this.#cipher.open(
+        fromBase64Url(envelope.iv, 12),
+        aad(envelope.s, envelope.from, envelope.seq),
+        fromBase64Url(envelope.body),
       );
     } catch {
       throw new Error("The signaling envelope could not be authenticated.");
@@ -108,28 +100,6 @@ export class SignalingCipher {
     this.#receiveSequence += 1;
     return signal;
   }
-}
-
-async function deriveKey(session: string, secret: string): Promise<CryptoKey> {
-  const material = await crypto.subtle.importKey(
-    "raw",
-    asArrayBuffer(fromBase64Url(secret, 32)),
-    "HKDF",
-    false,
-    ["deriveKey"],
-  );
-  return crypto.subtle.deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: asArrayBuffer(fromBase64Url(session, 32)),
-      info: asArrayBuffer(INFO),
-    },
-    material,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
-  );
 }
 
 function aad(session: string, role: Role, sequence: number): Uint8Array {
@@ -201,8 +171,4 @@ function validateSignal(value: unknown): asserts value is Signal {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(bytes).buffer;
 }

@@ -6,8 +6,14 @@ export type ChatEvent =
   | { type: "message"; id: string; sender: string; text: string; receivedAt: number }
   | { type: "error"; message: string; recoverable: boolean };
 
+export interface SignalingPrimitive {
+  seal(nonce: Uint8Array, additionalData: Uint8Array, plaintext: Uint8Array): Uint8Array;
+  open(nonce: Uint8Array, additionalData: Uint8Array, ciphertext: Uint8Array): Uint8Array;
+}
+
 export interface BrowserP2pSession {
   publicKey(): string;
+  createSignalingCipher(session: Uint8Array, secret: Uint8Array): SignalingPrimitive;
   prepare(peerConnection: RTCPeerConnection, dataChannel: RTCDataChannel): void;
   attach(
     expectedPeer: string,
@@ -61,6 +67,7 @@ function validateSession(value: unknown): asserts value is BrowserP2pSession {
   const session = value as Partial<BrowserP2pSession>;
   const methods: Array<keyof BrowserP2pSession> = [
     "publicKey",
+    "createSignalingCipher",
     "prepare",
     "attach",
     "send",

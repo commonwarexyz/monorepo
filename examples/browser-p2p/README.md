@@ -47,15 +47,18 @@ PUBLIC_URL=https://192.168.1.42:3000/ just run
 to `0.0.0.0`. A genuinely internet-facing URL still requires routing, firewall, and NAT or proxy
 configuration outside this example.
 
-`http://localhost` is suitable for two tabs on one machine. Mobile browsers require a secure
-context. Create a locally trusted certificate for the laptop's LAN hostname or address, then run:
+The data-channel-only example works over LAN HTTP and does not depend on secure-context-only Web
+Crypto. To protect application delivery and signaling metadata on the LAN, create a locally trusted
+certificate for the laptop's LAN hostname or address, then run:
 
 ```bash
 TLS_CERT_FILE=./cert.pem TLS_KEY_FILE=./key.pem PORT=3000 just run
 ```
 
 Open the printed `https://` URL. The certificate must cover that address and be trusted by the
-phone.
+phone. Plain HTTP leaves the downloaded HTML, JavaScript, and WASM open to modification by an
+active LAN attacker before Commonware starts; Commonware still authenticates and encrypts chat
+traffic after the application is running.
 
 Useful commands:
 

@@ -1,5 +1,9 @@
 #![cfg(target_arch = "wasm32")]
 
+use chacha20poly1305::{
+    ChaCha20Poly1305, KeyInit as _,
+    aead::{Aead as _, Payload},
+};
 use commonware_codec::DecodeExt as _;
 use commonware_cryptography::{Signer as _, ed25519};
 use commonware_math::algebra::Random as _;
@@ -12,7 +16,9 @@ use commonware_stream::encrypted;
 use commonware_utils::{NZUsize, sys_rng};
 use commonware_webrtc::{WebRtcConfig, WebRtcConnection, WebRtcOrigin};
 use futures::channel::oneshot;
+use hmac::{Hmac, Mac as _};
 use js_sys::{Date, Function, Object, Promise, Reflect};
+use sha2::Sha256;
 use std::{cell::RefCell, num::NonZeroU32, rc::Rc, time::Duration};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
@@ -23,6 +29,7 @@ const CHAT_NAMESPACE: &[u8] = b"_COMMONWARE_BROWSER_P2P_CHAT";
 const MAX_CHAT_MESSAGE_SIZE: usize = 16 * 1024;
 const MAX_NETWORK_MESSAGE_SIZE: u32 = 64 * 1024;
 const CHANNEL_BACKLOG: usize = 128;
+const SIGNALING_INFO: &[u8] = b"commonware-browser-p2p-signaling-v1";
 
 type ChatSender = commonware_p2p::authenticated::lookup::Sender<
     ed25519::PublicKey,
@@ -76,6 +83,16 @@ impl BrowserChat {
     #[wasm_bindgen(js_name = publicKey)]
     pub fn public_key(&self) -> String {
         self.public_key.clone()
+    }
+
+    /// Create a signaling cipher that works outside browser secure contexts.
+    #[wasm_bindgen(js_name = createSignalingCipher)]
+    pub fn create_signaling_cipher(
+        &self,
+        session: &[u8],
+        secret: &[u8],
+    ) -> Result<SignalingCipher, JsValue> {
+        SignalingCipher::new(session, secret)
     }
 
     /// Attach an established WebRTC data channel to the authenticated chat network.
@@ -217,6 +234,78 @@ impl BrowserChat {
     /// Stop the runtime and close the active transport.
     pub fn disconnect(&self) {
         self.stop(true);
+    }
+}
+
+/// Authenticated encryption for the short-lived rendezvous transcript.
+#[wasm_bindgen]
+pub struct SignalingCipher {
+    cipher: ChaCha20Poly1305,
+}
+
+#[wasm_bindgen]
+impl SignalingCipher {
+    fn new(session: &[u8], secret: &[u8]) -> Result<Self, JsValue> {
+        if session.len() != 32 || secret.len() != 32 {
+            return Err(JsValue::from_str("The signaling key material is invalid."));
+        }
+
+        let mut extract = Hmac::<Sha256>::new_from_slice(session)
+            .map_err(|_| JsValue::from_str("Could not derive the signaling key."))?;
+        extract.update(secret);
+        let pseudorandom_key = extract.finalize().into_bytes();
+
+        let mut expand = Hmac::<Sha256>::new_from_slice(&pseudorandom_key)
+            .map_err(|_| JsValue::from_str("Could not derive the signaling key."))?;
+        expand.update(SIGNALING_INFO);
+        expand.update(&[1]);
+        let key = expand.finalize().into_bytes();
+
+        Ok(Self {
+            cipher: ChaCha20Poly1305::new((&key).into()),
+        })
+    }
+
+    /// Encrypt and authenticate one signaling payload.
+    pub fn seal(
+        &self,
+        nonce: &[u8],
+        additional_data: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let nonce: &[u8; 12] = nonce
+            .try_into()
+            .map_err(|_| JsValue::from_str("The signaling nonce is invalid."))?;
+        self.cipher
+            .encrypt(
+                nonce.into(),
+                Payload {
+                    msg: plaintext,
+                    aad: additional_data,
+                },
+            )
+            .map_err(|_| JsValue::from_str("Could not encrypt the signaling message."))
+    }
+
+    /// Authenticate and decrypt one signaling payload.
+    pub fn open(
+        &self,
+        nonce: &[u8],
+        additional_data: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let nonce: &[u8; 12] = nonce
+            .try_into()
+            .map_err(|_| JsValue::from_str("The signaling nonce is invalid."))?;
+        self.cipher
+            .decrypt(
+                nonce.into(),
+                Payload {
+                    msg: ciphertext,
+                    aad: additional_data,
+                },
+            )
+            .map_err(|_| JsValue::from_str("The signaling message could not be authenticated."))
     }
 }
 

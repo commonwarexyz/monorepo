@@ -18,10 +18,10 @@ bun run serve
 
 `dist/` contains the hashed frontend assets. The parent build packages wasm-bindgen output beneath
 `dist/wasm`. `COMMONWARE_ICE_SERVERS` supplies an optional JSON array of ICE servers. Set
-`TLS_CERT_FILE` and `TLS_KEY_FILE` together when serving a mobile browser, which requires a trusted
-secure context for WebCrypto and WebRTC. The server advertises a non-loopback LAN address by
-default. Set `PUBLIC_URL` to override the URL placed in invites, and `HOST` to override the listening
-interface.
+`TLS_CERT_FILE` and `TLS_KEY_FILE` together to protect application delivery and signaling metadata.
+The example's signaling cipher runs in WASM and therefore does not require secure-context-only Web
+Crypto. The server advertises a non-loopback LAN address by default. Set `PUBLIC_URL` to override
+the URL placed in invites, and `HOST` to override the listening interface.
 
 Private keys remain inside the Rust WASM module and are regenerated on each page load. The Bun
 service handles only static files, bounded room state, opaque signaling envelopes, and ICE server
