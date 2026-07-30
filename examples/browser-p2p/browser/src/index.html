@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f5f0" />
+    <meta
+      name="description"
+      content="An ephemeral, authenticated peer-to-peer chat powered by Commonware."
+    />
+    <title>Commonware Chat</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2218%22 fill=%22%231c1c1a%22/><path d=%22M18 22h28v17H30l-9 7v-7h-3z%22 fill=%22%23f6f5f0%22/></svg>" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="chat" aria-label="Commonware peer-to-peer chat">
+        <header class="topbar">
+          <div class="brand" aria-label="Commonware Chat">
+            <span class="brand-mark" aria-hidden="true">C</span>
+            <div>
+              <h1>Commonware</h1>
+              <p>Authenticated chat</p>
+            </div>
+          </div>
+
+          <div class="connection">
+            <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+            <span id="status-text" role="status">Starting...</span>
+          </div>
+        </header>
+
+        <div id="notice" class="notice" role="alert" hidden>
+          <div>
+            <strong id="notice-title"></strong>
+            <p id="notice-detail"></p>
+          </div>
+          <button id="retry-button" class="text-button" type="button" hidden>Retry</button>
+        </div>
+
+        <section class="identity-panel" aria-label="Your ephemeral identity">
+          <div>
+            <span class="eyebrow">Your ephemeral identity</span>
+            <button id="identity" class="fingerprint" type="button" title="Copy public key" disabled>
+              Waiting for WASM
+            </button>
+          </div>
+          <span class="ephemeral-note">New on every load</span>
+        </section>
+
+        <ol id="messages" class="messages" aria-live="polite" aria-label="Messages">
+          <li id="empty-state" class="empty-state">
+            <span class="empty-icon" aria-hidden="true">↗</span>
+            <h2>Start a private conversation</h2>
+            <p>Paste a pairing payload below. Messages are authenticated by your temporary identity.</p>
+          </li>
+        </ol>
+
+        <section class="pairing" aria-labelledby="pairing-title">
+          <div class="pairing-heading">
+            <div>
+              <span class="eyebrow" id="pairing-title">Pair with someone</span>
+              <p>Paste an invite URL, encoded payload, or JSON object.</p>
+            </div>
+            <button id="reconnect-button" class="text-button" type="button" hidden>Reconnect</button>
+          </div>
+          <form id="pairing-form" class="pairing-form">
+            <label class="sr-only" for="pairing-input">Pairing payload</label>
+            <input
+              id="pairing-input"
+              name="pairing"
+              type="text"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste pairing payload"
+              required
+            />
+            <button id="connect-button" class="primary-button" type="submit">Connect</button>
+          </form>
+          <p id="pairing-error" class="field-error" role="alert" hidden></p>
+        </section>
+
+        <form id="composer" class="composer">
+          <label class="sr-only" for="message-input">Message</label>
+          <textarea
+            id="message-input"
+            rows="1"
+            maxlength="4096"
+            placeholder="Connect to send a message"
+            disabled
+          ></textarea>
+          <button id="send-button" class="send-button" type="submit" aria-label="Send message" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m5 12 14-7-5 14-2.2-5.1L5 12Zm6.8 1.9L19 5" />
+            </svg>
+          </button>
+        </form>
+      </section>
+      <p class="privacy-note">Private keys stay in memory and disappear when this page closes.</p>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

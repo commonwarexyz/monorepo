@@ -1,0 +1,17 @@
+{
+  "name": "@commonware/browser-p2p-chat",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/index.html",
+    "build": "bun run scripts/build.ts",
+    "lint": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run lint && bun test && bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}
