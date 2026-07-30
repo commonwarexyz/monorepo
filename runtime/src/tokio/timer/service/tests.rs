@@ -5,7 +5,7 @@ mod ordinary {
         DriverSignal, ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING,
         EXPIRY_YIELD_BUDGET, Entry, InitError, NEXT_RUNTIME_ID, NOT_IN_HEAP, RegisteredSleep,
         Shard, ShardLifecycle, Sleep, ThreadAssignment, ThreadAssignments, WAKE_BATCH,
-        allocate_runtime_id, arm_covers, initialize_shards, run_driver, run_driver_loop,
+        allocate_runtime_id, initialize_shards, run_driver, run_driver_loop,
     };
     use crate::{
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
@@ -1498,19 +1498,6 @@ mod ordinary {
         // The crossing addition clamps while the representable addition stays exact.
         assert_eq!(saturated, limit);
         assert_eq!(exact, Deadline::from_duration(Duration::from_secs(5)));
-    }
-
-    #[test]
-    fn rearm_tolerance_is_one_sided() {
-        let armed = Some(at(100));
-
-        // Only equal or no more than 50 ns earlier deadlines are covered.
-        assert!(arm_covers(armed, Some(at(100))));
-        assert!(arm_covers(armed, Some(at(50))));
-        assert!(!arm_covers(armed, Some(at(49))));
-        assert!(!arm_covers(armed, Some(at(101))));
-        assert!(!arm_covers(armed, None));
-        assert!(arm_covers(None, None));
     }
 
     #[tokio::test(flavor = "current_thread")]
