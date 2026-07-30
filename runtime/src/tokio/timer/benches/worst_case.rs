@@ -22,6 +22,9 @@ use tokio::sync::oneshot;
 /// Long lead that keeps registration and cancellation timers from expiring.
 const LONG_DEADLINE: Duration = Duration::from_secs(60);
 
+/// Maximum time allowed for all callbacks after a storm deadline.
+const STORM_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Runs worst-case workloads that use the requested worker topology.
 pub(crate) async fn run_contention(
     config: &Config,
@@ -788,25 +791,16 @@ async fn run_storm_batch(
         tokio::time::sleep(remaining - peer_lead).await;
     }
     let (peer_ready_sender, peer_ready) = oneshot::channel();
+    let peer_timeout = deadlines
+        .measurement_deadline
+        .checked_add(STORM_COMPLETION_TIMEOUT)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "peer timeout overflow"))?;
     let peer_recorder = Arc::clone(&recorder);
-    let peer = tokio::spawn(async move {
-        // Initialize measurement before acknowledging that the peer is runnable.
-        let initialized_at = Instant::now();
-        let callbacks_at_init = peer_recorder.completed.load(Ordering::Relaxed);
-        let mut gap = PeerGap::new(initialized_at);
-        let _ = peer_ready_sender.send((initialized_at, callbacks_at_init));
-        loop {
-            tokio::task::yield_now().await;
-            let now = Instant::now();
-            let callbacks_completed = peer_recorder.last_ns.load(Ordering::Acquire) != 0;
-            let callbacks_started =
-                callbacks_completed || peer_recorder.first_ns.load(Ordering::Acquire) != 0;
-            if gap.observe(now, callbacks_started, callbacks_completed) {
-                break;
-            }
-        }
-        gap.maximum()
-    });
+    let peer = tokio::spawn(measure_peer_gap(
+        peer_recorder,
+        peer_ready_sender,
+        peer_timeout,
+    ));
 
     // Do not measure a storm that began before peer initialization completed.
     let (peer_initialized_at, callbacks_at_init) = peer_ready
@@ -822,7 +816,7 @@ async fn run_storm_batch(
     }
     let peer_gap = peer
         .await
-        .map_err(|error| io::Error::other(format!("storm peer task failed: {error}")))?;
+        .map_err(|error| io::Error::other(format!("storm peer task failed: {error}")))??;
 
     let first = recorder.first_elapsed()?;
     let last = recorder.last_elapsed()?;
@@ -835,6 +829,40 @@ async fn run_storm_batch(
         live_fd_count,
         clock_pair_span: deadlines.clock_pair_span,
     })
+}
+
+/// Measures scheduling gaps until every callback arrives or the watchdog expires.
+async fn measure_peer_gap(
+    recorder: Arc<Recorder>,
+    ready: oneshot::Sender<(Instant, usize)>,
+    timeout: Instant,
+) -> io::Result<Duration> {
+    // Initialize measurement before acknowledging that the peer is runnable.
+    let initialized_at = Instant::now();
+    let callbacks_at_init = recorder.completed.load(Ordering::Relaxed);
+    let mut gap = PeerGap::new(initialized_at);
+    let _ = ready.send((initialized_at, callbacks_at_init));
+
+    loop {
+        tokio::task::yield_now().await;
+        let now = Instant::now();
+        let callbacks_completed = recorder.last_ns.load(Ordering::Acquire) != 0;
+        let callbacks_started =
+            callbacks_completed || recorder.first_ns.load(Ordering::Acquire) != 0;
+        if gap.observe(now, callbacks_started, callbacks_completed) {
+            return Ok(gap.maximum());
+        }
+        if now >= timeout {
+            let observed = recorder.completed.load(Ordering::Relaxed);
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "storm observed {observed} of {} timer callbacks before timeout",
+                    recorder.target
+                ),
+            ));
+        }
+    }
 }
 
 /// Atomically records callback progress without scheduling timer tasks.

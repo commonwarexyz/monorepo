@@ -189,6 +189,38 @@ fn single_callback_recorder_uses_one_boundary_timestamp() {
 }
 
 #[test]
+fn fairness_peer_times_out_when_callbacks_are_missing() {
+    use commonware_runtime::{Runner as _, tokio as commonware_tokio};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    use tokio::sync::oneshot;
+
+    // Setup: Start the one-worker fairness topology with a recorder that
+    // expects two callbacks and an already-expired watchdog.
+    let runner =
+        commonware_tokio::Runner::new(commonware_tokio::Config::default().with_worker_threads(1));
+    let recorder = Arc::new(super::Recorder::new(Instant::now(), 2));
+    let (ready_sender, ready) = oneshot::channel();
+    let timeout = Instant::now();
+
+    // Action: Run the production peer loop without delivering either callback.
+    let error = runner.start(move |_| async move {
+        let peer = tokio::spawn(super::measure_peer_gap(recorder, ready_sender, timeout));
+        let _ = ready.await.unwrap();
+        peer.await.unwrap().unwrap_err()
+    });
+
+    // Assertion: The watchdog reports the missing callbacks instead of
+    // leaving the benchmark blocked indefinitely.
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("0 of 2"));
+    assert!(error.to_string().contains("before timeout"));
+    assert_eq!(super::STORM_COMPLETION_TIMEOUT, Duration::from_secs(30));
+}
+
+#[test]
 fn cancellation_scaling_requires_a_measured_baseline() {
     use std::time::Duration;
 
