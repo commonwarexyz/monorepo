@@ -1,4 +1,13 @@
-//! Live filesystem blob generations.
+//! Tracks the identity of each live filesystem blob-name generation.
+//!
+//! Handles opened for the same current blob share a generation token. Removing the blob or its
+//! partition invalidates that token's namespace entry, so reopening the same name receives a new
+//! identity. A batch mutation is accepted only when its handle still carries the identity currently
+//! registered for that name, preventing an old handle from mutating a replacement blob.
+//!
+//! Invalidation does not revoke existing handles. They may continue reading the underlying blob,
+//! but can no longer authorize a later batch mutation. The registry retains weak references so
+//! generation entries can be reclaimed after their last handle is dropped.
 
 use super::batch::Operation;
 use crate::RemoveTarget;
