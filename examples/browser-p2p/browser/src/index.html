@@ -50,34 +50,28 @@
         <ol id="messages" class="messages" aria-live="polite" aria-label="Messages">
           <li id="empty-state" class="empty-state">
             <span class="empty-icon" aria-hidden="true">↗</span>
-            <h2>Join the room</h2>
-            <p>Scan or paste a one-time invite. Every message carries an authenticated ephemeral identity.</p>
+            <h2 id="empty-title">Preparing a private room</h2>
+            <p id="empty-detail">Creating an ephemeral identity and one-time invite.</p>
           </li>
         </ol>
 
-        <section class="pairing" aria-labelledby="pairing-title">
+        <section id="pairing" class="pairing" aria-labelledby="pairing-title">
           <div class="pairing-heading">
             <div>
-              <span class="eyebrow" id="pairing-title">Pair with someone</span>
-              <p>Paste an invite URL, encoded payload, or JSON object.</p>
+              <span class="eyebrow" id="pairing-title">Preparing invite</span>
+              <p id="pairing-detail">Pairing requires one QR scan.</p>
             </div>
-            <button id="reconnect-button" class="text-button" type="button" hidden>Reconnect</button>
           </div>
-          <form id="pairing-form" class="pairing-form">
-            <label class="sr-only" for="pairing-input">Pairing payload</label>
-            <input
-              id="pairing-input"
-              name="pairing"
-              type="text"
-              inputmode="url"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Paste pairing payload"
-              required
-            />
-            <button id="connect-button" class="primary-button" type="submit">Connect</button>
-          </form>
-          <p id="pairing-error" class="field-error" role="alert" hidden></p>
+          <div id="qr-panel" class="qr-panel" hidden>
+            <a id="invite-link" target="_blank" rel="noreferrer" aria-label="Open invite link">
+              <img id="invite-qr" width="220" height="220" alt="One-time pairing QR code" />
+            </a>
+            <div class="qr-copy">
+              <strong>One-time invite</strong>
+              <span>Expires automatically. Do not share it beyond your peer.</span>
+              <button id="copy-invite" class="primary-button" type="button">Copy link</button>
+            </div>
+          </div>
         </section>
 
         <form id="composer" class="composer">

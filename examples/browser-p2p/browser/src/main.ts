@@ -1,41 +1,42 @@
+import QRCode from "qrcode";
 import "./styles.css";
 import { createBrowserChat, type BrowserP2pSession, type ChatEvent, type ConnectionState } from "./bridge";
-import { parsePairingPayload, serializePairingPayload } from "./pairing";
+import { createInvite, inviteUrl, parseInvite, type Invite } from "./invite";
+import { loadWebRtcConfig, WebRtcPairing } from "./webrtc";
 
 const elements = {
   composer: getElement<HTMLFormElement>("composer"),
-  connectButton: getElement<HTMLButtonElement>("connect-button"),
+  copyInvite: getElement<HTMLButtonElement>("copy-invite"),
   emptyState: getElement<HTMLLIElement>("empty-state"),
+  emptyTitle: getElement<HTMLHeadingElement>("empty-title"),
+  emptyDetail: getElement<HTMLParagraphElement>("empty-detail"),
   identity: getElement<HTMLButtonElement>("identity"),
+  inviteLink: getElement<HTMLAnchorElement>("invite-link"),
   messageInput: getElement<HTMLTextAreaElement>("message-input"),
   messages: getElement<HTMLOListElement>("messages"),
   notice: getElement<HTMLDivElement>("notice"),
   noticeDetail: getElement<HTMLParagraphElement>("notice-detail"),
   noticeTitle: getElement<HTMLElement>("notice-title"),
-  pairingError: getElement<HTMLParagraphElement>("pairing-error"),
-  pairingForm: getElement<HTMLFormElement>("pairing-form"),
-  pairingInput: getElement<HTMLInputElement>("pairing-input"),
-  reconnectButton: getElement<HTMLButtonElement>("reconnect-button"),
+  pairing: getElement<HTMLElement>("pairing"),
+  pairingDetail: getElement<HTMLParagraphElement>("pairing-detail"),
+  pairingTitle: getElement<HTMLElement>("pairing-title"),
+  qr: getElement<HTMLImageElement>("invite-qr"),
+  qrPanel: getElement<HTMLDivElement>("qr-panel"),
   retryButton: getElement<HTMLButtonElement>("retry-button"),
   sendButton: getElement<HTMLButtonElement>("send-button"),
   statusDot: getElement<HTMLSpanElement>("status-dot"),
   statusText: getElement<HTMLSpanElement>("status-text"),
 };
 
-let session: BrowserP2pSession | undefined;
-let lastPairingPayload: string | undefined;
+let chat: BrowserP2pSession | undefined;
+let pairing: WebRtcPairing | undefined;
 let state: ConnectionState = "disconnected";
-
-elements.pairingForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void connect(elements.pairingInput.value);
-});
+let currentInviteUrl: string | undefined;
 
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   void sendMessage();
 });
-
 elements.messageInput.addEventListener("input", resizeComposer);
 elements.messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -43,88 +44,92 @@ elements.messageInput.addEventListener("keydown", (event) => {
     elements.composer.requestSubmit();
   }
 });
-
 elements.identity.addEventListener("click", () => void copyIdentity());
-elements.reconnectButton.addEventListener("click", () => void reconnect());
+elements.copyInvite.addEventListener("click", () => void copyInvite());
 elements.retryButton.addEventListener("click", () => void initialize());
-window.addEventListener("beforeunload", () => session?.free());
+window.addEventListener("commonware-pairing-error", (event) => {
+  const detail = (event as CustomEvent<unknown>).detail;
+  setConnectionState("disconnected", "Connection failed");
+  showNotice("Could not connect", errorMessage(detail));
+  elements.retryButton.hidden = false;
+});
+window.addEventListener("beforeunload", cleanup);
 
 void initialize();
 
 async function initialize(): Promise<void> {
+  cleanup();
   clearNotice();
   elements.retryButton.hidden = true;
-  setConnectionState("connecting", "Initializing identity...");
+  elements.qrPanel.hidden = true;
+  elements.pairing.hidden = false;
+  setConnectionState("connecting", "Creating identity");
 
+  let invite: Invite | undefined;
   try {
-    session?.free();
-    session = await createBrowserChat(handleChatEvent);
-    const publicKey = session.publicKey();
+    invite = parseInvite(new URL(window.location.href));
+    if (invite) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+
+    chat = await createBrowserChat(handleChatEvent);
+    const webRtcConfig = await loadWebRtcConfig();
+    const publicKey = chat.publicKey();
     elements.identity.textContent = formatFingerprint(publicKey);
     elements.identity.dataset.publicKey = publicKey;
     elements.identity.disabled = false;
-    setConnectionState("disconnected", "Ready to pair");
 
-    const invite = inviteFromLocation();
-    if (invite) {
-      window.history.replaceState(null, "", window.location.pathname);
-      await connect(invite);
+    const role = invite ? "responder" : "initiator";
+    invite ??= createInvite(publicKey);
+    if (role === "initiator") {
+      await displayInvite(invite, webRtcConfig.applicationUrl);
+      elements.emptyTitle.textContent = "Scan to connect";
+      elements.emptyDetail.textContent = "Open the one-time QR on a phone. Signaling is encrypted before it leaves this browser.";
+    } else {
+      elements.pairingTitle.textContent = "Joining invite";
+      elements.pairingDetail.textContent = "Pinning the identity carried by the QR and connecting directly.";
+      elements.emptyTitle.textContent = "Connecting to laptop";
+      elements.emptyDetail.textContent = "Keep this page open while the browsers establish a direct authenticated channel.";
     }
+
+    pairing = new WebRtcPairing({
+      role,
+      invite,
+      chat,
+      iceServers: webRtcConfig.iceServers,
+      onState: (label) => setConnectionState("connecting", label),
+    });
+    await pairing.start();
   } catch (error) {
-    session = undefined;
-    setConnectionState("disconnected", "WASM unavailable");
-    showNotice("Browser networking is unavailable", errorMessage(error));
+    setConnectionState("disconnected", "Unavailable");
+    showNotice("Could not start pairing", errorMessage(error));
     elements.retryButton.hidden = false;
   }
 }
 
-async function connect(input: string): Promise<void> {
-  clearPairingError();
-  if (!session) {
-    showPairingError("The Commonware WASM bridge is not available.");
-    return;
-  }
-
-  let payload: string;
-  try {
-    payload = serializePairingPayload(parsePairingPayload(input));
-  } catch (error) {
-    showPairingError(errorMessage(error));
-    return;
-  }
-
-  lastPairingPayload = payload;
-  elements.connectButton.disabled = true;
-  setConnectionState("connecting");
-
-  try {
-    await session.connect(payload);
-  } catch (error) {
-    setConnectionState("disconnected", "Connection failed");
-    showNotice("Could not connect", errorMessage(error));
-    elements.reconnectButton.hidden = false;
-  } finally {
-    elements.connectButton.disabled = false;
-  }
-}
-
-async function reconnect(): Promise<void> {
-  if (!lastPairingPayload) {
-    elements.pairingInput.focus();
-    return;
-  }
-  await connect(lastPairingPayload);
+async function displayInvite(invite: Invite, applicationUrl: string): Promise<void> {
+  currentInviteUrl = inviteUrl(invite, new URL(applicationUrl));
+  elements.qr.src = await QRCode.toDataURL(currentInviteUrl, {
+    width: 220,
+    margin: 1,
+    color: { dark: "#1c1c1aff", light: "#ffffffff" },
+    errorCorrectionLevel: "M",
+  });
+  elements.inviteLink.href = currentInviteUrl;
+  elements.qrPanel.hidden = false;
+  elements.pairingTitle.textContent = "Scan once with your phone";
+  elements.pairingDetail.textContent = "The QR contains a short-lived pairing secret and this browser's identity.";
 }
 
 async function sendMessage(): Promise<void> {
   const text = elements.messageInput.value.trim();
-  if (!session || state !== "connected" || !text) {
+  if (!chat || state !== "connected" || !text) {
     return;
   }
 
   elements.sendButton.disabled = true;
   try {
-    await session.send(text);
+    await chat.send(text);
     appendMessage({ direction: "outgoing", text, timestamp: Date.now() });
     elements.messageInput.value = "";
     resizeComposer();
@@ -138,12 +143,11 @@ async function sendMessage(): Promise<void> {
 function handleChatEvent(event: ChatEvent): void {
   switch (event.type) {
     case "connection":
-      setConnectionState(event.state, connectionLabel(event.state, event.attempt));
+      setConnectionState(event.state, connectionLabel(event.state));
       return;
     case "peer":
-      lastPairingPayload = undefined;
-      elements.pairingInput.value = "";
-      elements.reconnectButton.hidden = true;
+      currentInviteUrl = undefined;
+      elements.pairing.hidden = true;
       clearNotice();
       showNotice("Peer authenticated", formatFingerprint(event.publicKey), "success");
       return;
@@ -156,8 +160,8 @@ function handleChatEvent(event: ChatEvent): void {
       });
       return;
     case "error":
-      showNotice("Network error", event.message);
-      elements.reconnectButton.hidden = !event.recoverable;
+      showNotice("Connection error", event.message);
+      elements.retryButton.hidden = !event.recoverable;
   }
 }
 
@@ -165,8 +169,6 @@ function setConnectionState(nextState: ConnectionState, label = connectionLabel(
   state = nextState;
   elements.statusDot.dataset.state = nextState;
   elements.statusText.textContent = label;
-  elements.reconnectButton.hidden = nextState !== "disconnected" || !lastPairingPayload;
-
   const canSend = nextState === "connected";
   elements.messageInput.disabled = !canSend;
   elements.sendButton.disabled = !canSend;
@@ -180,27 +182,19 @@ function appendMessage(message: {
   timestamp: number;
 }): void {
   elements.emptyState.remove();
-
   const item = document.createElement("li");
   item.className = `message ${message.direction}`;
-
   if (message.sender) {
     const sender = document.createElement("span");
     sender.className = "message-sender";
     sender.textContent = formatFingerprint(message.sender);
     item.append(sender);
   }
-
   const body = document.createElement("p");
   body.textContent = message.text;
-
   const time = document.createElement("time");
   time.dateTime = new Date(message.timestamp).toISOString();
-  time.textContent = new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(message.timestamp);
-
+  time.textContent = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(message.timestamp);
   item.append(body, time);
   elements.messages.append(item);
   item.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -211,12 +205,23 @@ async function copyIdentity(): Promise<void> {
   if (!publicKey) {
     return;
   }
-
   await navigator.clipboard.writeText(publicKey);
-  const previous = elements.identity.textContent;
-  elements.identity.textContent = "Copied public key";
+  temporarilyLabel(elements.identity, "Copied public key");
+}
+
+async function copyInvite(): Promise<void> {
+  if (!currentInviteUrl) {
+    return;
+  }
+  await navigator.clipboard.writeText(currentInviteUrl);
+  temporarilyLabel(elements.copyInvite, "Copied");
+}
+
+function temporarilyLabel(element: HTMLElement, label: string): void {
+  const previous = element.textContent;
+  element.textContent = label;
   window.setTimeout(() => {
-    elements.identity.textContent = previous;
+    element.textContent = previous;
   }, 1200);
 }
 
@@ -238,28 +243,21 @@ function clearNotice(): void {
   elements.noticeDetail.textContent = "";
 }
 
-function showPairingError(message: string): void {
-  elements.pairingError.hidden = false;
-  elements.pairingError.textContent = message;
-  elements.pairingInput.setAttribute("aria-invalid", "true");
+function cleanup(): void {
+  pairing?.close();
+  pairing = undefined;
+  chat?.disconnect();
+  chat?.free();
+  chat = undefined;
+  currentInviteUrl = undefined;
 }
 
-function clearPairingError(): void {
-  elements.pairingError.hidden = true;
-  elements.pairingError.textContent = "";
-  elements.pairingInput.removeAttribute("aria-invalid");
-}
-
-function connectionLabel(connectionState: ConnectionState, attempt?: number): string {
+function connectionLabel(connectionState: ConnectionState): string {
   switch (connectionState) {
-    case "connecting":
-      return "Connecting...";
-    case "connected":
-      return "Connected";
-    case "reconnecting":
-      return attempt ? `Reconnecting · attempt ${attempt}` : "Reconnecting...";
-    case "disconnected":
-      return "Disconnected";
+    case "connecting": return "Connecting";
+    case "connected": return "Connected directly";
+    case "reconnecting": return "Reconnecting";
+    case "disconnected": return "Disconnected";
   }
 }
 
@@ -270,14 +268,6 @@ function formatFingerprint(publicKey: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function inviteFromLocation(): string | undefined {
-  const url = new URL(window.location.href);
-  if (url.searchParams.has("pair") || /(?:^#|[&#])pair=/.test(url.hash)) {
-    return url.toString();
-  }
-  return undefined;
 }
 
 function getElement<T extends HTMLElement>(id: string): T {

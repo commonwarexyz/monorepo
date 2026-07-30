@@ -1,8 +1,9 @@
 # Browser P2P WASM bridge
 
 This standalone crate implements the module contract in `../src/bridge.ts`. It generates a fresh
-ephemeral Ed25519 identity for each `createBrowserChat` call, dials the pairing WebSocket, and moves
-chat bytes only through Commonware authenticated lookup.
+ephemeral Ed25519 identity for each `createBrowserChat` call and attaches an established, reliable
+WebRTC data channel to Commonware authenticated lookup. Signaling, SDP, and ICE remain entirely in
+the browser application; the bridge only handles authenticated peer traffic.
 
 Install `wasm-bindgen-cli` with the same version used by this crate, then build and generate the
 browser loader:
@@ -16,10 +17,8 @@ wasm-bindgen \
   target/wasm32-unknown-unknown/release/commonware_browser_p2p.wasm
 ```
 
-The Bun development server and a separately deployed static service must expose that output at
-`/wasm/browser_p2p.js` and `/wasm/browser_p2p_bg.wasm`. If the service embeds `../dist`, build the
-Bun frontend first and run the commands above afterward so `dist/wasm` is included.
+The Bun server must expose that output at `/wasm/browser_p2p.js` and
+`/wasm/browser_p2p_bg.wasm`.
 
 For a production deployment, serve the JavaScript as `text/javascript`, the binary as
 `application/wasm`, and prevent stale caching of the loader when deploying a new binary.
-

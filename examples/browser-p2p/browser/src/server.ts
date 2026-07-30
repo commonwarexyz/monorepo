@@ -1,3 +1,4 @@
+import { networkInterfaces } from "node:os";
 import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RendezvousStore, type RendezvousPeer } from "./rendezvous-store";
@@ -14,12 +15,20 @@ const MAX_REGISTRATION_BYTES = 256;
 const store = new RendezvousStore();
 const iceServers = parseIceServers(Bun.env.COMMONWARE_ICE_SERVERS);
 const tls = loadTls(Bun.env.TLS_CERT_FILE, Bun.env.TLS_KEY_FILE);
+const protocol = tls ? "https" : "http";
+const applicationUrl = selectApplicationUrl(
+  Bun.env.PUBLIC_URL,
+  protocol,
+  PORT,
+  localIpv4Addresses(),
+);
 
 if (import.meta.main) {
   const cleanup = setInterval(() => store.cleanup(), 30_000);
   cleanup.unref();
 
   Bun.serve<SocketData>({
+    hostname: Bun.env.HOST ?? "0.0.0.0",
     port: PORT,
     ...(tls ? { tls } : {}),
     async fetch(request, server) {
@@ -33,7 +42,10 @@ if (import.meta.main) {
         return new Response("WebSocket upgrade required", { status: 426 });
       }
       if (url.pathname === "/config.json") {
-        return Response.json({ iceServers }, { headers: { "cache-control": "no-store" } });
+        return Response.json(
+          { applicationUrl, iceServers },
+          { headers: { "cache-control": "no-store" } },
+        );
       }
       return serveStatic(url.pathname);
     },
@@ -86,8 +98,7 @@ if (import.meta.main) {
     },
   });
 
-  const protocol = tls ? "https" : "http";
-  console.log(`Commonware browser chat listening on ${protocol}://localhost:${PORT}`);
+  console.log(`Commonware browser chat available at ${applicationUrl}`);
 }
 
 class BunSocketPeer implements RendezvousPeer {
@@ -151,6 +162,46 @@ export function resolveStaticPath(root: string, pathname: string): string | unde
     return undefined;
   }
   return path;
+}
+
+export function selectApplicationUrl(
+  configured: string | undefined,
+  protocol: "http" | "https",
+  port: number,
+  addresses: readonly string[],
+): string {
+  if (configured) {
+    return validateApplicationUrl(configured).toString();
+  }
+
+  const address = addresses.find((candidate) => !isLoopback(candidate));
+  return new URL(`${protocol}://${address ?? "localhost"}:${port}/`).toString();
+}
+
+function validateApplicationUrl(value: string): URL {
+  if (value.length > 2048) {
+    throw new Error("PUBLIC_URL is too long.");
+  }
+
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("PUBLIC_URL must use http or https.");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("PUBLIC_URL must not contain credentials, a query, or a fragment.");
+  }
+  return url;
+}
+
+function localIpv4Addresses(): string[] {
+  return Object.values(networkInterfaces())
+    .flatMap((addresses) => addresses ?? [])
+    .filter((address) => address.family === "IPv4" && !address.internal)
+    .map((address) => address.address);
+}
+
+function isLoopback(address: string): boolean {
+  return address === "localhost" || address.startsWith("127.");
 }
 
 function loadTls(certFile: string | undefined, keyFile: string | undefined) {

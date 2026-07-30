@@ -324,11 +324,6 @@ h1 {
   margin-bottom: 10px;
 }
 
-.pairing-form {
-  display: flex;
-  gap: 8px;
-}
-
 input,
 textarea {
   width: 100%;
@@ -371,6 +366,50 @@ input[aria-invalid="true"] {
 
 .primary-button:hover:not(:disabled) {
   background: #294b3e;
+}
+
+.qr-panel {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-top: 14px;
+}
+
+.qr-panel[hidden] {
+  display: none;
+}
+
+.qr-panel > a {
+  display: block;
+  flex: none;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: white;
+}
+
+.qr-panel img {
+  display: block;
+  width: 154px;
+  height: 154px;
+}
+
+.qr-copy {
+  display: grid;
+  justify-items: start;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.qr-copy strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.qr-copy .primary-button {
+  margin-top: 4px;
 }
 
 .text-button {
@@ -509,6 +548,19 @@ textarea:disabled {
 
   .notice {
     margin-inline: 18px;
+  }
+
+  .qr-panel {
+    justify-content: center;
+  }
+
+  .qr-copy {
+    max-width: 150px;
+  }
+
+  .qr-panel img {
+    width: 128px;
+    height: 128px;
   }
 
   .privacy-note {

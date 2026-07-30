@@ -1,64 +1,28 @@
-# Commonware browser P2P chat frontend
+# Browser package
 
-A dependency-light Bun frontend for the Commonware authenticated lookup chat example. The page never generates, receives, or stores private key material: the WASM module owns a fresh ephemeral Ed25519 identity for the lifetime of the page and exposes only its public key.
+This Bun package contains the static chat interface and the signaling-only rendezvous service for
+the browser P2P example. See the parent [README](../README.md) for setup, architecture, and security
+details.
 
-## Develop and validate
-
-Requires Bun 1.3 or newer.
-
-```bash
-bun install
-bun run dev
-```
-
-The development server prints its local URL. Run all frontend checks with:
-
-```bash
-bun run check
-```
-
-This type-checks the TypeScript, runs the pairing parser tests, and creates a minified production build in `dist/`.
-
-## WASM bridge contract
-
-The frontend dynamically loads `/wasm/browser_p2p.js`. This path is intentionally unresolved at bundle time so the Rust package can be built and deployed separately. Until that module exists, the app displays a visible “WASM unavailable” state and keeps networking controls disabled. It does not simulate connections or messages.
-
-The generated module must export:
-
-```ts
-export default function init(moduleOrPath?: unknown): Promise<unknown>;
-
-export function createBrowserChat(
-  onEvent: (event: ChatEvent) => void,
-): BrowserP2pSession;
-```
-
-`BrowserP2pSession` must implement `publicKey()`, `connect(pairingPayload)`, `send(text)`, `disconnect()`, and `free()` as defined in `src/bridge.ts`. `createBrowserChat` must generate a new Ed25519 private key internally on every call, must never return or persist it, and must use Commonware authenticated lookup for all peer events and messages.
-
-`connect` receives canonical JSON after frontend validation:
-
-```json
-{
-  "version": 1,
-  "desktop_public_key": "64-character lowercase Ed25519 public key hex",
-  "websocket_url": "ws://192.168.1.42:8080/pair",
-  "capability": "43-character base64url 256-bit capability",
-  "session_id": "22-character base64url 128-bit session ID",
-  "expires_at": 1893456000
-}
-```
-
-The input field also accepts this JSON encoded as base64url, prefixed with `commonware-chat:`, or supplied in an invite URL's `pair` query/hash parameter.
-
-Pairing endpoints may use `wss://` or plain `ws://`. Plain WebSockets support direct pairing with a desktop on the same LAN, such as `ws://192.168.1.42:8080/pair`. Transport encryption, asset integrity, and bootstrap authenticity are outside this MVP; authenticated lookup still identifies chat peers by their Ed25519 public keys.
-
-## Package and embed
+The browser without an invite creates a five-minute pairing session and displays one QR code. The
+scanning browser answers through encrypted WebRTC signaling. After Commonware authenticates both
+ephemeral Ed25519 keys over the direct data channel, both signaling WebSockets close.
 
 ```bash
 bun install --frozen-lockfile
+bun run lint
+bun test
 bun run build
+bun run serve
 ```
 
-`dist/` is the complete static frontend embedding input. Embed every emitted file while preserving its relative path and serve `index.html` for the application route. Separately place the wasm-bindgen JavaScript loader and its referenced `.wasm` binary beneath the host's `/wasm/` URL namespace, with the loader available exactly at `/wasm/browser_p2p.js`.
+`dist/` contains the hashed frontend assets. The parent build packages wasm-bindgen output beneath
+`dist/wasm`. `COMMONWARE_ICE_SERVERS` supplies an optional JSON array of ICE servers. Set
+`TLS_CERT_FILE` and `TLS_KEY_FILE` together when serving a mobile browser, which requires a trusted
+secure context for WebCrypto and WebRTC. The server advertises a non-loopback LAN address by
+default. Set `PUBLIC_URL` to override the URL placed in invites, and `HOST` to override the listening
+interface.
 
-The static host should serve JavaScript as `text/javascript`, WebAssembly as `application/wasm`, and HTML with `Cache-Control: no-cache`. Hashed Bun assets may be cached immutably. The app makes no use of local storage, IndexedDB, cookies, or service workers.
+Private keys remain inside the Rust WASM module and are regenerated on each page load. The Bun
+service handles only static files, bounded room state, opaque signaling envelopes, and ICE server
+configuration. It never receives Commonware frames or chat messages.

@@ -3,40 +3,50 @@ set shell := ["bash", "-euc"]
 default:
     @just --list
 
-# Verify the tools required by the standalone browser and service packages.
+# Verify the tools required by the browser package.
 doctor:
     command -v bun >/dev/null
     command -v cargo >/dev/null
     command -v wasm-bindgen >/dev/null
     rustup target list --installed | grep -qx wasm32-unknown-unknown
 
-# Install the pinned Bun dependencies.
+# Install the locked Bun dependencies.
 install: doctor
     cd browser && bun install --frozen-lockfile
 
-# Type-check, test, and bundle the browser interface.
-frontend: install
-    cd browser && bun run check
+# Type-check and test the Bun application without changing packaged output.
+frontend-check: install
+    cd browser && bun run lint
+    cd browser && bun test
 
-# Build the Rust bridge and package its wasm-bindgen output with the browser bundle.
+# Build the hashed browser assets.
+frontend: install
+    cd browser && bun run build
+
+# Type-check the Rust bridge against the browser target.
+wasm-check: doctor
+    cargo fmt --manifest-path browser/wasm/Cargo.toml -- --check
+    cargo check --locked --target wasm32-unknown-unknown --manifest-path browser/wasm/Cargo.toml
+
+# Package wasm-bindgen output after the frontend has created a clean dist directory.
 wasm: frontend
     cd browser/wasm && ./build.sh
 
-# Build the desktop service after all browser assets are ready for embedding.
+# Build the complete static application.
 build: wasm
-    cargo build --locked --release --manifest-path service/Cargo.toml
+    test -f browser/dist/index.html
+    test -f browser/dist/wasm/browser_p2p.js
+    test -f browser/dist/wasm/browser_p2p_bg.wasm
 
-# Build and start a temporary LAN chat room.
+# Build and start the Bun static/rendezvous service.
 run: build
-    cargo run --locked --release --manifest-path service/Cargo.toml
+    cd browser && bun run serve
 
-# Run the Rust and Bun checks without producing a release service binary.
-check: install
-    cd browser && bun run check
-    cargo check --locked --target wasm32-unknown-unknown --manifest-path browser/wasm/Cargo.toml
-    cargo test --locked --manifest-path service/Cargo.toml
-    cargo clippy --locked --manifest-path service/Cargo.toml --all-targets -- -D warnings
+# Run focused checks without starting the service.
+check: frontend-check wasm-check
+    cargo check -p commonware-webrtc
+    cargo check --target wasm32-unknown-unknown -p commonware-webrtc
 
-# Remove generated browser and standalone Rust build output.
+# Remove generated browser output.
 clean:
-    rm -rf browser/dist browser/wasm/target service/target
+    rm -rf browser/dist browser/wasm/target

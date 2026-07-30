@@ -255,20 +255,46 @@ export class WebRtcPairing {
   }
 }
 
-export async function loadIceServers(): Promise<RTCIceServer[]> {
+export interface WebRtcApplicationConfig {
+  applicationUrl: string;
+  iceServers: RTCIceServer[];
+}
+
+export async function loadWebRtcConfig(): Promise<WebRtcApplicationConfig> {
   const response = await fetch("/config.json", { cache: "no-store" });
   if (!response.ok) {
     throw new Error("Could not load the WebRTC configuration.");
   }
   const text = await response.text();
-  if (text.length > 8192) {
+  if (text.length > 12_288) {
     throw new Error("The WebRTC configuration is too large.");
   }
   const value: unknown = JSON.parse(text);
-  if (!isRecord(value) || !Array.isArray(value.iceServers) || value.iceServers.length > 8) {
+  if (
+    !isRecord(value) ||
+    typeof value.applicationUrl !== "string" ||
+    value.applicationUrl.length > 2048 ||
+    !Array.isArray(value.iceServers) ||
+    value.iceServers.length > 8
+  ) {
     throw new Error("The WebRTC configuration is invalid.");
   }
-  return value.iceServers as RTCIceServer[];
+
+  const applicationUrl = new URL(value.applicationUrl);
+  if (
+    (applicationUrl.protocol !== "http:" && applicationUrl.protocol !== "https:") ||
+    applicationUrl.username ||
+    applicationUrl.password ||
+    applicationUrl.search ||
+    applicationUrl.hash
+  ) {
+    throw new Error("The application URL is invalid.");
+  }
+
+  return {
+    applicationUrl: applicationUrl.toString(),
+    iceServers: value.iceServers as RTCIceServer[],
+  };
 }
 
 function validateChannel(channel: RTCDataChannel): void {
