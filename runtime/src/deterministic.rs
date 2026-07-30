@@ -43,6 +43,8 @@
 //! ```
 
 pub use crate::storage::faulty::Config as FaultConfig;
+/// Runtime-owned deterministic network simulation.
+pub mod network;
 use crate::{
     Acceptor, BufferPool, BufferPoolConfig, Clock, ConnectionOf, Dialer, Error, Execution, Handle,
     IoBufs, METRICS_PREFIX, Name, Panicked, TcpEndpoint, child_label,

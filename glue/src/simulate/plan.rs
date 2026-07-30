@@ -11,12 +11,11 @@ use super::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_p2p::{
-    Manager as _,
-    simulated::{self, Link, Network},
+use commonware_runtime::{
+    Clock, Runner as _, Scheduler, Supervisor as _, deterministic,
+    deterministic::network::{Endpoint, Link, Oracle as NetworkOracle},
 };
-use commonware_runtime::{Clock, Runner as _, Scheduler, Supervisor as _, deterministic};
-use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set};
+use commonware_utils::channel::mpsc;
 use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
@@ -137,7 +136,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
     /// [`EngineDefinition::participants`].
     ///
     /// Defaults: seed 0, 1MB max message size, good links (10ms latency,
-    /// 5ms jitter, 100% success), no crashes, 10 required finalizations,
+    /// 5ms jitter), no crashes, 10 required finalizations,
     /// no timeout.
     pub fn new(engine: D) -> Self {
         let participants = engine.participants();
@@ -147,7 +146,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             link: Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(5),
-                success_rate: 1.0,
+                behavior: Default::default(),
             },
             max_message_size: 1024 * 1024,
             engine,
@@ -276,7 +275,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
         Plan {
             seed,
             participants: self.participants.clone(),
-            link: self.link.clone(),
+            link: self.link,
             max_message_size: self.max_message_size,
             engine: self.engine.clone(),
             crashes: self.crashes.clone(),
@@ -384,7 +383,7 @@ impl<D: EngineDefinition> Plan<D> {
             );
 
             triggered.insert(index);
-            if !team.crash(participant) {
+            if !team.crash(participant).await {
                 continue;
             }
             crashes += 1;
@@ -469,29 +468,23 @@ impl<D: EngineDefinition> Plan<D> {
 
     /// Run the simulation. This is the main async entry point.
     async fn run_inner(&self, mut ctx: deterministic::Context) -> Result<PlanResult<D>, String> {
-        let (network, oracle) = Network::<_, D::PublicKey>::new(
-            ctx.child("network"),
-            simulated::Config {
-                max_size: self.max_message_size,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
-        );
-        network.start();
-
-        // Seed initial peers so resolver subscriptions can reconcile immediately.
-        let mut manager = oracle.manager();
-        manager.track(
-            0,
-            self.participants
-                .iter()
-                .cloned()
-                .try_collect::<Set<D::PublicKey>>()
-                .expect("participants must be unique"),
-        );
+        let oracle = NetworkOracle::new(Default::default());
+        for index in 0..self.participants.len() {
+            oracle.register(
+                ctx.child("transport_registration")
+                    .with_attribute("index", index),
+                Endpoint::new(index as u64 + 1),
+                None,
+            );
+        }
 
         let total = self.participants.len();
-        let mut team = Team::new(self.engine.clone(), self.participants.clone());
+        let mut team = Team::new(
+            self.engine.clone(),
+            self.participants.clone(),
+            oracle.clone(),
+            self.max_message_size,
+        );
         let (monitor_tx, mut monitor_rx) = mpsc::channel::<FinalizationUpdate<D::PublicKey>>(1024);
         let (restart_tx, mut restart_rx) = mpsc::channel::<D::PublicKey>(10);
         let (crash_tx, mut crash_rx) = mpsc::channel::<()>(1);
@@ -507,14 +500,8 @@ impl<D: EngineDefinition> Plan<D> {
                 "enabled storage fault injection"
             );
         }
-        team.start(
-            &ctx,
-            &oracle,
-            self.link.clone(),
-            monitor_tx.clone(),
-            &delayed,
-        )
-        .await;
+        team.start(&ctx, self.link, monitor_tx.clone(), &delayed)
+            .await;
 
         // Spawn crash ticker for Random crashes.
         if let Some((frequency, _, _)) = self.random_crash() {
@@ -567,7 +554,7 @@ impl<D: EngineDefinition> Plan<D> {
             },
             Some(pk) = restart_rx.recv() else break => {
                 let was_delayed = delayed.contains(&pk);
-                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                team.restart(&ctx, pk, monitor_tx.clone(), was_delayed)
                     .await;
             },
             Some(update) = monitor_rx.recv() else {
@@ -641,7 +628,7 @@ impl<D: EngineDefinition> Plan<D> {
                 if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
                     info!(target: "simulator", "starting delayed participants");
                     for pk in &delayed {
-                        team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
+                        team.start_one(&ctx, pk.clone(), monitor_tx.clone(), true)
                             .await;
                     }
                     delayed_started = true;
@@ -681,13 +668,13 @@ impl<D: EngineDefinition> Plan<D> {
             },
             Some(cmd) = schedule_rx.recv() else break => match cmd {
                 ScheduleCmd::Crash(pk) => {
-                    if team.crash(&pk) {
+                    if team.crash(&pk).await {
                         crashes += 1;
                     }
                 }
                 ScheduleCmd::Restart(pk) => {
                     let was_delayed = delayed.contains(&pk);
-                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                    team.restart(&ctx, pk, monitor_tx.clone(), was_delayed)
                         .await;
                 }
             },
@@ -700,7 +687,7 @@ impl<D: EngineDefinition> Plan<D> {
                 let to_crash: Vec<D::PublicKey> =
                     active.sample(&mut ctx, crash_count).cloned().collect();
                 for pk in to_crash {
-                    if !team.crash(&pk) {
+                    if !team.crash(&pk).await {
                         continue;
                     }
                     crashes += 1;
@@ -763,7 +750,7 @@ impl<D: EngineDefinition> Plan<D> {
         ctx: deterministic::Context,
         fault_ctx: deterministic::Context,
         schedule: Schedule<D::PublicKey>,
-        oracle: &simulated::Oracle<D::PublicKey, deterministic::Context>,
+        oracle: &NetworkOracle<deterministic::Context>,
         participants: &[D::PublicKey],
         cmd_tx: mpsc::Sender<ScheduleCmd<D::PublicKey>>,
         actions_applied: Arc<AtomicU64>,
@@ -789,8 +776,10 @@ impl<D: EngineDefinition> Plan<D> {
                             if v1 == v2 {
                                 continue;
                             }
-                            let _ = oracle.remove_link(v1.clone(), v2.clone()).await;
-                            let _ = oracle.add_link(v1.clone(), v2.clone(), link.clone()).await;
+                            let from = Self::endpoint(participants, v1);
+                            let to = Self::endpoint(participants, v2);
+                            oracle.remove_link(from, to);
+                            let _ = oracle.set_link(from, to, *link);
                         }
                     }
                     actions_applied.fetch_add(1, Ordering::Relaxed);
@@ -801,10 +790,10 @@ impl<D: EngineDefinition> Plan<D> {
                     ref to,
                     ref link,
                 } => {
-                    let _ = oracle.remove_link(from.clone(), to.clone()).await;
-                    let _ = oracle
-                        .add_link(from.clone(), to.clone(), link.clone())
-                        .await;
+                    let from_endpoint = Self::endpoint(participants, from);
+                    let to_endpoint = Self::endpoint(participants, to);
+                    oracle.remove_link(from_endpoint, to_endpoint);
+                    let _ = oracle.set_link(from_endpoint, to_endpoint, *link);
                     actions_applied.fetch_add(1, Ordering::Relaxed);
                     info!(target: "simulator", ?from, ?to, "link updated");
                 }
@@ -822,6 +811,14 @@ impl<D: EngineDefinition> Plan<D> {
                 }
             }
         }
+    }
+
+    fn endpoint(participants: &[D::PublicKey], public_key: &D::PublicKey) -> Endpoint {
+        let index = participants
+            .iter()
+            .position(|candidate| candidate == public_key)
+            .expect("participant not found");
+        Endpoint::new(index as u64 + 1)
     }
 
     /// Run the simulation synchronously using [`Self::seed`].
@@ -908,11 +905,16 @@ mod tests {
 
     impl EngineDefinition for FinalizingEngine {
         type PublicKey = ed25519::PublicKey;
+        type Signer = ed25519::PrivateKey;
         type Engine = FinalizingNode;
         type State = ();
 
         fn participants(&self) -> Vec<Self::PublicKey> {
             self.participants.clone()
+        }
+
+        fn signer(&self, index: usize) -> Self::Signer {
+            ed25519::PrivateKey::from_seed(index as u64)
         }
 
         fn channels(&self) -> Vec<(u64, Quota)> {
@@ -963,11 +965,16 @@ mod tests {
 
     impl EngineDefinition for FaultObservingEngine {
         type PublicKey = ed25519::PublicKey;
+        type Signer = ed25519::PrivateKey;
         type Engine = FaultObservingNode;
         type State = bool;
 
         fn participants(&self) -> Vec<Self::PublicKey> {
             self.participants.clone()
+        }
+
+        fn signer(&self, index: usize) -> Self::Signer {
+            ed25519::PrivateKey::from_seed(index as u64)
         }
 
         fn channels(&self) -> Vec<(u64, Quota)> {
@@ -1085,14 +1092,14 @@ mod tests {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(0),
-            success_rate: 1.0,
+            behavior: Default::default(),
         };
         let result = PlanBuilder::new(FinalizingEngine::new(1, Duration::from_millis(100), 1))
             .required_finalizations(1)
             .timeout(Duration::from_secs(2))
             .crash(Crash::Schedule(
                 Schedule::new()
-                    .at(Duration::from_millis(1), Action::Heal(link.clone()))
+                    .at(Duration::from_millis(1), Action::Heal(link))
                     .at(Duration::from_secs(5), Action::Heal(link)),
             ))
             .run()
@@ -1112,7 +1119,7 @@ mod tests {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(0),
-            success_rate: 1.0,
+            behavior: Default::default(),
         };
         let engine = FinalizingEngine::new(2, Duration::from_millis(100), 2);
         let delayed = engine.participants[0].clone();

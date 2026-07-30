@@ -11,6 +11,13 @@ use commonware_utils::PlatformSend;
 use core::future;
 use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
 
+#[cfg(not(target_arch = "wasm32"))]
+commonware_macros::stability_mod!(ALPHA, pub mod deterministic);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[commonware_macros::stability(ALPHA)]
+pub use deterministic::{LookupNetwork, lookup};
+
 /// Metrics implementation that registers nothing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Metrics;

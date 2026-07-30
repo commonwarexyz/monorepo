@@ -5,23 +5,24 @@ use colored::Colorize;
 use commonware_cryptography::{Signer, ed25519};
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::{
-    simulated::{Config, Link, Network, Receiver, Sender},
+    Advertisement, Reachability, ReachabilityManager,
+    authenticated::lookup::{self, Receiver, Sender},
     utils::codec::{WrappedReceiver, WrappedSender, wrap},
 };
 use commonware_runtime::{
-    Acceptor, BufferPool, BufferPooler, Clock, Connection, Dialer, Handle, Metrics, Quota, Runner,
-    Spawner, TcpEndpoint, TcpOrigin, deterministic,
+    BufferPool, BufferPooler, Clock, Handle, Metrics, Quota, Runner, Spawner, Supervisor,
+    deterministic,
 };
 use commonware_utils::{
-    NZUsize,
+    NZU32, NZUsize,
     channel::{mpsc, oneshot},
+    ordered::Map,
 };
 use estimator::{
     Command, Distribution, Latencies, RegionConfig, calculate_proposer_region, calculate_threshold,
     count_peers, crate_version, get_latency_data, mean, median, parse_task, std_dev,
 };
 use futures::future::try_join_all;
-use rand_core::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
@@ -36,8 +37,11 @@ const DEFAULT_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 /// The channel to use for all messages
 const DEFAULT_CHANNEL: u64 = 0;
 
-/// The success rate over all links (1.0 = 100%)
-const DEFAULT_SUCCESS_RATE: f64 = 1.0;
+/// Namespace for authenticated estimator connections.
+const NETWORK_NAMESPACE: &[u8] = b"_COMMONWARE_ESTIMATOR_NETWORK";
+
+/// Time reserved for lookup to authenticate and connect the full topology.
+const NETWORK_STARTUP: Duration = Duration::from_secs(10);
 
 /// The message type
 type Message = Vec<u8>;
@@ -71,6 +75,8 @@ type PeerIdentity<C> = (
     WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
     WrappedReceiver<Receiver<ed25519::PublicKey>, Message>,
 );
+
+type TransportOracle = deterministic::network::Oracle<deterministic::Context>;
 
 /// The result of a peer job execution
 type PeerResult = (
@@ -291,54 +297,39 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C>(
-    context: C,
+async fn run_simulation_logic(
+    context: deterministic::Context,
     proposer_idx: usize,
     peers: usize,
     distribution: &Distribution,
     commands: &[(usize, Command)],
     latencies: &Latencies,
-) -> Steps
-where
-    C: Acceptor<Bind = SocketAddr, Connection: Connection<Origin = TcpOrigin>>
-        + Dialer<Endpoint = TcpEndpoint, Connection: Connection<Origin = TcpOrigin>>
-        + Spawner
-        + BufferPooler
-        + Clock
-        + Metrics
-        + Rng,
-{
-    let mut peer_addresses: Vec<(ed25519::PublicKey, String)> = Vec::with_capacity(peers);
+) -> Steps {
+    let mut peer_addresses = Vec::with_capacity(peers);
     for (region, config) in distribution {
         for _ in 0..config.count {
             let peer_idx = peer_addresses.len() as u64;
             peer_addresses.push((
                 ed25519::PrivateKey::from_seed(peer_idx).public_key(),
+                deterministic::network::Endpoint::new(peer_idx),
                 region.clone(),
             ));
         }
     }
 
-    let (network, mut oracle) = Network::new_with_peers(
-        context.child("network"),
-        Config {
-            max_size: u32::MAX,
-            disconnect_on_block: true,
-            tracked_peer_sets: NZUsize!(1),
-        },
-        peer_addresses.iter().map(|(k, _)| k.clone()),
-    )
-    .await;
-    network.start();
+    let transport = TransportOracle::new(deterministic::network::Config::default());
+    setup_network_links(&transport, &peer_addresses, latencies);
 
     let identities = setup_network_identities(
+        &context,
         &peer_addresses,
         context.network_buffer_pool().clone(),
-        &mut oracle,
-        distribution,
-    )
-    .await;
-    setup_network_links(&mut oracle, &identities, latencies).await;
+        &transport,
+    );
+
+    // Authentication and connection establishment are setup costs, not mechanism latency.
+    context.sleep(NETWORK_STARTUP).await;
+    setup_bandwidth(&transport, &peer_addresses, distribution);
 
     let (tx, mut rx) = mpsc::channel(peers);
     let jobs = spawn_peer_jobs(&context, proposer_idx, peers, identities, commands, tx);
@@ -362,61 +353,100 @@ where
 }
 
 /// Set up network identities for all peers across regions
-async fn setup_network_identities<C: Clock>(
-    peers: &[(ed25519::PublicKey, String)],
+fn setup_network_identities(
+    context: &deterministic::Context,
+    peers: &[(ed25519::PublicKey, deterministic::network::Endpoint, String)],
     pool: BufferPool,
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
-    distribution: &Distribution,
-) -> Vec<PeerIdentity<C>> {
+    transport: &TransportOracle,
+) -> Vec<PeerIdentity<deterministic::Context>> {
     let mut identities = Vec::with_capacity(peers.len());
+    let reachability: Map<_, _> = peers
+        .iter()
+        .map(|(identity, endpoint, _)| {
+            let advertisement = Advertisement::new(vec![*endpoint]).unwrap();
+            (identity.clone(), Reachability::Dialable(advertisement))
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
 
-    // Register all peers
-    for (identity, region) in peers {
-        let (sender, receiver) = oracle
-            .control(identity.clone())
-            .register(DEFAULT_CHANNEL, DEFAULT_QUOTA)
-            .await
-            .unwrap();
+    for (index, (identity, endpoint, region)) in peers.iter().enumerate() {
+        let signer = ed25519::PrivateKey::from_seed(index as u64);
+        let node = transport.register(
+            context.child("transport"),
+            *endpoint,
+            Some(deterministic::network::Origin::new(index as u64)),
+        );
+        let (dialer, acceptor) = node.split();
+        let tcp_config = lookup::Config::local(
+            signer,
+            NETWORK_NAMESPACE,
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            u32::MAX,
+        );
+        let mut lookup_config = lookup::GenericConfig::from(tcp_config);
+        lookup_config.tracked_peer_sets = NZUsize!(1);
+        lookup_config.dial_frequency = Duration::from_millis(1);
+
+        let (network, mut oracle) =
+            lookup::DialOnlyNetwork::new(context.child("lookup"), dialer, lookup_config);
+        let mut network = network.accepting(
+            acceptor,
+            *endpoint,
+            lookup::UnrestrictedAdmission,
+            NZU32!(1_024),
+        );
+        let (sender, receiver) = network.register(DEFAULT_CHANNEL, DEFAULT_QUOTA, peers.len());
+        oracle.track(0, reachability.clone());
+
         let codec_config = (commonware_codec::RangeCfg::from(..), ());
         let (sender, receiver) =
             wrap::<_, _, Message>(codec_config, pool.clone(), sender, receiver);
         identities.push((identity.clone(), region.clone(), sender, receiver));
-    }
-
-    // Set bandwidth limits for each peer based on their region config
-    for (identity, region, _, _) in &identities {
-        let config = &distribution[region];
-        oracle
-            .limit_bandwidth(identity.clone(), config.egress_cap, config.ingress_cap)
-            .await
-            .unwrap();
+        network.start();
     }
 
     identities
 }
 
 /// Set up network links between all peers with appropriate latencies
-async fn setup_network_links<C: Clock>(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
-    identities: &[PeerIdentity<C>],
+fn setup_network_links(
+    transport: &TransportOracle,
+    peers: &[(ed25519::PublicKey, deterministic::network::Endpoint, String)],
     latencies: &Latencies,
 ) {
-    for (i, (identity, region, _, _)) in identities.iter().enumerate() {
-        for (j, (other_identity, other_region, _, _)) in identities.iter().enumerate() {
+    for (i, (_, endpoint, region)) in peers.iter().enumerate() {
+        for (j, (_, other_endpoint, other_region)) in peers.iter().enumerate() {
             if i == j {
                 continue;
             }
             let latency = latencies[region][other_region];
-            let link = Link {
-                latency: Duration::from_micros((latency.0 * 1000.0) as u64),
-                jitter: Duration::from_micros((latency.1 * 1000.0) as u64),
-                success_rate: DEFAULT_SUCCESS_RATE,
-            };
-            oracle
-                .add_link(identity.clone(), other_identity.clone(), link)
-                .await
+            let link = deterministic::network::Link::new(Duration::from_micros(
+                (latency.0 * 1000.0) as u64,
+            ))
+            .with_jitter(Duration::from_micros((latency.1 * 1000.0) as u64));
+            transport
+                .set_link(*endpoint, *other_endpoint, link)
                 .unwrap();
         }
+    }
+}
+
+/// Apply application-traffic bandwidth after authenticated connections are established.
+fn setup_bandwidth(
+    transport: &TransportOracle,
+    peers: &[(ed25519::PublicKey, deterministic::network::Endpoint, String)],
+    distribution: &Distribution,
+) {
+    for (_, endpoint, region) in peers {
+        let config = &distribution[region];
+        transport
+            .limit_bandwidth(
+                *endpoint,
+                config.egress_cap.map(|cap| cap as u64),
+                config.ingress_cap.map(|cap| cap as u64),
+            )
+            .unwrap();
     }
 }
 

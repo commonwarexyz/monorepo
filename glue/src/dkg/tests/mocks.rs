@@ -29,11 +29,7 @@ use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
     transcript::Summary,
 };
-use commonware_p2p::{
-    Message as P2pMessage, Receiver,
-    simulated::{Control, Manager as SimManager},
-    utils::mux,
-};
+use commonware_p2p::{Message as P2pMessage, Receiver, utils::mux};
 use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
 use commonware_utils::{
@@ -59,8 +55,8 @@ pub(crate) type TestScheme = scheme::Scheme<TestPublicKey>;
 pub(crate) type TestProvider = ConstantProvider<TestScheme, Epoch>;
 pub(crate) type TestElector = RoundRobin;
 pub(crate) type TestStrategy = Sequential;
-pub(crate) type TestBlocker = Control<TestPublicKey, deterministic::Context>;
-pub(crate) type TestManager = SimManager<TestPublicKey, deterministic::Context>;
+pub(crate) type TestBlocker = crate::simulate::engine::LookupManager<TestPublicKey>;
+pub(crate) type TestManager = crate::simulate::engine::LookupManager<TestPublicKey>;
 pub(crate) type TestMailbox = orchestrator::Mailbox<TestBlock>;
 pub(crate) type TestMarshalMailbox = MarshalMailbox<TestScheme, TestMarshalVariant>;
 pub(crate) type TestActor = orchestrator::Actor<
@@ -457,6 +453,7 @@ impl Reporter for MarshalApplication {
 
 pub(crate) struct SchemeFixture {
     pub(crate) participants: Vec<TestPublicKey>,
+    pub(crate) private_keys: Vec<TestSigner>,
     pub(crate) schemes: Vec<TestScheme>,
     pub(crate) provider: TestProvider,
 }
@@ -470,6 +467,7 @@ pub(crate) fn scheme_fixture_n(context: &mut deterministic::Context, n: u32) -> 
     let provider = ConstantProvider::new(fixture.schemes[0].clone());
     SchemeFixture {
         participants: fixture.participants,
+        private_keys: fixture.private_keys,
         schemes: fixture.schemes,
         provider,
     }

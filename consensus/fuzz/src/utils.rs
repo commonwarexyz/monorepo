@@ -1,7 +1,7 @@
 use arbitrary::Arbitrary;
-use commonware_cryptography::PublicKey;
-use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
-use commonware_runtime::{Clock, Quota};
+use commonware_consensus::simplex::mocks::network::{Channel, Link, Network};
+use commonware_cryptography::ed25519::PublicKey;
+use commonware_runtime::Quota;
 use std::{collections::HashMap, num::NonZeroU32};
 
 /// Default rate limit set high enough to not interfere with normal operation
@@ -62,9 +62,9 @@ fn ring(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
-pub async fn link_peers<P: PublicKey, E: Clock>(
-    oracle: &mut Oracle<P, E>,
-    validators: &[P],
+pub async fn link_peers(
+    network: &Network,
+    validators: &[PublicKey],
     action: Action,
     filter: Option<fn(usize, usize, usize) -> bool>,
 ) {
@@ -73,20 +73,22 @@ pub async fn link_peers<P: PublicKey, E: Clock>(
             if v2 == v1 {
                 continue;
             }
-            if let Some(f) = filter
-                && !f(validators.len(), i1, i2)
-            {
+            let selected = filter.is_none_or(|filter| filter(validators.len(), i1, i2));
+            if !selected {
+                if matches!(&action, Action::Link(_)) {
+                    network.remove_link(v1.clone(), v2.clone()).await.ok();
+                }
                 continue;
             }
             match action {
                 Action::Update(_) | Action::Unlink => {
-                    oracle.remove_link(v1.clone(), v2.clone()).await.ok();
+                    network.remove_link(v1.clone(), v2.clone()).await.ok();
                 }
                 _ => {}
             }
             match action {
                 Action::Link(ref link) | Action::Update(ref link) => {
-                    oracle
+                    network
                         .add_link(v1.clone(), v2.clone(), link.clone())
                         .await
                         .unwrap();
@@ -97,24 +99,79 @@ pub async fn link_peers<P: PublicKey, E: Clock>(
     }
 }
 
-pub async fn register<P: PublicKey, E: Clock>(
-    oracle: &mut Oracle<P, E>,
-    validators: &[P],
-) -> HashMap<
-    P,
-    (
-        (Sender<P, E>, Receiver<P>),
-        (Sender<P, E>, Receiver<P>),
-        (Sender<P, E>, Receiver<P>),
-    ),
-> {
+pub async fn register(
+    network: &Network,
+    validators: &[PublicKey],
+) -> HashMap<PublicKey, (Channel, Channel, Channel)> {
     let mut registrations = HashMap::new();
     for validator in validators.iter() {
-        let control = oracle.control(validator.clone());
+        let control = network.control(validator.clone());
         let pending = control.register(0, TEST_QUOTA).await.unwrap();
         let recovered = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver = control.register(2, TEST_QUOTA).await.unwrap();
         registrations.insert(validator.clone(), (pending, recovered, resolver));
     }
     registrations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_consensus::simplex::mocks::network::PrivateKey;
+    use commonware_cryptography::Signer as _;
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use std::time::Duration;
+
+    #[test]
+    fn partitions_replace_bootstrap_topology() {
+        deterministic::Runner::default().start(|context| async move {
+            for partition in [
+                Partition::Connected,
+                Partition::Isolated,
+                Partition::TwoPartitionsWithByzantine,
+                Partition::ManyPartitionsWithByzantine,
+                Partition::Ring,
+            ] {
+                let private_keys = (0..4).map(PrivateKey::from_seed).collect::<Vec<_>>();
+                let validators = private_keys
+                    .iter()
+                    .map(|key| key.public_key())
+                    .collect::<Vec<_>>();
+                let network = Network::new(
+                    context.child("network"),
+                    private_keys,
+                    validators.clone(),
+                    [],
+                    &[],
+                );
+                link_peers(
+                    &network,
+                    &validators,
+                    Action::Link(Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    }),
+                    partition.filter(),
+                )
+                .await;
+
+                for (from_index, from) in validators.iter().enumerate() {
+                    for (to_index, to) in validators.iter().enumerate() {
+                        if from == to {
+                            continue;
+                        }
+                        let expected = partition
+                            .filter()
+                            .is_none_or(|filter| filter(validators.len(), from_index, to_index));
+                        assert_eq!(
+                            network.linked(from, to),
+                            expected,
+                            "unexpected {partition:?} link {from_index} -> {to_index}"
+                        );
+                    }
+                }
+            }
+        });
+    }
 }

@@ -305,8 +305,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        Manager as _, Recipients,
-        simulated::{self, Link, Network, Oracle},
+        Recipients,
+        utils::mocks::deterministic::lookup_test::{start_peers, wait_for_connected},
     };
     use commonware_actor::Feedback;
     use commonware_codec::Encode;
@@ -316,11 +316,11 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_parallel::{Manual, Sequential, Strategy};
-    use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{Clock as _, IoBuf, Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::mpsc, ordered::Set};
     use std::{
         io,
-        num::{NonZeroU32, NonZeroUsize},
+        num::NonZeroUsize,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -328,45 +328,8 @@ mod tests {
         time::Duration,
     };
 
-    const LINK: Link = Link {
-        latency: Duration::from_millis(0),
-        jitter: Duration::from_millis(0),
-        success_rate: 1.0,
-    };
-
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-    fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
-        let (network, oracle) = Network::new(
-            context.child("network"),
-            simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
-        );
-        network.start();
-        oracle
-    }
-
     fn pk(seed: u64) -> PublicKey {
         PrivateKey::from_seed(seed).public_key()
-    }
-
-    fn track_peers<I>(oracle: &Oracle<PublicKey, deterministic::Context>, index: u64, peers: I)
-    where
-        I: IntoIterator<Item = PublicKey>,
-    {
-        oracle.manager().track(index, Set::from_iter_dedup(peers));
-    }
-
-    async fn link_bidirectional(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
-        a: PublicKey,
-        b: PublicKey,
-    ) {
-        oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
-        oracle.add_link(b, a, LINK).await.unwrap();
     }
 
     #[derive(Debug)]
@@ -538,17 +501,12 @@ mod tests {
     fn test_valid_messages_forwarded() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let pk1 = pk(0);
-            let pk2 = pk(1);
-            let control1 = oracle.control(pk1.clone());
-            let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
-
-            let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
-            let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
+            let mut peers = start_peers(&context, 2).await;
+            let pk1 = peers[0].key.clone();
+            let pk2 = peers[1].key.clone();
+            let control2 = peers[1].oracle.clone();
+            let (mut sender1, _) = peers[0].take_channel();
+            let (_, receiver2) = peers[1].take_channel();
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
@@ -573,18 +531,13 @@ mod tests {
     fn test_invalid_codec_blocks_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let pk1 = pk(0);
-            let pk2 = pk(1);
-            let pk3 = pk(2);
-            let control1 = oracle.control(pk1.clone());
-            let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone(), pk3.clone()]);
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
-
-            let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
-            let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
+            let mut peers = start_peers(&context, 3).await;
+            let pk2 = peers[1].key.clone();
+            let pk3 = peers[2].key.clone();
+            let control2 = peers[1].oracle.clone();
+            let (mut sender1, _) = peers[0].take_channel();
+            let (mut sender2, receiver2) = peers[1].take_channel();
+            let (mut sender3, _) = peers[2].take_channel();
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
@@ -602,26 +555,14 @@ mod tests {
 
             // Then send a valid message from a different peer to confirm
             // the receiver is still running.
-            let control3 = oracle.control(pk3.clone());
-            link_bidirectional(&mut oracle, pk3.clone(), pk2.clone()).await;
-            let (mut sender3, _) = control3.register(0, TEST_QUOTA).await.unwrap();
-
             let msg: u32 = 99;
-            let _ = sender3.send(Recipients::One(pk2.clone()), msg.encode(), true);
+            let _ = sender3.send(Recipients::One(pk2), msg.encode(), true);
 
             let (from, value) = rx.recv().await.unwrap();
             assert_eq!(from, pk3);
             assert_eq!(value, 99u32);
 
-            // Verify pk1 was blocked.
-            loop {
-                let blocked = oracle.blocked().await.unwrap();
-                if blocked.contains(&(pk2.clone(), pk1.clone())) {
-                    break;
-                }
-
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            wait_for_connected(&context, &mut sender2, &Set::from_iter_dedup([pk3])).await;
         });
     }
 
@@ -629,17 +570,12 @@ mod tests {
     fn test_multiple_valid_messages() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let pk1 = pk(0);
-            let pk2 = pk(1);
-            let control1 = oracle.control(pk1.clone());
-            let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
-
-            let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
-            let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
+            let mut peers = start_peers(&context, 2).await;
+            let pk1 = peers[0].key.clone();
+            let pk2 = peers[1].key.clone();
+            let control2 = peers[1].oracle.clone();
+            let (mut sender1, _) = peers[0].take_channel();
+            let (_, receiver2) = peers[1].take_channel();
 
             let count = 20;
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
@@ -672,17 +608,12 @@ mod tests {
     fn test_decode_with_strategy() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let pk1 = pk(0);
-            let pk2 = pk(1);
-            let control1 = oracle.control(pk1.clone());
-            let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
-
-            let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
-            let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
+            let mut peers = start_peers(&context, 2).await;
+            let pk1 = peers[0].key.clone();
+            let pk2 = peers[1].key.clone();
+            let control2 = peers[1].oracle.clone();
+            let (mut sender1, _) = peers[0].take_channel();
+            let (_, receiver2) = peers[1].take_channel();
 
             // Give the decoded mailbox enough capacity for all messages so this test only
             // exercises the decode concurrency bound.
@@ -716,21 +647,13 @@ mod tests {
     fn test_invalid_among_valid_only_blocks_offender() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
-
-            let pk1 = pk(0);
-            let pk2 = pk(1);
-            let pk3 = pk(2);
-            let control1 = oracle.control(pk1.clone());
-            let control2 = oracle.control(pk2.clone());
-            let control3 = oracle.control(pk3.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone(), pk3.clone()]);
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
-            link_bidirectional(&mut oracle, pk3.clone(), pk2.clone()).await;
-
-            let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
-            let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
-            let (mut sender3, _) = control3.register(0, TEST_QUOTA).await.unwrap();
+            let mut peers = start_peers(&context, 3).await;
+            let pk2 = peers[1].key.clone();
+            let pk3 = peers[2].key.clone();
+            let control2 = peers[1].oracle.clone();
+            let (mut sender1, _) = peers[0].take_channel();
+            let (mut sender2, receiver2) = peers[1].take_channel();
+            let (mut sender3, _) = peers[2].take_channel();
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
@@ -761,16 +684,7 @@ mod tests {
             values.sort();
             assert_eq!(values, vec![10u32, 20]);
 
-            // Only pk1 should be blocked.
-            loop {
-                let blocked = oracle.blocked().await.unwrap();
-                assert!(!blocked.contains(&(pk2.clone(), pk3.clone())));
-                if blocked.contains(&(pk2.clone(), pk1.clone())) {
-                    break;
-                }
-
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            wait_for_connected(&context, &mut sender2, &Set::from_iter_dedup([pk3])).await;
         });
     }
 

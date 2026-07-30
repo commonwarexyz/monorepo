@@ -61,6 +61,36 @@ pub trait InboundAdmission<P: PublicKey, O>: PlatformSend + PlatformSync + 'stat
     ) -> impl Future<Output = Result<(), Rejection>> + PlatformSend;
 }
 
+/// Applies no transport-origin policy after tracker membership is checked.
+///
+/// This policy is suitable for transports whose origin metadata has no admission semantics. When
+/// used with explicit attachment, callers must independently constrain the expected peer.
+#[stability(ALPHA)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnrestrictedAdmission;
+
+#[stability(ALPHA)]
+impl<P, O> InboundAdmission<P, O> for UnrestrictedAdmission
+where
+    P: PublicKey,
+    O: PlatformSend + PlatformSync + 'static,
+{
+    type Permit = ();
+
+    fn pre_auth(&self, _info: &ConnectionInfo<O>) -> Result<Self::Permit, Rejection> {
+        Ok(())
+    }
+
+    async fn post_auth(
+        &self,
+        _permit: Self::Permit,
+        _peer: &P,
+        _info: &ConnectionInfo<O>,
+    ) -> Result<(), Rejection> {
+        Ok(())
+    }
+}
+
 /// Admits only one expected authenticated peer, independent of transport origin.
 #[stability(ALPHA)]
 #[derive(Clone, Debug)]

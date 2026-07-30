@@ -11,9 +11,16 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
 };
-use commonware_p2p::{Recipients, simulated::Network};
-use commonware_runtime::{Buf, BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
-use commonware_utils::{NZUsize, TestRng, channel::oneshot, futures::Pool, vec::Bounded};
+use commonware_p2p::{
+    Advertisement, Reachability, ReachabilityManager as _, ReachableTrackedPeers, Recipients,
+};
+use commonware_runtime::{
+    Buf, BufMut, Clock, Quota, Runner, Supervisor as _, deterministic,
+    deterministic::network::{Endpoint, Link, Oracle as TransportOracle},
+};
+use commonware_utils::{
+    NZUsize, TestRng, channel::oneshot, futures::Pool, ordered::Map, vec::Bounded,
+};
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
@@ -150,7 +157,7 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
 #[derive(Debug)]
 pub struct FuzzInput {
     peer_seeds: Vec<u64>,
-    network_success_rate: f64,
+    network_partition_rate: u8,
     network_latency_ms: u64,
     network_jitter_ms: u64,
     cache_size: usize,
@@ -161,7 +168,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let num_peers = u.int_in_range(1..=5)?;
         let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
-        let network_success_rate = u.int_in_range(30..=100)? as f64 / 100.0;
+        let network_partition_rate = u.int_in_range(0..=70)?;
         let network_latency_ms = u.int_in_range(1..=100)?;
         let network_jitter_ms = u.int_in_range(0..=50)?;
         let cache_size = u.int_in_range(5..=10)?;
@@ -173,7 +180,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
 
         Ok(FuzzInput {
             peer_seeds,
-            network_success_rate,
+            network_partition_rate,
             network_latency_ms,
             network_jitter_ms,
             cache_size,
@@ -216,65 +223,74 @@ fn fuzz(input: FuzzInput) {
     executor.start(|context| async move {
         // Generate peer identities before building the network so the initial
         // peer set can be seeded through the constructor.
-        let peers = input
+        let schemes = input
             .peer_seeds
             .iter()
-            .map(|&seed| PrivateKey::from_seed(seed).public_key())
+            .map(|&seed| PrivateKey::from_seed(seed))
             .collect::<Vec<_>>();
+        let peers = schemes.iter().map(Signer::public_key).collect::<Vec<_>>();
 
-        // Create network
-        let (network, oracle) = Network::<deterministic::Context, PublicKey>::new_with_peers(
-            context.child("network"),
-            commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: false,
-                tracked_peer_sets: NZUsize!(1),
-            },
-            peers.clone(),
-        )
-        .await;
-        network.start();
+        let transport = TransportOracle::new(Default::default());
+        let endpoints = peers
+            .iter()
+            .enumerate()
+            .map(|(index, peer)| (peer.clone(), Endpoint::new(index as u64)))
+            .collect::<BTreeMap<_, _>>();
+        let link = Link::new(Duration::from_millis(input.network_latency_ms))
+            .with_jitter(Duration::from_millis(input.network_jitter_ms));
+        for (from_index, from) in peers.iter().enumerate() {
+            for (to_index, to) in peers.iter().enumerate() {
+                if from == to {
+                    continue;
+                }
+                transport
+                    .set_link(endpoints[from], endpoints[to], link)
+                    .unwrap();
+                let pair = (from_index * peers.len() + to_index) as u8;
+                if pair.wrapping_mul(37) % 100 < input.network_partition_rate {
+                    transport.partition(endpoints[from], endpoints[to], true);
+                }
+            }
+        }
 
-        // Create peers
         let mut mailboxes: BTreeMap<PublicKey, Mailbox<PublicKey, FuzzMessage>> = BTreeMap::new();
-        for (i, public_key) in peers.iter().cloned().enumerate() {
-            // Create channel
-            let (sender, receiver) = oracle
-                .control(public_key.clone())
-                .register(0, TEST_QUOTA)
-                .await
-                .unwrap();
+        for (i, (scheme, public_key)) in schemes.into_iter().zip(peers.iter().cloned()).enumerate()
+        {
+            let (mut network, mut oracle) = commonware_p2p::utils::mocks::lookup(
+                context.child("peer_network").with_attribute("index", i),
+                &transport,
+                scheme,
+                endpoints[&public_key],
+                b"_COMMONWARE_BROADCAST_FUZZ",
+                1024 * 1024,
+            );
+            let channel = network.register(0, TEST_QUOTA, 1024);
+            let reachability = Map::from_iter_dedup(peers.iter().cloned().map(|peer| {
+                let advertisement = Advertisement::new(vec![endpoints[&peer]]).unwrap();
+                let reachability = if public_key < peer {
+                    Reachability::Dialable(advertisement)
+                } else {
+                    Reachability::OutboundOnly
+                };
+                (peer, reachability)
+            }));
+            oracle.track(0, ReachableTrackedPeers::primary(reachability));
 
-            // Create mailbox
             let config = Config {
                 public_key: public_key.clone(),
                 mailbox_size: NZUsize!(1024),
                 deque_size: input.cache_size,
                 priority: false,
                 codec_config: RangeCfg::from(..),
-                peer_provider: oracle.manager(),
+                peer_provider: oracle,
             };
 
-            // Create engine
             let engine_context = context.child("peer").with_attribute("index", i);
             let (engine, mailbox) =
                 Engine::<_, PublicKey, FuzzMessage, _>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);
-            engine.start((sender, receiver));
-        }
-
-        // Add links between peers
-        let link = commonware_p2p::simulated::Link {
-            latency: Duration::from_millis(input.network_latency_ms),
-            jitter: Duration::from_millis(input.network_jitter_ms),
-            success_rate: input.network_success_rate,
-        };
-        for p1 in &peers {
-            for p2 in &peers {
-                if p1 != p2 {
-                    let _ = oracle.add_link(p1.clone(), p2.clone(), link.clone()).await;
-                }
-            }
+            engine.start(channel);
+            network.start();
         }
 
         // Execute fuzzed actions

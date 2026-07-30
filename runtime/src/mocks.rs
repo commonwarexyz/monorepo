@@ -144,7 +144,7 @@ enum SinkState {
 }
 
 impl Sink {
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         if matches!(self.state, SinkState::Closed) {
             return;
         }

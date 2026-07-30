@@ -92,11 +92,12 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::select;
-    use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, Handle, Quota, Runner, Scheduler as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic,
+        buffer::paged::CacheRef,
+        deterministic,
+        deterministic::network::{Behavior, Link, Oracle as NetworkOracle},
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -113,15 +114,14 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: 1.0,
+        behavior: Behavior::Deliver,
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 
     struct Cluster {
         nodes: Vec<Node>,
         boundary: mocks::TestBlock,
-        oracle: Oracle<mocks::TestPublicKey, deterministic::Context>,
-        network_handle: Handle<()>,
+        transport: NetworkOracle<deterministic::Context>,
     }
 
     impl Cluster {
@@ -193,27 +193,7 @@ mod tests {
             let boundary = make_height_one_block(participants[0].clone(), &participants);
             let nodes = participants.len();
 
-            let (network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                NetworkConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                participants.clone(),
-            )
-            .await;
-            let network_handle = network.start();
-            for from in &participants {
-                for to in &participants {
-                    if from != to {
-                        oracle
-                            .add_link(from.clone(), to.clone(), LINK)
-                            .await
-                            .expect("failed to add link");
-                    }
-                }
-            }
+            let transport = crate::test_utils::transport(context, participants.len(), LINK);
 
             let mut started = Vec::with_capacity(nodes);
             for index in 0..nodes {
@@ -226,7 +206,7 @@ mod tests {
                 started.push(
                     Node::start_with_gate_epoch(
                         context.child("node").with_attribute("index", index),
-                        &oracle,
+                        &transport,
                         fixture,
                         index,
                         boundary,
@@ -240,8 +220,7 @@ mod tests {
             Self {
                 nodes: started,
                 boundary,
-                oracle,
-                network_handle,
+                transport,
             }
         }
 
@@ -251,9 +230,12 @@ mod tests {
             fixture: &mocks::SchemeFixture,
             index: usize,
         ) {
-            self.nodes[index].abort();
+            self.nodes[index].abort_and_wait().await;
+            self.transport
+                .set_online(crate::test_utils::endpoint(index), false)
+                .expect("participant is registered");
             self.nodes[index] =
-                Node::start(context, &self.oracle, fixture, index, None, None).await;
+                Node::start(context, &self.transport, fixture, index, None, None).await;
         }
     }
 
@@ -262,7 +244,6 @@ mod tests {
             for node in &mut self.nodes {
                 node.abort();
             }
-            self.network_handle.abort();
         }
     }
 
@@ -272,14 +253,26 @@ mod tests {
         application: mocks::MockApplication,
         orchestrator_handle: Handle<()>,
         marshal_handle: Handle<()>,
+        network_handle: Handle<()>,
         // Held so the epoch gate stays open for the node's lifetime.
         _fence: Fence,
     }
 
     impl Node {
+        async fn abort_and_wait(&mut self) {
+            self.orchestrator_handle.abort();
+            self.marshal_handle.abort();
+            self.network_handle.abort();
+            let _ = futures::join!(
+                &mut self.orchestrator_handle,
+                &mut self.marshal_handle,
+                &mut self.network_handle,
+            );
+        }
+
         async fn start(
             context: deterministic::Context,
-            oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
+            transport: &NetworkOracle<deterministic::Context>,
             fixture: &mocks::SchemeFixture,
             index: usize,
             boundary: Option<mocks::TestBlock>,
@@ -287,7 +280,7 @@ mod tests {
         ) -> Self {
             Self::start_with_gate_epoch(
                 context,
-                oracle,
+                transport,
                 fixture,
                 index,
                 boundary,
@@ -299,7 +292,7 @@ mod tests {
 
         async fn start_with_gate_epoch(
             context: deterministic::Context,
-            oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
+            transport: &NetworkOracle<deterministic::Context>,
             fixture: &mocks::SchemeFixture,
             index: usize,
             boundary: Option<mocks::TestBlock>,
@@ -307,20 +300,31 @@ mod tests {
             gate_epoch: Epoch,
         ) -> Self {
             let public_key = fixture.participants[index].clone();
-            let control = oracle.control(public_key.clone());
+            let (oracle, mut channels, network_handle) = crate::test_utils::start_node(
+                context.child("lookup"),
+                transport,
+                fixture.private_keys[index].clone(),
+                index,
+                &fixture.participants,
+                b"_COMMONWARE_GLUE_DKG_ORCHESTRATOR_LOOKUP",
+                1024 * 1024,
+                &[
+                    (BACKFILL_CHANNEL, TEST_QUOTA),
+                    (VOTE_CHANNEL, TEST_QUOTA),
+                    (CERTIFICATE_CHANNEL, TEST_QUOTA),
+                    (RESOLVER_CHANNEL, TEST_QUOTA),
+                ],
+            );
             let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
             let partition_prefix = format!("orchestrator-node-{index}");
 
-            let backfill = control
-                .register(BACKFILL_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register marshal backfill channel");
+            let backfill = channels.remove(0);
             let resolver = marshal_resolver::init(
                 context.child("marshal_resolver"),
                 marshal_resolver::Config {
                     public_key: public_key.clone(),
-                    peer_provider: oracle.manager(),
-                    blocker: control.clone(),
+                    peer_provider: oracle.clone(),
+                    blocker: oracle.clone(),
                     mailbox_size: NZUsize!(16),
                     initial: Duration::from_millis(100),
                     timeout: Duration::from_millis(200),
@@ -390,8 +394,8 @@ mod tests {
             let (actor, mailbox) = Actor::new(
                 context.child("orchestrator"),
                 Config {
-                    oracle: control.clone(),
-                    manager: oracle.manager(),
+                    oracle: oracle.clone(),
+                    manager: oracle.clone(),
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     marshal: marshal.clone(),
                     application: application.clone(),
@@ -429,18 +433,9 @@ mod tests {
                 );
             }
 
-            let votes = control
-                .register(VOTE_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register vote channel");
-            let certificates = control
-                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register certificate channel");
-            let simplex_resolver = control
-                .register(RESOLVER_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register simplex resolver channel");
+            let votes = channels.remove(0);
+            let certificates = channels.remove(0);
+            let simplex_resolver = channels.remove(0);
             let orchestrator_handle = actor.start(votes, certificates, simplex_resolver);
 
             Self {
@@ -449,6 +444,7 @@ mod tests {
                 application,
                 orchestrator_handle,
                 marshal_handle,
+                network_handle,
                 _fence: fence,
             }
         }
@@ -456,6 +452,7 @@ mod tests {
         fn abort(&mut self) {
             self.orchestrator_handle.abort();
             self.marshal_handle.abort();
+            self.network_handle.abort();
         }
     }
 
@@ -491,7 +488,7 @@ mod tests {
         marshal: &mocks::TestMarshalMailbox,
         height: Height,
     ) -> mocks::TestBlock {
-        for _ in 0..50 {
+        for _ in 0..500 {
             if let Some(block) = marshal.get_block(height).await {
                 return block;
             }
@@ -505,7 +502,7 @@ mod tests {
         nodes: &[Node],
         epoch: Epoch,
     ) -> mocks::TestContext {
-        for _ in 0..50 {
+        for _ in 0..500 {
             for node in nodes {
                 if let Some(proposal) = node
                     .application
@@ -635,20 +632,23 @@ mod tests {
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 1);
             let participants = fixture.participants.clone();
-            let (network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                NetworkConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                participants.clone(),
-            )
-            .await;
-            network.start();
+            let transport = crate::test_utils::transport(&context, 1, Link::default());
+            let (oracle, mut channels, _network) = crate::test_utils::start_node(
+                context.child("lookup"),
+                &transport,
+                fixture.private_keys[0].clone(),
+                0,
+                &participants,
+                b"_COMMONWARE_GLUE_DKG_ORCHESTRATOR_SHUTDOWN_LOOKUP",
+                1024 * 1024,
+                &[
+                    (VOTE_CHANNEL, TEST_QUOTA),
+                    (CERTIFICATE_CHANNEL, TEST_QUOTA),
+                    (RESOLVER_CHANNEL, TEST_QUOTA),
+                ],
+            );
 
             let public_key = participants[0].clone();
-            let control = oracle.control(public_key.clone());
             let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
             let partition_prefix = "orchestrator-marshal-shutdown".to_string();
 
@@ -700,8 +700,8 @@ mod tests {
             let (actor, _mailbox): (_, super::Mailbox<mocks::TestBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
                 Config {
-                    oracle: control.clone(),
-                    manager: oracle.manager(),
+                    oracle: oracle.clone(),
+                    manager: oracle.clone(),
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
@@ -715,18 +715,9 @@ mod tests {
                     partition_prefix,
                 },
             );
-            let votes = control
-                .register(VOTE_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register vote channel");
-            let certificates = control
-                .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register certificate channel");
-            let simplex_resolver = control
-                .register(RESOLVER_CHANNEL, TEST_QUOTA)
-                .await
-                .expect("failed to register simplex resolver channel");
+            let votes = channels.remove(0);
+            let certificates = channels.remove(0);
+            let simplex_resolver = channels.remove(0);
 
             // The marshal actor is never started, so startup resolution parks
             // on an unserved processed-height read.

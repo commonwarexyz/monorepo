@@ -331,6 +331,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
 /// Multi-database engine definition for the simulation harness.
 #[derive(Clone)]
 pub(crate) struct MultiDbEngine {
+    signers: Vec<ed25519::PrivateKey>,
     participants: Vec<ed25519::PublicKey>,
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
     enable_state_sync: bool,
@@ -344,11 +345,13 @@ impl MultiDbEngine {
         let mut rng = test_rng();
         let Fixture {
             participants,
+            private_keys,
             schemes,
             ..
         } = scheme_mocks::fixture(&mut rng, NAMESPACE, n);
 
         Self {
+            signers: private_keys,
             participants,
             schemes,
             enable_state_sync: false,
@@ -384,11 +387,16 @@ impl MultiDbEngine {
 
 impl EngineDefinition for MultiDbEngine {
     type PublicKey = ed25519::PublicKey;
+    type Signer = ed25519::PrivateKey;
     type Engine = Handle<()>;
     type State = MockValidatorState<Standard<Block>>;
 
     fn participants(&self) -> Vec<Self::PublicKey> {
         self.participants.clone()
+    }
+
+    fn signer(&self, index: usize) -> Self::Signer {
+        self.signers[index].clone()
     }
 
     fn channels(&self) -> Vec<(u64, Quota)> {
@@ -481,8 +489,8 @@ impl EngineDefinition for MultiDbEngine {
         // Marshal resolver
         let resolver_cfg = marshal_resolver::Config {
             public_key: public_key.clone(),
-            peer_provider: oracle.manager(),
-            blocker: oracle.control(public_key.clone()),
+            peer_provider: oracle.clone(),
+            blocker: oracle.clone(),
             mailbox_size: NZUsize!(100),
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
@@ -503,7 +511,7 @@ impl EngineDefinition for MultiDbEngine {
             deque_size: 10,
             priority: false,
             codec_config: (),
-            peer_provider: oracle.manager(),
+            peer_provider: oracle.clone(),
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -542,7 +550,7 @@ impl EngineDefinition for MultiDbEngine {
             provider: provider.clone(),
             strategy: Sequential,
             capacity: NZUsize!(100),
-            blocker: oracle.control(public_key.clone()),
+            blocker: oracle.clone(),
             minimum_epoch: Epoch::zero(),
             retry_timeout: NZDuration!(Duration::from_millis(100)),
         });
@@ -589,8 +597,8 @@ impl EngineDefinition for MultiDbEngine {
             qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbA<_>>::new(
                 context.child("qmdb_resolver_a"),
                 qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
+                    peer_provider: oracle.clone(),
+                    blocker: oracle.clone(),
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
@@ -615,8 +623,8 @@ impl EngineDefinition for MultiDbEngine {
         >::new(
             context.child("qmdb_resolver_b"),
             compact_resolver::Config {
-                peer_provider: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
+                peer_provider: oracle.clone(),
+                blocker: oracle.clone(),
                 database: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
@@ -706,7 +714,7 @@ impl EngineDefinition for MultiDbEngine {
         let simplex_config = simplex::Config {
             scheme,
             elector: RoundRobin::<Sha256>::default(),
-            blocker: oracle.control(public_key.clone()),
+            blocker: oracle.clone(),
             automaton: deferred.clone(),
             relay: deferred,
             reporter: marshal_mailbox.clone(),

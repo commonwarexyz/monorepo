@@ -8,6 +8,9 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod dkg;
     pub mod stateful;
 
+    #[cfg(test)]
+    mod test_utils;
+
     #[cfg(any(test, feature = "test-utils"))]
     pub mod simulate;
 });

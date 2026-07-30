@@ -198,6 +198,7 @@ pub use crate::authenticated::channels::{Error, Receiver, Sender};
 #[stability(ALPHA)]
 pub use actors::attachment::{
     Attachments, Error as AttachmentError, ExactPeerAdmission, PeerAdmission, Rejected,
+    UnrestrictedAdmission,
 };
 #[stability(ALPHA)]
 pub use actors::tracker::Oracle as ReachabilityOracle;

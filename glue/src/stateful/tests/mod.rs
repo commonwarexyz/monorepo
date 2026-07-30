@@ -11,8 +11,10 @@ use crate::simulate::{
 use commonware_consensus::types::{Epoch, Round, View};
 use commonware_cryptography::{PublicKey, ed25519};
 use commonware_macros::{test_group, test_traced};
-use commonware_p2p::simulated::Link;
-use commonware_runtime::deterministic;
+use commonware_runtime::deterministic::{
+    self,
+    network::{Behavior, Link},
+};
 use multi_db_app::MultiDbEngine;
 use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
@@ -108,29 +110,26 @@ fn state_sync_random_crashes() {
 
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn state_sync_lossy_network() {
+fn state_sync_slow_network() {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: 0.7,
+        behavior: Behavior::Deliver,
     };
-    run_state_sync_lossy(
-        SingleDbEngine::new(NUM_VALIDATORS).with_state_sync(),
-        link.clone(),
-    );
-    run_state_sync_lossy(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync(), link);
+    run_state_sync_slow(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync(), link);
+    run_state_sync_slow(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync(), link);
 }
 
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn lossy_network() {
+fn slow_network() {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: 0.7,
+        behavior: Behavior::Deliver,
     };
-    run_lossy(SingleDbEngine::new(NUM_VALIDATORS), link.clone());
-    run_lossy(MultiDbEngine::new(NUM_VALIDATORS), link);
+    run_slow(SingleDbEngine::new(NUM_VALIDATORS), link);
+    run_slow(MultiDbEngine::new(NUM_VALIDATORS), link);
 }
 
 #[test_group("slow")]
@@ -449,7 +448,7 @@ where
     let dead_link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::ZERO,
-        success_rate: 0.0,
+        behavior: Behavior::Fail,
     };
 
     let mut schedule = Schedule::new();
@@ -464,7 +463,7 @@ where
                 Action::UpdateLink {
                     from: late_joiner.clone(),
                     to: peer.clone(),
-                    link: dead_link.clone(),
+                    link: dead_link,
                 },
             )
             .at(
@@ -472,7 +471,7 @@ where
                 Action::UpdateLink {
                     from: peer.clone(),
                     to: late_joiner.clone(),
-                    link: dead_link.clone(),
+                    link: dead_link,
                 },
             );
     }
@@ -482,7 +481,7 @@ where
         .at(Duration::from_secs(7), Action::Restart(late_joiner))
 }
 
-fn run_lossy<D>(engine: D, link: Link)
+fn run_slow<D>(engine: D, link: Link)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
     D::State: ProcessedHeight,
@@ -554,7 +553,7 @@ where
         .link(Link {
             latency: Duration::from_millis(100),
             jitter: Duration::from_millis(5),
-            success_rate: 1.0,
+            behavior: Behavior::Deliver,
         })
         .crash(Crash::Random {
             // A full-cluster crash discards all in-flight votes, and a
@@ -632,7 +631,7 @@ where
         .unwrap();
 }
 
-fn run_state_sync_lossy<D>(engine: D, link: Link)
+fn run_state_sync_slow<D>(engine: D, link: Link)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
     D::State: ProcessedHeight,
@@ -752,12 +751,12 @@ where
     let good_link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(5),
-        success_rate: 1.0,
+        behavior: Behavior::Deliver,
     };
     let dead_link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::ZERO,
-        success_rate: 0.0,
+        behavior: Behavior::Fail,
     };
 
     // Build a schedule that kills all links to/from the isolated node at
@@ -770,7 +769,7 @@ where
                 Action::UpdateLink {
                     from: isolated.clone(),
                     to: peer.clone(),
-                    link: dead_link.clone(),
+                    link: dead_link,
                 },
             )
             .at(
@@ -778,7 +777,7 @@ where
                 Action::UpdateLink {
                     from: peer.clone(),
                     to: isolated.clone(),
-                    link: dead_link.clone(),
+                    link: dead_link,
                 },
             );
     }

@@ -2,7 +2,7 @@ use crate::simulate::{action::Crash, exit::ProcessedHeightAtLeast, plan::PlanBui
 use commonware_consensus::types::{Epoch, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
-use commonware_p2p::simulated::Link;
+use commonware_runtime::deterministic::network::{Behavior, Link};
 use std::time::Duration;
 
 mod harness;
@@ -428,7 +428,7 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
     .link(Link {
         latency: Duration::from_millis(4),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        behavior: Behavior::Deliver,
     })
     .crash(Crash::ProcessedHeight {
         participant: delayed.clone(),
@@ -564,7 +564,7 @@ fn reshare_e2e_rotating_subset() {
 
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_lossy_network() {
+fn reshare_e2e_slow_network() {
     reshare_plan_with_boundary(
         ReshareEngine::new(),
         4,
@@ -575,7 +575,7 @@ fn reshare_e2e_lossy_network() {
     .link(Link {
         latency: Duration::from_millis(100),
         jitter: Duration::from_millis(50),
-        success_rate: 0.7,
+        behavior: Behavior::Deliver,
     })
     .timeout(Duration::from_secs(720))
     .run()

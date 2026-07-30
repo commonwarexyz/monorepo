@@ -634,11 +634,16 @@ impl ReshareEngine {
 
 impl EngineDefinition for ReshareEngine {
     type PublicKey = ed25519::PublicKey;
+    type Signer = ed25519::PrivateKey;
     type Engine = ValidatorEngine;
     type State = ValidatorState;
 
     fn participants(&self) -> Vec<Self::PublicKey> {
         self.participants.clone()
+    }
+
+    fn signer(&self, index: usize) -> Self::Signer {
+        self.signers[index].clone()
     }
 
     fn channels(&self) -> Vec<(u64, Quota)> {
@@ -698,8 +703,8 @@ impl EngineDefinition for ReshareEngine {
             context.child("marshal_resolver"),
             marshal_resolver::Config {
                 public_key: public_key.clone(),
-                peer_provider: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
+                peer_provider: oracle.clone(),
+                blocker: oracle.clone(),
                 mailbox_size: NZUsize!(100),
                 initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
@@ -716,7 +721,7 @@ impl EngineDefinition for ReshareEngine {
             deque_size: 10,
             priority: false,
             codec_config: (),
-            peer_provider: oracle.manager(),
+            peer_provider: oracle.clone(),
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -738,7 +743,7 @@ impl EngineDefinition for ReshareEngine {
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
         let (probe_actor, probe_mailbox) = dkg_probe::Actor::new(dkg_probe::Config {
             context: context.child("dkg_probe"),
-            manager: oracle.manager(),
+            manager: oracle.clone(),
             bootstrap: dkg_probe::Bootstrap {
                 epoch: Epoch::zero(),
                 participants: self.initial.info.participants(),
@@ -749,7 +754,7 @@ impl EngineDefinition for ReshareEngine {
             ),
             genesis: self.initial.info.clone(),
             strategy: Sequential,
-            blocker: oracle.control(public_key.clone()),
+            blocker: oracle.clone(),
             blocks_per_epoch: EPOCH_LENGTH,
             retry_timeout: NZDuration!(Duration::from_millis(500)),
             mailbox_size: NZUsize!(100),
@@ -888,8 +893,8 @@ impl EngineDefinition for ReshareEngine {
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
             context.child("qmdb_resolver"),
             qmdb_resolver::Config {
-                peer_provider: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
+                peer_provider: oracle.clone(),
+                blocker: oracle.clone(),
                 database: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
@@ -939,8 +944,8 @@ impl EngineDefinition for ReshareEngine {
             context.child("reshare"),
             reshare::Config {
                 signer: signer.clone(),
-                manager: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
+                manager: oracle.clone(),
+                blocker: oracle.clone(),
                 participants_provider: ScheduleProvider {
                     schedule: self.schedule.clone(),
                 },
@@ -1006,8 +1011,8 @@ impl EngineDefinition for ReshareEngine {
         let (orchestrator_actor, orchestrator_mailbox) = orchestrator::Actor::new(
             context.child("orchestrator"),
             orchestrator::Config {
-                oracle: oracle.control(public_key.clone()),
-                manager: oracle.manager(),
+                oracle: oracle.clone(),
+                manager: oracle.clone(),
                 provider: provider.clone(),
                 marshal: marshal.clone(),
                 application: deferred,

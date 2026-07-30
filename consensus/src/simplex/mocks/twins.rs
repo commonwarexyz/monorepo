@@ -74,14 +74,249 @@ use crate::{
     simplex::elector::{self, Terms},
     types::{Participant, Round, TermLength, View},
 };
+use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::certificate::Scheme;
-use commonware_p2p::simulated::SplitTarget;
-use commonware_utils::ordered::Set;
+use commonware_p2p::{CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
+use commonware_runtime::{IoBuf, IoBufs, Scheduler, Supervisor};
+use commonware_utils::{PlatformSend, PlatformSync, channel::mpsc, ordered::Set};
 use rand::{Rng, RngExt as _, seq::SliceRandom};
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Debug,
+    io,
     sync::Arc,
+    time::SystemTime,
 };
+
+/// Origin of a message sent by a local twin engine.
+#[derive(Clone, Copy)]
+pub enum SplitOrigin {
+    Primary,
+    Secondary,
+}
+
+/// Local twin engine that should receive an authenticated message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SplitTarget {
+    None,
+    Primary,
+    Secondary,
+    Both,
+}
+
+/// A sender owned by one local twin engine and backed by one authenticated peer.
+pub struct TwinSender<P, S, F>
+where
+    P: commonware_cryptography::PublicKey,
+{
+    origin: SplitOrigin,
+    sender: S,
+    peers: Arc<[P]>,
+    forward: F,
+}
+
+impl<P, S, F> Clone for TwinSender<P, S, F>
+where
+    P: commonware_cryptography::PublicKey,
+    S: Clone,
+    F: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            origin: self.origin,
+            sender: self.sender.clone(),
+            peers: self.peers.clone(),
+            forward: self.forward.clone(),
+        }
+    }
+}
+
+impl<P, S, F> Debug for TwinSender<P, S, F>
+where
+    P: commonware_cryptography::PublicKey,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwinSender").finish_non_exhaustive()
+    }
+}
+
+/// Splits one authenticated sender between two local twin engines.
+pub fn split_sender<P, S, F>(
+    sender: S,
+    peers: Arc<[P]>,
+    forward: F,
+) -> (TwinSender<P, S, F>, TwinSender<P, S, F>)
+where
+    P: commonware_cryptography::PublicKey,
+    S: Sender<PublicKey = P>,
+    F: Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>>
+        + Clone
+        + PlatformSend
+        + PlatformSync
+        + 'static,
+{
+    let primary = TwinSender {
+        origin: SplitOrigin::Primary,
+        sender: sender.clone(),
+        peers: peers.clone(),
+        forward: forward.clone(),
+    };
+    let secondary = TwinSender {
+        origin: SplitOrigin::Secondary,
+        sender,
+        peers,
+        forward,
+    };
+    (primary, secondary)
+}
+
+impl<P, S, F> LimitedSender for TwinSender<P, S, F>
+where
+    P: commonware_cryptography::PublicKey,
+    S: Sender<PublicKey = P>,
+    F: Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>>
+        + Clone
+        + PlatformSend
+        + PlatformSync
+        + 'static,
+{
+    type PublicKey = P;
+    type Checked<'a>
+        = TwinCheckedSender<'a, P, S, F>
+    where
+        Self: 'a;
+
+    fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        let checked = match &recipients {
+            Recipients::All => self.peers.to_vec(),
+            Recipients::Some(peers) => peers.clone(),
+            Recipients::One(peer) => vec![peer.clone()],
+        };
+        Ok(TwinCheckedSender {
+            sender: self,
+            recipients,
+            checked,
+        })
+    }
+}
+
+pub struct TwinCheckedSender<'a, P, S, F>
+where
+    P: commonware_cryptography::PublicKey,
+{
+    sender: &'a mut TwinSender<P, S, F>,
+    recipients: Recipients<P>,
+    checked: Vec<P>,
+}
+
+impl<P, S, F> CheckedSender for TwinCheckedSender<'_, P, S, F>
+where
+    P: commonware_cryptography::PublicKey,
+    S: Sender<PublicKey = P>,
+    F: Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>>
+        + Clone
+        + PlatformSend
+        + PlatformSync
+        + 'static,
+{
+    type PublicKey = P;
+
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        self.checked.clone()
+    }
+
+    fn send(
+        self,
+        message: impl Into<IoBufs> + PlatformSend,
+        priority: bool,
+    ) -> Unreliable<Feedback> {
+        let message = message.into().coalesce();
+        let Some(recipients) =
+            (self.sender.forward)(self.sender.origin, &self.recipients, &message)
+        else {
+            return Unreliable::Rejected;
+        };
+        if self
+            .sender
+            .sender
+            .send(recipients, message, priority)
+            .is_empty()
+        {
+            return Unreliable::Rejected;
+        }
+        Unreliable::Outcome(Feedback::Ok)
+    }
+}
+
+/// Receiver owned by one local twin engine.
+pub struct TwinReceiver<P: commonware_cryptography::PublicKey> {
+    receiver: mpsc::UnboundedReceiver<Message<P>>,
+}
+
+impl<P: commonware_cryptography::PublicKey> Debug for TwinReceiver<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwinReceiver").finish_non_exhaustive()
+    }
+}
+
+impl<P: commonware_cryptography::PublicKey> Receiver for TwinReceiver<P> {
+    type Error = io::Error;
+    type PublicKey = P;
+
+    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
+        self.receiver
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
+    }
+}
+
+/// Splits one authenticated receiver between two local twin engines.
+pub fn split_receiver<P, R, E, F>(
+    mut receiver: R,
+    context: E,
+    route: F,
+) -> (TwinReceiver<P>, TwinReceiver<P>)
+where
+    P: commonware_cryptography::PublicKey,
+    R: Receiver<PublicKey = P>,
+    E: Scheduler + Supervisor,
+    F: Fn(&Message<P>) -> SplitTarget + PlatformSend + PlatformSync + 'static,
+{
+    let (primary_tx, primary_rx) = mpsc::unbounded_channel();
+    let (secondary_tx, secondary_rx) = mpsc::unbounded_channel();
+    context.spawn(move |_| async move {
+        while let Ok(message) = receiver.recv().await {
+            match route(&message) {
+                SplitTarget::None => {}
+                SplitTarget::Primary => {
+                    primary_tx.send(message).ok();
+                }
+                SplitTarget::Secondary => {
+                    secondary_tx.send(message).ok();
+                }
+                SplitTarget::Both => {
+                    primary_tx.send(message.clone()).ok();
+                    secondary_tx.send(message).ok();
+                }
+            }
+            if primary_tx.is_closed() && secondary_tx.is_closed() {
+                break;
+            }
+        }
+    });
+    (
+        TwinReceiver {
+            receiver: primary_rx,
+        },
+        TwinReceiver {
+            receiver: secondary_rx,
+        },
+    )
+}
 
 /// Maximum participant count supported by the scenario generator.
 const MAX_PARTICIPANTS: usize = u64::BITS as usize;

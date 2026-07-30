@@ -103,11 +103,14 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        Blocker, Manager as _, Provider, TrackedPeers,
-        simulated::{Link, Network, Oracle, Receiver, Sender},
+        Advertisement, Blocker, Provider, Reachability, ReachabilityManager as _,
+        ReachableTrackedPeers, TrackedPeers,
+        authenticated::lookup::{ReachabilityOracle, Receiver, Sender},
+        utils::mocks::lookup,
     };
     use commonware_runtime::{
         Clock, Metrics as _, Quota, Runner, Scheduler as _, Supervisor as _, deterministic,
+        deterministic::network::{Endpoint, Link, Oracle as NetworkOracle},
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
@@ -117,11 +120,11 @@ mod tests {
             mpsc, oneshot,
         },
         non_empty_vec,
-        ordered::Set,
+        ordered::{Map, Set},
         sync::Mutex,
     };
     use std::{
-        collections::{HashMap, VecDeque},
+        collections::{BTreeSet, HashMap, VecDeque},
         num::{NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::Duration,
@@ -132,16 +135,93 @@ mod tests {
     const INITIAL_DURATION: Duration = Duration::from_millis(100);
     const TIMEOUT: Duration = Duration::from_millis(400);
     const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
-    const LINK: Link = Link {
-        latency: Duration::from_millis(10),
-        jitter: Duration::from_millis(1),
-        success_rate: 1.0,
-    };
-    const LINK_UNRELIABLE: Link = Link {
-        latency: Duration::from_millis(10),
-        jitter: Duration::from_millis(1),
-        success_rate: 0.5,
-    };
+    const LINK: Link = Link::new(Duration::from_millis(10)).with_jitter(Duration::from_millis(1));
+
+    type LookupOracle = ReachabilityOracle<PublicKey, Endpoint>;
+    type TestConnection = (
+        Sender<PublicKey, deterministic::Context>,
+        Receiver<PublicKey>,
+    );
+
+    #[derive(Clone)]
+    struct RecordingBlocker {
+        local: PublicKey,
+        oracle: LookupOracle,
+        blocked: Arc<Mutex<BTreeSet<(PublicKey, PublicKey)>>>,
+    }
+
+    impl Blocker for RecordingBlocker {
+        type PublicKey = PublicKey;
+
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "records the block before forwarding it to authenticated lookup"
+        )]
+        fn block(&mut self, public_key: Self::PublicKey) -> commonware_actor::Feedback {
+            self.blocked
+                .lock()
+                .insert((self.local.clone(), public_key.clone()));
+            self.oracle.block(public_key)
+        }
+    }
+
+    struct LookupFixture {
+        transport: NetworkOracle<deterministic::Context>,
+        nodes: HashMap<PublicKey, LookupOracle>,
+        endpoints: HashMap<PublicKey, Endpoint>,
+        blocked: Arc<Mutex<BTreeSet<(PublicKey, PublicKey)>>>,
+    }
+
+    impl LookupFixture {
+        fn oracle(&self, peer: &PublicKey) -> LookupOracle {
+            self.nodes
+                .get(peer)
+                .expect("peer must be registered")
+                .clone()
+        }
+
+        fn blocker(&self, peer: PublicKey) -> RecordingBlocker {
+            RecordingBlocker {
+                oracle: self.oracle(&peer),
+                local: peer,
+                blocked: self.blocked.clone(),
+            }
+        }
+
+        fn track<T>(&self, index: u64, peers: T)
+        where
+            T: Into<TrackedPeers<PublicKey>>,
+        {
+            let peers = peers.into();
+            let tracked = ReachableTrackedPeers::new(
+                self.reachable(peers.primary),
+                self.reachable(peers.secondary),
+            );
+            for oracle in self.nodes.values() {
+                oracle.clone().track(index, tracked.clone());
+            }
+        }
+
+        fn reachable(&self, peers: Set<PublicKey>) -> Map<PublicKey, Reachability<Endpoint>> {
+            Map::from_iter_dedup(peers.into_iter().map(|peer| {
+                let endpoint = self.endpoints[&peer];
+                let advertisement = Advertisement::new(vec![endpoint]).unwrap();
+                (peer, Reachability::Dialable(advertisement))
+            }))
+        }
+
+        fn add_link(&self, a: &PublicKey, b: &PublicKey, link: Link) {
+            let a = self.endpoints[a];
+            let b = self.endpoints[b];
+            self.transport.set_link(a, b, link).unwrap();
+            self.transport.set_link(b, a, link).unwrap();
+        }
+
+        #[allow(clippy::unused_async)]
+        async fn blocked(&self) -> Result<Vec<(PublicKey, PublicKey)>, ()> {
+            Ok(self.blocked.lock().iter().cloned().collect())
+        }
+    }
 
     fn status_metric_total(metrics: &str, name: &str, status: &str) -> u64 {
         let prefix = format!("{name}{{");
@@ -163,77 +243,90 @@ mod tests {
         context: &deterministic::Context,
         peer_seeds: &[u64],
     ) -> (
-        Oracle<PublicKey, deterministic::Context>,
+        LookupFixture,
         Vec<PrivateKey>,
         Vec<PublicKey>,
-        Vec<(
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        )>,
+        Vec<TestConnection>,
     ) {
         setup_network_and_peers_with_rate_limit(context, peer_seeds, Quota::per_second(RATE_LIMIT))
             .await
     }
 
+    #[allow(clippy::unused_async)]
     async fn setup_network_and_peers_with_rate_limit(
         context: &deterministic::Context,
         peer_seeds: &[u64],
         rate_limit: Quota,
     ) -> (
-        Oracle<PublicKey, deterministic::Context>,
+        LookupFixture,
         Vec<PrivateKey>,
         Vec<PublicKey>,
-        Vec<(
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        )>,
+        Vec<TestConnection>,
     ) {
-        let (network, oracle) = Network::new(
-            context.child("network"),
-            commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(3),
-            },
-        );
-        network.start();
-
         let schemes: Vec<PrivateKey> = peer_seeds
             .iter()
             .map(|seed| PrivateKey::from_seed(*seed))
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-        let mut manager = oracle.manager();
-        manager.track(0, Set::try_from(peers.clone()).unwrap());
-
-        let mut connections = Vec::new();
-        for peer in &peers {
-            let (sender, receiver) = oracle
-                .control(peer.clone())
-                .register(0, rate_limit)
-                .await
-                .unwrap();
-            connections.push((sender, receiver));
-        }
+        let (oracle, connections) = setup_lookup_network(
+            context,
+            &schemes,
+            rate_limit,
+            Some(TrackedPeers::primary(Set::try_from(peers.clone()).unwrap())),
+        );
 
         (oracle, schemes, peers, connections)
     }
 
+    fn setup_lookup_network(
+        context: &deterministic::Context,
+        schemes: &[PrivateKey],
+        rate_limit: Quota,
+        initial: Option<TrackedPeers<PublicKey>>,
+    ) -> (LookupFixture, Vec<TestConnection>) {
+        let transport = NetworkOracle::new(Default::default());
+        let mut nodes = HashMap::new();
+        let mut endpoints = HashMap::new();
+        let mut connections = Vec::with_capacity(schemes.len());
+
+        for (index, scheme) in schemes.iter().enumerate() {
+            let public_key = scheme.public_key();
+            let endpoint = Endpoint::new(index as u64 + 1);
+            let (mut network, oracle) = lookup(
+                context.child("network").with_attribute("peer", &public_key),
+                &transport,
+                scheme.clone(),
+                endpoint,
+                b"_COMMONWARE_RESOLVER_P2P_TESTS",
+                1024 * 1024,
+            );
+            connections.push(network.register(0, rate_limit, MAILBOX_SIZE.get()));
+            network.start();
+            endpoints.insert(public_key.clone(), endpoint);
+            nodes.insert(public_key, oracle);
+        }
+
+        let network = LookupFixture {
+            transport,
+            nodes,
+            endpoints,
+            blocked: Arc::new(Mutex::new(BTreeSet::new())),
+        };
+        if let Some(initial) = initial {
+            network.track(0, initial);
+        }
+        (network, connections)
+    }
+
+    #[allow(clippy::unused_async)]
     async fn add_link(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        oracle: &LookupFixture,
         link: Link,
         peers: &[PublicKey],
         from: usize,
         to: usize,
     ) {
-        oracle
-            .add_link(peers[from].clone(), peers[to].clone(), link.clone())
-            .await
-            .unwrap();
-        oracle
-            .add_link(peers[to].clone(), peers[from].clone(), link)
-            .await
-            .unwrap();
+        oracle.add_link(&peers[from], &peers[to], link);
     }
 
     #[derive(Clone, Default)]
@@ -517,7 +610,7 @@ mod tests {
 
     async fn wait_for_blocked(
         context: &deterministic::Context,
-        oracle: &Oracle<PublicKey, deterministic::Context>,
+        oracle: &LookupFixture,
         blocker: &PublicKey,
         blocked: &PublicKey,
     ) {
@@ -540,10 +633,10 @@ mod tests {
     fn test_fetch_success() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(2);
             let mut prod2 = Producer::default();
@@ -554,8 +647,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -565,8 +658,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -615,10 +708,10 @@ mod tests {
     fn test_fetch_after_accepted_verdict_restarts() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(2);
             let mut prod2 = Producer::default();
@@ -629,8 +722,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -640,8 +733,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -677,11 +770,11 @@ mod tests {
     fn test_pending_delivery_does_not_block_engine() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             let key1 = Key(1);
             let key2 = Key(2);
@@ -704,8 +797,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -715,8 +808,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -726,8 +819,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -764,10 +857,10 @@ mod tests {
     fn test_retain_drops_pending_delivery() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(1);
             let data = Bytes::from("data for key 1");
@@ -784,8 +877,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -795,8 +888,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -831,10 +924,10 @@ mod tests {
     fn test_invalid_delivery_retries_and_rearms_slot() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(1);
             let data = Bytes::from("data for key 1");
@@ -855,8 +948,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -866,8 +959,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -877,8 +970,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -895,8 +988,8 @@ mod tests {
             first_gate_sender.send(()).unwrap();
             wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            oracle.manager().track(
+            add_link(&oracle, LINK, &peers, 0, 2).await;
+            oracle.track(
                 1,
                 Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
             );
@@ -915,10 +1008,10 @@ mod tests {
         context: &deterministic::Context,
         validation_first: bool,
     ) {
-        let (mut oracle, mut schemes, peers, mut connections) =
+        let (oracle, mut schemes, peers, mut connections) =
             setup_network_and_peers(context, &[1, 2]).await;
 
-        add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+        add_link(&oracle, LINK, &peers, 0, 1).await;
 
         let key = Key(1);
         let mut prod2 = Producer::default();
@@ -931,8 +1024,8 @@ mod tests {
         let scheme = schemes.remove(0);
         let mut mailbox1 = setup_and_spawn_actor(
             context,
-            oracle.manager(),
-            oracle.control(scheme.public_key()),
+            oracle.oracle(&scheme.public_key()),
+            oracle.blocker(scheme.public_key()),
             scheme,
             connections.remove(0),
             cons1,
@@ -942,8 +1035,8 @@ mod tests {
         let scheme = schemes.remove(0);
         let _mailbox2 = setup_and_spawn_actor(
             context,
-            oracle.manager(),
-            oracle.control(scheme.public_key()),
+            oracle.oracle(&scheme.public_key()),
+            oracle.blocker(scheme.public_key()),
             scheme,
             connections.remove(0),
             dummy_consumer(),
@@ -976,11 +1069,12 @@ mod tests {
 
     #[test_traced]
     fn test_retain_pending_invalid_delivery_race() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|context| async move {
-            run_pending_invalid_delivery_race(&context, false).await;
-            run_pending_invalid_delivery_race(&context, true).await;
-        });
+        for validation_first in [false, true] {
+            let executor = deterministic::Runner::timed(Duration::from_secs(10));
+            executor.start(|context| async move {
+                run_pending_invalid_delivery_race(&context, validation_first).await;
+            });
+        }
     }
 
     /// Tests that pruning a fetch leaves the consumer untouched.
@@ -999,8 +1093,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1027,11 +1121,11 @@ mod tests {
     fn test_peer_no_data() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             let prod1 = Producer::default();
             let prod2 = Producer::default();
@@ -1044,8 +1138,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1055,8 +1149,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1066,8 +1160,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1099,8 +1193,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1124,16 +1218,6 @@ mod tests {
     fn test_fetch_before_initial_peer_set_waits_for_update() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
-                context.child("network"),
-                commonware_p2p::simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-            );
-            network.start();
-
             let mut schemes = [1_u64, 2]
                 .into_iter()
                 .map(PrivateKey::from_seed)
@@ -1141,17 +1225,10 @@ mod tests {
             schemes.sort_by_key(|s| s.public_key());
             let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
 
-            let mut connections = Vec::new();
-            for peer in &peers {
-                let (sender, receiver) = oracle
-                    .control(peer.clone())
-                    .register(0, Quota::per_second(RATE_LIMIT))
-                    .await
-                    .unwrap();
-                connections.push((sender, receiver));
-            }
+            let (oracle, mut connections) =
+                setup_lookup_network(&context, &schemes, Quota::per_second(RATE_LIMIT), None);
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(2);
             let mut prod2 = Producer::default();
@@ -1162,8 +1239,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1173,8 +1250,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1190,9 +1267,7 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(200)) => {},
             };
 
-            oracle
-                .manager()
-                .track(0, Set::try_from(peers.clone()).unwrap());
+            oracle.track(0, Set::try_from(peers.clone()).unwrap());
 
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
@@ -1207,7 +1282,7 @@ mod tests {
     fn test_concurrent_fetch_requests() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
             let key2 = Key(2);
@@ -1222,8 +1297,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1233,8 +1308,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1244,23 +1319,27 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
                 prod3,
             );
 
-            // Add choppy links between the requester and the two producers
-            add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 2).await;
-
-            // Run the fetches multiple times to ensure that the peer tries both of its peers
-            for _ in 0..10 {
+            // Run the fetches multiple times to ensure that the peer tries both producers.
+            // The first pair starts while both producers are unreachable, then completes after
+            // connectivity is restored. Reliable streams model loss as connection failure.
+            for attempt in 0..10 {
                 // Initiate concurrent fetches.
                 mailbox1.fetch(key2.clone());
                 mailbox1.fetch(key3.clone());
+
+                if attempt == 0 {
+                    context.sleep(Duration::from_millis(250)).await;
+                    add_link(&oracle, LINK, &peers, 0, 1).await;
+                    add_link(&oracle, LINK, &peers, 0, 2).await;
+                }
 
                 // Collect both events without assuming order
                 let mut events = Vec::new();
@@ -1292,10 +1371,10 @@ mod tests {
     fn test_retain_drops_key() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(6);
             let mut prod2 = Producer::default();
@@ -1306,8 +1385,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1317,8 +1396,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1371,12 +1450,12 @@ mod tests {
     fn test_blocking_peer() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 1, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 1, 2).await;
 
             let key_a = Key(1);
             let key_b = Key(2);
@@ -1401,8 +1480,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1412,8 +1491,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1423,8 +1502,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1473,10 +1552,10 @@ mod tests {
     fn test_duplicate_fetch_key() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(5);
             let mut prod2 = Producer::default();
@@ -1487,8 +1566,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1498,8 +1577,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1534,11 +1613,11 @@ mod tests {
     fn test_changing_peer_sets() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             let key1 = Key(1);
             let key2 = Key(2);
@@ -1554,8 +1633,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1565,8 +1644,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1585,8 +1664,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1610,11 +1689,11 @@ mod tests {
     fn test_fetch_targeted() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             let key = Key(1);
             let invalid_data = Bytes::from("invalid data");
@@ -1634,8 +1713,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1645,8 +1724,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1656,8 +1735,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1699,12 +1778,12 @@ mod tests {
     fn test_fetch_targeted_no_fallback() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 3).await;
 
             let key = Key(1);
 
@@ -1717,8 +1796,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1728,8 +1807,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1739,8 +1818,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1750,8 +1829,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox4 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1785,12 +1864,12 @@ mod tests {
     fn test_fetch_all_targeted() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3, 4]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 3).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 3).await;
 
             let key1 = Key(1);
             let key2 = Key(2);
@@ -1817,8 +1896,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1828,8 +1907,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1839,8 +1918,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1850,8 +1929,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox4 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1899,11 +1978,11 @@ mod tests {
     fn test_fetch_clears_targets() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             let key = Key(1);
             let valid_data = Bytes::from("valid data");
@@ -1917,8 +1996,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1928,8 +2007,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1939,8 +2018,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -1970,11 +2049,11 @@ mod tests {
     fn test_fetch_targeted_does_not_restrict_all() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             let key = Key(1);
             let valid_data = Bytes::from("valid data");
@@ -1988,8 +2067,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -1999,8 +2078,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2010,8 +2089,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2043,7 +2122,7 @@ mod tests {
     fn test_retain() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
             let key = Key(5);
@@ -2055,8 +2134,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2066,8 +2145,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2092,7 +2171,7 @@ mod tests {
             mailbox1.retain(move |key, _| key != &key_clone);
 
             // Now add link so fetches can complete
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
@@ -2109,7 +2188,7 @@ mod tests {
     fn test_retain_uses_subscribers() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
             let key = Key(5);
@@ -2121,8 +2200,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2132,8 +2211,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2157,7 +2236,7 @@ mod tests {
             mailbox1.retain(move |_, subscriber| subscriber == &kept_subscriber);
             context.sleep(Duration::from_millis(100)).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
@@ -2169,7 +2248,7 @@ mod tests {
     fn test_deliver_receives_subscribers() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
             let key = Key(5);
@@ -2181,8 +2260,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2192,8 +2271,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2213,7 +2292,7 @@ mod tests {
                 span: tracing::Span::none(),
             });
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
             assert_eq!(
@@ -2234,7 +2313,7 @@ mod tests {
     fn test_deliver_receives_multiple_subscribers() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
             let key = Key(5);
@@ -2246,8 +2325,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2257,8 +2336,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2278,7 +2357,7 @@ mod tests {
                 span: tracing::Span::none(),
             });
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
             assert_eq!(
@@ -2299,10 +2378,10 @@ mod tests {
     fn test_fetch_during_validation_reuses_response_after_success() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(5);
             let first_response = Bytes::from("data for key 5");
@@ -2324,8 +2403,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2335,8 +2414,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor_with_producer(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2414,11 +2493,11 @@ mod tests {
     fn test_late_subscriber_delivery_ignores_unrelated_waiter() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             let blocked_key = Key(4);
             let waiting_key = Key(5);
@@ -2441,8 +2520,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2452,8 +2531,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2463,8 +2542,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2548,7 +2627,7 @@ mod tests {
     fn test_deliver_receives_distinct_subscriber_type() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
             let key = Key(5);
@@ -2560,8 +2639,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2571,8 +2650,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2591,7 +2670,7 @@ mod tests {
             mailbox1.retain(move |_, subscriber| subscriber == &retained);
             context.sleep(Duration::from_millis(100)).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
             assert_eq!(
@@ -2609,7 +2688,7 @@ mod tests {
     fn test_deliver_receives_single_subscriber() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
             let key = Key(5);
@@ -2621,8 +2700,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2632,8 +2711,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2646,7 +2725,7 @@ mod tests {
                 subscriber: subscriber.clone(),
                 span: tracing::Span::none(),
             });
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
             assert_eq!(
@@ -2664,7 +2743,7 @@ mod tests {
     fn test_retain_drops_all() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
             // No link yet - fetch will stay in-flight
@@ -2677,8 +2756,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2688,8 +2767,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2712,7 +2791,7 @@ mod tests {
             mailbox1.retain(|_, _| false);
 
             // Now add link so fetches can complete
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
@@ -2733,7 +2812,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|context| async move {
             // Use a very restrictive rate limit: 1 request per second per peer
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers_with_rate_limit(
                     &context,
                     &[1, 2, 3],
@@ -2742,8 +2821,8 @@ mod tests {
                 .await;
 
             // Add links between peer 1 and both peer 2 and peer 3
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             // Both peer 2 and peer 3 have the same data
             let mut prod2 = Producer::default();
@@ -2759,8 +2838,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2771,8 +2850,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2783,16 +2862,16 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
                 prod3,
             );
 
-            // Wait for peer set to be established
-            context.sleep(Duration::from_millis(100)).await;
+            // Let authenticated connections settle before measuring application rate limiting.
+            context.sleep(Duration::from_secs(3)).await;
             let start = context.current();
 
             // Issue 2 fetches rapidly.
@@ -2837,7 +2916,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|context| async move {
             // Use a restrictive rate limit: 1 request per second
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers_with_rate_limit(
                     &context,
                     &[1, 2],
@@ -2845,7 +2924,7 @@ mod tests {
                 )
                 .await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             // Peer 2 has data for multiple keys
             let mut prod2 = Producer::default();
@@ -2858,8 +2937,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2869,8 +2948,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2920,10 +2999,10 @@ mod tests {
     fn test_self_exclusion() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(1);
             let data = Bytes::from("shared data");
@@ -2940,8 +3019,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -2952,8 +3031,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -2977,16 +3056,6 @@ mod tests {
     fn test_fetch_uses_primary_peers_only() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (network, oracle) = Network::new(
-                context.child("network"),
-                commonware_p2p::simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-            );
-            network.start();
-
             let schemes: Vec<PrivateKey> = [1u64, 2, 3]
                 .into_iter()
                 .map(PrivateKey::from_seed)
@@ -2994,24 +3063,17 @@ mod tests {
             let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
             let mut schemes = schemes;
 
-            let mut connections = Vec::new();
-            for peer in &peers {
-                let (sender, receiver) = oracle
-                    .control(peer.clone())
-                    .register(0, Quota::per_second(RATE_LIMIT))
-                    .await
-                    .unwrap();
-                connections.push((sender, receiver));
-            }
+            let (oracle, mut connections) =
+                setup_lookup_network(&context, &schemes, Quota::per_second(RATE_LIMIT), None);
 
             // Topology: peer 1 (requester) linked to peers 2 and 3.
             // Peer 2 is primary (no data), peer 3 is secondary (has data).
             // Fetch should only query primary peers, so the request must time out.
-            let mut oracle = oracle;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
 
-            oracle.manager().track(
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
+
+            oracle.track(
                 1,
                 TrackedPeers::new(
                     Set::try_from([peers[1].clone()]).unwrap(),
@@ -3029,8 +3091,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -3041,8 +3103,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -3055,8 +3117,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -3080,16 +3142,6 @@ mod tests {
     fn test_fetch_uses_latest_primary_set_only() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (network, oracle) = Network::new(
-                context.child("network"),
-                commonware_p2p::simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(2),
-                },
-            );
-            network.start();
-
             let schemes: Vec<PrivateKey> = [1u64, 2, 3]
                 .into_iter()
                 .map(PrivateKey::from_seed)
@@ -3097,25 +3149,21 @@ mod tests {
             let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
             let mut schemes = schemes;
 
-            let mut connections = Vec::new();
-            for peer in &peers {
-                let (sender, receiver) = oracle
-                    .control(peer.clone())
-                    .register(0, Quota::per_second(RATE_LIMIT))
-                    .await
-                    .unwrap();
-                connections.push((sender, receiver));
-            }
+            let (oracle, mut connections) = setup_lookup_network(
+                &context,
+                &schemes,
+                Quota::per_second(RATE_LIMIT),
+                None,
+            );
 
-            let mut oracle = oracle;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+        add_link(&oracle, LINK, &peers, 0, 1).await;
+        add_link(&oracle, LINK, &peers, 0, 2).await;
 
             // Keep the requester tracked across the cutover so the fetch path itself remains
             // active, while peer 2 is retained only through the overlap window after peer 3
             // becomes the newest primary set.
             oracle
-                .manager()
                 .track(
                     0,
                     Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
@@ -3132,8 +3180,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -3147,8 +3195,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -3159,8 +3207,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -3173,7 +3221,6 @@ mod tests {
             // Peer 2 remains in the provider's overlap window (`all.primary`), but new resolver traffic
             // should use only `latest.primary`.
             oracle
-                .manager()
                 .track(
                     1,
                     Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
@@ -3210,16 +3257,6 @@ mod tests {
     fn test_fetch_after_cutover_relies_on_latest_primary_history() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (network, oracle) = Network::new(
-                context.child("network"),
-                commonware_p2p::simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(2),
-                },
-            );
-            network.start();
-
             let schemes: Vec<PrivateKey> = [1u64, 2, 3]
                 .into_iter()
                 .map(PrivateKey::from_seed)
@@ -3227,23 +3264,15 @@ mod tests {
             let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
             let mut schemes = schemes;
 
-            let mut connections = Vec::new();
-            for peer in &peers {
-                let (sender, receiver) = oracle
-                    .control(peer.clone())
-                    .register(0, Quota::per_second(RATE_LIMIT))
-                    .await
-                    .unwrap();
-                connections.push((sender, receiver));
-            }
+            let (oracle, mut connections) =
+                setup_lookup_network(&context, &schemes, Quota::per_second(RATE_LIMIT), None);
 
-            let mut oracle = oracle;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 2).await;
 
             // Keep the requester in the peer set across the cutover while peer 2 remains connected
             // only through the overlap window after the latest primary advances to peer 3.
-            oracle.manager().track(
+            oracle.track(
                 0,
                 Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
             );
@@ -3260,8 +3289,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons1,
@@ -3275,8 +3304,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -3289,8 +3318,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -3299,7 +3328,7 @@ mod tests {
 
             context.sleep(Duration::from_millis(100)).await;
 
-            oracle.manager().track(
+            oracle.track(
                 1,
                 Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
             );
@@ -3322,16 +3351,16 @@ mod tests {
     fn test_secondary_peer_requests_are_served() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
             // Topology: peer 1 is primary (has data), peer 2 is secondary (requester).
             // Verifies that a primary peer serves requests from secondary peers
             // (i.e. secondary peers can't fetch via broadcast, but their direct
             // requests are still answered).
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
-            oracle.manager().track(
+            oracle.track(
                 1,
                 TrackedPeers::new(
                     Set::try_from([peers[0].clone()]).unwrap(),
@@ -3350,8 +3379,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let _mailbox1 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
@@ -3364,8 +3393,8 @@ mod tests {
             let scheme = schemes.remove(0);
             let mut mailbox2 = setup_and_spawn_actor(
                 &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
+                oracle.oracle(&scheme.public_key()),
+                oracle.blocker(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 cons2,
@@ -3384,10 +3413,10 @@ mod tests {
     fn test_shutdown_aborts_pending_delivery_without_leaked_tasks() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
+            let (oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(1);
             let data = Bytes::from("data for key 1");
@@ -3405,8 +3434,8 @@ mod tests {
             let (engine, mut mailbox1): (_, Mailbox<Key, PublicKey>) = Engine::new(
                 actor_context.child("peer").with_attribute("index", 0),
                 Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
+                    peer_provider: oracle.oracle(&public_key),
+                    blocker: oracle.blocker(public_key.clone()),
                     consumer: cons1,
                     producer: Producer::<Key, Bytes>::default(),
                     mailbox_size: MAILBOX_SIZE,
@@ -3425,8 +3454,8 @@ mod tests {
             let (engine, _mailbox2): (_, Mailbox<Key, PublicKey>) = Engine::new(
                 actor_context.child("peer").with_attribute("index", 1),
                 Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
+                    peer_provider: oracle.oracle(&public_key),
+                    blocker: oracle.blocker(public_key.clone()),
                     consumer: dummy_consumer(),
                     producer: prod2,
                     mailbox_size: MAILBOX_SIZE,
@@ -3474,7 +3503,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn spawn_actors_with_handles(
         context: &deterministic::Context,
-        oracle: &Oracle<PublicKey, deterministic::Context>,
+        oracle: &LookupFixture,
         schemes: Vec<PrivateKey>,
         connections: Vec<(
             Sender<PublicKey, deterministic::Context>,
@@ -3501,8 +3530,8 @@ mod tests {
             let (engine, mailbox) = Engine::new(
                 ctx,
                 Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
+                    peer_provider: oracle.oracle(&public_key),
+                    blocker: oracle.blocker(public_key.clone()),
                     consumer,
                     producer,
                     mailbox_size: MAILBOX_SIZE,
@@ -3525,10 +3554,10 @@ mod tests {
     fn test_operations_after_shutdown_do_not_panic() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (mut oracle, schemes, peers, connections) =
+            let (oracle, schemes, peers, connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(1);
             let mut prod2 = Producer::default();
@@ -3580,10 +3609,10 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|context| async move {
-            let (mut oracle, schemes, peers, connections) =
+            let (oracle, schemes, peers, connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&oracle, LINK, &peers, 0, 1).await;
 
             let key = Key(1);
             let mut prod2 = Producer::default();

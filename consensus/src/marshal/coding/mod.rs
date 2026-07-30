@@ -95,8 +95,9 @@ mod tests {
     use commonware_codec::{Encode, FixedSize};
     use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
-        Committable, Digestible, Hasher,
+        Committable, Digestible, Hasher, Signer,
         certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
+        ed25519::PrivateKey,
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -423,17 +424,21 @@ mod tests {
 
     async fn start_shard_mailbox(
         context: deterministic::Context,
-        participants: Vec<K>,
+        private_keys: Vec<PrivateKey>,
         provider: ConstantProvider<S, Epoch>,
     ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
+        let participants = private_keys
+            .iter()
+            .map(Signer::public_key)
+            .collect::<Vec<_>>();
         let me = participants[0].clone();
         let oracle =
-            setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
+            setup_network_with_participants(context.child("network"), NZUsize!(1), private_keys)
                 .await;
-        let control = oracle.control(me.clone());
+        let (mut network, manager, blocker) = oracle.node(context.child("p2p"), &me);
         let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
             scheme_provider: provider,
-            blocker: control.clone(),
+            blocker,
             shard_codec_cfg: CodecConfig {
                 maximum_shard_size: 1024 * 1024,
             },
@@ -442,12 +447,13 @@ mod tests {
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: NZUsize!(1024),
-            peer_provider: oracle.manager(),
+            peer_provider: manager,
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
-        let network = control.register(0, TEST_QUOTA).await.unwrap();
-        shard_engine.start(network);
+        let channel = network.register(0, TEST_QUOTA, 1024);
+        shard_engine.start(channel);
+        network.start();
         shard_mailbox
     }
 
@@ -611,6 +617,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
@@ -625,7 +632,7 @@ mod tests {
             )
             .await;
             let shards =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                start_shard_mailbox(context.child("shard_stack"), private_keys, provider.clone())
                     .await;
             let (candidate_ctx, candidate) = missing_candidate(me);
             let commitment = candidate.commitment();
@@ -670,6 +677,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
@@ -684,7 +692,7 @@ mod tests {
             )
             .await;
             let shards =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                start_shard_mailbox(context.child("shard_stack"), private_keys, provider.clone())
                     .await;
 
             let cfg = MarshaledConfig {
@@ -739,6 +747,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
@@ -753,7 +762,7 @@ mod tests {
             )
             .await;
             let shards =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                start_shard_mailbox(context.child("shard_stack"), private_keys, provider.clone())
                     .await;
 
             let cfg = MarshaledConfig {
@@ -1003,13 +1012,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1089,13 +1099,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1193,13 +1204,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1316,13 +1328,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1553,13 +1566,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1646,13 +1660,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1746,13 +1761,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
+       let mut oracle = setup_network_with_participants(
+           context.child("network"),
+           NZUsize!(1),
+            private_keys.clone(),
             )
             .await;
 
@@ -1836,13 +1852,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -1934,13 +1951,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -2037,13 +2055,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -2206,13 +2225,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -2301,13 +2321,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -2329,11 +2350,10 @@ mod tests {
             // unanswered.
             let mut peer_senders = Vec::new();
             for peer in participants.iter().skip(1) {
-                let (sender, _receiver) = oracle
-                    .control(peer.clone())
-                    .register(2, TEST_QUOTA)
-                    .await
-                    .unwrap();
+                let (mut peer_network, _, _) =
+                    oracle.node(context.child("peer_p2p").with_attribute("peer", peer), peer);
+                let (sender, _receiver) = peer_network.register(2, TEST_QUOTA, 1024);
+                peer_network.start();
                 peer_senders.push(sender);
             }
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -2447,13 +2467,14 @@ mod tests {
             // 1) Set up a single validator marshal stack.
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -2542,13 +2563,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -2674,13 +2696,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants[..2].iter().cloned(),
+                private_keys[..2].iter().cloned(),
             )
             .await;
 
@@ -2842,13 +2865,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -2910,13 +2934,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -3034,13 +3059,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -3160,13 +3186,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -3272,13 +3299,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 
@@ -3377,13 +3405,14 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture {
                 participants,
+                private_keys,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
-                participants.clone(),
+                private_keys.clone(),
             )
             .await;
 

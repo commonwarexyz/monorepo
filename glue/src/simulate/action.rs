@@ -2,8 +2,7 @@
 
 use commonware_consensus::types::Round;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::simulated::Link;
-use commonware_runtime::deterministic;
+use commonware_runtime::deterministic::{self, network::Link};
 use std::{ops::RangeInclusive, time::Duration};
 
 /// Crash strategy for a simulation run.

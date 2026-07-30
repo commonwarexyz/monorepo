@@ -80,6 +80,7 @@ mod tests {
         ordered_broadcast::scheme::{
             Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1,
         },
+        simplex::mocks::network::{Channel, Link, Network},
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
@@ -90,7 +91,6 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Quota, Runner, Scheduler, Supervisor as _,
@@ -143,16 +143,10 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     const TEST_NAMESPACE: &[u8] = b"ordered_broadcast_test";
 
-    type Registrations<P> = BTreeMap<
-        P,
-        (
-            (Sender<P, deterministic::Context>, Receiver<P>),
-            (Sender<P, deterministic::Context>, Receiver<P>),
-        ),
-    >;
+    type Registrations<P> = BTreeMap<P, (Channel, Channel)>;
 
     async fn register_participants(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        oracle: &mut Network,
         participants: &[PublicKey],
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
@@ -172,7 +166,7 @@ mod tests {
     }
 
     async fn link_participants(
-        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        oracle: &mut Network,
         participants: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize, usize) -> bool>,
@@ -210,21 +204,14 @@ mod tests {
         context: Context,
         fixture: &Fixture<S>,
         link: Link,
-    ) -> (
-        Oracle<PublicKey, deterministic::Context>,
-        Registrations<PublicKey>,
-    ) {
-        let (network, mut oracle) = Network::new_with_peers(
+    ) -> (Network, Registrations<PublicKey>) {
+        let mut oracle = Network::new(
             context.child("network"),
-            commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
+            fixture.private_keys.clone(),
             fixture.participants.clone(),
-        )
-        .await;
-        network.start();
+            std::iter::empty(),
+            &[0, 1],
+        );
 
         let registrations = register_participants(&mut oracle, &fixture.participants).await;
         link_participants(&mut oracle, &fixture.participants, Action::Link(link), None).await;
@@ -432,17 +419,13 @@ mod tests {
             let f = |mut context: deterministic::Context| async move {
                 let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
-                let (network, mut oracle) = Network::new_with_peers(
+                let mut oracle = Network::new(
                     context.child("network"),
-                    commonware_p2p::simulated::Config {
-                        max_size: 1024 * 1024,
-                        disconnect_on_block: true,
-                        tracked_peer_sets: NZUsize!(1),
-                    },
+                    fixture.private_keys.clone(),
                     fixture.participants.clone(),
-                )
-                .await;
-                network.start();
+                    std::iter::empty(),
+                    &[0, 1],
+                );
 
                 let mut registrations =
                     register_participants(&mut oracle, &fixture.participants).await;
@@ -852,17 +835,15 @@ mod tests {
             participants.push(sequencer.public_key());
 
             // Create network
-            let (network, mut oracle) = Network::new_with_peers(
+            let mut private_keys = fixture.private_keys.clone();
+            private_keys.push(sequencer.clone());
+            let mut oracle = Network::new(
                 context.child("network"),
-                commonware_p2p::simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                private_keys,
                 participants.clone(),
-            )
-            .await;
-            network.start();
+                std::iter::empty(),
+                &[0, 1],
+            );
 
             // Register all participants
             let mut registrations = register_participants(&mut oracle, &participants).await;

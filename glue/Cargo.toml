@@ -52,7 +52,7 @@ rstest.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
-test-utils = [ "dep:rand" ]
+test-utils = [ "commonware-p2p/mocks", "dep:rand" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-consensus/arbitrary",

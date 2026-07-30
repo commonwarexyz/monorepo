@@ -29,21 +29,19 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_math::algebra::Random;
-use commonware_p2p::{
-    Manager as _,
-    simulated::{self, Link, Network},
-};
+use commonware_p2p::Receiver;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock as _, Handle, Quota, Runner as _, Scheduler as _, Supervisor as _, deterministic,
-    telemetry::metrics::count_running_tasks,
+    deterministic::network::Link, telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
-    NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, sync::Mutex, test_rng,
+    NZU32, NZU64, Participant, channel::oneshot, ordered::Set, sync::Mutex, test_rng,
 };
 use futures::future::pending;
 use std::{
     collections::{BTreeMap, HashSet},
+    marker::PhantomData,
     num::NonZeroU64,
     sync::Arc,
     time::Duration,
@@ -52,6 +50,18 @@ use std::{
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_INITIAL_E2E";
 const EPOCH_LENGTH: NonZeroU64 = NZU64!(16);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+
+#[derive(Debug)]
+struct ClosedReceiver<P>(PhantomData<P>);
+
+impl<P: commonware_cryptography::PublicKey> Receiver for ClosedReceiver<P> {
+    type Error = std::io::Error;
+    type PublicKey = P;
+
+    async fn recv(&mut self) -> Result<(P, commonware_runtime::IoBuf), Self::Error> {
+        Err(std::io::Error::other("receiver closed"))
+    }
+}
 
 const VOTES: u64 = 0;
 const CERTIFICATES: u64 = 1;
@@ -156,6 +166,7 @@ impl DkgEngine {
 
 impl EngineDefinition for DkgEngine {
     type PublicKey = ed25519::PublicKey;
+    type Signer = ed25519::PrivateKey;
     type Engine = StartedNode;
     type State = NodeState;
 
@@ -164,6 +175,10 @@ impl EngineDefinition for DkgEngine {
             .iter()
             .map(|signer| signer.public_key())
             .collect()
+    }
+
+    fn signer(&self, index: usize) -> Self::Signer {
+        self.signers[index].clone()
     }
 
     fn channels(&self) -> Vec<(u64, Quota)> {
@@ -197,8 +212,8 @@ impl EngineDefinition for DkgEngine {
             context.child("dkg"),
             bootstrap::Config {
                 signer: self.signer(public_key),
-                manager: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
+                manager: oracle.clone(),
+                blocker: oracle.clone(),
                 secret_store: store,
                 strategy: Sequential,
                 namespace: NAMESPACE,
@@ -340,52 +355,35 @@ pub(super) fn good_link() -> Link {
     Link {
         latency: Duration::from_millis(20),
         jitter: Duration::from_millis(5),
-        success_rate: 1.0,
+        behavior: Default::default(),
     }
 }
 
 pub(super) fn run_closed_network_receiver() {
     let runner = deterministic::Runner::timed(Duration::from_secs(5));
     runner.start(|context| async move {
-        let (network, oracle) = Network::<_, ed25519::PublicKey>::new(
-            context.child("network"),
-            simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
-        );
-        network.start();
-
         let engine = DkgEngine::new(1);
         let public_key = engine.participant(0);
-        oracle
-            .manager()
-            .track(0, Set::from_iter_dedup(engine.participants()));
-
-        let control = oracle.control(public_key.clone());
-        let mut channels = Vec::new();
-        for (channel, quota) in engine.channels() {
-            channels.push(
-                control
-                    .register(channel, quota)
-                    .await
-                    .expect("channel registration failed"),
-            );
-        }
-
-        let _replacement_broadcast = control
-            .register(BROADCAST, TEST_QUOTA)
-            .await
-            .expect("replacement channel registration failed");
+        let participants = engine.participants();
+        let transport = crate::test_utils::transport(&context, 1, Link::default());
+        let (oracle, mut channels, _network) = crate::test_utils::start_node(
+            context.child("lookup"),
+            &transport,
+            <DkgEngine as EngineDefinition>::signer(&engine, 0),
+            0,
+            &participants,
+            b"_COMMONWARE_GLUE_DKG_CLOSED_RECEIVER_LOOKUP",
+            1024 * 1024,
+            &engine.channels(),
+        );
 
         let store = engine.store(&public_key);
         let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _>::new(
             context.child("dkg"),
             bootstrap::Config {
                 signer: engine.signer(&public_key),
-                manager: oracle.manager(),
-                blocker: oracle.control(public_key),
+                manager: oracle.clone(),
+                blocker: oracle,
                 secret_store: store,
                 strategy: Sequential,
                 namespace: NAMESPACE,
@@ -396,12 +394,15 @@ pub(super) fn run_closed_network_receiver() {
                 blocks_per_epoch: EPOCH_LENGTH,
             },
         );
+        let broadcast = channels.remove(4);
+        drop(broadcast.1);
+        let broadcast = (broadcast.0, ClosedReceiver(PhantomData));
         let (mut handle, completion) = bootstrap.start(
             channels.remove(0),
             channels.remove(0),
             channels.remove(0),
             channels.remove(0),
-            channels.remove(0),
+            broadcast,
             channels.remove(0),
         );
 

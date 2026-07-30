@@ -1685,15 +1685,26 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        Manager as _, TrackedPeers,
-        simulated::{self, Control, Link, Oracle},
+        Advertisement, Blocker, CheckedSender as _, LimitedSender as _, Reachability,
+        ReachabilityManager as _, ReachableTrackedPeers, TrackedPeers,
+        authenticated::lookup::{
+            ReachabilityOracle, Receiver as LookupReceiver, Sender as LookupSender,
+        },
+        utils::mocks::lookup,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Quota, Runner, Supervisor as _, deterministic,
+        deterministic::network::{Endpoint, Link, Oracle as NetworkOracle},
+    };
     use commonware_utils::{
-        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZUsize, Participant,
+        channel::oneshot::error::TryRecvError,
+        ordered::{Map, Set},
+        sync::Mutex,
     };
     use std::{
+        collections::BTreeSet,
         future::Future,
         marker::PhantomData,
         num::NonZeroU32,
@@ -1729,11 +1740,10 @@ mod tests {
     const MAX_SHARD_SIZE: usize = 1024 * 1024; // 1 MiB
 
     /// The default link configuration for tests.
-    const DEFAULT_LINK: Link = Link {
-        latency: Duration::from_millis(50),
-        jitter: Duration::ZERO,
-        success_rate: 1.0,
-    };
+    const DEFAULT_LINK: Link = Link::new(Duration::from_millis(50));
+
+    /// Maximum time for lookup actors to establish authenticated connections.
+    const LOOKUP_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Rate limit quota for tests (effectively unlimited).
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -1810,14 +1820,139 @@ mod tests {
     type H = Sha256;
     type P = PublicKey;
     type C = ReedSolomon<H>;
-    type X = Control<P, deterministic::Context>;
-    type O = Oracle<P, deterministic::Context>;
+    type D = ReachabilityOracle<P, Endpoint>;
+    type NetworkSender = LookupSender<P, deterministic::Context>;
+    type NetworkReceiver = LookupReceiver<P>;
+    type X = RecordingBlocker;
+    type O = TestNetwork;
     type Prov = MultiEpochProvider;
-    type NetworkSender = simulated::Sender<P, deterministic::Context>;
-    type D = simulated::Manager<P, deterministic::Context>;
     type ShardEngine<S> = Engine<deterministic::Context, Prov, X, D, S, H, B, P, Sequential>;
     type ChurningShardEngine<S> =
         Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
+
+    #[derive(Clone)]
+    struct RecordingBlocker {
+        local: P,
+        oracle: D,
+        blocked: Arc<Mutex<BTreeSet<(P, P)>>>,
+    }
+
+    impl Blocker for RecordingBlocker {
+        type PublicKey = P;
+
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test harness records blocks before forwarding to lookup"
+        )]
+        fn block(&mut self, public_key: Self::PublicKey) -> commonware_actor::Feedback {
+            self.blocked
+                .lock()
+                .insert((self.local.clone(), public_key.clone()));
+            self.oracle.block(public_key)
+        }
+    }
+
+    struct TestNetwork {
+        transport: NetworkOracle<deterministic::Context>,
+        nodes: BTreeMap<P, D>,
+        endpoints: BTreeMap<P, Endpoint>,
+        blocked: Arc<Mutex<BTreeSet<(P, P)>>>,
+    }
+
+    impl TestNetwork {
+        fn new() -> Self {
+            Self {
+                transport: NetworkOracle::new(Default::default()),
+                nodes: BTreeMap::new(),
+                endpoints: BTreeMap::new(),
+                blocked: Arc::new(Mutex::new(BTreeSet::new())),
+            }
+        }
+
+        fn register(
+            &mut self,
+            context: deterministic::Context,
+            crypto: PrivateKey,
+        ) -> (NetworkSender, NetworkReceiver) {
+            let public_key = crypto.public_key();
+            let endpoint = Endpoint::new(self.nodes.len() as u64 + 1);
+            let (mut network, oracle) = lookup(
+                context,
+                &self.transport,
+                crypto,
+                endpoint,
+                b"_COMMONWARE_CONSENSUS_SHARD_ENGINE_LOOKUP_TESTS",
+                MAX_SHARD_SIZE as u32,
+            );
+            let channel = network.register(0, TEST_QUOTA, 1_024);
+            network.start();
+            self.nodes.insert(public_key.clone(), oracle);
+            self.endpoints.insert(public_key, endpoint);
+            channel
+        }
+
+        fn manager(&self, peer: &P) -> D {
+            self.nodes
+                .get(peer)
+                .expect("peer must be registered")
+                .clone()
+        }
+
+        fn control(&self, peer: &P) -> RecordingBlocker {
+            RecordingBlocker {
+                local: peer.clone(),
+                oracle: self.manager(peer),
+                blocked: self.blocked.clone(),
+            }
+        }
+
+        fn track<T>(&self, index: u64, peers: T)
+        where
+            T: Into<TrackedPeers<P>>,
+        {
+            let peers = peers.into();
+            let tracked = ReachableTrackedPeers::new(
+                self.reachable(peers.primary),
+                self.reachable(peers.secondary),
+            );
+            for oracle in self.nodes.values() {
+                oracle.clone().track(index, tracked.clone());
+            }
+        }
+
+        fn reachable(&self, peers: Set<P>) -> Map<P, Reachability<Endpoint>> {
+            Map::from_iter_dedup(peers.into_iter().map(|peer| {
+                let reachability =
+                    self.endpoints
+                        .get(&peer)
+                        .map_or(Reachability::OutboundOnly, |endpoint| {
+                            let advertisement = Advertisement::new(vec![*endpoint])
+                                .expect("one endpoint is a valid advertisement");
+                            Reachability::Dialable(advertisement)
+                        });
+                (peer, reachability)
+            }))
+        }
+
+        fn add_link(&self, a: &P, b: &P, link: Link) {
+            let a = self.endpoints[a];
+            let b = self.endpoints[b];
+            self.transport.set_link(a, b, link).unwrap();
+            self.transport.set_link(b, a, link).unwrap();
+        }
+
+        fn remove_link(&self, a: &P, b: &P) {
+            let a = self.endpoints[a];
+            let b = self.endpoints[b];
+            self.transport.remove_link(a, b);
+            self.transport.remove_link(b, a);
+        }
+
+        #[allow(clippy::unused_async)]
+        async fn blocked(&self) -> Result<Vec<(P, P)>, ()> {
+            Ok(self.blocked.lock().iter().cloned().collect())
+        }
+    }
 
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
         let blocked_peers = oracle.blocked().await.unwrap();
@@ -1825,6 +1960,32 @@ mod tests {
             .iter()
             .any(|(a, b)| a == blocker && b == blocked);
         assert!(is_blocked, "expected {blocker} to have blocked {blocked}");
+    }
+
+    async fn wait_for_connected(
+        context: &deterministic::Context,
+        sender: &mut NetworkSender,
+        expected: &Set<P>,
+    ) {
+        let deadline = context.current() + LOOKUP_READY_TIMEOUT;
+        loop {
+            let connected = sender
+                .check(Recipients::All)
+                .map(|checked| Set::from_iter_dedup(checked.recipients()))
+                .unwrap_or_default();
+            if expected
+                .iter()
+                .all(|peer| connected.position(peer).is_some())
+            {
+                return;
+            }
+
+            assert!(
+                context.current() < deadline,
+                "lookup peers did not become ready: expected {expected:?}, got {connected:?}"
+            );
+            context.sleep(Duration::from_millis(1)).await;
+        }
     }
 
     /// A participant in the test network with its engine mailbox and blocker.
@@ -1901,29 +2062,23 @@ mod tests {
                 np_private_keys.sort_by_key(|s| s.public_key());
                 let np_keys: Vec<P> = np_private_keys.iter().map(|k| k.public_key()).collect();
 
-                let (network, oracle) =
-                    simulated::Network::<deterministic::Context, P>::new_with_split_peers(
-                        context.child("network"),
-                        simulated::Config {
-                            max_size: MAX_SHARD_SIZE as u32,
-                            disconnect_on_block: true,
-                            tracked_peer_sets: NZUsize!(1),
-                        },
-                        peer_keys.clone(),
-                        np_keys.clone(),
-                    )
-                    .await;
-                network.start();
+                let mut oracle = TestNetwork::new();
 
                 let all_keys: Vec<P> = peer_keys.iter().chain(np_keys.iter()).cloned().collect();
+                let all_private_keys = private_keys
+                    .iter()
+                    .chain(np_private_keys.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
 
                 let mut registrations = BTreeMap::new();
-                for key in all_keys.iter() {
-                    let control = oracle.control(key.clone());
-                    let (sender, receiver) = control
-                        .register(0, TEST_QUOTA)
-                        .await
-                        .expect("registration should succeed");
+                for (index, (key, private_key)) in all_keys.iter().zip(all_private_keys).enumerate()
+                {
+                    let (sender, receiver) = oracle.register(
+                        context.child("network").with_attribute("index", index),
+                        private_key,
+                    );
+                    let control = oracle.control(key);
                     registrations.insert(key.clone(), (control, sender, receiver));
                 }
                 for p1 in all_keys.iter() {
@@ -1931,11 +2086,20 @@ mod tests {
                         if p2 == p1 {
                             continue;
                         }
-                        oracle
-                            .add_link(p1.clone(), p2.clone(), self.link.clone())
-                            .await
-                            .expect("link should be added");
+                        oracle.add_link(p1, p2, self.link);
                     }
+                }
+                oracle.track(
+                    0,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(peer_keys.clone()),
+                        Set::from_iter_dedup(np_keys.clone()),
+                    ),
+                );
+                for (key, (_, sender, _)) in &mut registrations {
+                    let expected =
+                        Set::from_iter_dedup(all_keys.iter().filter(|peer| *peer != key).cloned());
+                    wait_for_connected(&context, sender, &expected).await;
                 }
 
                 let coding_config =
@@ -1969,7 +2133,7 @@ mod tests {
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: NZUsize!(1024),
-                        peer_provider: oracle.manager(),
+                        peer_provider: oracle.manager(peer_key),
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -2008,7 +2172,7 @@ mod tests {
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: NZUsize!(1024),
-                        peer_provider: oracle.manager(),
+                        peer_provider: oracle.manager(np_key),
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -2692,7 +2856,7 @@ mod tests {
     fn test_shard_from_non_participant_blocks_peer() {
         let fixture = Fixture::<C>::default();
         fixture.start(
-            |config, context, oracle, peers, _, coding_config| async move {
+            |config, context, mut oracle, peers, _, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
@@ -2703,28 +2867,24 @@ mod tests {
                 let non_participant_key = PrivateKey::from_seed(10_000);
                 let non_participant_pk = non_participant_key.public_key();
 
-                let non_participant_control = oracle.control(non_participant_pk.clone());
-                let (mut non_participant_sender, _non_participant_receiver) =
-                    non_participant_control
-                        .register(0, TEST_QUOTA)
-                        .await
-                        .expect("registration should succeed");
-                oracle
-                    .add_link(
-                        non_participant_pk.clone(),
-                        receiver_pk.clone(),
-                        DEFAULT_LINK,
-                    )
-                    .await
-                    .expect("link should be added");
-                oracle.manager().track(
+                let (mut non_participant_sender, _non_participant_receiver) = oracle.register(
+                    context.child("non_participant_network"),
+                    non_participant_key,
+                );
+                oracle.add_link(&non_participant_pk, &receiver_pk, DEFAULT_LINK);
+                oracle.track(
                     2,
                     TrackedPeers::new(
                         Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
                         Set::from_iter_dedup([non_participant_pk.clone()]),
                     ),
                 );
-                context.sleep(Duration::from_millis(10)).await;
+                wait_for_connected(
+                    &context,
+                    &mut non_participant_sender,
+                    &Set::from_iter_dedup([receiver_pk.clone()]),
+                )
+                .await;
 
                 peers[2].mailbox.discovered(
                     commitment,
@@ -2748,7 +2908,7 @@ mod tests {
     fn test_preleader_shard_from_non_participant_is_not_buffered() {
         let fixture = Fixture::<C>::default();
         fixture.start(
-            |config, context, oracle, peers, _, coding_config| async move {
+            |config, context, mut oracle, peers, _, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
@@ -2759,28 +2919,24 @@ mod tests {
                 let non_participant_key = PrivateKey::from_seed(10_000);
                 let non_participant_pk = non_participant_key.public_key();
 
-                let non_participant_control = oracle.control(non_participant_pk.clone());
-                let (mut non_participant_sender, _non_participant_receiver) =
-                    non_participant_control
-                        .register(0, TEST_QUOTA)
-                        .await
-                        .expect("registration should succeed");
-                oracle
-                    .add_link(
-                        non_participant_pk.clone(),
-                        receiver_pk.clone(),
-                        DEFAULT_LINK,
-                    )
-                    .await
-                    .expect("link should be added");
-                oracle.manager().track(
+                let (mut non_participant_sender, _non_participant_receiver) = oracle.register(
+                    context.child("non_participant_network"),
+                    non_participant_key,
+                );
+                oracle.add_link(&non_participant_pk, &receiver_pk, DEFAULT_LINK);
+                oracle.track(
                     2,
                     TrackedPeers::new(
                         Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
                         Set::from_iter_dedup([non_participant_pk.clone()]),
                     ),
                 );
-                context.sleep(Duration::from_millis(10)).await;
+                wait_for_connected(
+                    &context,
+                    &mut non_participant_sender,
+                    &Set::from_iter_dedup([receiver_pk.clone()]),
+                )
+                .await;
 
                 let peer2_index = peers[2].index.get() as u16;
                 let shard = coded_block.shard(peer2_index).expect("missing shard");
@@ -3941,16 +4097,6 @@ mod tests {
     fn test_cross_epoch_buffered_shard_not_blocked() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Epoch 0 participants: peers 0..4 (seeds 0..4).
             // Epoch 1 participants: peers 0..3 + peer 4 (seed 4 replaces seed 3).
             let mut epoch0_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
@@ -3975,26 +4121,23 @@ mod tests {
             let receiver_key = epoch0_keys[receiver_idx_in_epoch0].clone();
             let receiver_pk = receiver_key.public_key();
 
-            let receiver_control = oracle.control(receiver_pk.clone());
-            let (sender_handle, receiver_handle) = receiver_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-
-            let future_peer_control = oracle.control(future_peer_pk.clone());
-            let (mut future_peer_sender, _future_peer_receiver) = future_peer_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-            oracle
-                .add_link(future_peer_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
-                .await
-                .expect("link should be added");
-            oracle.manager().track(
+            let mut oracle = TestNetwork::new();
+            let (sender_handle, receiver_handle) =
+                oracle.register(context.child("receiver_network"), receiver_key.clone());
+            let (mut future_peer_sender, _future_peer_receiver) =
+                oracle.register(context.child("future_peer_network"), future_peer_key);
+            let receiver_control = oracle.control(&receiver_pk);
+            oracle.add_link(&future_peer_pk, &receiver_pk, DEFAULT_LINK);
+            oracle.track(
                 0,
                 Set::from_iter_dedup([receiver_pk.clone(), future_peer_pk.clone()]),
             );
-            context.sleep(Duration::from_millis(10)).await;
+            wait_for_connected(
+                &context,
+                &mut future_peer_sender,
+                &Set::from_iter_dedup([receiver_pk.clone()]),
+            )
+            .await;
 
             // Set up the receiver's engine with a multi-epoch provider.
             let scheme_epoch0 =
@@ -4017,7 +4160,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
-                peer_provider: oracle.manager(),
+                peer_provider: oracle.manager(&receiver_pk),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
@@ -4068,16 +4211,6 @@ mod tests {
     fn test_shard_broadcast_survives_provider_churn() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-            );
-            network.start();
-
             let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
             private_keys.sort_by_key(|s| s.public_key());
             let peer_keys: Vec<P> = private_keys.iter().map(|k| k.public_key()).collect();
@@ -4091,13 +4224,14 @@ mod tests {
             let broadcaster_pk = peer_keys[broadcaster_idx].clone();
             let receiver_pk = peer_keys[receiver_idx].clone();
 
+            let mut oracle = TestNetwork::new();
             let mut registrations = BTreeMap::new();
-            for key in &peer_keys {
-                let control = oracle.control(key.clone());
-                let (sender, receiver) = control
-                    .register(0, TEST_QUOTA)
-                    .await
-                    .expect("registration should succeed");
+            for (index, (key, private_key)) in peer_keys.iter().zip(&private_keys).enumerate() {
+                let (sender, receiver) = oracle.register(
+                    context.child("network").with_attribute("index", index),
+                    private_key.clone(),
+                );
+                let control = oracle.control(key);
                 registrations.insert(key.clone(), (control, sender, receiver));
             }
 
@@ -4106,14 +4240,15 @@ mod tests {
                     if src == dst {
                         continue;
                     }
-                    oracle
-                        .add_link(src.clone(), dst.clone(), DEFAULT_LINK)
-                        .await
-                        .expect("link should be added");
+                    oracle.add_link(src, dst, DEFAULT_LINK);
                 }
             }
-            oracle.manager().track(0, participants.clone());
-            context.sleep(Duration::from_millis(10)).await;
+            oracle.track(0, participants.clone());
+            for (key, (_, sender, _)) in &mut registrations {
+                let expected =
+                    Set::from_iter_dedup(peer_keys.iter().filter(|peer| *peer != key).cloned());
+                wait_for_connected(&context, sender, &expected).await;
+            }
 
             let (_leader_control, mut leader_sender, _leader_receiver) = registrations
                 .remove(&leader_pk)
@@ -4146,7 +4281,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
-                peer_provider: oracle.manager(),
+                peer_provider: oracle.manager(&broadcaster_pk),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
                 ChurningShardEngine::new(context.child("broadcaster"), broadcaster_config);
@@ -4169,7 +4304,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
-                peer_provider: oracle.manager(),
+                peer_provider: oracle.manager(&receiver_pk),
             };
             let (receiver_engine, receiver_mailbox) =
                 ShardEngine::new(context.child("receiver"), receiver_config);
@@ -4668,10 +4803,7 @@ mod tests {
 
                 // Sever the link from leader to victim so the leader's
                 // direct shard never arrives.
-                oracle
-                    .remove_link(leader.clone(), victim.clone())
-                    .await
-                    .expect("remove_link should succeed");
+                oracle.remove_link(&leader, &victim);
 
                 // Leader proposes. The victim will not receive a direct shard
                 // because the link is severed.
@@ -4742,10 +4874,7 @@ mod tests {
 
                 // Remove the link from leader to victim so the leader's shard
                 // never reaches the victim directly.
-                oracle
-                    .remove_link(leader.clone(), victim.clone())
-                    .await
-                    .expect("remove_link should succeed");
+                oracle.remove_link(&leader, &victim);
 
                 // Subscribe to the shard and block BEFORE any broadcasting.
                 let mut shard_sub = peers[1]
@@ -4901,16 +5030,6 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let num_peers = 10usize;
-            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(2),
-                },
-            );
-            network.start();
-
             let mut private_keys = (0..num_peers)
                 .map(|i| PrivateKey::from_seed(i as u64))
                 .collect::<Vec<_>>();
@@ -4923,26 +5042,24 @@ mod tests {
             let receiver_pk = peer_keys[receiver_idx].clone();
             let leader_pk = peer_keys[0].clone();
 
-            let receiver_control = oracle.control(receiver_pk.clone());
-            let (sender_handle, receiver_handle) = receiver_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-
-            // Register the leader so it can send shards.
-            let leader_control = oracle.control(leader_pk.clone());
-            let (mut leader_sender, _leader_receiver) = leader_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-            oracle
-                .add_link(leader_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
-                .await
-                .expect("link should be added");
+            let mut oracle = TestNetwork::new();
+            let (sender_handle, receiver_handle) = oracle.register(
+                context.child("receiver_network"),
+                private_keys[receiver_idx].clone(),
+            );
+            let (mut leader_sender, _leader_receiver) =
+                oracle.register(context.child("leader_network"), private_keys[0].clone());
+            let receiver_control = oracle.control(&receiver_pk);
+            oracle.add_link(&leader_pk, &receiver_pk, DEFAULT_LINK);
 
             // Track the full participant set so the engine sees all peers.
-            oracle.manager().track(0, participants.clone());
-            context.sleep(Duration::from_millis(10)).await;
+            oracle.track(0, participants.clone());
+            wait_for_connected(
+                &context,
+                &mut leader_sender,
+                &Set::from_iter_dedup([receiver_pk.clone()]),
+            )
+            .await;
 
             let scheme = Scheme::signer(
                 SCHEME_NAMESPACE,
@@ -4962,7 +5079,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
-                peer_provider: oracle.manager(),
+                peer_provider: oracle.manager(&receiver_pk),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
@@ -4993,7 +5110,7 @@ mod tests {
             // Now send a peer set update that excludes the leader.
             let remaining: Set<P> =
                 Set::from_iter_dedup(peer_keys.iter().filter(|pk| **pk != leader_pk).cloned());
-            oracle.manager().track(1, remaining);
+            oracle.track(1, remaining);
             context.sleep(Duration::from_millis(10)).await;
 
             // The retained overlap window still lets the leader reach the receiver,
@@ -5027,16 +5144,6 @@ mod tests {
     fn test_peer_buffer_lifetime_tracks_latest_primary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-            );
-            network.start();
-
             let mut private_keys = (0..4)
                 .map(|i| PrivateKey::from_seed(i as u64))
                 .collect::<Vec<_>>();
@@ -5046,7 +5153,10 @@ mod tests {
             let sender_pk = peer_keys[1].clone();
             let participants: Set<P> = Set::from_iter_dedup(peer_keys);
 
-            let receiver_control = oracle.control(receiver_pk);
+            let mut oracle = TestNetwork::new();
+            let _channel =
+                oracle.register(context.child("receiver_network"), private_keys[0].clone());
+            let receiver_control = oracle.control(&receiver_pk);
             let scheme = Scheme::signer(
                 SCHEME_NAMESPACE,
                 participants.clone(),
@@ -5065,7 +5175,7 @@ mod tests {
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
                 background_channel_capacity: NZUsize!(16),
-                peer_provider: oracle.manager(),
+                peer_provider: oracle.manager(&receiver_pk),
             };
 
             let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
@@ -5105,16 +5215,6 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let num_peers = 6usize;
-            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(2),
-                },
-            );
-            network.start();
-
             let mut private_keys = (0..num_peers)
                 .map(|i| PrivateKey::from_seed(i as u64))
                 .collect::<Vec<_>>();
@@ -5137,25 +5237,22 @@ mod tests {
             let receiver_key = private_keys[receiver_idx].clone();
             let leader_pk = peer_keys[0].clone();
 
-            let receiver_control = oracle.control(receiver_pk.clone());
-            let (sender_handle, receiver_handle) = receiver_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-
-            let leader_control = oracle.control(leader_pk.clone());
-            let (mut leader_sender, _leader_receiver) = leader_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-            oracle
-                .add_link(leader_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
-                .await
-                .expect("link should be added");
+            let mut oracle = TestNetwork::new();
+            let (sender_handle, receiver_handle) =
+                oracle.register(context.child("receiver_network"), receiver_key.clone());
+            let (mut leader_sender, _leader_receiver) =
+                oracle.register(context.child("leader_network"), private_keys[0].clone());
+            let receiver_control = oracle.control(&receiver_pk);
+            oracle.add_link(&leader_pk, &receiver_pk, DEFAULT_LINK);
 
             // Peer-set id 0: epoch 0 primaries before any cutover.
-            oracle.manager().track(0, epoch0_set.clone());
-            context.sleep(Duration::from_millis(10)).await;
+            oracle.track(0, epoch0_set.clone());
+            wait_for_connected(
+                &context,
+                &mut leader_sender,
+                &Set::from_iter_dedup([receiver_pk.clone()]),
+            )
+            .await;
 
             let scheme_epoch0 =
                 Scheme::signer(SCHEME_NAMESPACE, epoch0_set.clone(), receiver_key.clone())
@@ -5176,7 +5273,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
-                peer_provider: oracle.manager(),
+                peer_provider: oracle.manager(&receiver_pk),
             };
 
             // Receiver engine: schemes for both epochs so post-cutover validation can run if needed.
@@ -5206,7 +5303,7 @@ mod tests {
             // Cutover to epoch 1 primaries before `Discovered`: `leader_pk` (epoch-0-only) is no
             // longer in `latest.primary`, so overlap-buffered shards for that sender must not feed
             // reconstruction.
-            oracle.manager().track(1, epoch1_set);
+            oracle.track(1, epoch1_set);
             context.sleep(Duration::from_millis(10)).await;
 
             // Leader announcement for the old commitment: should not complete reconstruction from
@@ -5243,16 +5340,6 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let num_peers = 10usize;
-            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(2),
-                },
-            );
-            network.start();
-
             let mut private_keys = (0..num_peers)
                 .map(|i| PrivateKey::from_seed(i as u64))
                 .collect::<Vec<_>>();
@@ -5271,47 +5358,33 @@ mod tests {
             let peer5_pk = peer_keys[5].clone();
             let peer6_pk = peer_keys[6].clone();
 
-            let receiver_control = oracle.control(receiver_pk.clone());
-            let (evicted_sender, evicted_receiver) = receiver_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-
-            let peer2_control = oracle.control(peer2_pk.clone());
-            let (mut peer2_sender, _peer2_receiver) = peer2_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-
-            let peer4_control = oracle.control(peer4_pk.clone());
-            let (mut peer4_sender, _peer4_receiver) = peer4_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-
-            let peer5_control = oracle.control(peer5_pk.clone());
-            let (mut peer5_sender, _peer5_receiver) = peer5_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
-
-            let peer6_control = oracle.control(peer6_pk.clone());
-            let (mut peer6_sender, _peer6_receiver) = peer6_control
-                .register(0, TEST_QUOTA)
-                .await
-                .expect("registration should succeed");
+            let mut oracle = TestNetwork::new();
+            let (evicted_sender, evicted_receiver) = oracle.register(
+                context.child("receiver_network"),
+                private_keys[receiver_idx].clone(),
+            );
+            let (mut peer2_sender, _peer2_receiver) =
+                oracle.register(context.child("peer2_network"), private_keys[2].clone());
+            let (mut peer4_sender, _peer4_receiver) =
+                oracle.register(context.child("peer4_network"), private_keys[4].clone());
+            let (mut peer5_sender, _peer5_receiver) =
+                oracle.register(context.child("peer5_network"), private_keys[5].clone());
+            let (mut peer6_sender, _peer6_receiver) =
+                oracle.register(context.child("peer6_network"), private_keys[6].clone());
+            let receiver_control = oracle.control(&receiver_pk);
 
             // Only secondary peers that will forward shards are connected to the receiver (not the leader).
             for sender in [&peer2_pk, &peer4_pk, &peer5_pk, &peer6_pk] {
-                oracle
-                    .add_link(sender.clone(), receiver_pk.clone(), DEFAULT_LINK)
-                    .await
-                    .expect("link should be added");
+                oracle.add_link(sender, &receiver_pk, DEFAULT_LINK);
             }
 
             // Start with the full committee so the receiver's signer scheme matches the coded block.
-            oracle.manager().track(0, participants.clone());
-            context.sleep(Duration::from_millis(10)).await;
+            oracle.track(0, participants.clone());
+            let receiver_only = Set::from_iter_dedup([receiver_pk.clone()]);
+            wait_for_connected(&context, &mut peer2_sender, &receiver_only).await;
+            wait_for_connected(&context, &mut peer4_sender, &receiver_only).await;
+            wait_for_connected(&context, &mut peer5_sender, &receiver_only).await;
+            wait_for_connected(&context, &mut peer6_sender, &receiver_only).await;
 
             let scheme = Scheme::signer(
                 SCHEME_NAMESPACE,
@@ -5331,7 +5404,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: NZUsize!(1024),
-                peer_provider: oracle.manager(),
+                peer_provider: oracle.manager(&receiver_pk),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.child("evicted"), config);
@@ -5385,7 +5458,7 @@ mod tests {
                     .filter(|pk| **pk != receiver_pk)
                     .cloned(),
             );
-            oracle.manager().track(1, latest_primary);
+            oracle.track(1, latest_primary);
             context.sleep(Duration::from_millis(10)).await;
 
             // Leader announcement drains overlap-buffered peer shards; the evicted receiver should
@@ -5444,10 +5517,7 @@ mod tests {
 
                 // Sever the link from leader to victim so the leader's
                 // direct shard does not arrive initially.
-                oracle
-                    .remove_link(leader.clone(), victim.clone())
-                    .await
-                    .expect("remove_link should succeed");
+                oracle.remove_link(&leader, &victim);
 
                 // Leader proposes. All peers except the victim get their
                 // shard from the leader, verify it, and gossip it.
@@ -5487,31 +5557,43 @@ mod tests {
                 );
 
                 // Now restore the link so the leader's shard arrives late.
-                oracle
-                    .add_link(leader.clone(), victim.clone(), DEFAULT_LINK)
-                    .await
-                    .expect("add_link should succeed");
+                oracle.add_link(&leader, &victim, DEFAULT_LINK);
+                wait_for_connected(
+                    &context,
+                    &mut peers[leader_idx].sender,
+                    &Set::from_iter_dedup([victim.clone()]),
+                )
+                .await;
 
                 // Re-send the leader's shard manually via the leader's
                 // network sender (the engine already broadcast it earlier,
                 // but the link was down).
                 let leader_shard = coded_block
                     .shard(peers[victim_idx].index.get() as u16)
-                    .expect("missing victim shard");
-                peers[leader_idx].sender.send(
-                    Recipients::One(victim.clone()),
-                    leader_shard.encode(),
-                    true,
-                );
-                context.sleep(config.link.latency * 2).await;
-
-                // The shard subscription should now resolve because the
-                // late leader shard was accepted and verified.
-                select! {
-                    _ = shard_sub => {},
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("shard subscription did not resolve after late leader shard");
-                    },
+                    .expect("missing victim shard")
+                    .encode();
+                let deadline = context.current() + Duration::from_secs(5);
+                loop {
+                    peers[leader_idx].sender.send(
+                        Recipients::One(victim.clone()),
+                        leader_shard.clone(),
+                        true,
+                    );
+                    select! {
+                        _ = &mut shard_sub => break,
+                        _ = context.sleep(config.link.latency * 2) => {
+                            assert!(
+                                context.current() < deadline,
+                                "shard subscription did not resolve after late leader shard"
+                            );
+                            wait_for_connected(
+                                &context,
+                                &mut peers[leader_idx].sender,
+                                &Set::from_iter_dedup([victim.clone()]),
+                            )
+                            .await;
+                        },
+                    }
                 }
 
                 // No peer should be blocked.

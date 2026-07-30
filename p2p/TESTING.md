@@ -1,38 +1,37 @@
-# Simulated network testing
+# Deterministic network testing
 
-Use `p2p/src/simulated` to test authenticated links and adverse conditions. Start the network, register each protocol channel, then configure links explicitly:
+Use authenticated lookup over `commonware_runtime::deterministic::network` for protocol tests.
+Configure transport links, construct one lookup network per peer, track the peers' endpoints, and
+register each protocol channel before starting the lookup networks:
 
 ```rust
-let (network, mut oracle) = Network::new(
-    context.child("network"),
-    Config {
-        max_size: 1024 * 1024,
-        disconnect_on_block: true,
-        tracked_peer_sets: NZUsize!(1),
-    },
+let transport = deterministic::network::Oracle::new(Default::default());
+transport.set_link(
+    endpoint_1,
+    endpoint_2,
+    deterministic::network::Link::new(Duration::from_millis(10))
+        .with_jitter(Duration::from_millis(3)),
+)?;
+
+let (mut network, mut oracle) = p2p::utils::mocks::lookup(
+    context.child("peer"),
+    &transport,
+    crypto,
+    endpoint_1,
+    b"_COMMONWARE_EXAMPLE_LOOKUP",
+    1024 * 1024,
 );
+oracle.track(0, tracked_peers);
+let (vote_sender, vote_receiver) = network.register(0, quota, backlog);
+let (certificate_sender, certificate_receiver) = network.register(1, quota, backlog);
 network.start();
-
-let (vote_sender, vote_receiver) = oracle
-    .control(pk.clone())
-    .register(0, quota)
-    .await
-    .unwrap();
-let (certificate_sender, certificate_receiver) = oracle
-    .control(pk)
-    .register(1, quota)
-    .await
-    .unwrap();
-
-oracle.add_link(pk1, pk2, Link {
-    latency: Duration::from_millis(10),
-    jitter: Duration::from_millis(3),
-    success_rate: 0.95,
-}).await.unwrap();
 ```
 
 ## Adversarial scenarios
 
-Exercise partitions, latency, jitter, and loss when they affect the protocol. For Byzantine tests, substitute the relevant mock actor and verify the expected fault or block outcome.
+Exercise partitions, latency, jitter, failures, and bandwidth constraints when they affect the
+protocol. Use the deterministic transport oracle for topology and impairment changes. Use the
+lookup oracle for membership changes and blocking. For Byzantine tests, substitute the relevant
+mock actor and verify the expected fault or block outcome.
 
 Monitor progress with supervisors or metrics rather than time alone. Run a scenario twice with the same seed when its state is meant to be deterministic.
