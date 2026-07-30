@@ -460,7 +460,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         sync::sync(sync::engine::Config {
             context,
-            resolver,
+            source: resolver,
             target,
             max_outstanding_requests: sync_config.max_outstanding_requests,
             fetch_batch_size: sync_config.fetch_batch_size,
@@ -502,7 +502,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         sync::sync(sync::engine::Config {
             context,
-            resolver,
+            source: resolver,
             target,
             max_outstanding_requests: sync_config.max_outstanding_requests,
             fetch_batch_size: sync_config.fetch_batch_size,

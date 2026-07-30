@@ -112,7 +112,7 @@ where
     /// Runtime context for creating database components
     pub context: DB::Context,
     /// Source of operations and proofs
-    pub resolver: S,
+    pub source: S,
     /// Sync target (root digest and operation bounds)
     pub target: Target<DB::Family, DB::Digest>,
     /// Maximum number of outstanding requests for operation batches
@@ -188,7 +188,7 @@ where
     journal: DB::Journal,
 
     /// Source of operations and proofs, shared with in-flight requests
-    resolver: Arc<S>,
+    source: Arc<S>,
 
     /// Hasher used for proof verification
     hasher: StandardHasher<DB::Hasher>,
@@ -285,7 +285,7 @@ where
             fetch_batch_size: config.fetch_batch_size,
             apply_batch_size: config.apply_batch_size,
             journal,
-            resolver: Arc::new(config.resolver),
+            source: Arc::new(config.source),
             hasher: qmdb::hasher::<DB::Hasher>(),
             context: config.context,
             config: config.db_config,
@@ -314,11 +314,11 @@ where
         {
             let start_loc = self.target.range.start();
             let request = Request::new(target_size, start_loc, NZU64!(1)).retaining_from(start_loc);
-            let resolver = Arc::clone(&self.resolver);
+            let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
                 .insert(id, start_loc, target_size, async move {
-                    let result = resolver.serve(request).await;
+                    let result = source.serve(request).await;
                     IndexedFetchResult { id, result }
                 });
         }
@@ -355,11 +355,11 @@ where
 
             // Schedule the request
             let request = Request::new(target_size, gap_range.start, batch_size);
-            let resolver = Arc::clone(&self.resolver);
+            let source = Arc::clone(&self.source);
             let id = self.outstanding_requests.next_id();
             self.outstanding_requests
                 .insert(id, gap_range.start, target_size, async move {
-                    let result = resolver.serve(request).await;
+                    let result = source.serve(request).await;
                     IndexedFetchResult { id, result }
                 });
         }
@@ -570,7 +570,7 @@ where
         // Validate batch size
         let operations_len = operations.len() as u64;
         if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
-            // Invalid batch size - notify resolver of failure.
+            // Invalid batch size - notify source of failure.
             // We will request these operations again when we scan for unfetched operations.
             if let Some(validity) = validity {
                 validity.send_lossy(false);
@@ -595,7 +595,7 @@ where
             let Some(root) = self.retained_roots.get(&request.target_size) else {
                 // No historical root to verify against (evicted or
                 // max_retained_roots is 0). Drop the result without
-                // penalizing the resolver — the data may be valid.
+                // penalizing the source -- the data may be valid.
                 return Ok(());
             };
             root
@@ -620,7 +620,7 @@ where
             proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
         };
 
-        // Report success or failure to the resolver.
+        // Report success or failure to the source.
         if let Some(validity) = validity {
             validity.send_lossy(valid);
         }
@@ -864,9 +864,9 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct TestResolver;
+    struct TestSource;
 
-    impl Source<Request<MmrFamily>> for TestResolver {
+    impl Source<Request<MmrFamily>> for TestSource {
         type Digest = sha256::Digest;
         type Error = Infallible;
         type Family = MmrFamily;
@@ -896,10 +896,10 @@ mod tests {
         context: deterministic::Context,
         journal_size: u64,
         boundary_probes: Arc<AtomicUsize>,
-    ) -> Config<TestDb, TestResolver> {
+    ) -> Config<TestDb, TestSource> {
         Config {
             context,
-            resolver: TestResolver,
+            source: TestSource,
             target: Target {
                 root: sha256::Digest::from([1u8; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(10)),

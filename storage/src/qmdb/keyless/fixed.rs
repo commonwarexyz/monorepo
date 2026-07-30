@@ -1010,7 +1010,7 @@ mod test {
                     range: non_empty_range!(lower_bound, upper_bound),
                 },
                 context: ctx.child("client"),
-                resolver: target_db.clone(),
+                source: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,

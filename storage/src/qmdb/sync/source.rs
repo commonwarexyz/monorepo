@@ -151,7 +151,7 @@ where
 
 /// Where to report whether a fetched response verified, so a remote peer can be scored.
 ///
-/// `None` when the response came from local storage, where there is no peer to score.
+/// `None` when there is no peer to score, e.g. the response came from local storage.
 pub type Validity = Option<oneshot::Sender<bool>>;
 
 /// Anything that can answer request `Req`.
@@ -173,7 +173,6 @@ pub trait Source<Req: Send + 'static>: Send + Sync {
     type Error: std::error::Error + Send + 'static;
 
     /// Answer one request.
-    ///
     #[allow(clippy::type_complexity)]
     fn serve<'a>(
         &'a self,
@@ -279,12 +278,11 @@ macro_rules! serve_request {
             ),
             $crate::qmdb::Error<F>,
         > {
-            let source = self;
-            let (proof, operations) = source
+            let (proof, operations) = self
                 .historical_proof(request.size, request.start, request.max_ops)
                 .await?;
             let pinned_nodes = match request.retain_from {
-                Some(boundary) => Some(source.pinned_nodes_at(boundary).await?),
+                Some(boundary) => Some(self.pinned_nodes_at(boundary).await?),
                 None => None,
             };
             Ok((
@@ -425,7 +423,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_all_qmdb_variants_implement_sources() {
+    fn test_all_qmdb_variants_implement_source() {
         type AnyOrderedFixed = crate::qmdb::any::ordered::fixed::Db<
             mmr::Family,
             deterministic::Context,

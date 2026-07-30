@@ -534,7 +534,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
                 root: sync_root,
                 range: commonware_utils::non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 4,
             update_rx: None,
@@ -658,8 +658,8 @@ macro_rules! current_sync_tests_for_harness {
             use std::num::NonZeroU64;
 
             #[test_traced]
-            fn test_sync_resolver_fails() {
-                crate::qmdb::any::sync::tests::test_sync_resolver_fails::<$harness>();
+            fn test_sync_source_fails() {
+                crate::qmdb::any::sync::tests::test_sync_source_fails::<$harness>();
             }
 
             #[rstest]

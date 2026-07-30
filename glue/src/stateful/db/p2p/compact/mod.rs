@@ -1,6 +1,6 @@
 //! P2P implementation of the compact QMDB sync resolver.
 //!
-//! Implements [`commonware_storage::qmdb::sync::compact::SourceFor`] over
+//! Implements [`commonware_storage::qmdb::sync::Source`] for compact targets over
 //! [`commonware_resolver::p2p::Engine`]. Use this for compact-storage QMDBs
 //! that fetch one authenticated frontier state instead of replaying operations.
 

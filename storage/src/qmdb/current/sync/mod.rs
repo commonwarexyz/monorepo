@@ -370,11 +370,6 @@ impl_current_sync_database!(
     OrderedVariableOp<F, K, V>: CodecShared
 );
 
-// --- Resolver implementations ---
-//
-// The resolver for `current` databases serves ops-level proofs (not grafted proofs) from
-// the inner `any` db. The sync engine verifies each batch against the ops root.
-
 /// A `current` database serves proofs from the `any` database it wraps: the sync engine
 /// operates on the ops root, which is `any`'s root.
 ///

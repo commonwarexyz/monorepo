@@ -24,7 +24,7 @@
 //! [`db::p2p::standard`] resolver implementing
 //! [`commonware_storage::qmdb::sync::source::Source`] and a
 //! [`db::p2p::compact`] resolver implementing
-//! [`commonware_storage::qmdb::sync::compact::SourceFor`]) over
+//! [`commonware_storage::qmdb::sync::Source`] keyed by compact targets) over
 //! [`commonware-resolver`](commonware_resolver), enabling databases to fetch
 //! and serve sync operations from peers.
 //!

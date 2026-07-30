@@ -138,7 +138,7 @@ where
                 range: non_empty_range!(target_oldest_retained_loc, target_op_count),
             },
             context: context.child("client"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -201,7 +201,7 @@ where
                 range: non_empty_range!(target_oldest_retained_loc, target_op_count),
             },
             context: context.child("client"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -253,7 +253,7 @@ where
                 range: non_empty_range!(lower_bound, op_count),
             },
             context: client_context.child("client"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -325,7 +325,7 @@ where
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
-                resolver: target_db.clone(),
+                source: target_db.clone(),
                 fetch_batch_size: NZU64!(2),
                 max_outstanding_requests: 10,
                 apply_batch_size: 1024,
@@ -409,7 +409,7 @@ where
                 range: non_empty_range!(lower_bound, op_count),
             },
             context: context.child("client"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -464,7 +464,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("sync"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -508,7 +508,7 @@ where
         let lower_bound = bounds.start;
         let upper_bound = bounds.end;
 
-        let resolver = Arc::new(target_db);
+        let source = Arc::new(target_db);
         let config = Config {
             db_config: sync_config,
             fetch_batch_size: NZU64!(10),
@@ -517,7 +517,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("sync"),
-            resolver: resolver.clone(),
+            source: source.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -532,7 +532,7 @@ where
 
         H::destroy(sync_db).await;
         let target_db =
-            Arc::try_unwrap(resolver).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            Arc::try_unwrap(source).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
         H::destroy(target_db).await;
     });
 }
@@ -566,7 +566,7 @@ where
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
@@ -628,7 +628,7 @@ where
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
@@ -701,7 +701,7 @@ where
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: Some(update_receiver),
@@ -774,7 +774,7 @@ where
                 range: non_empty_range!(bounds.start, bounds.end),
             },
             context: context.child("client"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -838,7 +838,7 @@ where
                 root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
@@ -1323,8 +1323,7 @@ mod compact_variable_mmr {
         }
     }
 
-    /// Fetch compact state for `target`. These tests never cancel, so the sender is held for the
-    /// duration of the call rather than dropped, which would read as an immediate cancellation.
+    /// Serve compact state for `target` from `source`.
     async fn fetch_compact_state<R>(
         source: &R,
         target: sync::compact::Target<mmr::Family, sha256::Digest>,
@@ -1348,7 +1347,7 @@ mod compact_variable_mmr {
     #[test_traced("WARN")]
     fn test_compact_full_source_missing_reports_missing_source() {
         deterministic::Runner::default().start(|_context| async move {
-            let resolver: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
+            let source: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
             let target = sync::compact::Target {
                 root: sha256::Digest::from([0; 32]),
@@ -1356,7 +1355,7 @@ mod compact_variable_mmr {
             };
 
             assert!(matches!(
-                fetch_compact_state(&resolver, target).await,
+                fetch_compact_state(&source, target).await,
                 Err(sync::ServeError::MissingSource)
             ));
         });
@@ -1391,7 +1390,7 @@ mod compact_variable_mmr {
             let client_cfg = client_config(&suffix, &context);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: source.clone(),
+                source: source.clone(),
                 target: target.clone(),
                 db_config: client_cfg.clone(),
                 update_rx: None,
@@ -1449,7 +1448,7 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -1513,7 +1512,7 @@ mod compact_variable_mmr {
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, Some(bad_tx)),
                         (good_state, Some(good_tx)),
@@ -1572,7 +1571,7 @@ mod compact_variable_mmr {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -1632,7 +1631,7 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -1727,7 +1726,7 @@ mod compact_variable_mmr {
 
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 1),
-                resolver: Arc::new(source),
+                source: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve1"), &context),
                 update_rx: None,
@@ -1761,7 +1760,7 @@ mod compact_variable_mmr {
 
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 2),
-                resolver: Arc::new(source),
+                source: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve2"), &context),
                 update_rx: None,
@@ -1794,7 +1793,7 @@ mod compact_variable_mmr {
 
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 3),
-                resolver: Arc::new(source),
+                source: Arc::new(source),
                 target: target3.clone(),
                 db_config: client_config(&format!("{suffix}-serve3"), &context),
                 update_rx: None,
@@ -1815,7 +1814,7 @@ mod compact_variable_mmr {
             );
             let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
                 context: context.child("stale_client"),
-                resolver: source.clone(),
+                source: source.clone(),
                 target: target2.clone(),
                 db_config: client_config(&format!("{suffix}-stale"), &context),
                 update_rx: None,
@@ -1891,7 +1890,7 @@ mod compact_variable_mmr {
 
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: Arc::new(source),
+                source: Arc::new(source),
                 target: target.clone(),
                 db_config: client_cfg.clone(),
                 update_rx: None,
@@ -2098,8 +2097,7 @@ mod compact_variable_mmb {
         }
     }
 
-    /// Fetch compact state for `target`. These tests never cancel, so the sender is held for the
-    /// duration of the call rather than dropped, which would read as an immediate cancellation.
+    /// Serve compact state for `target` from `source`.
     async fn fetch_compact_state<R>(
         source: &R,
         target: sync::compact::Target<mmb::Family, sha256::Digest>,
@@ -2123,7 +2121,7 @@ mod compact_variable_mmb {
     #[test_traced("WARN")]
     fn test_compact_full_source_missing_reports_missing_source() {
         deterministic::Runner::default().start(|_context| async move {
-            let resolver: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
+            let source: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
             let target = sync::compact::Target {
                 root: sha256::Digest::from([0; 32]),
@@ -2131,7 +2129,7 @@ mod compact_variable_mmb {
             };
 
             assert!(matches!(
-                fetch_compact_state(&resolver, target).await,
+                fetch_compact_state(&source, target).await,
                 Err(sync::ServeError::MissingSource)
             ));
         });
@@ -2166,7 +2164,7 @@ mod compact_variable_mmb {
             let client_cfg = client_config(&suffix, &context);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: source.clone(),
+                source: source.clone(),
                 target: target.clone(),
                 db_config: client_cfg.clone(),
                 update_rx: None,
@@ -2224,7 +2222,7 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -2288,7 +2286,7 @@ mod compact_variable_mmb {
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, Some(bad_tx)),
                         (good_state, Some(good_tx)),
@@ -2347,7 +2345,7 @@ mod compact_variable_mmb {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -2410,7 +2408,7 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, None),
@@ -2505,7 +2503,7 @@ mod compact_variable_mmb {
 
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 1),
-                resolver: Arc::new(source),
+                source: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve1"), &context),
                 update_rx: None,
@@ -2539,7 +2537,7 @@ mod compact_variable_mmb {
 
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 2),
-                resolver: Arc::new(source),
+                source: Arc::new(source),
                 target: target1.clone(),
                 db_config: client_config(&format!("{suffix}-serve2"), &context),
                 update_rx: None,
@@ -2572,7 +2570,7 @@ mod compact_variable_mmb {
 
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 3),
-                resolver: Arc::new(source),
+                source: Arc::new(source),
                 target: target3.clone(),
                 db_config: client_config(&format!("{suffix}-serve3"), &context),
                 update_rx: None,
@@ -2594,7 +2592,7 @@ mod compact_variable_mmb {
             assert_eq!(source.target(), target3);
             let stale_result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
                 context: context.child("stale_client"),
-                resolver: source.clone(),
+                source: source.clone(),
                 target: target2.clone(),
                 db_config: client_config(&format!("{suffix}-stale"), &context),
                 update_rx: None,

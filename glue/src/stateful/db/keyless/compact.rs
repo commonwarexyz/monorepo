@@ -338,7 +338,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         sync::compact::sync(sync::compact::Config {
             context,
-            resolver,
+            source: resolver,
             target,
             db_config: config,
             update_rx: Some(tip_updates),
@@ -374,7 +374,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         sync::compact::sync(sync::compact::Config {
             context,
-            resolver,
+            source: resolver,
             target,
             db_config: config,
             update_rx: Some(tip_updates),

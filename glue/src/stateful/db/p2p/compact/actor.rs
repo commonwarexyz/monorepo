@@ -353,8 +353,6 @@ where
         let State::HasDb(database) = &self.state else {
             return;
         };
-        // Serving is driven by the requesting peer, which this actor cannot cancel, so the
-        // sender is held for the duration of the read.
         let Ok((state, _)) = database.serve(key.to_target()).await else {
             return;
         };

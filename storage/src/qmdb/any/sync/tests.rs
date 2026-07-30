@@ -157,7 +157,7 @@ where
                 range: non_empty_range!(Location::new(0), Location::new(10)),
             },
             context: context.child("client"),
-            resolver: Arc::new(target_db),
+            source: Arc::new(target_db),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -180,8 +180,8 @@ where
     });
 }
 
-/// Test that resolver failure is handled correctly
-pub(crate) fn test_sync_resolver_fails<H: SyncTestHarness>()
+/// Test that source failure is handled correctly
+pub(crate) fn test_sync_source_fails<H: SyncTestHarness>()
 where
     source::tests::FailSource<H::Family, OpOf<H>, Digest>:
         Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
@@ -190,7 +190,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let resolver = source::tests::FailSource::<H::Family, OpOf<H>, Digest>::new();
+        let source = source::tests::FailSource::<H::Family, OpOf<H>, Digest>::new();
         let target_root = Digest::from([0; 32]);
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -200,7 +200,7 @@ where
                 root: target_root,
                 range: non_empty_range!(Location::new(0), Location::new(5)),
             },
-            resolver,
+            source,
             apply_batch_size: 2,
             max_outstanding_requests: 2,
             fetch_batch_size: NZU64!(2),
@@ -251,7 +251,7 @@ where
                 range: non_empty_range!(lower_bound, target_op_count),
             },
             context: client_context.child("client"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -327,7 +327,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
-            resolver: Arc::new(target_db),
+            source: Arc::new(target_db),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -402,7 +402,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("sync"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -488,10 +488,10 @@ where
         let lower_bound = target_db.sync_boundary();
         let upper_bound = target_db.bounds().end;
 
-        // sync_db should never ask the resolver for operations
-        // because it is already complete. Use a resolver that always fails
+        // sync_db should never ask the source for operations
+        // because it is already complete. Use a source that always fails
         // to ensure that it's not being used.
-        let resolver = source::tests::FailSource::<H::Family, OpOf<H>, Digest>::new();
+        let source = source::tests::FailSource::<H::Family, OpOf<H>, Digest>::new();
         let config = Config {
             db_config: sync_config, // Use same config to access same partitions
             fetch_batch_size: NZU64!(10),
@@ -500,7 +500,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("sync"),
-            resolver,
+            source,
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -570,7 +570,7 @@ where
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
@@ -639,7 +639,7 @@ where
                 root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
@@ -722,7 +722,7 @@ where
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
-                resolver: target_db.clone(),
+                source: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: Some(update_receiver),
@@ -794,7 +794,7 @@ where
                 root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
@@ -861,7 +861,7 @@ where
                 root,
                 range: non_empty_range!(initial_lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
@@ -932,7 +932,7 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(10),
             target: initial_target.clone(),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: Some(update_receiver),
@@ -1063,7 +1063,7 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(2),
             target: initial_target.clone(),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: Some(update_receiver),
@@ -1169,7 +1169,7 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(3),
             target: target.clone(),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -1226,7 +1226,7 @@ where
                 root: H::sync_target_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -1276,7 +1276,7 @@ where
                 root: H::sync_target_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -1338,7 +1338,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                     root: initial_sync_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
-                resolver: target_db.clone(),
+                source: target_db.clone(),
                 fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
                 max_outstanding_requests: 10,
                 apply_batch_size: 1024,
@@ -1448,7 +1448,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("client"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -1515,7 +1515,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
-            resolver: target_db.clone(),
+            source: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -1773,15 +1773,15 @@ where
     });
 }
 
-/// A resolver wrapper that corrupts pinned nodes on the first request, then returns correct
+/// A source wrapper that corrupts pinned nodes on the first request, then returns correct
 /// data on subsequent requests.
 #[derive(Clone)]
-struct CorruptFirstPinnedNodesResolver<R> {
+struct CorruptFirstPinnedNodesSource<R> {
     inner: R,
     corrupted: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl<R, F> Source<Request<F>> for CorruptFirstPinnedNodesResolver<R>
+impl<R, F> Source<Request<F>> for CorruptFirstPinnedNodesSource<R>
 where
     F: crate::merkle::Family,
     R: Source<Request<F>, Family = F, Digest = Digest>,
@@ -1811,7 +1811,7 @@ where
 }
 
 /// Test that corrupted pinned nodes on the first attempt are rejected and the sync
-/// succeeds on retry when the resolver returns correct data.
+/// succeeds on retry when the source returns correct data.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Source<Request<H::Family>, Family = H::Family, Op = OpOf<H>, Digest = Digest>,
@@ -1833,7 +1833,7 @@ where
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
 
-        let resolver = CorruptFirstPinnedNodesResolver {
+        let source = CorruptFirstPinnedNodesSource {
             inner: Arc::new(target_db),
             corrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -1846,7 +1846,7 @@ where
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
-            resolver,
+            source,
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -1863,10 +1863,10 @@ where
     });
 }
 
-/// A resolver wrapper that replays the first fresh boundary request against the retained
+/// A source wrapper that replays the first fresh boundary request against the retained
 /// historical root, then blocks the retry until the test releases it.
 #[derive(Clone)]
-struct ReplayFreshBoundaryResolver<R, F: crate::merkle::Family> {
+struct ReplayFreshBoundarySource<R, F: crate::merkle::Family> {
     inner: R,
     historical_target_size: Location<F>,
     boundary_start: Location<F>,
@@ -1875,7 +1875,7 @@ struct ReplayFreshBoundaryResolver<R, F: crate::merkle::Family> {
     boundary_attempts: Arc<AtomicUsize>,
 }
 
-impl<R, F> Source<Request<F>> for ReplayFreshBoundaryResolver<R, F>
+impl<R, F> Source<Request<F>> for ReplayFreshBoundarySource<R, F>
 where
     F: crate::merkle::Family,
     R: Source<Request<F>, Family = F, Digest = Digest>,
@@ -1974,7 +1974,7 @@ where
         let (release_historical_gap_tx, release_historical_gap_rx) = oneshot::channel();
         let (release_boundary_retry_tx, release_boundary_retry_rx) = oneshot::channel();
         let target_db = Arc::new(target_db);
-        let resolver = ReplayFreshBoundaryResolver {
+        let source = ReplayFreshBoundarySource {
             inner: target_db.clone(),
             historical_target_size: old_target.range.end(),
             boundary_start: new_target.range.start(),
@@ -1992,7 +1992,7 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(1),
             target: old_target.clone(),
-            resolver,
+            source,
             apply_batch_size: 1024,
             max_outstanding_requests: 2,
             update_rx: Some(update_receiver),
@@ -2897,8 +2897,8 @@ macro_rules! sync_tests_for_harness {
             }
 
             #[test_traced]
-            fn test_sync_resolver_fails() {
-                super::test_sync_resolver_fails::<$harness>();
+            fn test_sync_source_fails() {
+                super::test_sync_source_fails::<$harness>();
             }
 
             #[test_traced]

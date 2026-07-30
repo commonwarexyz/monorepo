@@ -361,8 +361,6 @@ where
 {
     state.request_counter.inc();
 
-    // Serving is driven by the requesting client, which this handler cannot cancel, so the
-    // sender is held for the duration of the read.
     let (compact_state, _) = state.database.serve(request.target).await.map_err(|err| {
         warn!(?err, "failed to serve compact state");
         match err {

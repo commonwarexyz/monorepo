@@ -71,9 +71,9 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor, reschedule};
-use commonware_utils::{Array, channel::mpsc};
+use commonware_utils::{Array, NZU64, channel::mpsc};
 use futures::future::{Either, pending};
-use std::{future::Future, num::NonZeroU64};
+use std::future::Future;
 
 /// Compact-sync target for a compact-storage database.
 ///
@@ -242,8 +242,8 @@ where
 {
     /// Runtime context for creating database components.
     pub context: DB::Context,
-    /// Source resolver for fetching compact authenticated state.
-    pub resolver: S,
+    /// Serves compact authenticated state.
+    pub source: S,
     /// Sync target (root digest and total leaf count).
     pub target: Target<DB::Family, DB::Digest>,
     /// Database-specific configuration.
@@ -302,7 +302,7 @@ where
 {
     let Config {
         context,
-        resolver,
+        source,
         mut target,
         db_config,
         mut update_rx,
@@ -337,7 +337,7 @@ where
                 target = update;
                 continue;
             },
-            db = attempt_sync(&context, attempt, &resolver, &db_config, &target) => db?,
+            db = attempt_sync(&context, attempt, &source, &db_config, &target) => db?,
         };
         metrics.record_synced(*target.leaf_count);
 
@@ -386,7 +386,7 @@ where
 async fn attempt_sync<DB, S>(
     context: &DB::Context,
     attempt: u64,
-    resolver: &S,
+    source: &S,
     db_config: &DB::Config,
     target: &Target<DB::Family, DB::Digest>,
 ) -> Result<DB, Error<DB::Family, S::Error, DB::Digest>>
@@ -395,14 +395,14 @@ where
     S: SourceFor<DB>,
 {
     // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
-    // responses. Resolver errors and local construction failures remain terminal.
+    // responses. Source errors and local construction failures remain terminal.
     loop {
-        let (response, validity_tx) = resolver
+        let (response, validity_tx) = source
             .serve(target.clone())
             .await
             .map_err(Error::Source)?;
 
-        // Validation failures describe a bad compact response. Reject it if the resolver supplied
+        // Validation failures describe a bad compact response. Reject it if the source supplied
         // feedback, then fetch another candidate.
         let validated_state = match validate_compact_state::<DB>(target, response) {
             Ok(state) => state,
@@ -562,7 +562,7 @@ where
 
     let leaf_count = target.leaf_count;
     let last_commit_loc = Location::new(*leaf_count - 1);
-    let request = Request::new(leaf_count, last_commit_loc, NonZeroU64::new(1).unwrap())
+    let request = Request::new(leaf_count, last_commit_loc, NZU64!(1))
         .retaining_from(leaf_count);
     let (response, _validity_tx) = source.serve(request).await?;
 
@@ -753,7 +753,6 @@ mod tests {
     type CompactResponse = (Response<mmr::Family, u8, Digest>, Validity);
 
     /// Serves a canned sequence of responses, one per call, so tests can drive the retry loop.
-    #[derive(Clone)]
     struct SequenceSource {
         responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
     }
@@ -804,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_compact_qmdb_variants_implement_sources() {
+    fn test_all_compact_qmdb_variants_implement_source() {
         type KeylessFixedCompactDb = crate::qmdb::keyless::fixed::CompactDb<
             mmr::Family,
             deterministic::Context,
@@ -871,7 +870,7 @@ mod tests {
 
             let db = super::sync::<TestDb, _>(Config {
                 context,
-                resolver: SequenceSource {
+                source: SequenceSource {
                     responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         (bad_state, None),
                         (good_state, Some(good_tx)),

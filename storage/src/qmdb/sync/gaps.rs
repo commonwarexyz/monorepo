@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 /// Returns a Range of operations to fetch, or None if no gaps.
 ///
 /// We assume that all outstanding requests will return `fetch_batch_size` operations,
-/// but the resolver may return fewer. In that case, we'll fetch the remaining operations
+/// but the source may return fewer. In that case, we'll fetch the remaining operations
 /// in a subsequent request.
 ///
 /// # Arguments

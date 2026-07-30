@@ -441,14 +441,14 @@ where
     {
         // Hold the witness lock only long enough to verify the requested target and snapshot the
         // entry; decode outside it so concurrent readers do not contend.
-        let (entry, leaf_count) = self.witness.with(|w| {
+        let entry = self.witness.with(|w| {
             if target.root != w.root || target.leaf_count != w.leaf_count() {
                 return Err(crate::qmdb::sync::ServeError::StaleTarget {
                     requested: target.clone(),
                     current: w.target(),
                 });
             }
-            Ok((w.witness.clone(), w.leaf_count()))
+            Ok(w.witness.clone())
         })?;
         let Witness {
             op_bytes,
@@ -461,7 +461,6 @@ where
                     "invalid commit operation",
                 ))
             })?;
-        let _ = leaf_count;
         Ok(crate::qmdb::sync::source::Response::new(
             last_commit_proof,
             vec![op],
