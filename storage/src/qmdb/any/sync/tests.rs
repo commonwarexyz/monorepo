@@ -1890,8 +1890,9 @@ where
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         if request.size == self.historical_target_size {
             if request.retain_from.is_some() {
-                // Never answers. The engine abandons this request when the target moves,
-                // which drops this future.
+                // Simulate a source that has not answered the old target's pinned-nodes
+                // request when the target changes. The update cancels the request and drops
+                // this pending future.
                 return std::future::pending().await;
             }
 

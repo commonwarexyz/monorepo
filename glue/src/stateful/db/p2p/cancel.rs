@@ -2,13 +2,13 @@
 
 use commonware_actor::mailbox::{Policy, Sender};
 
-/// Sends its message on drop, unless [`CancelGuard::disarm`] ran first.
-pub(super) struct CancelGuard<T: Policy> {
+/// Sends its message on drop, unless [`Guard::disarm`] ran first.
+pub(super) struct Guard<T: Policy> {
     sender: Sender<T>,
     cancel: Option<T>,
 }
 
-impl<T: Policy> CancelGuard<T> {
+impl<T: Policy> Guard<T> {
     pub(super) const fn new(sender: Sender<T>, cancel: T) -> Self {
         Self {
             sender,
@@ -22,7 +22,7 @@ impl<T: Policy> CancelGuard<T> {
     }
 }
 
-impl<T: Policy> Drop for CancelGuard<T> {
+impl<T: Policy> Drop for Guard<T> {
     fn drop(&mut self) {
         let Some(cancel) = self.cancel.take() else {
             return;
