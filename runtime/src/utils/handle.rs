@@ -461,40 +461,30 @@ mod tests {
     }
 
     #[test]
-    fn fatal_notification_during_final_task_poll_interrupts_completion() {
-        // Build a root task that publishes a fatal failure and completes in the
-        // same poll, after the interrupt receiver was first observed pending.
-        let (panicker, panicked) = Panicker::new(true);
-        let task = async move {
-            panicker.notify_fatal(Box::new("fatal during final poll"));
-            7
-        };
+    fn fatal_notification_during_final_task_poll_wins_arbitration() {
+        for root_panics in [false, true] {
+            // Publish a fatal failure during the final poll, then either complete
+            // the root task or raise a generic panic from that same poll.
+            let (panicker, panicked) = Panicker::new(true);
+            let task = async move {
+                panicker.notify_fatal(Box::new("detailed fatal failure"));
+                if root_panics {
+                    panic!("generic root panic");
+                }
+                7
+            };
 
-        // The newly published fatal payload must win over the ready task output.
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            futures::executor::block_on(panicked.interrupt(task))
-        }))
-        .expect_err("root task completion discarded its fatal notification");
-        assert_eq!(extract_panic_message(&*panic), "fatal during final poll");
-    }
-
-    #[test]
-    fn fatal_notification_during_panicking_task_poll_preserves_detail() {
-        // Build a root task that publishes a detailed infrastructure failure
-        // and then raises a generic panic during the same poll.
-        let (panicker, panicked) = Panicker::new(true);
-        let task = async move {
-            panicker.notify_fatal(Box::new("detailed fatal failure"));
-            panic!("generic root panic");
-        };
-
-        // The fatal receiver must win the same-poll arbitration so callers see
-        // the actionable infrastructure diagnostic instead of the generic panic.
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            futures::executor::block_on(panicked.interrupt(task))
-        }))
-        .expect_err("generic root panic replaced its fatal notification");
-        assert_eq!(extract_panic_message(&*panic), "detailed fatal failure");
+            // The actionable infrastructure diagnostic must win over either root outcome.
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                futures::executor::block_on(panicked.interrupt(task))
+            }))
+            .expect_err("root outcome discarded its fatal notification");
+            assert_eq!(
+                extract_panic_message(&*panic),
+                "detailed fatal failure",
+                "root_panics={root_panics}"
+            );
+        }
     }
 
     #[test]
