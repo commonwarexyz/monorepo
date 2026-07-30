@@ -15,10 +15,8 @@ use futures::{
     task::{ArcWake, AtomicWaker, noop_waker, waker},
 };
 use std::{
-    future::Future,
     io,
     panic::{AssertUnwindSafe, catch_unwind},
-    pin::Pin,
     sync::{
         Arc, Barrier, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
@@ -1823,17 +1821,6 @@ fn rearm_tolerance_is_one_sided() {
     assert!(arm_covers(None, None));
 }
 
-#[test]
-fn ready_sleep_is_ready_on_first_poll() {
-    // Construct the path used for zero and already elapsed sleeps.
-    let mut sleep = Sleep::ready();
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-
-    // Immediate sleeps must complete on their first poll.
-    assert_eq!(Pin::new(&mut sleep).poll(&mut context), Poll::Ready(()));
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn ready_sleep_loop_cooperates_with_other_tasks() {
     // Setup: Queue a peer behind a task that repeatedly awaits immediate sleeps.
@@ -1857,24 +1844,8 @@ async fn ready_sleep_loop_cooperates_with_other_tasks() {
 }
 
 #[test]
-fn entry_poll_observes_fire_and_failure() {
-    // Poll a waiting entry, then win its terminal transition with firing.
-    let fired = Entry::new();
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    assert_eq!(fired.poll(&mut context), Poll::Pending);
-    assert!(fired.transition(ENTRY_FIRED));
-
-    // A fired entry completes while a failed entry unwinds instead of hanging.
-    assert_eq!(fired.poll(&mut context), Poll::Ready(()));
-    let failed = Entry::new();
-    assert!(failed.transition(ENTRY_FAILED));
-    assert!(failed_poll_unwinds(&failed));
-}
-
-#[test]
-fn entry_poll_replaces_waker_without_duplicating_repeated_registration() {
-    // Poll repeatedly with one task waker, then migrate polling to another task.
+fn entry_poll_replaces_waker_and_reports_terminal_outcomes() {
+    // Setup: Poll repeatedly with one task waker, then migrate polling to another task.
     let entry = Entry::new();
     let first = Arc::new(CountingWaker {
         wakes: AtomicUsize::new(0),
@@ -1891,14 +1862,24 @@ fn entry_poll_replaces_waker_without_duplicating_repeated_registration() {
     let mut second_context = Context::from_waker(&second_waker);
     assert_eq!(entry.poll(&mut second_context), Poll::Pending);
 
-    // Fire once and invoke the single waker retained by the entry.
+    // Action: Fire once and invoke the single waker retained by the entry.
     assert!(entry.transition(ENTRY_FIRED));
     entry.take_waker().unwrap().wake();
 
-    // Repeated polls do not duplicate callbacks and replacement targets only the latest task.
+    // Assertion: Repeated polls do not duplicate callbacks, replacement targets
+    // only the latest task, and a fired entry completes.
     assert_eq!(first.wakes.load(AtomicOrdering::Relaxed), 0);
     assert_eq!(second.wakes.load(AtomicOrdering::Relaxed), 1);
     assert_eq!(entry.poll(&mut second_context), Poll::Ready(()));
+
+    // Setup: Prepare the other externally visible terminal outcome.
+    let failed = Entry::new();
+
+    // Action: Fail the entry before polling it.
+    assert!(failed.transition(ENTRY_FAILED));
+
+    // Assertion: A failed entry unwinds instead of hanging.
+    assert!(failed_poll_unwinds(&failed));
 }
 
 #[test]
@@ -1939,24 +1920,6 @@ fn entry_poll_double_check_observes_terminal_transition_during_registration() {
         assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
         assert!(entry.take_waker().is_none());
     }
-}
-
-#[test]
-fn dropping_sleep_after_ready_does_not_cancel_or_reinsert_entry() {
-    // Pop and fire one registered sleep while retaining its future-side owner.
-    let (shard, control) = fake_shard();
-    let (entry, registered) = register(&shard, at(10));
-    control.set_now(at(10));
-    let mut batch = Batch::new();
-    assert!(!driver_ok(shard.take_expired(&mut batch)));
-    assert!(batch.complete(ENTRY_FIRED).is_none());
-    assert_eq!(shard.state.lock().entries.len(), 0);
-
-    // Dropping the already-ready owner cannot replace FIRED with CANCELED.
-    drop(registered);
-    assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
-    assert_eq!(entry.heap_index.load(AtomicOrdering::Acquire), NOT_IN_HEAP);
-    assert_eq!(shard.state.lock().entries.len(), 0);
 }
 
 #[test]

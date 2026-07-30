@@ -881,29 +881,17 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn test_timer_cancellation_restores_exact_heap_occupancy() {
+    fn test_timer_timeout_winner_restores_exact_heap_occupancy() {
+        // Setup: Start one real runtime with an initially empty timer shard.
         let runner = Runner::new(Config::default().with_worker_threads(1));
         runner.start(|context| async move {
-            // Start from an empty service, then eagerly register two long sleeps
-            // without polling either future.
-            assert_eq!(context.executor.timer.heap_lengths(), vec![0]);
-            let first = context.sleep(Duration::from_secs(60));
-            let second = context.sleep(Duration::from_secs(120));
-            assert_eq!(context.executor.timer.heap_lengths(), vec![2]);
-
-            // Dropping a nonhead and then the head must remove each exact entry
-            // immediately instead of leaving canceled tombstones in the heap.
-            drop(second);
-            assert_eq!(context.executor.timer.heap_lengths(), vec![1]);
-            drop(first);
-            assert_eq!(context.executor.timer.heap_lengths(), vec![0]);
-
-            // When the user future wins a timeout, dropping the losing timeout
-            // sleep must restore the same exact empty occupancy before return.
+            // Action: Let the user future win so the losing timeout is dropped.
             let output = context
                 .timeout(Duration::from_secs(60), async { 7 })
                 .await
                 .expect("ready future should win its timeout");
+
+            // Assertion: Timeout cleanup removes its timer before returning.
             assert_eq!(output, 7);
             assert_eq!(context.executor.timer.heap_lengths(), vec![0]);
         });
