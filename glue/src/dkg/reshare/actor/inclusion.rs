@@ -120,7 +120,10 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
     /// Installs the sole active task for the current target.
     fn start(&mut self, task: Handle<VerifiedLogs<V, C>>) {
         assert!(self.task.is_none(), "verification task already running");
-        assert!(self.result.is_none(), "verification result already available");
+        assert!(
+            self.result.is_none(),
+            "verification result already available"
+        );
         self.task = Some(task).into();
     }
 
@@ -142,10 +145,7 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
     ///
     /// The outer `None` means no matching verification has completed;
     /// `Some(None)` means verification completed and the ceremony failed.
-    fn ready(
-        &self,
-        logs: &PendingLogs<V, C::PublicKey>,
-    ) -> Option<&Option<Ceremony<V, C>>> {
+    fn ready(&self, logs: &PendingLogs<V, C::PublicKey>) -> Option<&Option<Ceremony<V, C>>> {
         self.result
             .as_ref()
             .filter(|result| result.logs == *logs)
@@ -758,17 +758,17 @@ where
     ) {
         let log_map = verification.target.clone();
         let task = self.verification_task(epoch, info, store, &log_map);
-        let handle = self
-            .context
-            .child("verification")
-            .shared(true)
-            .spawn(move |context| async move {
-                let ceremony = task.run::<E, BV>(context);
-                VerifiedLogs {
-                    logs: log_map,
-                    ceremony,
-                }
-            });
+        let handle =
+            self.context
+                .child("verification")
+                .shared(true)
+                .spawn(move |context| async move {
+                    let ceremony = task.run::<E, BV>(context);
+                    VerifiedLogs {
+                        logs: log_map,
+                        ceremony,
+                    }
+                });
         verification.start(handle);
     }
 
@@ -901,8 +901,7 @@ where
                         outcome: EpochOutcome::Success,
                         epoch,
                         output: ceremony.output.clone(),
-                        players: dkg_participants
-                            .expect("DKG mode must provide participants"),
+                        players: dkg_participants.expect("DKG mode must provide participants"),
                         next_players: future_players,
                     },
                     share: Some(share),
@@ -1028,8 +1027,7 @@ mod tests {
     use commonware_cryptography::{
         Signer,
         bls12381::{
-            dkg::feldman_desmedt::Dealer as CryptoDealer,
-            primitives::sharing::Mode as SharingMode,
+            dkg::feldman_desmedt::Dealer as CryptoDealer, primitives::sharing::Mode as SharingMode,
         },
         ed25519::{PrivateKey, PublicKey},
     };
@@ -1079,9 +1077,8 @@ mod tests {
     fn dealer_logs(index: usize) -> PendingLogs<TestBlsVariant, PublicKey> {
         let info = info();
         let signer = signers()[index].clone();
-        let (dealer, _, _) =
-            CryptoDealer::start::<N3f1>(test_rng(), info.clone(), signer, None)
-                .expect("dealer should start");
+        let (dealer, _, _) = CryptoDealer::start::<N3f1>(test_rng(), info.clone(), signer, None)
+            .expect("dealer should start");
         let signed = dealer.finalize::<N3f1>();
         let (public_key, log) = signed.check(&info).expect("dealer log should be valid");
         BTreeMap::from([(public_key, log)])
@@ -1232,5 +1229,4 @@ mod tests {
             assert!(verification.ready(&active).is_some());
         });
     }
-
 }
