@@ -3,8 +3,6 @@
 use crate::utils::Panicker;
 use std::{
     future::Future,
-    pin::Pin,
-    task::{Context, Poll},
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -36,19 +34,28 @@ impl Timer {
     }
 
     /// Eagerly constructs a Tokio sleep for nonzero durations.
-    pub(crate) fn sleep(&self, duration: Duration) -> Sleep {
-        if duration.is_zero() {
-            return Sleep { inner: None };
-        }
-        // Tokio fixes its monotonic deadline at construction, which preserves
-        // the Clock contract even when the returned future is polled later.
-        Sleep {
-            inner: Some(Box::pin(tokio::time::sleep(duration))),
+    pub(crate) fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        // Construct outside the async block so Tokio fixes the monotonic
+        // deadline now, even when the returned future is polled later.
+        let sleep = if duration.is_zero() {
+            None
+        } else {
+            Some(tokio::time::sleep(duration))
+        };
+
+        async move {
+            match sleep {
+                Some(sleep) => sleep.await,
+                None => tokio::task::coop::consume_budget().await,
+            }
         }
     }
 
     /// Snapshots a wall-clock deadline once before constructing its sleep.
-    pub(crate) fn sleep_until(&self, deadline: SystemTime) -> Sleep {
+    pub(crate) fn sleep_until(
+        &self,
+        deadline: SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static {
         // Wall time is read once, so later clock adjustments cannot move the
         // monotonic deadline retained by Tokio's sleep.
         let remaining = deadline
@@ -61,29 +68,6 @@ impl Timer {
 /// Infallible fallback initialization error.
 #[derive(Debug, Error)]
 pub(crate) enum InitError {}
-
-/// Concrete fallback future with eager Tokio sleep construction.
-pub(crate) struct Sleep {
-    /// Absent for immediate completion and present for a Tokio timer.
-    inner: Option<Pin<Box<tokio::time::Sleep>>>,
-}
-
-impl Future for Sleep {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.inner.as_mut() {
-            Some(sleep) => sleep.as_mut().poll(context),
-            None => poll_cooperative_ready(context),
-        }
-    }
-}
-
-/// Consumes scheduler budget before completing an otherwise immediate sleep.
-fn poll_cooperative_ready(context: &mut Context<'_>) -> Poll<()> {
-    let mut budget = std::pin::pin!(tokio::task::coop::consume_budget());
-    budget.as_mut().poll(context)
-}
 
 #[cfg(test)]
 mod tests;

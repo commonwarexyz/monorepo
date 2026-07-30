@@ -1,11 +1,13 @@
 use super::*;
 use futures::task::noop_waker;
 use std::{
+    future::Future,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    task::Context,
+    task::{Context, Poll},
 };
 
 /// Creates the descriptor-free fallback timer facade.
@@ -21,10 +23,10 @@ fn timer() -> Timer {
 }
 
 /// Polls a fallback sleep exactly once without driving the executor.
-fn poll_once(sleep: &mut Sleep) -> Poll<()> {
+fn poll_once<F: Future<Output = ()>>(sleep: Pin<&mut F>) -> Poll<()> {
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    Pin::new(sleep).poll(&mut context)
+    sleep.poll(&mut context)
 }
 
 /// Checks the future bounds promised by the runtime Clock facade.
@@ -37,16 +39,16 @@ fn zero_and_past_sleeps_are_ready_on_first_poll() {
 
     // Zero relative durations and past wall deadlines take the immediate
     // representation instead of constructing a Tokio timer.
-    let mut zero = timer.sleep(Duration::ZERO);
-    let mut past = timer.sleep_until(SystemTime::UNIX_EPOCH);
+    let zero = timer.sleep(Duration::ZERO);
+    let past = timer.sleep_until(SystemTime::UNIX_EPOCH);
 
     // Both futures satisfy the facade bounds and complete with fresh scheduler budget.
     assert_send_static(&zero);
     assert_send_static(&past);
-    assert_eq!(poll_once(&mut zero), Poll::Ready(()));
-    assert_eq!(poll_once(&mut past), Poll::Ready(()));
-    assert!(zero.inner.is_none());
-    assert!(past.inner.is_none());
+    let mut zero = std::pin::pin!(zero);
+    let mut past = std::pin::pin!(past);
+    assert_eq!(poll_once(zero.as_mut()), Poll::Ready(()));
+    assert_eq!(poll_once(past.as_mut()), Poll::Ready(()));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -73,40 +75,24 @@ async fn immediate_sleep_loop_cooperates_with_other_tasks() {
 }
 
 #[tokio::test]
-async fn nonzero_sleep_starts_at_construction() {
-    // Construct a nonzero fallback sleep but do not poll it yet.
+async fn relative_and_wall_sleeps_start_at_construction() {
+    // Setup: Construct relative and wall-clock sleeps without polling either.
     let timer = timer();
     let duration = Duration::from_millis(20);
-    let mut sleep = timer.sleep(duration);
-    let fixed_deadline = sleep.inner.as_ref().unwrap().deadline();
-
-    // Let the eagerly created Tokio deadline elapse through another timer.
-    tokio::time::sleep(duration.saturating_mul(3)).await;
-
-    // The original sleep is ready on its next poll and retained the deadline
-    // chosen when Timer::sleep was called.
-    assert_eq!(sleep.inner.as_ref().unwrap().deadline(), fixed_deadline);
-    assert_eq!(poll_once(&mut sleep), Poll::Ready(()));
-}
-
-#[tokio::test]
-async fn sleep_until_retains_one_monotonic_snapshot() {
-    // Convert one future wall deadline into the Tokio monotonic clock.
-    let timer = timer();
-    let duration = Duration::from_millis(50);
     let wall_deadline = SystemTime::now()
         .checked_add(duration)
         .expect("test wall deadline must be representable");
-    let sleep = timer.sleep_until(wall_deadline);
-    let fixed_deadline = sleep.inner.as_ref().unwrap().deadline();
+    let relative = timer.sleep(duration);
+    let wall = timer.sleep_until(wall_deadline);
+    assert_send_static(&relative);
+    assert_send_static(&wall);
 
-    // Time passing after construction must not recompute the wall-clock
-    // conversion or move the retained monotonic deadline.
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(sleep.inner.as_ref().unwrap().deadline(), fixed_deadline);
+    // Action: Let both eagerly created deadlines elapse through another timer.
+    tokio::time::sleep(duration.saturating_mul(3)).await;
 
-    // Awaiting the same future completes against that original snapshot.
-    tokio::time::timeout(Duration::from_secs(2), sleep)
-        .await
-        .expect("fallback wall-clock sleep timed out");
+    // Assertion: Their first polls observe the construction-time deadlines.
+    let mut relative = std::pin::pin!(relative);
+    let mut wall = std::pin::pin!(wall);
+    assert_eq!(poll_once(relative.as_mut()), Poll::Ready(()));
+    assert_eq!(poll_once(wall.as_mut()), Poll::Ready(()));
 }
