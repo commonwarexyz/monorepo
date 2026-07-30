@@ -239,6 +239,23 @@ mod tests {
         }
     }
 
+    /// Pops and verifies the minimum retained by the reference model.
+    fn assert_pop_matches_model(heap: &mut Heap, model: &mut Vec<LiveTimer>) {
+        let expected_index = model
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, timer)| (timer.deadline, timer.sequence))
+            .map(|(index, _)| index)
+            .expect("reference model is not empty");
+        let expected = model.swap_remove(expected_index);
+        let popped = heap.pop().expect("heap matches reference length");
+        assert!(Arc::ptr_eq(&popped.entry, &expected.entry));
+        assert_eq!(
+            expected.entry.heap_index.load(Ordering::Relaxed),
+            NOT_IN_HEAP
+        );
+    }
+
     /// Remove the entry at `index` and verify its identity and resulting state.
     fn assert_remove_at(heap: &mut Heap, index: usize) {
         let expected_entry = Arc::clone(&heap.items[index].entry);
@@ -459,19 +476,7 @@ mod tests {
                 });
                 sequence = sequence.wrapping_add(1);
             } else if rng.random_bool(0.5) {
-                let expected_index = model
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, timer)| (timer.deadline, timer.sequence))
-                    .map(|(index, _)| index)
-                    .expect("reference model is not empty");
-                let expected = model.swap_remove(expected_index);
-                let popped = heap.pop().expect("heap matches reference length");
-                assert!(Arc::ptr_eq(&popped.entry, &expected.entry));
-                assert_eq!(
-                    expected.entry.heap_index.load(Ordering::Relaxed),
-                    NOT_IN_HEAP
-                );
+                assert_pop_matches_model(&mut heap, &mut model);
             } else {
                 let model_index = rng.random_range(0..model.len());
                 let expected = model.swap_remove(model_index);
@@ -495,19 +500,7 @@ mod tests {
         // Drain the remaining entries against the model to prove final pop order
         // and nonresident sentinel cleanup.
         while !model.is_empty() {
-            let expected_index = model
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, timer)| (timer.deadline, timer.sequence))
-                .map(|(index, _)| index)
-                .expect("reference model is not empty");
-            let expected = model.swap_remove(expected_index);
-            let popped = heap.pop().expect("heap matches reference length");
-            assert!(Arc::ptr_eq(&popped.entry, &expected.entry));
-            assert_eq!(
-                expected.entry.heap_index.load(Ordering::Relaxed),
-                NOT_IN_HEAP
-            );
+            assert_pop_matches_model(&mut heap, &mut model);
             assert_invariants(&heap);
         }
         assert_eq!(heap.len(), 0);

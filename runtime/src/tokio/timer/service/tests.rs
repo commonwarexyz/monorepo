@@ -3,9 +3,9 @@ mod ordinary {
     use super::super::{
         Affinity, Alarm, AlarmInitError, AssignmentKind, Batch, Deadline, DriverFailure,
         DriverSignal, ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING,
-        EXPIRY_YIELD_BUDGET, Entry, InitError, NEXT_RUNTIME_ID, NOT_IN_HEAP, RegisteredSleep,
-        Shard, ShardLifecycle, Sleep, ThreadAssignment, ThreadAssignments, WAKE_BATCH,
-        allocate_runtime_id, initialize_shards, run_driver, run_driver_loop,
+        EXPIRY_YIELD_BUDGET, Entry, InitError, NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle,
+        Sleep, ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id,
+        initialize_shards, run_driver, run_driver_loop,
     };
     use crate::{
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
@@ -528,7 +528,7 @@ mod ordinary {
     /// Constructs an affinity allocator with a fresh runtime identity.
     fn affinity(worker_threads: usize) -> Affinity {
         Affinity {
-            runtime_id: allocate_runtime_id(&NEXT_RUNTIME_ID),
+            runtime_id: allocate_runtime_id(),
             lifetime: Arc::new(()),
             worker_threads,
             next_worker: super::super::AtomicUsize::new(0),

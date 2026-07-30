@@ -61,9 +61,9 @@ pub(super) const NOT_IN_HEAP: usize = usize::MAX;
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Claims one runtime identity without allowing the allocator to wrap.
-fn allocate_runtime_id(counter: &AtomicU64) -> u64 {
+fn allocate_runtime_id() -> u64 {
     // Relaxed ordering is sufficient because the counter provides uniqueness only.
-    counter
+    NEXT_RUNTIME_ID
         .try_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
             next.checked_add(1)
         })
@@ -174,7 +174,7 @@ pub(crate) struct Setup {
 impl Setup {
     /// Allocates a distinct runtime identity and its shard allocators.
     pub(crate) fn new(worker_threads: usize) -> Self {
-        let runtime_id = allocate_runtime_id(&NEXT_RUNTIME_ID);
+        let runtime_id = allocate_runtime_id();
         Self {
             affinity: Arc::new(Affinity {
                 runtime_id,
@@ -217,32 +217,23 @@ where
     // On error, Vec and local-value RAII drop all prior and current alarms.
     let mut shards = Vec::with_capacity(worker_threads);
     for index in 0..worker_threads {
-        let alarm = create_alarm(index).map_err(|error| InitError {
+        let init_error = |operation, source| InitError {
             platform: A::PLATFORM,
             shard: index,
-            operation: error.operation,
-            source: error.source,
-        })?;
-        alarm.now().map_err(|source| InitError {
-            platform: A::PLATFORM,
-            shard: index,
-            operation: "read monotonic clock",
+            operation,
             source,
-        })?;
+        };
+        let alarm =
+            create_alarm(index).map_err(|error| init_error(error.operation, error.source))?;
+        alarm
+            .now()
+            .map_err(|source| init_error("read monotonic clock", source))?;
         alarm
             .arm(alarm.max_deadline())
-            .map_err(|source| InitError {
-                platform: A::PLATFORM,
-                shard: index,
-                operation: "validate initial arm",
-                source,
-            })?;
-        alarm.disarm().map_err(|source| InitError {
-            platform: A::PLATFORM,
-            shard: index,
-            operation: "validate initial disarm",
-            source,
-        })?;
+            .map_err(|source| init_error("validate initial arm", source))?;
+        alarm
+            .disarm()
+            .map_err(|source| init_error("validate initial disarm", source))?;
         shards.push(Arc::new(Shard::new(index, alarm, panicker.clone())));
     }
     Ok(shards)
