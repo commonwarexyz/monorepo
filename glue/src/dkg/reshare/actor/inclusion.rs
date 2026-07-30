@@ -710,7 +710,7 @@ mod tests {
         bls12381::primitives::sharing::Mode as SharingMode,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{Runner, Scheduler, Supervisor, deterministic};
     use commonware_utils::{N3f1, NZU32, NZU64, channel::oneshot, ordered::Set};
     use futures::{FutureExt, stream};
     use std::sync::Arc;

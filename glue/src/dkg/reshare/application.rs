@@ -272,7 +272,9 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
     };
-    use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{
+        Clock, Metrics, Runner, Scheduler as _, Spawner, Supervisor, deterministic,
+    };
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
         sync::Mutex,

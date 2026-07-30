@@ -45,6 +45,7 @@ use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
+use commonware_utils::PlatformSend;
 use std::{
     collections::VecDeque,
     fmt,
@@ -56,7 +57,7 @@ use std::{
 };
 
 /// Retained overflow messages for a mailbox policy.
-pub trait Overflow<T>: Default {
+pub trait Overflow<T>: Default + PlatformSend {
     /// Return whether the retained message set is empty.
     fn is_empty(&self) -> bool;
 
@@ -70,7 +71,7 @@ pub trait Overflow<T>: Default {
         F: FnMut(T) -> Option<T>;
 }
 
-impl<T> Overflow<T> for VecDeque<T> {
+impl<T: PlatformSend> Overflow<T> for VecDeque<T> {
     fn is_empty(&self) -> bool {
         self.is_empty()
     }
@@ -89,7 +90,7 @@ impl<T> Overflow<T> for VecDeque<T> {
 }
 
 /// Overflow behavior for actor messages when an inbox is full.
-pub trait Policy: Sized {
+pub trait Policy: Sized + PlatformSend {
     /// Overflow storage used by this policy.
     type Overflow: Overflow<Self>;
 
@@ -112,7 +113,7 @@ pub trait Policy: Sized {
 }
 
 /// Overflow behavior for actor messages that can be rejected when an inbox is full.
-pub trait UnreliablePolicy: Sized {
+pub trait UnreliablePolicy: Sized + PlatformSend {
     /// Overflow storage used by this policy.
     type Overflow: Overflow<Self>;
 
@@ -906,6 +907,22 @@ mod tests {
                 Self::Vote(_) => false,
             }
         }
+    }
+
+    const fn assert_send<T: Send>(_: &T) {}
+
+    const fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn native_mailboxes_remain_thread_safe() {
+        assert_send_sync::<Sender<Ack>>();
+        assert_send_sync::<UnreliableSender<Message>>();
+
+        let (_sender, mut receiver) = new::<Ack>(NZUsize!(1));
+        assert_send(&receiver.recv());
+
+        let (_sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
+        assert_send(&receiver.recv());
     }
 
     struct Ack {

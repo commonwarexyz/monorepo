@@ -107,7 +107,7 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
-        Clock, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
+        Clock, Metrics as _, Quota, Runner, Scheduler as _, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{

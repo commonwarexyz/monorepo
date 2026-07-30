@@ -9,7 +9,7 @@ use commonware_flood::Config;
 use commonware_formatting::from_hex;
 use commonware_p2p::{Manager as _, Receiver, Recipients, Sender, authenticated::discovery};
 use commonware_runtime::{
-    Buf, Quota, Runner, Spawner, Supervisor as _,
+    Buf, Quota, Runner, Scheduler as _, Supervisor as _,
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };

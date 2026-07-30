@@ -28,7 +28,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -183,7 +183,7 @@ where
 /// Consensus engine orchestrator.
 pub struct Actor<E, B, M, P, MV, DV, C, A, L, T, ACK = Exact>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     P: Provider<Scope = Epoch>,
@@ -225,7 +225,7 @@ where
 
 impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, ACK>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     P: Provider<Scope = Epoch>,

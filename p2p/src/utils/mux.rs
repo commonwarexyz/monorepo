@@ -12,11 +12,14 @@ use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
 use commonware_macros::select_loop;
-use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
-use commonware_utils::channel::{
-    fallible::FallibleExt,
-    mpsc::{self, error::TrySendError},
-    oneshot,
+use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Scheduler, spawn_cell};
+use commonware_utils::{
+    PlatformSend,
+    channel::{
+        fallible::FallibleExt,
+        mpsc::{self, error::TrySendError},
+        oneshot,
+    },
 };
 use std::{collections::HashMap, fmt::Debug, time::SystemTime};
 use thiserror::Error;
@@ -58,7 +61,7 @@ type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 type BackupResponse<P> = (Channel, Message<P>);
 
 /// A multiplexer of p2p channels into subchannels.
-pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
+pub struct Muxer<E: Scheduler, S: Sender, R: Receiver> {
     context: ContextCell<E>,
     sender: S,
     receiver: R,
@@ -68,7 +71,7 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     backup: Option<mpsc::Sender<BackupResponse<R::PublicKey>>>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
+impl<E: Scheduler, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
@@ -299,7 +302,7 @@ impl<S: Sender> GlobalSender<S> {
         &mut self,
         subchannel: Channel,
         recipients: Recipients<S::PublicKey>,
-        payload: impl Into<IoBufs> + Send,
+        payload: impl Into<IoBufs> + PlatformSend,
         priority: bool,
     ) -> Unreliable<Feedback> {
         self.check(recipients).map_or_else(
@@ -347,7 +350,11 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         self.inner.recipients()
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send(
+        self,
+        message: impl Into<IoBufs> + PlatformSend,
+        priority: bool,
+    ) -> Unreliable<Feedback> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
@@ -365,12 +372,12 @@ pub trait Builder {
 }
 
 /// A builder that constructs a [Muxer].
-pub struct MuxerBuilder<E: Spawner, S: Sender, R: Receiver> {
+pub struct MuxerBuilder<E: Scheduler, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilder<E, S, R> {
+impl<E: Scheduler, S: Sender, R: Receiver> Builder for MuxerBuilder<E, S, R> {
     type Output = (Muxer<E, S, R>, MuxHandle<S, R>);
 
     fn build(self) -> Self::Output {
@@ -378,7 +385,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilder<E, S, R> {
     }
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
+impl<E: Scheduler, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
     /// Registers a backup channel with the muxer.
     pub fn with_backup(mut self) -> MuxerBuilderWithBackup<E, S, R> {
         let (tx, rx) = mpsc::channel(self.mux.mailbox_size);
@@ -404,13 +411,13 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
 }
 
 /// A builder that constructs a [Muxer] with a backup channel.
-pub struct MuxerBuilderWithBackup<E: Spawner, S: Sender, R: Receiver> {
+pub struct MuxerBuilderWithBackup<E: Scheduler, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
     backup_rx: mpsc::Receiver<BackupResponse<R::PublicKey>>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithBackup<E, S, R> {
+impl<E: Scheduler, S: Sender, R: Receiver> MuxerBuilderWithBackup<E, S, R> {
     /// Registers a global sender with the muxer.
     pub fn with_global_sender(self) -> MuxerBuilderAllOpts<E, S, R> {
         let global_sender = GlobalSender::new(self.mux.sender.clone());
@@ -424,7 +431,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithBackup<E, S, R> {
     }
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S, R> {
+impl<E: Scheduler, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S, R> {
     type Output = (
         Muxer<E, S, R>,
         MuxHandle<S, R>,
@@ -437,13 +444,13 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S
 }
 
 /// A builder that constructs a [Muxer] with a [GlobalSender].
-pub struct MuxerBuilderWithGlobalSender<E: Spawner, S: Sender, R: Receiver> {
+pub struct MuxerBuilderWithGlobalSender<E: Scheduler, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
     global_sender: GlobalSender<S>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithGlobalSender<E, S, R> {
+impl<E: Scheduler, S: Sender, R: Receiver> MuxerBuilderWithGlobalSender<E, S, R> {
     /// Registers a backup channel with the muxer.
     pub fn with_backup(mut self) -> MuxerBuilderAllOpts<E, S, R> {
         let (tx, rx) = mpsc::channel(self.mux.mailbox_size);
@@ -458,7 +465,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithGlobalSender<E, S, R> {
     }
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSender<E, S, R> {
+impl<E: Scheduler, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSender<E, S, R> {
     type Output = (Muxer<E, S, R>, MuxHandle<S, R>, GlobalSender<S>);
 
     fn build(self) -> Self::Output {
@@ -467,14 +474,14 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSende
 }
 
 /// A builder that constructs a [Muxer] with a [GlobalSender] and backup channel.
-pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender, R: Receiver> {
+pub struct MuxerBuilderAllOpts<E: Scheduler, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
     backup_rx: mpsc::Receiver<BackupResponse<R::PublicKey>>,
     global_sender: GlobalSender<S>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R> {
+impl<E: Scheduler, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R> {
     type Output = (
         Muxer<E, S, R>,
         MuxHandle<S, R>,
@@ -680,7 +687,7 @@ mod tests {
             unreachable!("rate-limited sender should not produce a checked sender");
         }
 
-        fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
+        fn send(self, _: impl Into<IoBufs> + PlatformSend, _: bool) -> Unreliable<Feedback> {
             unreachable!("rate-limited sender should not send");
         }
     }

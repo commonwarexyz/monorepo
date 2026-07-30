@@ -4,6 +4,7 @@ use commonware_actor::{
 };
 use commonware_macros::select;
 use commonware_runtime::Metrics;
+use commonware_utils::PlatformSend;
 use std::{collections::VecDeque, num::NonZeroUsize};
 
 pub(crate) struct Message<T>(T);
@@ -14,7 +15,7 @@ impl<T> Message<T> {
     }
 }
 
-impl<T> UnreliablePolicy for Message<T> {
+impl<T: PlatformSend> UnreliablePolicy for Message<T> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -22,18 +23,18 @@ impl<T> UnreliablePolicy for Message<T> {
     }
 }
 
-pub(crate) struct Receivers<T> {
+pub(crate) struct Receivers<T: PlatformSend> {
     pub(crate) low: mailbox::UnreliableReceiver<Message<T>>,
     pub(crate) high: mailbox::UnreliableReceiver<Message<T>>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Relay<T> {
+pub struct Relay<T: PlatformSend> {
     low: mailbox::UnreliableSender<Message<T>>,
     high: mailbox::UnreliableSender<Message<T>>,
 }
 
-impl<T> Relay<T> {
+impl<T: PlatformSend> Relay<T> {
     /// Creates a prioritized relay backed by bounded low and high priority mailboxes.
     pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, Receivers<T>) {
         let (low_sender, low_receiver) = mailbox::new_unreliable(metrics.child("low"), size);
@@ -71,7 +72,7 @@ pub enum Prioritized<C, D> {
 }
 
 /// Awaits a message from control, high, or low priority receivers.
-pub async fn recv_prioritized<C: UnreliablePolicy, D>(
+pub async fn recv_prioritized<C: UnreliablePolicy, D: PlatformSend>(
     control: &mut mailbox::UnreliableReceiver<C>,
     high: &mut mailbox::UnreliableReceiver<Message<D>>,
     low: &mut mailbox::UnreliableReceiver<Message<D>>,
@@ -88,7 +89,9 @@ pub async fn recv_prioritized<C: UnreliablePolicy, D>(
 }
 
 /// Attempts to receive one data message from a relay receiver.
-pub(crate) fn try_recv<T>(receiver: &mut mailbox::UnreliableReceiver<Message<T>>) -> Option<T> {
+pub(crate) fn try_recv<T: PlatformSend>(
+    receiver: &mut mailbox::UnreliableReceiver<Message<T>>,
+) -> Option<T> {
     receiver.try_recv().ok().map(Message::into_inner)
 }
 

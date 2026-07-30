@@ -22,6 +22,14 @@ hash = "d3e85c4a686b2b20a7af190a6446d22c356584166b1e245757c4a45428c4c416"
 n_cases = 65536
 hash = "7839d952c09aea96d40dcfd33b3219babe805bd0b8aa7d80b30f65041cf43a8c"
 
+["commonware_p2p::types::tests::conformance::CodecConformance<Advertisement<Ingress>>"]
+n_cases = 65536
+hash = "f61f28283896523a65bf12f501f48aafe7ef42ec3002756e722b5347077a0dd3"
+
 ["commonware_p2p::types::tests::conformance::CodecConformance<Ingress>"]
 n_cases = 65536
 hash = "e773b0aaebf079d380a4652b17c063f7a936f0da853d28e4a88ccb55a82574f2"
+
+["commonware_p2p::types::tests::conformance::CodecConformance<Reachability<Ingress>>"]
+n_cases = 65536
+hash = "326d241a2341632b43590d82abe535b2204547db2ee0747ef649486e690e9c76"

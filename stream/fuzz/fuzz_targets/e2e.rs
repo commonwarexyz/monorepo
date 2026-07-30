@@ -1,7 +1,9 @@
 #![no_main]
 
 use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::TAG_SIZE};
-use commonware_runtime::{Handle, Runner as _, Spawner, Supervisor as _, deterministic, mocks};
+use commonware_runtime::{
+    Handle, Runner as _, Scheduler as _, Supervisor as _, deterministic, mocks,
+};
 use commonware_stream::{
     encrypted::{Config, Error, Receiver, Sender, dial, listen},
     utils::codec::{recv_frame, send_frame},

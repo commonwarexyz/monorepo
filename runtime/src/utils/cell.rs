@@ -13,7 +13,7 @@ const DUPLICATE_CONTEXT: &str = "runtime context already present";
 macro_rules! spawn_cell {
     ($cell:expr, $body:expr $(,)?) => {{
         let __commonware_context = $cell.take();
-        $crate::Spawner::spawn(__commonware_context, move |context| {
+        $crate::Scheduler::spawn(__commonware_context, move |context| {
             $cell.restore(context);
             $body
         })

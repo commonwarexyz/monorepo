@@ -4,7 +4,7 @@ use super::{Contiguous, Many, fixed, variable};
 use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as _, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+    Blob as _, Runner as _, Scheduler as _, Storage as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs},

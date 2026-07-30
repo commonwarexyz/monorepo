@@ -63,7 +63,7 @@ use common::{
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
-    Runner as _, Spawner as _, Supervisor as _,
+    Runner as _, Scheduler as _, Supervisor as _,
     tokio::{Config, Context, Runner},
 };
 use commonware_storage::{merkle::mmr::Family as Mmr, qmdb::any::traits::DbAny};

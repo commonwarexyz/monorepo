@@ -536,7 +536,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{Runner as _, Scheduler as _, Supervisor as _, deterministic};
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,

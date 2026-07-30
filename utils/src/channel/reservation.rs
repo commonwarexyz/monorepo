@@ -4,6 +4,7 @@ use super::mpsc::{
     self, OwnedPermit,
     error::{SendError, TrySendError},
 };
+use crate::PlatformSend;
 use std::{
     future::Future,
     pin::Pin,
@@ -14,7 +15,11 @@ use std::{
 type ReserveResult<T> = Result<OwnedPermit<T>, SendError<()>>;
 
 // Tokio's `reserve_owned` future is not nameable, so box it instead of exposing a future parameter.
+#[cfg(not(target_arch = "wasm32"))]
 type ReserveFuture<T> = Pin<Box<dyn Future<Output = ReserveResult<T>> + Send>>;
+
+#[cfg(target_arch = "wasm32")]
+type ReserveFuture<T> = Pin<Box<dyn Future<Output = ReserveResult<T>>>>;
 
 /// A reserved channel slot bundled with the value to send.
 #[must_use = "call send to deliver the reserved message"]
@@ -38,7 +43,10 @@ pub struct Reservation<T> {
 }
 
 impl<T> Reservation<T> {
-    fn new(future: impl Future<Output = ReserveResult<T>> + Send + 'static, value: T) -> Self {
+    fn new(
+        future: impl Future<Output = ReserveResult<T>> + PlatformSend + 'static,
+        value: T,
+    ) -> Self {
         Self {
             future: Box::pin(future),
             value: Some(value),
@@ -82,7 +90,7 @@ pub trait ReservationExt<T> {
         T: 'static;
 }
 
-impl<T: Send> ReservationExt<T> for mpsc::Sender<T> {
+impl<T: PlatformSend> ReservationExt<T> for mpsc::Sender<T> {
     fn send_or_reserve(&self, value: T) -> Result<Option<Reservation<T>>, SendError<T>>
     where
         T: 'static,

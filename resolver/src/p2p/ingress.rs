@@ -1,7 +1,7 @@
 use crate::{Fetch, Resolver, TargetedResolver, ingress};
 use commonware_actor::{Feedback, mailbox::Sender};
 use commonware_cryptography::PublicKey;
-use commonware_utils::{Span, vec::NonEmptyVec};
+use commonware_utils::{PlatformSend, Span, vec::NonEmptyVec};
 
 /// A key to fetch data for, optionally with target peers.
 pub type FetchKey<K, P, S> = ingress::FetchKey<K, S, Option<NonEmptyVec<P>>>;
@@ -19,12 +19,12 @@ fn fetch_key<K, P, S>(fetch: Fetch<K, S>, targets: Option<NonEmptyVec<P>>) -> Fe
 
 /// A way to send messages to the peer actor.
 #[derive(Clone)]
-pub struct Mailbox<K: Span, P: Eq, S: Eq = ()> {
+pub struct Mailbox<K: Span, P: Eq + PlatformSend, S: Eq + PlatformSend = ()> {
     /// The channel that delivers messages to the peer actor.
     sender: Sender<Message<K, P, S>>,
 }
 
-impl<K: Span, P: Eq, S: Eq> Mailbox<K, P, S> {
+impl<K: Span, P: Eq + PlatformSend, S: Eq + PlatformSend> Mailbox<K, P, S> {
     /// Create a new mailbox.
     pub(super) const fn new(sender: Sender<Message<K, P, S>>) -> Self {
         Self { sender }

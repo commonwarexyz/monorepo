@@ -7,8 +7,8 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    Spawner as _, StreamOf, Supervisor as _, child_label,
+    Acceptor, BufferPool, BufferPoolConfig, Clock, ConnectionOf, Dialer, Error, Execution, Handle,
+    METRICS_PREFIX, Name, Scheduler as _, Spawner as _, Supervisor as _, TcpEndpoint, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
@@ -538,9 +538,8 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Implementation of [crate::Spawner], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `tokio`
-/// runtime.
+/// Implementation of [crate::Scheduler], [crate::Clock], [crate::Dialer],
+/// [crate::Acceptor], and [crate::Storage] for the `tokio` runtime.
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
@@ -560,17 +559,7 @@ impl Context {
     }
 }
 
-impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
-        self
-    }
-
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
-        self
-    }
-
+impl crate::Scheduler for Context {
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -650,6 +639,18 @@ impl crate::Spawner for Context {
 
     fn stopped(&self) -> Signal {
         self.executor.shutdown.lock().stopped()
+    }
+}
+
+impl crate::Spawner for Context {
+    fn dedicated(mut self) -> Self {
+        self.execution = Execution::Dedicated;
+        self
+    }
+
+    fn shared(mut self, blocking: bool) -> Self {
+        self.execution = Execution::Shared(blocking);
+        self
     }
 }
 
@@ -769,29 +770,35 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl crate::Network for Context {
-    type Listener = <Network as crate::Network>::Listener;
-
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        self.network.bind(socket).await
-    }
-
-    async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
-        self.network.dial(socket).await
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        let addresses = tokio::net::lookup_host(format!("{host}:0"))
+            .await
+            .map_err(|error| Error::ResolveFailed(error.to_string()))?;
+        Ok(addresses.map(|address| address.ip()).collect())
     }
 }
 
-impl crate::Resolver for Context {
-    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
-        // Uses the host's DNS configuration (e.g. /etc/resolv.conf on Unix,
-        // registry on Windows). This delegates to the system's libc resolver.
-        //
-        // The `:0` port is required by lookup_host's API but is not used
-        // for DNS resolution.
-        let addrs = tokio::net::lookup_host(format!("{host}:0"))
-            .await
-            .map_err(|e| Error::ResolveFailed(e.to_string()))?;
-        Ok(addrs.map(|addr| addr.ip()).collect())
+impl Dialer for Context {
+    type Endpoint = TcpEndpoint;
+    type Connection = ConnectionOf<Network>;
+
+    fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+        self.network.supports(endpoint)
+    }
+
+    async fn dial(&self, endpoint: &Self::Endpoint) -> Result<Self::Connection, Error> {
+        self.network.dial(endpoint).await
+    }
+}
+
+impl Acceptor for Context {
+    type Bind = SocketAddr;
+    type Connection = <Network as Acceptor>::Connection;
+    type Listener = <Network as Acceptor>::Listener;
+
+    async fn bind(&self, bind: &Self::Bind) -> Result<Self::Listener, Error> {
+        self.network.bind(bind).await
     }
 }
 
@@ -849,16 +856,11 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
-        tokio::telemetry,
+        Connection as _, Listener as _, Metrics, Runner as _, Sink, Stream, TcpListener as _,
+        telemetry::metrics::raw::Counter, tokio::telemetry,
     };
     use bytes::Bytes;
-    use std::{
-        self,
-        collections::HashMap,
-        net::{IpAddr, Ipv4Addr, Ipv6Addr},
-        str::FromStr,
-    };
+    use std::{self, collections::HashMap, str::FromStr};
     use tracing::{Level, error};
 
     #[test]
@@ -1048,9 +1050,10 @@ mod tests {
 
             // Simulate a client connecting to the server
             let client_handle = context.child("client").spawn(move |context| async move {
-                let (mut sink, mut stream) = loop {
-                    match context.dial(address).await {
-                        Ok((sink, stream)) => break (sink, stream),
+                let endpoint = TcpEndpoint::Socket(address);
+                let (mut sink, mut stream, _) = loop {
+                    match context.dial(&endpoint).await {
+                        Ok(connection) => break connection.split(),
                         Err(e) => {
                             // The client may be polled before the server is ready, that's alright!
                             error!(err =?e, "failed to connect");
@@ -1092,14 +1095,30 @@ mod tests {
     fn test_resolver() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let addrs = context.resolve("localhost").await.unwrap();
-            assert!(!addrs.is_empty());
-            for addr in addrs {
-                assert!(
-                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
-                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
-                );
-            }
+            let mut listener = context
+                .bind(&SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let endpoint = TcpEndpoint::Dns {
+                host: "127.0.0.1".to_string(),
+                port,
+                allow_private_ips: true,
+            };
+
+            let (dialed, accepted) = futures::join!(context.dial(&endpoint), listener.accept());
+            dialed.unwrap().split();
+            accepted.unwrap().split();
+
+            let endpoint = TcpEndpoint::Dns {
+                host: "127.0.0.1".to_string(),
+                port,
+                allow_private_ips: false,
+            };
+            assert!(matches!(
+                context.dial(&endpoint).await,
+                Err(Error::ResolveFailed(_))
+            ));
         });
     }
 }

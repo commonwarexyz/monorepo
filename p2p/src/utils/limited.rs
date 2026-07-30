@@ -4,12 +4,12 @@ use crate::{Recipients, UnlimitedSender};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
-use commonware_utils::{channel::ring, sync::Mutex};
+use commonware_utils::{PlatformSend, PlatformSync, channel::ring, sync::Mutex};
 use futures::{FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer snapshots for resolving [`Recipients::All`].
-pub trait Connected: Clone + Send + Sync + 'static {
+pub trait Connected: Clone + PlatformSend + PlatformSync + 'static {
     type PublicKey: PublicKey;
 
     /// Return the current peer snapshot.
@@ -210,7 +210,11 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
         }
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send(
+        self,
+        message: impl Into<IoBufs> + PlatformSend,
+        priority: bool,
+    ) -> Unreliable<Feedback> {
         self.sender.send(self.recipients, message, priority)
     }
 }
@@ -258,7 +262,7 @@ mod tests {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufs> + Send,
+            message: impl Into<IoBufs> + PlatformSend,
             priority: bool,
         ) -> Unreliable<Feedback> {
             let message = message.into().coalesce();

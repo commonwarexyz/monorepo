@@ -223,7 +223,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
+        BufferPooler, Error as RError, Metrics as _, Runner, Scheduler as _, Supervisor as _,
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,

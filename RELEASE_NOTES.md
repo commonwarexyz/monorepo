@@ -2,6 +2,20 @@
 
 ## v2026.7.0
 
+### Portable Scheduling and Transports
+
+The runtime now separates portable task scheduling from native thread-placement
+hints. `Scheduler` owns `spawn`, `stop`, and `stopped`; `Spawner` extends it with
+`shared` and `dedicated`. Existing runtime implementations should move the
+portable methods to `Scheduler` while retaining `Spawner` for native placement.
+
+Runtime networking now exposes separate `Dialer` and `Acceptor` capabilities,
+with established streams represented by `Connection`. TCP implementations use
+`TcpEndpoint`, `TcpOrigin`, and the optional `TcpListener` extension. The BETA
+authenticated discovery and lookup constructions remain TCP-oriented, while
+new ALPHA lookup constructions accept generic endpoints, support dial-only
+participation, and attach already-established authenticated connections.
+
 ### Staged Batch Updates in QMDB
 
 QMDB batches gained an explicit staged path for read-then-write workloads

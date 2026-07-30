@@ -27,7 +27,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, Metrics, Supervisor};
+//! use commonware_runtime::{Scheduler, Runner, deterministic, Metrics, Supervisor};
 //!
 //! let executor =  deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -43,11 +43,9 @@
 //! ```
 
 pub use crate::storage::faulty::Config as FaultConfig;
-#[cfg(feature = "external")]
-use crate::{Blocker, Pacer};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
-    METRICS_PREFIX, Name, Panicked, child_label,
+    Acceptor, BufferPool, BufferPoolConfig, Clock, ConnectionOf, Dialer, Error, Execution, Handle,
+    IoBufs, METRICS_PREFIX, Name, Panicked, TcpEndpoint, child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -67,6 +65,8 @@ use crate::{
         supervision::Tree,
     },
 };
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -897,9 +897,8 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
-/// Implementation of [crate::Spawner], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `deterministic`
-/// runtime.
+/// Implementation of [crate::Scheduler], [crate::Clock], [crate::Dialer],
+/// [crate::Acceptor], and [crate::Storage] for the `deterministic` runtime.
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
@@ -1116,17 +1115,7 @@ impl Context {
     }
 }
 
-impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
-        self
-    }
-
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
-        self
-    }
-
+impl crate::Scheduler for Context {
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -1193,6 +1182,18 @@ impl crate::Spawner for Context {
         executor.auditor.event(b"stopped", |_| {});
 
         executor.shutdown.lock().stopped()
+    }
+}
+
+impl crate::Spawner for Context {
+    fn dedicated(mut self) -> Self {
+        self.execution = Execution::Dedicated;
+        self
+    }
+
+    fn shared(mut self, blocking: bool) -> Self {
+        self.execution = Execution::Shared(blocking);
+        self
     }
 }
 
@@ -1498,35 +1499,78 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-impl crate::Network for Context {
-    type Listener = ListenerOf<Network>;
-
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        self.network.bind(socket).await
-    }
-
-    async fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
-        self.network.dial(socket).await
-    }
-}
-
 impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
-        // Get the record
         let executor = self.executor();
-        let dns = executor.dns.lock();
-        let result = dns.get(host).cloned();
-        drop(dns);
-
-        // Update the auditor
+        let result = executor.dns.lock().get(host).cloned();
         executor.auditor.event(b"resolve", |hasher| {
             hasher.update(host.as_bytes());
             hasher.update(result.encode());
         });
         result.ok_or_else(|| Error::ResolveFailed(host.to_string()))
+    }
+}
+
+impl Dialer for Context {
+    type Endpoint = TcpEndpoint;
+    type Connection = ConnectionOf<Network>;
+
+    fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+        matches!(endpoint, TcpEndpoint::Socket(_) | TcpEndpoint::Dns { .. })
+    }
+
+    async fn dial(&self, endpoint: &Self::Endpoint) -> Result<Self::Connection, Error> {
+        let sockets = match endpoint {
+            TcpEndpoint::Socket(socket) => vec![*socket],
+            TcpEndpoint::Dns {
+                host,
+                port,
+                allow_private_ips,
+            } => {
+                let executor = self.executor();
+                let result = executor.dns.lock().get(host).cloned();
+                executor.auditor.event(b"resolve", |hasher| {
+                    hasher.update(host.as_bytes());
+                    hasher.update(result.encode());
+                });
+                let mut addresses = result.ok_or_else(|| Error::ResolveFailed(host.clone()))?;
+                if addresses.is_empty() {
+                    return Err(Error::ResolveFailed(host.clone()));
+                }
+                executor.auditor.event(b"rand", |hasher| {
+                    hasher.update(b"dns_shuffle");
+                });
+                addresses.shuffle(&mut **executor.rng.lock());
+                let addresses: Vec<_> = addresses
+                    .into_iter()
+                    .filter(|ip| *allow_private_ips || commonware_utils::IpAddrExt::is_global(ip))
+                    .map(|ip| SocketAddr::new(ip, *port))
+                    .collect();
+                if addresses.is_empty() {
+                    return Err(Error::ResolveFailed(host.clone()));
+                }
+                addresses
+            }
+        };
+
+        let mut last_error = Error::ConnectionFailed;
+        for socket in sockets {
+            match self.network.dial(&TcpEndpoint::Socket(socket)).await {
+                Ok(connection) => return Ok(connection),
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error)
+    }
+}
+
+impl Acceptor for Context {
+    type Bind = SocketAddr;
+    type Connection = <Network as Acceptor>::Connection;
+    type Listener = <Network as Acceptor>::Listener;
+
+    async fn bind(&self, bind: &Self::Bind) -> Result<Self::Listener, Error> {
+        self.network.bind(bind).await
     }
 }
 
@@ -1600,8 +1644,8 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
-        Supervisor as _, deterministic, reschedule,
+        Blob, Connection as _, Listener as _, Metrics as _, Runner as _, Scheduler as _, Storage,
+        Strategizer, Supervisor as _, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
@@ -1853,8 +1897,17 @@ mod tests {
         // Check that DNS mappings persist after recovery
         let executor = Runner::from(checkpoint);
         executor.start(move |context| async move {
-            let resolved = context.resolve(host).await.unwrap();
-            assert_eq!(resolved, addrs);
+            let socket = SocketAddr::new(addrs[0], 1234);
+            let mut listener = context.bind(&socket).await.unwrap();
+            let endpoint = TcpEndpoint::Dns {
+                host: host.to_string(),
+                port: socket.port(),
+                allow_private_ips: true,
+            };
+
+            let (dialed, accepted) = futures::join!(context.dial(&endpoint), listener.accept());
+            dialed.unwrap().split();
+            accepted.unwrap().split();
         });
     }
 
@@ -2336,17 +2389,49 @@ mod tests {
             let ip2: IpAddr = "192.168.1.2".parse().unwrap();
             context.resolver_register("example.com", Some(vec![ip1, ip2]));
 
-            // Resolve registered hostname
-            let addrs = context.resolve("example.com").await.unwrap();
-            assert_eq!(addrs, vec![ip1, ip2]);
+            // Dial a registered hostname.
+            let socket = SocketAddr::new(ip1, 1234);
+            let mut listener = context.bind(&socket).await.unwrap();
+            let endpoint = TcpEndpoint::Dns {
+                host: "example.com".to_string(),
+                port: socket.port(),
+                allow_private_ips: true,
+            };
+            let (dialed, accepted) = futures::join!(context.dial(&endpoint), listener.accept());
+            dialed.unwrap().split();
+            accepted.unwrap().split();
 
-            // Resolve unregistered hostname
-            let result = context.resolve("unknown.com").await;
+            // Dial an unregistered hostname.
+            let unknown = TcpEndpoint::Dns {
+                host: "unknown.com".to_string(),
+                port: socket.port(),
+                allow_private_ips: true,
+            };
+            let result = context.dial(&unknown).await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // An empty successful response is also a resolution failure.
+            context.resolver_register("empty.com", Some(Vec::new()));
+            let empty = TcpEndpoint::Dns {
+                host: "empty.com".to_string(),
+                port: socket.port(),
+                allow_private_ips: true,
+            };
+            let result = context.dial(&empty).await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // Private DNS results are rejected before a connection is attempted.
+            let private = TcpEndpoint::Dns {
+                host: "example.com".to_string(),
+                port: socket.port(),
+                allow_private_ips: false,
+            };
+            let result = context.dial(&private).await;
             assert!(matches!(result, Err(Error::ResolveFailed(_))));
 
             // Remove mapping
             context.resolver_register("example.com", None);
-            let result = context.resolve("example.com").await;
+            let result = context.dial(&endpoint).await;
             assert!(matches!(result, Err(Error::ResolveFailed(_))));
         });
     }

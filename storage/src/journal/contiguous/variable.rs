@@ -2570,7 +2570,7 @@ mod tests {
     use crate::journal::contiguous::tests::{corrupt_page, run_contiguous_tests};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
+        Metrics as _, Runner, Scheduler as _, Storage, Supervisor as _,
         buffer::paged::{CacheRef, Writer},
         deterministic,
         mocks::{

@@ -1,5 +1,5 @@
 use crate::{
-    IoBufs, SinkOf, StreamOf,
+    Acceptor, Dialer, IoBufs, PlatformSend,
     telemetry::metrics::{Counter, Register, raw},
 };
 use std::{net::SocketAddr, sync::Arc};
@@ -51,7 +51,7 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + PlatformSend) -> Result<(), crate::Error> {
         let bufs = bufs.into();
         let len = bufs.len();
         self.inner.send(bufs).await?;
@@ -64,6 +64,39 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
 pub struct Stream<S: crate::Stream> {
     inner: S,
     metrics: Arc<Metrics>,
+}
+
+/// Adds byte counters to an established connection.
+pub struct Connection<C: crate::Connection> {
+    inner: C,
+    metrics: Arc<Metrics>,
+}
+
+impl<C: crate::Connection> crate::Connection for Connection<C> {
+    type Sink = Sink<C::Sink>;
+    type Stream = Stream<C::Stream>;
+    type Origin = C::Origin;
+
+    fn split(
+        self,
+    ) -> (
+        Self::Sink,
+        Self::Stream,
+        crate::ConnectionInfo<Self::Origin>,
+    ) {
+        let (sink, stream, info) = self.inner.split();
+        (
+            Sink {
+                inner: sink,
+                metrics: Arc::clone(&self.metrics),
+            },
+            Stream {
+                inner: stream,
+                metrics: self.metrics,
+            },
+            info,
+        )
+    }
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
@@ -86,34 +119,27 @@ pub struct Listener<L: crate::Listener> {
 }
 
 impl<L: crate::Listener> crate::Listener for Listener<L> {
-    type Sink = Sink<L::Sink>;
-    type Stream = Stream<L::Stream>;
+    type Connection = Connection<L::Connection>;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
-        let (addr, sink, stream) = self.inner.accept().await?;
+    async fn accept(&mut self) -> Result<Self::Connection, crate::Error> {
+        let inner = self.inner.accept().await?;
         self.metrics.inbound_connections.inc();
-        Ok((
-            addr,
-            Sink {
-                inner: sink,
-                metrics: self.metrics.clone(),
-            },
-            Stream {
-                inner: stream,
-                metrics: self.metrics.clone(),
-            },
-        ))
+        Ok(Connection {
+            inner,
+            metrics: Arc::clone(&self.metrics),
+        })
     }
+}
 
+impl<L: crate::TcpListener> crate::TcpListener for Listener<L> {
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
         self.inner.local_addr()
     }
 }
 
-/// A metered network implementation which wraps another
-/// [crate::Network] and tracks metrics for it.
+/// A metered transport that wraps another transport and tracks metrics for it.
 #[derive(Debug, Clone)]
-pub struct Network<N: crate::Network> {
+pub struct Network<N> {
     inner: N,
     /// Metrics for the network.
     /// Note these are not tracked on a per-connection basis.
@@ -122,7 +148,7 @@ pub struct Network<N: crate::Network> {
     metrics: Arc<Metrics>,
 }
 
-impl<N: crate::Network> Network<N> {
+impl<N> Network<N> {
     /// Wraps `inner` to make it metered.
     /// The `registry` is used to register the metrics.
     pub(crate) fn new(inner: N, registry: &mut impl Register) -> Self {
@@ -134,40 +160,43 @@ impl<N: crate::Network> Network<N> {
     }
 }
 
-impl<N: crate::Network> crate::Network for Network<N> {
-    type Listener = Listener<N::Listener>;
+impl<N: Dialer> Dialer for Network<N> {
+    type Endpoint = N::Endpoint;
+    type Connection = Connection<N::Connection>;
 
-    async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, crate::Error> {
-        let inner = self.inner.bind(socket).await?;
-        Ok(Listener {
-            inner,
-            metrics: self.metrics.clone(),
-        })
+    fn supports(&self, endpoint: &Self::Endpoint) -> bool {
+        self.inner.supports(endpoint)
     }
 
-    async fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> Result<(SinkOf<Self>, StreamOf<Self>), crate::Error> {
-        let (sink, stream) = self.inner.dial(socket).await?;
+    async fn dial(&self, endpoint: &Self::Endpoint) -> Result<Self::Connection, crate::Error> {
+        let inner = self.inner.dial(endpoint).await?;
         self.metrics.outbound_connections.inc();
-        Ok((
-            Sink {
-                inner: sink,
-                metrics: self.metrics.clone(),
-            },
-            Stream {
-                inner: stream,
-                metrics: self.metrics.clone(),
-            },
-        ))
+        Ok(Connection {
+            inner,
+            metrics: Arc::clone(&self.metrics),
+        })
+    }
+}
+
+impl<N: Acceptor> Acceptor for Network<N> {
+    type Bind = N::Bind;
+    type Connection = Connection<N::Connection>;
+    type Listener = Listener<N::Listener>;
+
+    async fn bind(&self, bind: &Self::Bind) -> Result<Self::Listener, crate::Error> {
+        let inner = self.inner.bind(bind).await?;
+        Ok(Listener {
+            inner,
+            metrics: Arc::clone(&self.metrics),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        Listener as _, Network as _, Sink as _, Stream as _,
+        Acceptor as _, Connection as _, Dialer as _, Listener as _, Sink as _, Stream as _,
+        TcpEndpoint,
         network::{
             deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork,
             tests,
@@ -175,7 +204,6 @@ mod tests {
     };
     use commonware_macros::test_group;
     use std::net::SocketAddr;
-
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
@@ -207,17 +235,21 @@ mod tests {
         // Note this is a deterministic network, so we can use any address
         // since we're not actually binding to a real socket.
         let addr = SocketAddr::from(([127, 0, 0, 1], 1234));
-        let mut listener = network.bind(addr).await.unwrap();
+        let mut listener = network.bind(&addr).await.unwrap();
 
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
-            let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+            let (mut sink, mut stream, _) = listener.accept().await.unwrap().split();
             let received = stream.recv(MSG_SIZE).await.unwrap();
             sink.send(received).await.unwrap();
         });
 
         // Send and receive data as client
-        let (mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
+        let (mut client_sink, mut client_stream, _) = network
+            .dial(&TcpEndpoint::Socket(addr))
+            .await
+            .unwrap()
+            .split();
 
         // Send fixed-size data and receive response
         let msg = vec![42u8; MSG_SIZE];

@@ -1,4 +1,4 @@
-use super::Aborter;
+use super::handle::Aborter;
 use commonware_utils::sync::Mutex;
 use std::{
     mem,
