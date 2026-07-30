@@ -267,8 +267,8 @@ pub trait Mutable: Contiguous + Sized {
     /// - If `min_position > bounds.end`, the prune is capped to `bounds.end` (no error is returned)
     /// - Some items with positions less than `min_position` may be retained due to
     ///   section/blob alignment
-    /// - This operation is not atomic, but implementations guarantee the journal is left in a
-    ///   recoverable state if a crash occurs during pruning
+    /// - Whole-blob removals are committed as one namespace batch. After commitment, storage
+    ///   recovery completes any interrupted removals before reopening the namespace
     ///
     /// # Errors
     ///
@@ -288,8 +288,9 @@ pub trait Mutable: Contiguous + Sized {
     /// - If `size > bounds.end`, returns [Error::InvalidRewind]
     /// - If `size == bounds.end`, this is a no-op
     /// - If `size < bounds.start`, returns [Error::ItemPruned] (can't rewind to pruned data)
-    /// - This operation is not atomic, but implementations guarantee the journal is left in a
-    ///   recoverable state if a crash occurs during rewinding
+    /// - The retained blob's final tail and all whole-blob removals share one namespace batch.
+    ///   After commitment, storage recovery completes any interrupted batch before reopening the
+    ///   namespace
     ///
     /// # Warnings
     ///
@@ -329,10 +330,8 @@ pub trait Mutable: Contiguous + Sized {
     /// This method consumes the journal and deletes all persisted data, leaving behind no storage
     /// artifacts. This can be used to clean up disk resources in tests.
     ///
-    /// # Crash Safety
-    ///
-    /// If interrupted, initialization remains possible so destruction can be retried. The
-    /// recovered contents are unspecified.
+    /// The owned namespace entries are committed as one removal batch. After commitment, storage
+    /// recovery completes an interrupted removal before another namespace operation proceeds.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Rewinds the journal to the last item matching `predicate`, returning the resulting

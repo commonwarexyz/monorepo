@@ -37,19 +37,22 @@ pub fn split_cycles<T>(
 }
 
 /// Fault preset for interrupting a multi-step storage operation (destroy, prune) at any of its
-/// awaits: writes, syncs, and removals may all fail, and a failed write persists an arbitrary
+/// awaits: writes, syncs, and batches may all fail, and a failed write persists an arbitrary
 /// byte subset.
 pub fn interrupt_faults() -> deterministic::FaultConfig {
     deterministic::FaultConfig::default()
         .write(0.5)
         .partial_write(1.0)
         .sync(0.5)
-        .remove(0.5)
+        .batch(0.5)
+        .batch_post_commit(0.5)
 }
 
-/// Fault preset for interrupting blob removals only.
-pub fn remove_faults() -> deterministic::FaultConfig {
-    deterministic::FaultConfig::default().remove(0.5)
+/// Fault preset for interrupting atomic storage batches only.
+pub fn batch_faults() -> deterministic::FaultConfig {
+    deterministic::FaultConfig::default()
+        .batch(0.5)
+        .batch_post_commit(0.5)
 }
 
 /// Page size for the buffer pool (1-256 bytes).

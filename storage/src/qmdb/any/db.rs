@@ -20,7 +20,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{Handle, RemoveTarget, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -898,12 +898,29 @@ where
         Ok(self)
     }
 
+    /// Return a context capable of removing this database's physical namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.log.destroy_context()
+    }
+
+    /// Wait for in-flight child syncs, then return the physical namespace entries it owns.
+    pub(crate) async fn into_remove_targets(
+        self,
+    ) -> Result<Vec<RemoveTarget>, crate::qmdb::Error<F>> {
+        // Destructure before the await boundary to avoid stack growth from
+        // retaining the entire `self` in the destroy future.
+        let Self { log, .. } = self;
+        Ok(log.into_remove_targets().await?)
+    }
+
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
-        // Destructure before the await boundary to avoid stack growth from
-        // retaining the entire `self` in the future.
-        let Self { log, .. } = self;
-        log.destroy().await.map_err(Into::into)
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(crate::qmdb::Error::Runtime)
     }
 }

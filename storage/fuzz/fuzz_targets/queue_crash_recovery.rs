@@ -67,7 +67,7 @@ enum QueueOperation {
 enum SyncFaultStage {
     /// Fail the journal sync before pruning can begin.
     Journal,
-    /// Allow the journal sync to finish, then fault blob removal during pruning.
+    /// Allow the journal sync to finish, then fault the pruning batch around commitment.
     Prune,
 }
 
@@ -90,7 +90,7 @@ struct FuzzInput {
     write_buffer: usize,
     /// Optional variable-journal compression.
     compression: bool,
-    /// Failure rate for ordinary sync operations and targeted prune removals.
+    /// Failure rate for ordinary sync operations and targeted prune batches.
     #[arbitrary(with = bounded_rate)]
     sync_failure_rate: f64,
     /// Failure rate for write operations.
@@ -251,8 +251,12 @@ async fn run_operations(
                 let faults = context.storage_fault_config();
                 *faults.write() = match fault_stage {
                     SyncFaultStage::Journal => deterministic::FaultConfig::default().sync(1.0),
-                    SyncFaultStage::Prune => deterministic::FaultConfig::default()
-                        .remove(injected_faults.sync_rate.unwrap_or_default()),
+                    SyncFaultStage::Prune => {
+                        let rate = injected_faults.sync_rate.unwrap_or_default();
+                        deterministic::FaultConfig::default()
+                            .batch(rate)
+                            .batch_post_commit(rate)
+                    }
                 };
                 let result = queue.sync().await;
                 *faults.write() = injected_faults.clone();
@@ -306,16 +310,10 @@ async fn verify_recovery(
     );
 
     assert!(
-        ack_floor >= state.durable_prune,
-        "recovered ack_floor {} is less than minimum expected {}",
-        ack_floor,
-        state.durable_prune
-    );
-    assert!(
-        ack_floor <= state.max_prune,
-        "recovered ack_floor {} is greater than maximum expected {}",
-        ack_floor,
-        state.max_prune
+        ack_floor == state.durable_prune || ack_floor == state.max_prune,
+        "recovered ack_floor {ack_floor} is neither complete atomic outcome ({}, {})",
+        state.durable_prune,
+        state.max_prune,
     );
     assert!(ack_floor <= size, "recovered ack floor exceeds size");
     assert_eq!(
@@ -458,8 +456,9 @@ fn fuzz(input: FuzzInput) {
             (state, sentinel_pos)
         });
 
-    // Cross one more crash boundary so the sentinel's durability is actually exercised. Destroy
-    // delegates to the journal, whose interrupted destroy journal_crash_recovery already fuzzes.
+    // Cross one more crash boundary so the sentinel's durability is actually exercised. Atomic
+    // destroy recovery is covered by the runtime batch-recovery and journal target-composition
+    // tests, so cleanup here is fault-free.
     deterministic::Runner::from(checkpoint).start(|ctx| async move {
         let queue_cfg = Config {
             partition: partition_name,

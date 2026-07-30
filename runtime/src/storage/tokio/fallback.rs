@@ -12,6 +12,7 @@ use tokio::{
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
+    generation: Arc<super::Generation>,
     // Files must be seeked prior to any read or write operation and are thus
     // not safe to concurrently interact with. If we switched to mapping files
     // we could remove this lock.
@@ -22,20 +23,38 @@ pub struct Blob {
 }
 
 impl Blob {
-    pub fn new(
+    pub(super) fn new(
         partition: String,
         name: &[u8],
         file: fs::File,
         pool: BufferPool,
         data_offset: u64,
+        generation: Arc<super::Generation>,
     ) -> Self {
         Self {
             partition,
             name: name.into(),
+            generation,
             file: Arc::new(Mutex::new(file)),
             pool,
             data_offset,
         }
+    }
+
+    pub(super) fn partition(&self) -> &str {
+        &self.partition
+    }
+
+    pub(super) fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    pub(super) const fn data_offset(&self) -> u64 {
+        self.data_offset
+    }
+
+    pub(super) const fn generation(&self) -> &Arc<super::Generation> {
+        &self.generation
     }
 
     async fn write_at_inner(

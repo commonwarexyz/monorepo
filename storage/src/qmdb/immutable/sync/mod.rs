@@ -27,9 +27,11 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C: Mutable<Item = Operation<F, K, V>>
+        + sync::Journal<F, Context = E, Op = Operation<F, K, V>>
+        + authenticated::Backing<E, Config = <C as sync::Journal<F>>::Config>,
     C::Item: EncodeShared,
-    C::Config: Clone + Send,
+    <C as sync::Journal<F>>::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -38,7 +40,7 @@ where
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config, S>;
+    type Config = immutable::Config<T, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 

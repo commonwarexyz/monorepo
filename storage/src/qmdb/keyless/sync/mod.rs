@@ -25,8 +25,10 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding + Codec,
-    C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
-    C::Config: Clone + Send,
+    C: Mutable<Item = Operation<F, V>>
+        + sync::Journal<F, Context = E, Op = Operation<F, V>>
+        + authenticated::Backing<E, Config = <C as sync::Journal<F>>::Config>,
+    <C as sync::Journal<F>>::Config: Clone + Send,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -35,7 +37,7 @@ where
     type Op = Operation<F, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<C::Config, S>;
+    type Config = super::Config<<C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 

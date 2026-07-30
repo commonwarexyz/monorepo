@@ -31,7 +31,7 @@ use crate::{
     journal::Error,
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, RemoveTarget};
 use commonware_utils::sequence::VecU64;
 
 /// Key for the mid-blob pruning boundary. Absent when the boundary is blob-aligned (it is then
@@ -61,6 +61,17 @@ impl<E: Context> Checkpoint<E> {
         )
         .await?;
         Ok(Self { metadata })
+    }
+
+    /// Wait for an in-flight checkpoint sync, then return its namespace-removal targets.
+    pub(super) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        Ok(self.metadata.into_remove_targets().await?)
+    }
+
+    /// Return the exact namespace entry owned by this checkpoint.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn destroy_target(&self) -> RemoveTarget {
+        self.metadata.destroy_target()
     }
 
     /// Read a `u64`-valued entry, if present.
@@ -160,12 +171,6 @@ impl<E: Context> Checkpoint<E> {
     pub(super) async fn sync(mut self) -> Result<Self, Error> {
         self.metadata = self.metadata.sync().await?;
         Ok(self)
-    }
-
-    /// Remove the checkpoint's partition.
-    pub(super) async fn destroy(self) -> Result<(), Error> {
-        self.metadata.destroy().await?;
-        Ok(())
     }
 }
 

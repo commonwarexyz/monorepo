@@ -1,5 +1,5 @@
 use crate::{
-    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs,
+    BatchOperation, Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs,
     buffer::{SyncState, tip::Buffer},
 };
 use std::num::NonZeroUsize;
@@ -289,6 +289,37 @@ impl<B: Blob> Write<B> {
             self.needs_sync_before_write = true;
         }
 
+        Ok(())
+    }
+
+    /// Prepare a shrink for an atomic storage batch.
+    ///
+    /// Pending writes are made durable before the resize is appended to `batch`. The writer's
+    /// logical state is updated immediately, but the underlying blob is not resized until the
+    /// batch is applied. The caller must apply the batch immediately and treat failure as fatal;
+    /// continuing to use the writer after a failed batch is unsupported.
+    pub async fn resize_into(
+        &mut self,
+        len: u64,
+        batch: &mut Vec<BatchOperation<B>>,
+    ) -> Result<(), Error> {
+        self.ensure_usable()?;
+        let old_size = self.buffer.size();
+        if len > old_size {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        self.sync().await?;
+        if len == old_size {
+            return Ok(());
+        }
+
+        let pending = self.buffer.resize(len);
+        debug_assert!(pending.is_none(), "sync must drain the buffered tip");
+        batch.push(BatchOperation::Resize {
+            blob: self.blob.clone(),
+            len,
+        });
         Ok(())
     }
 

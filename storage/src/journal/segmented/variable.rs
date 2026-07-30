@@ -96,7 +96,7 @@ use crate::journal::{
 };
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
-    Blob, Buf, Handle, IoBuf, Metrics, Storage,
+    Blob, Buf, Handle, IoBuf, Metrics, RemoveTarget, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use std::{collections::VecDeque, io::Cursor, num::NonZeroUsize};
@@ -349,9 +349,14 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.manager.num_sections()
     }
 
-    /// See [Journal::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        self.manager.destroy().await
+    /// Return a context capable of removing this journal's namespace entries.
+    fn destroy_context(&self) -> E {
+        self.manager.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the journal's removal targets.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.manager.into_remove_targets().await
     }
 
     /// See [Journal::clear].
@@ -512,8 +517,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// # Warnings
     ///
     /// * This operation is not guaranteed to survive restarts until sync is called.
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
-    ///   in the event of failure since blobs are always removed in reverse order of section.
+    /// * The retained-section resize and all whole-section removals share one namespace batch.
+    ///   After commitment, storage recovery completes any interrupted batch before reopening the
+    ///   namespace.
     pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.rewind(section, size).await?;
         Ok(self)
@@ -594,7 +600,22 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Removes any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Return a context capable of removing this journal's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the journal's removal targets.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
     }
 
     /// Clear all data, resetting the journal to an empty state.
@@ -835,7 +856,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 None
             }
             Err(err) => {
-                // A failed resize or sync leaves the writer's in-memory and durable state
+                // A failed preparation or batch leaves the writer's in-memory and durable state
                 // uncertain. Do not read or repair any later section through this journal.
                 self.sections.clear();
                 self.fail(err)
@@ -863,14 +884,7 @@ async fn repair_blob<E: Storage + Metrics, V: Codec>(
     size: u64,
 ) -> Result<(), Error> {
     // The journal is owned by the reader, so a replayed section cannot be removed.
-    let blob = journal
-        .0
-        .manager
-        .get_mut(section)
-        .expect("replayed section must exist");
-    blob.resize(size).await?;
-    blob.sync().await?;
-    Ok(())
+    journal.0.manager.rewind_section(section, size).await
 }
 
 #[cfg(test)]
@@ -1432,7 +1446,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_replay_repair_resize_error_is_terminal() {
+    fn test_journal_replay_repair_batch_error_is_terminal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1443,8 +1457,8 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Leave one byte in the first page so the trailing bytes below cross the page
-            // boundary and repair must issue a physical resize.
+            // Leave one byte in the first page so repairing the trailing bytes must stage a
+            // retained-page update in a storage batch.
             let section = 1u64;
             let item = [10u8; 1021];
             let item_record_size =
@@ -1491,10 +1505,8 @@ mod tests {
             )
             .await
             .expect("Failed to re-initialize journal");
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                resize_rate: Some(1.0),
-                ..Default::default()
-            };
+            *context.storage_fault_config().write() =
+                deterministic::FaultConfig::default().batch(1.0);
 
             let first = replay
                 .next()
@@ -1503,11 +1515,11 @@ mod tests {
                 .expect("failed to replay valid item");
             assert_eq!(first, (section, 0, item.encode_size() as u32, item));
 
-            // The trailing bytes cross the page boundary, so repair must issue a physical resize.
+            // The batch fails before committing the retained-page repair.
             match replay.next().await {
                 Some(Err(_)) => {}
                 other => {
-                    panic!("expected resize error while repairing trailing bytes, got {other:?}")
+                    panic!("expected batch error while repairing trailing bytes, got {other:?}")
                 }
             }
 
@@ -1540,8 +1552,8 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // Same layout as the resize-error test: trailing bytes cross the page
-            // boundary so repair must issue a physical resize, which the fault fails.
+            // Same layout as the batch-error test: repairing the trailing bytes stages a
+            // retained-page update, and the batch fault rejects it before commit.
             let section = 1u64;
             let item = [10u8; 1021];
             let mut journal = init_journal(context.child("first"), cfg.clone())
@@ -1563,10 +1575,8 @@ mod tests {
                 Journal::<_, [u8; 1021]>::init(context.child("second"), cfg, NZUsize!(1024))
                     .await
                     .expect("Failed to re-initialize journal");
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                resize_rate: Some(1.0),
-                ..Default::default()
-            };
+            *context.storage_fault_config().write() =
+                deterministic::FaultConfig::default().batch(1.0);
 
             let _ = replay
                 .next()

@@ -6,7 +6,7 @@
 use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
+    BatchOperation, Blob, BufferPool, Error as RError, Handle, Metrics, RemoveTarget, Storage,
     buffer::{
         Write,
         paged::{CacheRef, Writer},
@@ -17,13 +17,16 @@ use futures::future::{join_all, try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
-    mem::take,
     num::NonZeroUsize,
+    ops::RangeBounds,
 };
 use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Send + Sync {
+    /// The wrapped blob type staged into atomic batches.
+    type Blob: Blob;
+
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> u64;
 
@@ -40,11 +43,17 @@ pub trait SectionBuffer: Send + Sync {
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Resize the logical size of the buffer.
-    fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+    /// Stage a logical shrink in `batch`.
+    fn resize_into(
+        &mut self,
+        len: u64,
+        batch: &mut Vec<BatchOperation<Self::Blob>>,
+    ) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
 impl<B: Blob> SectionBuffer for Writer<B> {
+    type Blob = B;
+
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -61,12 +70,18 @@ impl<B: Blob> SectionBuffer for Writer<B> {
         Self::wait_for_sync(self).await
     }
 
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+    async fn resize_into(
+        &mut self,
+        len: u64,
+        batch: &mut Vec<BatchOperation<B>>,
+    ) -> Result<(), RError> {
+        Self::resize_into(self, len, batch).await
     }
 }
 
 impl<B: Blob> SectionBuffer for Write<B> {
+    type Blob = B;
+
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -83,15 +98,19 @@ impl<B: Blob> SectionBuffer for Write<B> {
         Self::wait_for_sync(self).await
     }
 
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+    async fn resize_into(
+        &mut self,
+        len: u64,
+        batch: &mut Vec<BatchOperation<B>>,
+    ) -> Result<(), RError> {
+        Self::resize_into(self, len, batch).await
     }
 }
 
 /// Factory for creating section buffers from raw blobs.
 pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     /// The buffer type produced by this factory.
-    type Buffer: SectionBuffer;
+    type Buffer: SectionBuffer<Blob = B>;
 
     /// Create a new buffer wrapping the given blob with the specified size.
     fn create(
@@ -159,11 +178,10 @@ pub struct Config<F> {
 ///
 /// # In-flight syncs
 ///
-/// Syncs started by [Manager::start_sync] complete in the background, so every path that
-/// removes a blob from `blobs` (`prune`, `remove_section`, `rewind`, `clear`, `destroy`) must
-/// call [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared
-/// completion first, guaranteeing that caller-held sync handles always report the sync's true
-/// result and that no buffer is dropped with I/O in flight.
+/// Syncs started by [Manager::start_sync] complete in the background, so mutations that remove
+/// blobs (`prune`, `remove_section`, `rewind`, `clear`, `into_remove_targets`) call
+/// [SectionBuffer::wait_for_sync] before dropping them. This resolves the sync's shared completion
+/// first, guaranteeing that caller-held sync handles report the sync's true result.
 pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     context: E,
     partition: String,
@@ -181,6 +199,14 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     pruned: Counter,
 }
 
+/// A rewind whose batchable storage operations are staged but not yet finalized in memory.
+pub(super) struct PreparedRewind {
+    section: u64,
+    size: u64,
+    old_size: Option<u64>,
+    remove_newer: bool,
+}
+
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Wait for all started syncs to complete before their blobs are dropped.
     async fn wait_for_syncs<'a>(
@@ -192,6 +218,86 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         try_join_all(blobs.into_iter().map(|blob| blob.wait_for_sync()))
             .await
             .map(|_| ())
+            .map_err(Error::Runtime)
+    }
+
+    /// Wait for selected section syncs, then return their exact removal targets.
+    async fn remove_range_targets<R>(
+        &mut self,
+        range: R,
+    ) -> Result<Vec<BatchOperation<E::Blob>>, Error>
+    where
+        R: RangeBounds<u64> + Clone,
+    {
+        let sections: Vec<_> = self
+            .blobs
+            .range(range.clone())
+            .map(|(&section, _)| section)
+            .collect();
+        if sections.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Self::wait_for_syncs(self.blobs.range_mut(range).map(|(_, blob)| blob)).await?;
+
+        Ok(sections
+            .into_iter()
+            .map(|section| {
+                RemoveTarget::Blob {
+                    partition: self.partition.clone(),
+                    name: section.to_be_bytes().to_vec(),
+                }
+                .into()
+            })
+            .collect())
+    }
+
+    /// Drop selected section handles after their removal succeeds.
+    fn finalize_remove_range<R>(&mut self, range: R) -> Vec<(u64, u64)>
+    where
+        R: RangeBounds<u64>,
+    {
+        let sections: Vec<_> = self
+            .blobs
+            .range(range)
+            .map(|(&section, _)| section)
+            .collect();
+
+        let mut removed = Vec::with_capacity(sections.len());
+        for section in sections {
+            let blob = self
+                .blobs
+                .remove(&section)
+                .expect("selected section must exist");
+            let size = blob.size();
+            drop(blob);
+            removed.push((section, size));
+        }
+
+        removed
+    }
+
+    /// Remove every section in `range` as one namespace operation.
+    async fn remove_range<R>(&mut self, range: R) -> Result<Vec<(u64, u64)>, Error>
+    where
+        R: RangeBounds<u64> + Clone,
+    {
+        let targets = self.remove_range_targets(range.clone()).await?;
+        self.apply_batch_operations(targets).await?;
+        Ok(self.finalize_remove_range(range))
+    }
+
+    /// Apply exact storage mutations through this manager's storage context.
+    pub(super) async fn apply_batch_operations(
+        &self,
+        operations: Vec<BatchOperation<E::Blob>>,
+    ) -> Result<(), Error> {
+        if operations.is_empty() {
+            return Ok(());
+        }
+        self.context
+            .apply_batch(operations)
+            .await
             .map_err(Error::Runtime)
     }
 
@@ -339,36 +445,33 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        // Prune any blobs that are smaller than the minimum
-        let mut pruned = false;
-        while let Some((&section, _)) = self.blobs.first_key_value() {
-            // Stop pruning if we reach the minimum
-            if section >= min {
-                break;
-            }
+        let targets = self.prune_targets(min).await?;
+        self.apply_batch_operations(targets).await?;
+        Ok(self.finalize_prune(min))
+    }
 
-            // Remove blob from map
-            let mut blob = self.blobs.remove(&section).unwrap();
-            blob.wait_for_sync().await?;
-            let size = blob.size();
-            drop(blob);
+    /// Wait for pruned section syncs, then return their exact removal targets.
+    pub(super) async fn prune_targets(
+        &mut self,
+        min: u64,
+    ) -> Result<Vec<BatchOperation<E::Blob>>, Error> {
+        self.remove_range_targets(..min).await
+    }
 
-            // Remove blob from storage
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            pruned = true;
-
+    /// Apply a successful prune to the in-memory state and metrics.
+    pub(super) fn finalize_prune(&mut self, min: u64) -> bool {
+        let removed = self.finalize_remove_range(..min);
+        for (section, size) in &removed {
             debug!(section, size, "pruned blob");
             self.tracked.dec();
             self.pruned.inc();
         }
 
-        if pruned {
+        if !removed.is_empty() {
             self.oldest_retained_section = min;
         }
 
-        Ok(pruned)
+        !removed.is_empty()
     }
 
     /// Returns true when `section` is below the prune floor.
@@ -409,58 +512,69 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.blobs.keys().copied()
     }
 
-    /// Remove a specific section. Returns true if the section existed and was removed.
-    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
-        self.prune_guard(section)?;
+    /// Remove selected sections as one namespace operation.
+    pub(super) async fn remove_sections(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<usize, Error> {
+        let sections = sections.sections().collect::<BTreeSet<_>>();
+        for &section in &sections {
+            self.prune_guard(section)?;
+        }
 
-        if let Some(mut blob) = self.blobs.remove(&section) {
+        let mut targets = Vec::with_capacity(sections.len());
+        for &section in &sections {
+            let Some(blob) = self.blobs.get_mut(&section) else {
+                continue;
+            };
             blob.wait_for_sync().await?;
+            targets.push(
+                RemoveTarget::Blob {
+                    partition: self.partition.clone(),
+                    name: section.to_be_bytes().to_vec(),
+                }
+                .into(),
+            );
+        }
+        self.apply_batch_operations(targets).await?;
+
+        let mut removed = 0;
+        for section in sections {
+            let Some(blob) = self.blobs.remove(&section) else {
+                continue;
+            };
             let size = blob.size();
             drop(blob);
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
             self.tracked.dec();
+            removed += 1;
             debug!(section, size, "removed section");
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        Ok(removed)
     }
 
-    /// Remove all underlying blobs.
-    pub async fn destroy(mut self) -> Result<(), Error> {
+    /// Remove a specific section. Returns true if the section existed and was removed.
+    pub async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
+        Ok(self.remove_sections(section).await? != 0)
+    }
+
+    /// Return a context capable of removing this manager's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.context.child("destroy")
+    }
+
+    /// Wait for pending section syncs, then return the owned partition removal operation.
+    pub(crate) async fn into_remove_targets(mut self) -> Result<Vec<RemoveTarget>, Error> {
         Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        for (section, blob) in self.blobs.into_iter() {
-            let size = blob.size();
-            drop(blob);
-            debug!(section, size, "destroyed blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-        }
-        match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
-            // Partition already removed or never existed.
-            Err(RError::PartitionMissing(_)) => {}
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-        Ok(())
+        Ok(vec![RemoveTarget::Partition(self.partition)])
     }
 
     /// Clear all blobs, resetting the manager to an empty state.
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
-        Self::wait_for_syncs(self.blobs.values_mut()).await?;
-        let blobs = take(&mut self.blobs);
-        for (section, blob) in blobs {
-            let size = blob.size();
-            drop(blob);
+        let removed = self.remove_range(..).await?;
+        for (section, size) in removed {
             debug!(section, size, "cleared blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
         }
         let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
@@ -469,61 +583,95 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Rewind by removing all sections after `section` and resizing the target section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-
-        // Remove sections in descending order (newest first) to maintain a contiguous record
-        // if a crash occurs during rewind. Section `u64::MAX` has no successor, so there are
-        // no sections above it to remove.
-        let sections_to_remove: Vec<u64> = match section.checked_add(1) {
-            Some(next) => self.blobs.range(next..).rev().map(|(&s, _)| s).collect(),
-            None => Vec::new(),
-        };
-
-        for s in sections_to_remove {
-            // Remove the underlying blob from storage
-            let mut blob = self.blobs.remove(&s).unwrap();
-            blob.wait_for_sync().await?;
-            drop(blob);
-            self.context
-                .remove(&self.partition, Some(&s.to_be_bytes()))
-                .await?;
-            self.tracked.dec();
-            debug!(section = s, "removed blob during rewind");
-        }
-
-        // If the section exists, truncate it to the given size. The buffer waits for any in-flight
-        // sync before shrinking and makes the shrink durable before later writes reuse the range.
-        if let Some(blob) = self.blobs.get_mut(&section) {
-            let current_size = blob.size();
-            if size < current_size {
-                blob.resize(size).await?;
-                debug!(
-                    section,
-                    old_size = current_size,
-                    new_size = size,
-                    "rewound blob"
-                );
-            }
-        }
-
+        let mut batch = Vec::new();
+        let prepared = self.rewind_into(section, size, &mut batch).await?;
+        self.apply_batch_operations(batch).await?;
+        self.finalize_rewind(prepared);
         Ok(())
     }
 
     /// Resize only the given section without affecting other sections.
     pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        let mut batch = Vec::new();
+        let prepared = self.rewind_section_into(section, size, &mut batch).await?;
+        self.apply_batch_operations(batch).await?;
+        self.finalize_rewind(prepared);
+        Ok(())
+    }
+
+    /// Stage a rewind in `batch` without finalizing removed section handles.
+    pub(super) async fn rewind_into(
+        &mut self,
+        section: u64,
+        size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
+        self.prepare_rewind(section, size, true, batch).await
+    }
+
+    /// Stage a single-section rewind in `batch`.
+    pub(super) async fn rewind_section_into(
+        &mut self,
+        section: u64,
+        size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
+        self.prepare_rewind(section, size, false, batch).await
+    }
+
+    /// Stage the requested shrink and removals after validating the prune floor.
+    async fn prepare_rewind(
+        &mut self,
+        section: u64,
+        size: u64,
+        remove_newer: bool,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
         self.prune_guard(section)?;
 
-        // Get the blob at the given section
-        if let Some(blob) = self.blobs.get_mut(&section) {
-            // Truncate the blob to the given size
-            let current = blob.size();
-            if size < current {
-                blob.resize(size).await?;
-                debug!(section, from = current, to = size, "rewound section");
+        let old_size = if let Some(blob) = self.blobs.get_mut(&section) {
+            let current_size = blob.size();
+            if size < current_size {
+                blob.resize_into(size, batch).await?;
+                Some(current_size)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if remove_newer && let Some(next) = section.checked_add(1) {
+            batch.extend(self.remove_range_targets(next..).await?);
+        }
+
+        Ok(PreparedRewind {
+            section,
+            size,
+            old_size,
+            remove_newer,
+        })
+    }
+
+    /// Finalize a successfully applied rewind in memory.
+    pub(super) fn finalize_rewind(&mut self, prepared: PreparedRewind) {
+        if prepared.remove_newer
+            && let Some(next) = prepared.section.checked_add(1)
+        {
+            for (removed_section, _) in self.finalize_remove_range(next..) {
+                self.tracked.dec();
+                debug!(section = removed_section, "removed blob during rewind");
             }
         }
 
-        Ok(())
+        if let Some(old_size) = prepared.old_size {
+            debug!(
+                section = prepared.section,
+                old_size,
+                new_size = prepared.size,
+                "rewound blob"
+            );
+        }
     }
 
     /// Returns the byte size of the given section.
@@ -536,7 +684,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Name, Runner as _, Spawner as _, Supervisor, deterministic,
+        telemetry::metrics::{Metric, Registered},
+    };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,
@@ -553,21 +704,109 @@ mod tests {
     /// A shared sync result, mirroring the runtime buffers' internal completion sharing.
     type SharedSync = Shared<BoxFuture<'static, Result<(), RError>>>;
 
+    #[derive(Debug, Eq, PartialEq)]
+    enum RecordedOperation {
+        Remove(RemoveTarget),
+        Resize { len: u64 },
+    }
+
+    #[derive(Default)]
+    struct RemoveCalls {
+        batches: Vec<Vec<RecordedOperation>>,
+    }
+
+    #[derive(Clone)]
+    struct RecordingContext<E> {
+        inner: E,
+        calls: Arc<Mutex<RemoveCalls>>,
+    }
+
+    impl<E: Supervisor> Supervisor for RecordingContext<E> {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                calls: self.calls.clone(),
+            }
+        }
+
+        fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            self.inner = self.inner.with_attribute(key, value);
+            self
+        }
+    }
+
+    impl<E: Metrics> Metrics for RecordingContext<E> {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl<E: Storage> Storage for RecordingContext<E> {
+        type Blob = E::Blob;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), RError> {
+            self.inner.open_versioned(partition, name, versions).await
+        }
+
+        async fn apply_batch(
+            &self,
+            operations: Vec<BatchOperation<Self::Blob>>,
+        ) -> Result<(), RError> {
+            let recorded = operations
+                .iter()
+                .map(|operation| match operation {
+                    BatchOperation::Remove(target) => RecordedOperation::Remove(target.clone()),
+                    BatchOperation::Resize { len, .. } | BatchOperation::Update { len, .. } => {
+                        RecordedOperation::Resize { len: *len }
+                    }
+                })
+                .collect();
+            self.calls.lock().batches.push(recorded);
+            self.inner.apply_batch(operations).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            self.inner.scan(partition).await
+        }
+    }
+
     #[derive(Clone)]
     struct TestFactory {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
     }
 
-    struct TestBuffer {
+    struct TestBuffer<B: Blob> {
+        blob: B,
+        size: u64,
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
         syncing: Option<SharedSync>,
     }
 
-    impl SectionBuffer for TestBuffer {
+    impl<B: Blob> SectionBuffer for TestBuffer<B> {
+        type Blob = B;
+
         fn size(&self) -> u64 {
-            0
+            self.size
         }
 
         async fn sync(&mut self) -> Result<(), RError> {
@@ -598,16 +837,29 @@ mod tests {
             Ok(())
         }
 
-        async fn resize(&mut self, _len: u64) -> Result<(), RError> {
+        async fn resize_into(
+            &mut self,
+            len: u64,
+            batch: &mut Vec<BatchOperation<B>>,
+        ) -> Result<(), RError> {
+            if len < self.size {
+                self.size = len;
+                batch.push(BatchOperation::Resize {
+                    blob: self.blob.clone(),
+                    len,
+                });
+            }
             Ok(())
         }
     }
 
     impl<B: Blob> BufferFactory<B> for TestFactory {
-        type Buffer = TestBuffer;
+        type Buffer = TestBuffer<B>;
 
-        async fn create(&self, _blob: B, _size: u64) -> Result<Self::Buffer, RError> {
+        async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
             Ok(TestBuffer {
+                blob,
+                size,
                 pending: self.pending.clone(),
                 wait_for_syncs: self.wait_for_syncs.clone(),
                 syncing: None,
@@ -638,6 +890,58 @@ mod tests {
             pending.remove(0)
         };
         let _ = sender.send(result);
+    }
+
+    #[test]
+    fn test_multi_section_removals_use_exact_batches() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let calls = Arc::new(Mutex::new(RemoveCalls::default()));
+            let context = RecordingContext {
+                inner: context.child("manager"),
+                calls: calls.clone(),
+            };
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending, wait_for_syncs);
+            let mut manager = Manager::init(context, cfg)
+                .await
+                .expect("failed to initialize manager");
+
+            for section in 1..=4 {
+                manager
+                    .get_or_create(section)
+                    .await
+                    .expect("failed to create section");
+            }
+            assert!(manager.prune(3).await.expect("prune failed"));
+            manager.clear().await.expect("clear failed");
+
+            for section in 5..=7 {
+                manager
+                    .get_or_create(section)
+                    .await
+                    .expect("failed to create section");
+            }
+            manager.blobs.get_mut(&5).unwrap().size = 10;
+            manager.rewind(5, 4).await.expect("rewind failed");
+
+            let target = |section: u64| {
+                RecordedOperation::Remove(RemoveTarget::Blob {
+                    partition: "test".into(),
+                    name: section.to_be_bytes().to_vec(),
+                })
+            };
+            let calls = calls.lock();
+            assert_eq!(
+                calls.batches,
+                vec![
+                    vec![target(1), target(2)],
+                    vec![target(3), target(4)],
+                    vec![RecordedOperation::Resize { len: 4 }, target(6), target(7),],
+                ]
+            );
+        });
     }
 
     #[test]
@@ -675,7 +979,15 @@ mod tests {
 
             complete_next_pending_sync(&pending, Ok(()));
             handle.await.expect("sync handle should complete");
-            manager.destroy().await.expect("destroy failed");
+            let destroy_context = manager.destroy_context();
+            let targets = manager
+                .into_remove_targets()
+                .await
+                .expect("failed to collect remove targets");
+            destroy_context
+                .apply_batch(targets.into_iter().map(Into::into).collect())
+                .await
+                .expect("destroy failed");
         });
     }
 
@@ -720,7 +1032,15 @@ mod tests {
             release_pending_syncs(&pending);
             first.await.expect("first sync handle should complete");
             second.await.expect("reused sync handle should complete");
-            manager.destroy().await.expect("destroy failed");
+            let destroy_context = manager.destroy_context();
+            let targets = manager
+                .into_remove_targets()
+                .await
+                .expect("failed to collect remove targets");
+            destroy_context
+                .apply_batch(targets.into_iter().map(Into::into).collect())
+                .await
+                .expect("destroy failed");
         });
     }
 
@@ -791,7 +1111,15 @@ mod tests {
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
             let waiter = context.child("destroy").spawn(|_| async move {
-                manager.destroy().await.expect("destroy failed");
+                let destroy_context = manager.destroy_context();
+                let targets = manager
+                    .into_remove_targets()
+                    .await
+                    .expect("failed to collect remove targets");
+                destroy_context
+                    .apply_batch(targets.into_iter().map(Into::into).collect())
+                    .await
+                    .expect("destroy failed");
                 completed_clone.fetch_add(1, Ordering::Relaxed);
             });
 
@@ -833,7 +1161,7 @@ mod tests {
             complete_next_pending_sync(&pending, Err(RError::Closed));
 
             let err = manager
-                .destroy()
+                .into_remove_targets()
                 .await
                 .expect_err("destroy should surface the sync failure");
             assert!(matches!(err, Error::Runtime(RError::Closed)));

@@ -865,43 +865,6 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_interrupted_destroy_reopens() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_config(&context, NZU64!(1));
-            let mut archive =
-                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to initialize archive");
-            for index in 0..3u64 {
-                archive = archive
-                    .put(index, test_key(&format!("k{index}")), index as i32)
-                    .await
-                    .expect("Failed to put");
-            }
-            let mut archive = archive.sync().await.expect("Failed to sync");
-
-            // Cancel the production destroy future after metadata removal and before journal
-            // removal, rather than constructing that state out of band.
-            archive.halt_destroy_after_metadata();
-            {
-                let destroy = archive.destroy();
-                futures::pin_mut!(destroy);
-                assert!(
-                    futures::poll!(destroy.as_mut()).is_pending(),
-                    "destroy must park between metadata and journal removal"
-                );
-            }
-
-            let archive =
-                Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("interrupted destroy must leave openable storage");
-            archive.destroy().await.expect("Failed to destroy");
-        });
-    }
-
     /// Pruning drops a section from the checkpoint before its blobs are removed, so a reopen
     /// after pruning neither reports the pruned sections as lost nor loses the retained ones.
     #[test_traced]

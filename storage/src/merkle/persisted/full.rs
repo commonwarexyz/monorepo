@@ -32,7 +32,7 @@ use crate::{
 use commonware_codec::{DecodeExt, FixedSize, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, buffer::paged::CacheRef};
+use commonware_runtime::{Handle, RemoveTarget, buffer::paged::CacheRef};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::BTreeMap,
@@ -400,13 +400,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         if journal_size == 0 {
-            // The journal is the source of truth. It may be empty because destruction was
-            // interrupted after resetting the journal but before removing its metadata. Clear the
-            // stale pruning record before returning a reusable empty tree.
-            if metadata.keys().next().is_some() {
-                metadata.clear();
-                metadata = metadata.sync().await?;
-            }
             let mem = Mem::init(MemConfig {
                 nodes: vec![],
                 pruning_boundary: Location::new(0),
@@ -632,14 +625,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 pinned_nodes
             };
 
-            // A fresh target (empty journal and metadata at a zero boundary) is already the
-            // reset outcome: nothing staged, cleared, or published here would change durable
-            // state.
+            // A fresh journal at a zero boundary is already the reset outcome: nothing staged,
+            // cleared, or published here would change durable state.
             let bounds = journal.bounds();
-            let fresh = *prune_pos == 0
-                && bounds.is_empty()
-                && bounds.start == 0
-                && metadata.keys().next().is_none();
+            let fresh = *prune_pos == 0 && bounds.is_empty() && bounds.start == 0;
             if !fresh {
                 // The outer metadata intent spans the journal's own recoverable clear protocol.
                 // Once this sync completes, both ordinary init and init_sync finish the reset
@@ -914,32 +903,30 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         Ok(self)
     }
 
-    /// Close and permanently remove any disk resources.
-    pub async fn destroy(self) -> Result<(), Error<F>> {
-        // The journal's destroy first stages a recoverable reset. If interruption leaves an empty
-        // journal with metadata behind, init clears that stale metadata before returning.
-        self.journal.destroy().await?;
-
-        self.metadata.destroy().await?;
-
-        Ok(())
+    /// Return a context capable of removing this structure's physical namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.journal.destroy_context()
     }
 
-    /// Durably reset the structure to an empty state.
-    pub(crate) async fn clear_to_empty(mut self) -> Result<Self, Error<F>> {
-        // Reset the journal first so an interrupted clear is completed by the empty-journal path
-        // in `init`, which also discards any stale pruning metadata.
-        self.journal = self.journal.clear_to_size(0).await?;
-        self.metadata.clear();
-        self.metadata = self.metadata.sync().await?;
-        self.mem = Arc::new(Mem::init(MemConfig {
-            nodes: vec![],
-            pruning_boundary: Location::new(0),
-            pinned_nodes: vec![],
-        })?);
-        self.pruned_to_pos = Position::new(0);
-        self.journal_dirty = false;
-        Ok(self)
+    /// Wait for in-flight child syncs, then return this structure's namespace entries.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error<F>> {
+        let Self {
+            journal, metadata, ..
+        } = self;
+        let mut targets = journal.into_remove_targets().await?;
+        targets.extend(metadata.into_remove_targets().await?);
+        Ok(targets)
+    }
+
+    /// Close and permanently remove any disk resources.
+    pub async fn destroy(self) -> Result<(), Error<F>> {
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(JError::Runtime)
+            .map_err(Error::Journal)
     }
 
     #[cfg(any(test, feature = "fuzzing"))]
@@ -1398,63 +1385,6 @@ mod tests {
     fn test_full_empty_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_empty_inner::<mmb::Family>);
-    }
-
-    #[test_traced]
-    fn test_interrupted_destroy_reopens_without_stale_metadata() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            type F = mmr::Family;
-            let hasher = Standard::<Sha256>::new(ForwardFold);
-            let cfg = test_config(&context);
-            let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
-                context.child("first"),
-                &hasher,
-                cfg.clone(),
-            )
-            .await
-            .unwrap();
-            for i in 0..16 {
-                let batch = merkle.new_batch().add(&hasher, &test_digest(i));
-                let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
-                merkle = merkle.apply_batch(&batch).unwrap();
-            }
-            merkle = merkle.sync().await.unwrap();
-            merkle = merkle.prune(Location::new(8)).await.unwrap();
-
-            // Cancel after the journal's reset intent and first blob removal are durable. This
-            // leaves a nonempty suffix whose nodes are unusable without completing the reset.
-            merkle.journal.halt_destroy_after_first_remove();
-            {
-                let destroy = merkle.destroy();
-                futures::pin_mut!(destroy);
-                assert!(
-                    futures::poll!(destroy.as_mut()).is_pending(),
-                    "destroy must park after removing its first journal blob"
-                );
-            }
-
-            let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
-                context.child("second"),
-                &hasher,
-                cfg.clone(),
-            )
-            .await
-            .expect("interrupted destroy must remain openable");
-
-            // Reusing the reopened handle must not resurrect the old pruning metadata later.
-            let batch = merkle.new_batch().add(&hasher, &test_digest(100));
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
-            merkle = merkle.apply_batch(&batch).unwrap().sync().await.unwrap();
-            drop(merkle);
-
-            let merkle =
-                Merkle::<F, _, Digest, Sequential>::init(context.child("third"), &hasher, cfg)
-                    .await
-                    .expect("new history must not observe stale destroy metadata");
-            assert_eq!(merkle.size(), 1);
-            merkle.destroy().await.unwrap();
-        });
     }
 
     async fn full_prune_out_of_bounds_returns_error_inner<F: Family>(
@@ -2491,21 +2421,6 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
         let config = test_config(&context);
 
-        // Seed metadata from a stale, unrelated history while leaving the journal empty. A reset
-        // to zero must discard it before the new history is exposed.
-        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.child("stale_metadata"),
-            MConfig {
-                partition: config.metadata_partition.clone(),
-                codec_config: ((0..).into(), ()),
-            },
-        )
-        .await
-        .unwrap();
-        metadata.put(U64::new(PRUNED_TO_PREFIX, 0), 1u64.to_be_bytes().into());
-        metadata.put(U64::new(NODE_PREFIX, 0), test_digest(123).to_vec());
-        drop(metadata.sync().await.unwrap());
-
         // Test fresh start scenario with completely new structure (no existing data)
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
             config: config.clone(),
@@ -2866,55 +2781,61 @@ mod tests {
     #[test_traced]
     fn test_init_completes_pending_sync_reset_after_interrupted_journal_clear() {
         type F = mmr::Family;
-        let boundary = Location::<F>::new(8);
-        let (target_root, checkpoint) =
-            deterministic::Runner::default().start_and_recover(|context| async move {
-                let hasher = Standard::<Sha256>::new(ForwardFold);
-                let config = test_config(&context);
-                let (pinned_nodes, target_root) =
-                    sync_reset_reference::<F>(&context, boundary).await;
+        for post_commit in [false, true] {
+            let boundary = Location::<F>::new(8);
+            let (target_root, checkpoint) =
+                deterministic::Runner::default().start_and_recover(|context| async move {
+                    let hasher = Standard::<Sha256>::new(ForwardFold);
+                    let config = test_config(&context);
+                    let (pinned_nodes, target_root) =
+                        sync_reset_reference::<F>(&context, boundary).await;
 
-                let mut old = Merkle::<F, _, Digest, Sequential>::init(
-                    context.child("old"),
+                    let mut old = Merkle::<F, _, Digest, Sequential>::init(
+                        context.child("old"),
+                        &hasher,
+                        config.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    let batch = old.new_batch().add(&hasher, &test_digest(2));
+                    let batch = old.with_mem(|mem| batch.merkleize(mem, &hasher));
+                    old = old.apply_batch(&batch).unwrap().sync().await.unwrap();
+                    drop(old);
+
+                    let faults = if post_commit {
+                        deterministic::FaultConfig::default().batch_post_commit(1.0)
+                    } else {
+                        deterministic::FaultConfig::default().batch(1.0)
+                    };
+                    *context.storage_fault_config().write() = faults;
+                    let result = Merkle::<F, _, Digest, Sequential>::init_sync(
+                        context.child("reset"),
+                        SyncConfig {
+                            config,
+                            range: non_empty_range!(boundary, Location::new(16)),
+                            pinned_nodes: Some(pinned_nodes),
+                        },
+                    )
+                    .await;
+                    assert!(result.is_err());
+                    target_root
+                });
+
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let hasher = Standard::<Sha256>::new(ForwardFold);
+                let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                    context.child("recover"),
                     &hasher,
-                    config.clone(),
+                    test_config(&context),
                 )
                 .await
                 .unwrap();
-                let batch = old.new_batch().add(&hasher, &test_digest(2));
-                let batch = old.with_mem(|mem| batch.merkleize(mem, &hasher));
-                old = old.apply_batch(&batch).unwrap().sync().await.unwrap();
-                drop(old);
-
-                *context.storage_fault_config().write() =
-                    deterministic::FaultConfig::default().remove(1.0);
-                let result = Merkle::<F, _, Digest, Sequential>::init_sync(
-                    context.child("reset"),
-                    SyncConfig {
-                        config,
-                        range: non_empty_range!(boundary, Location::new(16)),
-                        pinned_nodes: Some(pinned_nodes),
-                    },
-                )
-                .await;
-                assert!(result.is_err());
-                target_root
+                assert_eq!(merkle.bounds(), boundary..boundary);
+                assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
+                merkle.destroy().await.unwrap();
             });
-
-        deterministic::Runner::from(checkpoint).start(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let hasher = Standard::<Sha256>::new(ForwardFold);
-            let merkle = Merkle::<F, _, Digest, Sequential>::init(
-                context.child("recover"),
-                &hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
-            assert_eq!(merkle.bounds(), boundary..boundary);
-            assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
-            merkle.destroy().await.unwrap();
-        });
+        }
     }
 
     #[test_traced]

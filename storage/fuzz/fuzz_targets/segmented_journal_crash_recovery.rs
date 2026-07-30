@@ -23,7 +23,7 @@ use commonware_storage::journal::{
     },
 };
 use commonware_storage_fuzz::{
-    RNG_BYTES, bounded_page_cache_size, bounded_page_size, fuzz_runner, remove_faults, split_cycles,
+    RNG_BYTES, batch_faults, bounded_page_cache_size, bounded_page_size, fuzz_runner, split_cycles,
 };
 use commonware_utils::sequence::FixedBytes;
 use libfuzzer_sys::fuzz_target;
@@ -515,8 +515,7 @@ fn run<J: HarnessJournal + Send + 'static>(input: &FuzzInput, tag: &str) {
     }
 
     // Populate and sync every section after recovery, then cross one more checkpoint. This proves
-    // that a repaired journal remains appendable and gives interrupted prune several real removal
-    // awaits to cross.
+    // that a repaired journal remains appendable and gives the atomic prune a nonempty batch.
     let (expected, checkpoint) = deterministic::Runner::from(checkpoint).start_and_recover({
         let partition = partition.clone();
         move |context| async move {
@@ -562,80 +561,54 @@ fn run<J: HarnessJournal + Send + 'static>(input: &FuzzInput, tag: &str) {
             .expect("pre-prune recovery should complete");
             assert_recovered(replayed, &expected);
 
-            *context.storage_fault_config().write() = remove_faults();
+            *context.storage_fault_config().write() = batch_faults();
             let prune_result = journal.prune(PRUNE_MIN).await.map(|(_, pruned)| pruned);
             (expected, prune_result)
         });
 
-    let destroy_partition = partition.clone();
-    let ((), checkpoint) =
-        deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let (journal, replayed) = J::init(
-                context.child("prune_recovery"),
-                J::config(&destroy_partition, &context, params),
-                params.replay_buffer,
-            )
-            .await
-            .expect("journal must reopen after interrupted prune");
-
-            match prune_result {
-                Ok(pruned) => {
-                    let mut exact = expected.clone();
-                    if pruned {
-                        exact.prune(PRUNE_MIN);
-                    }
-                    let recovered = assert_recovered(replayed, &exact);
-                    assert_eq!(
-                        recovered, exact.attempted,
-                        "completed prune recovery must match its reported result"
-                    );
-                }
-                Err(_) => {
-                    let mut relaxed = expected.clone();
-                    for section in 0..PRUNE_MIN {
-                        relaxed.durable.insert(section, 0);
-                    }
-                    let recovered = assert_recovered(replayed, &relaxed);
-                    let mut retained = false;
-                    for section in 0..PRUNE_MIN {
-                        let recovered_entries =
-                            recovered.get(&section).map_or(&[][..], Vec::as_slice);
-                        if recovered_entries.is_empty() {
-                            assert!(
-                                !retained,
-                                "interrupted ascending prune left a hole before section {section}"
-                            );
-                        } else {
-                            assert_eq!(
-                                recovered_entries, expected.attempted[&section],
-                                "interrupted prune partially removed section {section}"
-                            );
-                            retained = true;
-                        }
-                    }
-                }
-            }
-
-            let (journal, _) = journal
-                .prune(PRUNE_MIN)
-                .await
-                .expect("prune retry must succeed");
-            *context.storage_fault_config().write() = remove_faults();
-            let _ = journal.destroy().await;
-        });
-
-    let redestroy_partition = partition.clone();
+    let cleanup_partition = partition.clone();
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let (journal, _) = J::init(
-            context.child("redestroy"),
-            J::config(&redestroy_partition, &context, params),
+        let (journal, replayed) = J::init(
+            context.child("prune_recovery"),
+            J::config(&cleanup_partition, &context, params),
             params.replay_buffer,
         )
         .await
-        .expect("segmented journal must reopen after interrupted destroy");
-        journal.destroy().await.expect("destroy retry must succeed");
+        .expect("journal must reopen after interrupted prune");
+
+        match prune_result {
+            Ok(pruned) => {
+                let mut exact = expected.clone();
+                if pruned {
+                    exact.prune(PRUNE_MIN);
+                }
+                let recovered = assert_recovered(replayed, &exact);
+                assert_eq!(
+                    recovered, exact.attempted,
+                    "completed prune recovery must match its reported result"
+                );
+            }
+            Err(_) => {
+                let mut pruned = expected.clone();
+                pruned.prune(PRUNE_MIN);
+                let mut relaxed = expected.clone();
+                for section in 0..PRUNE_MIN {
+                    relaxed.durable.insert(section, 0);
+                }
+                let recovered = assert_recovered(replayed, &relaxed);
+                assert!(
+                    recovered == expected.attempted || recovered == pruned.attempted,
+                    "failed atomic prune recovered neither the all-old nor all-new state"
+                );
+            }
+        }
+
+        let (journal, _) = journal
+            .prune(PRUNE_MIN)
+            .await
+            .expect("prune retry must succeed");
+        journal.destroy().await.expect("destroy");
     });
 }
 

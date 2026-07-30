@@ -29,11 +29,11 @@
 //! All data must be assigned to a `section`. This allows pruning entire sections
 //! (and their corresponding blobs) independently.
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager, PreparedRewind};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    Blob, Buf, Handle, Metrics, Storage,
+    BatchOperation, Blob, Buf, Handle, Metrics, RemoveTarget, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay},
 };
 use commonware_utils::NZUsize;
@@ -269,9 +269,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         self.manager.rewind_section(section, size).await
     }
 
-    /// See [Journal::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        self.manager.destroy().await
+    /// Return a context capable of removing this journal's namespace entries.
+    fn destroy_context(&self) -> E {
+        self.manager.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the journal's removal targets.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.manager.into_remove_targets().await
     }
 
     /// See [Journal::clear].
@@ -489,8 +494,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             section,
             size, valid, "interior hole above the durable end: truncating"
         );
-        blob.resize(valid).await?;
-        blob.sync().await?;
+        self.0.manager.rewind_section(section, valid).await?;
         Ok(self)
     }
 
@@ -522,6 +526,27 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let pruned = self.0.prune(min).await?;
         Ok((self, pruned))
+    }
+
+    /// Wait for pruned section syncs, then return their exact removal targets.
+    pub(super) async fn prune_targets(
+        &mut self,
+        min: u64,
+    ) -> Result<Vec<BatchOperation<E::Blob>>, Error> {
+        self.0.manager.prune_targets(min).await
+    }
+
+    /// Apply a successful prune to the journal's in-memory state.
+    pub(super) fn finalize_prune(&mut self, min: u64) -> bool {
+        self.0.manager.finalize_prune(min)
+    }
+
+    /// Apply exact storage mutations through this journal's storage context.
+    pub(super) async fn apply_batch_operations(
+        &self,
+        operations: Vec<BatchOperation<E::Blob>>,
+    ) -> Result<(), Error> {
+        self.0.manager.apply_batch_operations(operations).await
     }
 
     /// Returns true when `section` is below the prune floor.
@@ -566,6 +591,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(self)
     }
 
+    /// Stage a rewind without applying or finalizing it.
+    pub(super) async fn rewind_into(
+        &mut self,
+        section: u64,
+        size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
+        self.0.manager.rewind_into(section, size, batch).await
+    }
+
     /// Rewind only the given section to a specific byte offset.
     ///
     /// Unlike `rewind`, this does not affect other sections.
@@ -574,9 +609,42 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(self)
     }
 
+    /// Stage a single-section rewind without applying or finalizing it.
+    pub(super) async fn rewind_section_into(
+        &mut self,
+        section: u64,
+        size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
+        self.0
+            .manager
+            .rewind_section_into(section, size, batch)
+            .await
+    }
+
+    /// Finalize a successfully applied rewind in memory.
+    pub(super) fn finalize_rewind(&mut self, prepared: PreparedRewind) {
+        self.0.manager.finalize_rewind(prepared);
+    }
+
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Return a context capable of removing this journal's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the journal's removal targets.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
     }
 
     /// Clear all data, resetting the journal to an empty state.
@@ -755,14 +823,7 @@ async fn repair_blob<E: Storage + Metrics, A: CodecFixed>(
     size: u64,
 ) -> Result<(), Error> {
     // The journal is owned by the reader, so a replayed section cannot be removed.
-    let blob = journal
-        .0
-        .manager
-        .get_mut(section)
-        .expect("replayed section must exist");
-    blob.resize(size).await?;
-    blob.sync().await?;
-    Ok(())
+    journal.0.manager.rewind_section(section, size).await
 }
 
 #[cfg(test)]

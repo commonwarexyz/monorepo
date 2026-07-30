@@ -415,6 +415,12 @@ impl crate::Runner for Runner {
                 self.cfg.storage_directory.display()
             );
         }
+        if let Err(e) = crate::storage::batch_fs::recover(&self.cfg.storage_directory) {
+            panic!(
+                "failed to recover storage namespace at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
+        }
 
         // Initialize storage
         cfg_if::cfg_if! {
@@ -826,8 +832,11 @@ impl crate::Storage for Context {
         self.storage.open_versioned(partition, name, versions).await
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.storage.remove(partition, name).await
+    async fn apply_batch(
+        &self,
+        operations: Vec<crate::BatchOperation<Self::Blob>>,
+    ) -> Result<(), Error> {
+        self.storage.apply_batch(operations).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -948,6 +957,52 @@ mod tests {
         );
         assert_eq!(reopened_len, 4);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_startup_recovers_committed_batch_before_user_code() {
+        let cfg = Config::new();
+        let root = cfg.storage_directory().clone();
+        let alpha = root.join("alpha");
+        let beta = root.join("beta");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::create_dir_all(&beta).unwrap();
+        let removed_blob = alpha.join(commonware_formatting::hex(b"remove"));
+        let kept_blob = alpha.join(commonware_formatting::hex(b"keep"));
+        let updated_blob = alpha.join(commonware_formatting::hex(b"update"));
+        std::fs::write(&removed_blob, b"remove").unwrap();
+        std::fs::write(&kept_blob, b"keep").unwrap();
+        std::fs::write(&updated_blob, b"update-old").unwrap();
+        std::fs::write(beta.join(commonware_formatting::hex(b"remove")), b"remove").unwrap();
+
+        let operations = crate::storage::batch::canonicalize_operations(vec![
+            crate::storage::batch::Operation::Remove(crate::RemoveTarget::Partition("beta".into())),
+            crate::storage::batch::Operation::Remove(crate::RemoveTarget::Blob {
+                partition: "alpha".into(),
+                name: b"remove".to_vec(),
+            }),
+            crate::storage::batch::Operation::Update {
+                partition: "alpha".into(),
+                name: b"update".to_vec(),
+                offset: 2,
+                data: b"NEW".into(),
+                len: 5,
+            },
+        ])
+        .unwrap();
+        assert!(
+            crate::storage::batch_fs::interrupt_committed_for_test(&root, &operations, 1).is_err()
+        );
+        assert!(beta.exists());
+
+        let checked_root = root.clone();
+        Runner::new(cfg).start(move |_| async move {
+            assert!(!removed_blob.exists());
+            assert!(!checked_root.join("beta").exists());
+            assert!(kept_blob.exists());
+            assert_eq!(std::fs::read(updated_blob).unwrap(), b"upNEW");
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

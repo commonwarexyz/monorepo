@@ -11,7 +11,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Handle, Metrics, RemoveTarget, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{
@@ -154,10 +154,6 @@ struct Inner<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: Co
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
-
-    /// Test-only: park destruction after removing metadata and before touching the journals.
-    #[cfg(test)]
-    halt_destroy_after_metadata: bool,
 
     /// Maps translated key representation to its corresponding index.
     keys: Index<T, u64>,
@@ -349,8 +345,6 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
-            #[cfg(test)]
-            halt_destroy_after_metadata: false,
             indices,
             extra_indices,
             intervals,
@@ -701,24 +695,16 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.intervals.last_index()
     }
 
-    /// See [crate::archive::Archive::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        // Remove the checkpoint before the journals it describes, matching the ordering `prune`
-        // uses. The reverse order can leave a checkpoint entry for an already-removed section,
-        // which `Oversized::repair` reports as unrecoverable loss, and `init` is the only way to
-        // obtain the handle `destroy` needs.
-        self.metadata.destroy().await?;
-
-        #[cfg(test)]
-        if self.halt_destroy_after_metadata {
-            std::future::pending::<()>().await;
-        }
-
-        // Without a checkpoint every section recovers at floor zero, so an interrupted destroy
-        // leaves storage the next init can open by scan and destroy again.
-        self.oversized.destroy().await?;
-
-        Ok(())
+    /// Wait for pending child syncs, then return the archive's namespace entries.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        let Self {
+            metadata,
+            oversized,
+            ..
+        } = self;
+        let mut targets = metadata.into_remove_targets().await?;
+        targets.extend(oversized.into_remove_targets().await?);
+        Ok(targets)
     }
 
     /// See [crate::archive::MultiArchive::get_all].
@@ -820,10 +806,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(self)
     }
 
-    /// Park destruction after its metadata await.
-    #[cfg(test)]
-    pub(crate) fn halt_destroy_after_metadata(&mut self) {
-        self.0.halt_destroy_after_metadata = true;
+    /// Return a context that can remove this archive's storage targets.
+    fn destroy_context(&self) -> E {
+        self.0.metadata.destroy_context()
+    }
+
+    /// Wait for pending child syncs, then return the archive's namespace entries.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
     }
 }
 
@@ -897,7 +887,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(crate::metadata::Error::Runtime)
+            .map_err(Error::Metadata)
     }
 }
 

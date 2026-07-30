@@ -154,6 +154,89 @@ pub(crate) fn test_discard_sync_result_destroys_database<H: SyncTestHarness>() {
     });
 }
 
+/// A failed mismatch discard must not let a stale Merkle projection survive a journal refill.
+pub(crate) fn test_interrupted_mismatch_discard_retries_cleanly<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        const OPS: usize = 4;
+
+        let client_config = H::config("9101", &context);
+        let client =
+            H::init_db_with_config(context.child("old_client"), client_config.clone()).await;
+        let client = H::apply_ops(client, H::create_ops_seeded(OPS, 1)).await;
+        let client = client.sync().await.unwrap();
+        let old_bounds = client.bounds();
+        let old_sync_boundary = client.sync_boundary();
+        let old_sync_root = H::sync_target_root(&client);
+        drop(client);
+
+        let target_config = H::config("9102", &context);
+        let target = H::init_db_with_config(context.child("target"), target_config).await;
+        let target = H::apply_ops(target, H::create_ops_seeded(OPS, 2)).await;
+        assert_eq!(target.bounds(), old_bounds);
+        assert_eq!(target.sync_boundary(), old_sync_boundary);
+        assert_ne!(H::sync_target_root(&target), old_sync_root);
+
+        let target_spec = Target {
+            root: H::sync_target_root(&target),
+            range: non_empty_range!(target.sync_boundary(), target.bounds().end),
+        };
+        let expected_root = target.root();
+        let expected_sync_boundary = target.sync_boundary();
+        let expected_bounds = expected_sync_boundary..target.bounds().end;
+        let target = Arc::new(target);
+        let sync_config = |context| Config {
+            context,
+            target: target_spec.clone(),
+            resolver: target.clone(),
+            apply_batch_size: 2,
+            max_outstanding_requests: 1,
+            fetch_batch_size: NZU64!(2),
+            db_config: client_config.clone(),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 0,
+        };
+
+        // The existing journal has the target's bounds but belongs to another root. Discarding
+        // the rejected generation must remove every backing component in one batch. Even when a
+        // committed batch reports an error, a retry must never observe a mixed generation.
+        *context.storage_fault_config().write() =
+            deterministic::FaultConfig::default().batch_post_commit(1.0);
+        let first: Result<H::Db, _> =
+            sync::sync(sync_config(context.child("interrupted_discard"))).await;
+        assert!(matches!(first, Err(sync::Error::Database(_))));
+
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+        let synced: H::Db = sync::sync(sync_config(context.child("retry")))
+            .await
+            .expect("retry must rebuild the rejected Merkle projection");
+        assert_eq!(synced.root(), expected_root);
+        assert_eq!(synced.bounds(), expected_bounds);
+        assert_eq!(synced.sync_boundary(), expected_sync_boundary);
+
+        drop(synced);
+        let reopened =
+            H::init_db_with_config(context.child("reopened_client"), client_config.clone()).await;
+        assert_eq!(reopened.root(), expected_root);
+        assert_eq!(reopened.bounds(), expected_bounds);
+        assert_eq!(reopened.sync_boundary(), expected_sync_boundary);
+
+        reopened.destroy().await.unwrap();
+        Arc::try_unwrap(target)
+            .unwrap_or_else(|_| panic!("failed to unwrap target"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
@@ -3026,3 +3109,14 @@ sync_tests_for_harness!(
     harnesses::UnorderedVariableMmbHarness,
     unordered_variable_mmb
 );
+
+mod mismatch_discard_recovery {
+    use super::harnesses;
+    use commonware_macros::test_traced;
+
+    #[test_traced]
+    fn unordered_fixed() {
+        super::test_interrupted_mismatch_discard_retries_cleanly::<harnesses::UnorderedFixedHarness>(
+        );
+    }
+}

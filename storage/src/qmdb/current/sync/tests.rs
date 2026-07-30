@@ -1160,6 +1160,120 @@ fn test_incompatible_pending_target_resets_before_restage() {
 }
 
 #[test_traced]
+fn test_interrupted_incompatible_target_reset_retries_cleanly() {
+    use crate::qmdb::{
+        current::db as current_db,
+        sync::{self, Target, engine::Config},
+    };
+    use commonware_utils::NZU64;
+    use std::sync::Arc;
+
+    type H = harnesses::UnorderedFixedMmrHarness;
+    type F = <H as SyncTestHarness>::Family;
+    type Db = <H as SyncTestHarness>::Db;
+
+    deterministic::Runner::default().start(|context| async move {
+        const OPS: usize = 4;
+
+        let client_config = H::config("interrupted-component-reset-client", &context);
+        let client =
+            H::init_db_with_config(context.child("old_client"), client_config.clone()).await;
+        let client = H::apply_ops(client, H::create_ops_seeded(OPS, 1)).await;
+        let client = client.sync().await.unwrap();
+        let old_bounds = client.bounds();
+        let old_sync_boundary = client.sync_boundary();
+        let old_sync_root = H::sync_target_root(&client);
+        drop(client);
+
+        let target_config = H::config("interrupted-component-reset-target", &context);
+        let target = H::init_db_with_config(context.child("target"), target_config).await;
+        let target = H::apply_ops(target, H::create_ops_seeded(OPS, 2)).await;
+        assert_eq!(target.bounds(), old_bounds);
+        assert_eq!(target.sync_boundary(), old_sync_boundary);
+        assert_ne!(H::sync_target_root(&target), old_sync_root);
+
+        let target_spec = Target {
+            root: H::sync_target_root(&target),
+            range: non_empty_range!(target.sync_boundary(), target.bounds().end),
+        };
+        let expected_root = target.root();
+        let expected_bounds = target.bounds();
+        let expected_sync_boundary = target.sync_boundary();
+        let target = Arc::new(target);
+
+        <Db as SyncDatabase>::prepare_sync(
+            context.child("stage_target"),
+            &client_config,
+            &target_spec,
+        )
+        .await
+        .unwrap();
+
+        let incompatible = Target {
+            root: old_sync_root,
+            range: target_spec.range.clone(),
+        };
+        // The pending target remains durable until the operations journal and Merkle projection
+        // have both been reset. A post-commit error must therefore leave a retryable intent and no
+        // mixture of the discarded components.
+        *context.storage_fault_config().write() =
+            deterministic::FaultConfig::default().batch_post_commit(1.0);
+        let reset = <Db as SyncDatabase>::prepare_sync(
+            context.child("interrupt_reset"),
+            &client_config,
+            &incompatible,
+        )
+        .await;
+        reset.expect_err("post-commit batch failure must surface");
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+        let metadata = current_db::open_metadata::<F, _>(
+            context.child("inspect_pending_target"),
+            &client_config.grafted_metadata_partition,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            current_db::pending_sync::<F, _, Digest>(&metadata).unwrap(),
+            Some(target_spec.clone())
+        );
+        drop(metadata);
+
+        let synced: Db = sync::sync(Config {
+            context: context.child("retry"),
+            resolver: target.clone(),
+            target: target_spec,
+            apply_batch_size: 2,
+            max_outstanding_requests: 1,
+            fetch_batch_size: NZU64!(2),
+            db_config: client_config.clone(),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 0,
+        })
+        .await
+        .expect("retry must rebuild both reset components");
+        assert_eq!(synced.root(), expected_root);
+        assert_eq!(synced.bounds(), expected_bounds);
+        assert_eq!(synced.sync_boundary(), expected_sync_boundary);
+
+        drop(synced);
+        let reopened = H::init_db_with_config(context.child("reopen"), client_config.clone()).await;
+        assert_eq!(reopened.root(), expected_root);
+        assert_eq!(reopened.bounds(), expected_bounds);
+        assert_eq!(reopened.sync_boundary(), expected_sync_boundary);
+
+        reopened.destroy().await.unwrap();
+        Arc::try_unwrap(target)
+            .unwrap_or_else(|_| panic!("failed to unwrap target"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
+#[test_traced]
 fn test_discarded_sync_result_is_not_resumed() {
     use crate::{
         journal::contiguous::fixed,
@@ -1436,6 +1550,7 @@ macro_rules! current_sync_tests_for_harness {
             fn test_sync_post_sync_usability() {
                 crate::qmdb::any::sync::tests::test_sync_post_sync_usability::<$harness>();
             }
+
         }
     };
 }

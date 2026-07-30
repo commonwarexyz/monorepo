@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::freezer::{Checkpoint, Config, Cursor, Freezer, Identifier};
-use commonware_storage_fuzz::{RNG_BYTES, fuzz_runner, remove_faults, split_cycles};
+use commonware_storage_fuzz::{RNG_BYTES, fuzz_runner, split_cycles};
 use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -220,32 +220,19 @@ fn fuzz(input: FuzzInput) {
         }
     });
 
-    let (_, runtime_checkpoint) = deterministic::Runner::from(runtime_checkpoint)
-        .start_and_recover(move |context| async move {
-            let freezer = Freezer::<_, FixedBytes<32>, i32>::init(
-                context.child("final"),
-                config(&context, compression),
-                expected.checkpoint,
-            )
-            .await
-            .expect("final recovery should succeed");
-            verify(&freezer, &expected).await;
-            *context.storage_fault_config().write() = remove_faults();
-            let _ = freezer.destroy().await;
-        });
-
     deterministic::Runner::from(runtime_checkpoint).start(move |context| async move {
-        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-        // Once destroy starts, the external checkpoint must be invalidated. Reopening without it
-        // exercises both an interrupted destroy and the documented reset path before retrying.
         let freezer = Freezer::<_, FixedBytes<32>, i32>::init(
-            context.child("redestroy"),
+            context.child("final"),
             config(&context, compression),
-            None,
+            expected.checkpoint,
         )
         .await
-        .expect("freezer reset must clean up interrupted destroy state");
-        freezer.destroy().await.expect("destroy retry must succeed");
+        .expect("final recovery should succeed");
+        verify(&freezer, &expected).await;
+        freezer
+            .destroy()
+            .await
+            .expect("cleanup destroy must succeed");
     });
 }
 

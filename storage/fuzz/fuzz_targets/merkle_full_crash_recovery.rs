@@ -15,7 +15,7 @@ use commonware_storage::merkle::{
 };
 use commonware_storage_fuzz::{
     RNG_BYTES, bounded_items_per_section, bounded_page_cache_size, bounded_page_size, bounded_rate,
-    fuzz_runner, interrupt_faults,
+    fuzz_runner,
 };
 use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;
@@ -169,6 +169,7 @@ async fn verify_recovery<F: MerkleFamily>(
     merkle: &Merkle<F>,
     hasher: &StandardHasher<Sha256>,
     expected: &ExpectedBounds,
+    items_per_blob: u64,
 ) {
     let size = merkle.size().as_u64();
     let leaves = merkle.leaves().as_u64();
@@ -205,9 +206,8 @@ async fn verify_recovery<F: MerkleFamily>(
         );
     }
 
-    // Recompute every node from the exact accepted leaf prefix, then compare every node still
-    // accessible through Full. Nodes at or above the logical prune position and all pinned peaks
-    // are mandatory; blob-aligned leftovers below it are checked whenever they remain accessible.
+    // Recompute every node from the exact accepted leaf prefix. Non-pinned physical nodes must
+    // match either the complete old blob cutoff or the complete committed prune cutoff.
     let oracle = mem_from_leaves::<F>(&expected.leaves_data[..leaves as usize], hasher);
     assert_eq!(
         oracle.size().as_u64(),
@@ -223,6 +223,7 @@ async fn verify_recovery<F: MerkleFamily>(
 
     let prune_loc = Location::<F>::new(pruned);
     let prune_pos = F::location_to_position(prune_loc);
+    let physical_floor = *prune_pos / items_per_blob * items_per_blob;
     let required_pins: BTreeSet<_> = F::nodes_to_pin(prune_loc)
         .chain(F::peaks(oracle.size()).map(|(pos, _)| pos))
         .collect();
@@ -238,6 +239,13 @@ async fn verify_recovery<F: MerkleFamily>(
         if pos >= prune_pos || required_pins.contains(&pos) {
             assert!(recovered_node.is_some(), "required node {pos} is missing");
         }
+        if !required_pins.contains(&pos) {
+            assert_eq!(
+                recovered_node.is_some(),
+                raw_pos >= physical_floor,
+                "physical node {pos} does not match the recovered atomic prune boundary"
+            );
+        }
         if let Some(recovered_node) = recovered_node {
             assert_eq!(
                 recovered_node, expected_node,
@@ -245,7 +253,6 @@ async fn verify_recovery<F: MerkleFamily>(
             );
         }
     }
-
     // Exercise both point and range proof construction against the recovered storage.
     if pruned < leaves {
         for leaf in pruned..leaves {
@@ -510,7 +517,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             )
             .await
             .expect("recovery should succeed");
-            verify_recovery(&merkle, &hasher, &expected).await;
+            verify_recovery(&merkle, &hasher, &expected, items_per_blob).await;
 
             // Add and durably sync a sentinel after recovery.
             let sentinel = [0xABu8; DATA_SIZE];
@@ -526,35 +533,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             expected
         });
 
-    // Cross a second crash boundary, verify the synced sentinel, and interrupt composite destroy.
-    let redestroy_suffix = partition_suffix.clone();
-    let (_, checkpoint) =
-        deterministic::Runner::from(checkpoint).start_and_recover(|ctx| async move {
-            let hasher = StandardHasher::<Sha256>::new(Bagging::ForwardFold);
-            let merkle = Merkle::<F>::init(
-                ctx.child("sentinel"),
-                &hasher,
-                merkle_config(
-                    &redestroy_suffix,
-                    &ctx,
-                    page_size,
-                    page_cache_size,
-                    items_per_blob,
-                    write_buffer,
-                ),
-            )
-            .await
-            .expect("sentinel recovery should succeed");
-            verify_recovery(&merkle, &hasher, &expected).await;
-            *ctx.storage_fault_config().write() = interrupt_faults();
-            let _ = merkle.destroy().await;
-        });
-
     deterministic::Runner::from(checkpoint).start(|ctx| async move {
-        *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let hasher = StandardHasher::<Sha256>::new(Bagging::ForwardFold);
         let merkle = Merkle::<F>::init(
-            ctx.child("redestroy"),
+            ctx.child("sentinel"),
             &hasher,
             merkle_config(
                 &partition_suffix,
@@ -566,8 +548,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             ),
         )
         .await
-        .expect("Merkle must reopen after interrupted destroy");
-        merkle.destroy().await.expect("destroy retry must succeed");
+        .expect("sentinel recovery should succeed");
+        verify_recovery(&merkle, &hasher, &expected, items_per_blob).await;
+        merkle
+            .destroy()
+            .await
+            .expect("cleanup destroy must succeed");
     });
 }
 

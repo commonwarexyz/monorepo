@@ -131,7 +131,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
-    blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
+    blobs::{Blob, Blobs, Partition, PreparedRewind, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
     durability::Barrier,
 };
@@ -146,7 +146,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf,
+    BatchOperation, Blob as RBlob, Buf, Handle, IoBuf, RemoveTarget,
     buffer::paged::{CacheRef, Writer},
 };
 use commonware_utils::Cached;
@@ -450,25 +450,27 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // preserve the evidence (`recover_bounds` would reject the truncated result anyway).
         let floor = checkpoint.watermark().unwrap_or(0);
         let floor_blob = super::position_to_blob(floor, cfg.items_per_blob.get());
+        let boundary_hint = checkpoint.boundary_hint().unwrap_or(0);
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
-            let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let valid = writer.recoverable_prefix_len(0).await?;
-            let valid = Self::items_to_bytes(valid / Self::CHUNK_SIZE_U64)?;
-            if valid == writer.size() {
+            let (valid, size) = {
+                let writer = pending.get_mut(&blob).expect("suspect blob is present");
+                let valid = writer.recoverable_prefix_len(0).await?;
+                (
+                    Self::items_to_bytes(valid / Self::CHUNK_SIZE_U64)?,
+                    writer.size(),
+                )
+            };
+            if valid == size {
                 continue;
             }
 
             // Bytes this blob must retain: everything in a blob below the watermark's blob, the
             // watermark's in-blob prefix in the blob containing it, and nothing above.
             let acknowledged = if blob < floor_blob {
-                writer.size()
+                size
             } else if blob == floor_blob {
-                let first_retained = first_in_blob(
-                    checkpoint.boundary_hint().unwrap_or(0),
-                    blob,
-                    cfg.items_per_blob.get(),
-                )?;
+                let first_retained = first_in_blob(boundary_hint, blob, cfg.items_per_blob.get())?;
                 let acknowledged_items = floor.checked_sub(first_retained).ok_or_else(|| {
                     Error::Corruption(format!(
                         "recovery watermark {floor} precedes retained position {first_retained}"
@@ -481,25 +483,30 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             if valid < acknowledged {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
-                     of size {}",
-                    writer.size()
+                     of size {size}"
                 )));
             }
-            warn!(
+            warn!(blob, valid, size, "truncating to last well-formed page");
+            Self::repair_blob_and_remove_after(
+                &partition,
+                &mut pending,
                 blob,
                 valid,
-                size = writer.size(),
-                "truncating to last well-formed page"
-            );
-            writer.resize(valid).await?;
-            writer.sync().await?;
+                boundary_hint,
+                cfg.items_per_blob.get(),
+            )
+            .await?;
         }
 
         // Truncate trailing non-chunk-aligned bytes on every blob. Items are fixed size, so a blob
         // ending in fewer than `CHUNK_SIZE` trailing bytes is junk from an incomplete write (the
-        // page-CRC layer surfaces it as a partial logical tail). The truncation is synced before
-        // `recover_bounds` queries lengths.
-        for (&blob, writer) in &mut pending {
+        // page-CRC layer surfaces it as a partial logical tail). Commit the truncation and any
+        // successors it makes unreachable before `recover_bounds` queries lengths.
+        let blobs = pending.keys().copied().collect::<Vec<_>>();
+        for blob in blobs {
+            let Some(writer) = pending.get_mut(&blob) else {
+                continue;
+            };
             let size = writer.size();
             let valid_size = Self::items_to_bytes(size / Self::CHUNK_SIZE_U64)?;
             if valid_size != size {
@@ -509,8 +516,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                     new_size = valid_size,
                     "trailing bytes detected: truncating"
                 );
-                writer.resize(valid_size).await?;
-                writer.sync().await?;
+                Self::repair_blob_and_remove_after(
+                    &partition,
+                    &mut pending,
+                    blob,
+                    valid_size,
+                    boundary_hint,
+                    cfg.items_per_blob.get(),
+                )
+                .await?;
             }
         }
 
@@ -536,23 +550,24 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             )
             .await?;
 
-        // Apply repair (if any). The short blob becomes the new tail; blobs strictly newer
-        // than it are removed (newest-first) and the truncation is synced, so the repair is
-        // durable before sealing.
+        // Apply repair (if any). The short blob becomes the new tail; its underlying length change
+        // and removal of every newer blob share one durable commit point.
         let tail_blob = super::position_to_blob(size, cfg.items_per_blob.get());
         if let Some(truncate_to) = repair {
-            while let Some((&newest, _)) = pending.last_key_value() {
-                if newest <= tail_blob {
-                    break;
-                }
-                drop(pending.remove(&newest));
-                partition.remove(newest).await?;
-            }
+            let newer = pending
+                .keys()
+                .copied()
+                .filter(|&blob| blob > tail_blob)
+                .collect::<Vec<_>>();
+            let mut operations = partition.blob_operations(newer.iter().copied());
             if let Some(writer) = pending.get_mut(&tail_blob)
                 && truncate_to < writer.size()
             {
-                writer.resize(truncate_to).await?;
-                writer.sync().await?;
+                writer.resize_into(truncate_to, &mut operations).await?;
+            }
+            partition.apply_batch(operations).await?;
+            for blob in newer {
+                drop(pending.remove(&blob));
             }
         }
 
@@ -571,6 +586,43 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         ))
     }
 
+    /// Atomically shorten `blob` and remove successors made unreachable by the new length.
+    async fn repair_blob_and_remove_after(
+        partition: &Partition<E>,
+        pending: &mut BTreeMap<u64, Writer<E::Blob>>,
+        blob: u64,
+        truncate_to: u64,
+        pruning_boundary: u64,
+        items_per_blob: u64,
+    ) -> Result<(), Error> {
+        let blob_start = super::blob_first_position(blob, items_per_blob)?;
+        let skipped = pruning_boundary
+            .saturating_sub(blob_start)
+            .min(items_per_blob);
+        let capacity = items_per_blob - skipped;
+        let capacity = Self::items_to_bytes(capacity)?;
+        let newer = if truncate_to < capacity {
+            pending
+                .keys()
+                .copied()
+                .filter(|&candidate| candidate > blob)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let mut operations = partition.blob_operations(newer.iter().copied());
+        let writer = pending
+            .get_mut(&blob)
+            .ok_or_else(|| Error::Corruption(format!("repair target blob {blob} is missing")))?;
+        writer.resize_into(truncate_to, &mut operations).await?;
+        partition.apply_batch(operations).await?;
+        for candidate in newer {
+            drop(pending.remove(&candidate));
+        }
+        Ok(())
+    }
+
     /// Complete an interrupted clear: discard all blob partitions and start fresh at
     /// `clear_target`, then finalize the checkpoint the crashed clear left staged.
     async fn complete_staged_clear(
@@ -581,8 +633,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ) -> Result<Self, Error> {
         warn!(clear_target, "crash repair: completing interrupted clear");
         let new_partition = format!("{}-blobs", cfg.partition);
-        Partition::<E>::remove_all(&context, &cfg.partition).await?;
-        Partition::<E>::remove_all(&context, &new_partition).await?;
+        context
+            .apply_batch(vec![
+                RemoveTarget::Partition(cfg.partition.clone()).into(),
+                RemoveTarget::Partition(new_partition.clone()).into(),
+            ])
+            .await
+            .map_err(Error::Runtime)?;
         let partition = Partition::new(
             context.child("blobs"),
             new_partition,
@@ -1042,15 +1099,30 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::rewind].
-    pub(crate) async fn rewind(mut self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
+    pub(crate) async fn rewind(self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
         match size.cmp(&self.bounds.end) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
             std::cmp::Ordering::Equal => return Ok(self),
             std::cmp::Ordering::Less => {}
         }
 
+        let mut operations = Vec::new();
+        let (self_, prepared) = self.prepare_rewind(size, &mut operations).await?;
+        self_.blobs.apply_batch(operations).await?;
+        Ok(self_.finalize_rewind(size, prepared))
+    }
+
+    /// Lower the recovery watermark and stage the physical rewind without publishing new bounds.
+    pub(super) async fn prepare_rewind(
+        mut self: Box<Self>,
+        size: u64,
+        operations: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<(Box<Self>, PreparedRewind<E::Blob>), Error> {
         if size < self.bounds.start {
             return Err(Error::ItemPruned(size));
+        }
+        if size >= self.bounds.end {
+            return Err(Error::InvalidRewind(size));
         }
 
         let blob = super::position_to_blob(size, self.items_per_blob.get());
@@ -1062,12 +1134,20 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.checkpoint = self.checkpoint.sync().await?;
         }
 
-        if blob == self.blobs.tail_blob_index() {
-            self.blobs.rewind_tail(byte_offset).await?;
-        } else {
-            self.blobs.rewind_into_sealed(blob, byte_offset).await?;
-        }
+        let prepared = self
+            .blobs
+            .prepare_rewind(blob, byte_offset, operations)
+            .await?;
+        Ok((self, prepared))
+    }
 
+    /// Publish a prepared physical rewind after its storage batch succeeds.
+    pub(super) fn finalize_rewind(
+        mut self: Box<Self>,
+        size: u64,
+        prepared: PreparedRewind<E::Blob>,
+    ) -> Box<Self> {
+        self.blobs.finalize_rewind(prepared);
         self.bounds.end = size;
         self.barrier.truncate(size);
         self.metrics.update(
@@ -1075,8 +1155,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.bounds.start,
             self.items_per_blob.get(),
         );
-
-        Ok(self)
+        self
     }
 
     /// Return the location before which all items have been pruned.
@@ -1111,7 +1190,26 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.barrier.mark_durable(self.bounds.end);
 
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
-        self.blobs.prune(min_blob).await?;
+        let targets = self.prune_targets(min_blob).await?;
+        self.blobs.remove_targets(targets).await?;
+        self.finalize_prune(min_blob, new_boundary);
+
+        Ok((self, true))
+    }
+
+    /// Return the exact blob entries removed by a prune after draining their syncs.
+    ///
+    /// The caller must make every retained item durable before calling this raw collection step.
+    pub(super) async fn prune_targets(
+        &mut self,
+        min_blob: u64,
+    ) -> Result<Vec<RemoveTarget>, Error> {
+        self.blobs.prune_targets(min_blob).await
+    }
+
+    /// Update the live pruning boundary after its blob removals succeed.
+    pub(super) fn finalize_prune(&mut self, min_blob: u64, new_boundary: u64) {
+        self.blobs.finalize_prune(min_blob);
         self.bounds.start = new_boundary;
 
         self.metrics.update(
@@ -1119,17 +1217,40 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.bounds.start,
             self.items_per_blob.get(),
         );
-
-        Ok((self, true))
     }
 
-    /// See [Journal::destroy].
-    pub(crate) async fn destroy(mut self) -> Result<(), Error> {
-        // Stage a recoverable reset before removing storage. If a later removal is interrupted,
-        // initialization completes the reset and can retry destruction.
-        self.checkpoint = self.checkpoint.stage_clear(0).await?;
-        self.blobs.destroy().await?;
-        self.checkpoint.destroy().await
+    /// Return the exact physical namespace entries owned by this journal.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn destroy_targets(&self) -> Vec<commonware_runtime::RemoveTarget> {
+        vec![
+            self.blobs.destroy_target(),
+            self.checkpoint.destroy_target(),
+        ]
+    }
+
+    /// Return a context capable of removing this journal's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.blobs.destroy_context()
+    }
+
+    /// Wait for in-flight child syncs, then return the physical namespace entries it owns.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        let Self {
+            blobs, checkpoint, ..
+        } = self;
+        let mut targets = blobs.into_remove_targets().await?;
+        targets.extend(checkpoint.into_remove_targets().await?);
+        Ok(targets)
+    }
+
+    #[cfg(test)]
+    async fn destroy(self) -> Result<(), Error> {
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(Error::Runtime)
     }
 
     /// Clear all data and reset the journal to a new starting position.
@@ -1180,6 +1301,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
         new_size: u64,
@@ -1346,9 +1468,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Warnings
     ///
-    /// * This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
-    /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
-    ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
+    /// * The retained blob's complete tail update and whole-blob removals share one durable
+    ///   storage batch. The recovery checkpoint is lowered first so a committed rewind is never
+    ///   paired with a later durable watermark.
     /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
     ///   rewind truncates into their range.
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
@@ -1368,27 +1490,32 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
     ///
-    /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
-    /// event of failure as items are always pruned in order from oldest to newest.
+    /// Whole-blob removals are committed as one runtime namespace batch. After commitment,
+    /// storage recovery completes any interrupted removals before reopening the namespace.
     pub async fn prune(mut self, min_item_pos: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min_item_pos).await?;
         self.0 = inner;
         Ok((self, pruned))
     }
 
-    /// Remove any persisted data created by the journal.
-    ///
-    /// # Crash Safety
-    ///
-    /// If interrupted, the journal remains openable and `destroy` can be retried.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+    /// Return a context capable of removing this journal's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.destroy_context()
     }
 
-    /// Park destruction after removing its first blob.
-    #[cfg(test)]
-    pub(crate) fn halt_destroy_after_first_remove(&mut self) {
-        self.0.blobs.halt_destroy_after_first_remove();
+    /// Wait for in-flight child syncs, then return the physical namespace entries it owns.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
+    }
+
+    /// Remove any persisted data created by the journal.
+    pub async fn destroy(self) -> Result<(), Error> {
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(Error::Runtime)
     }
 }
 
@@ -1747,6 +1874,10 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 
     async fn init(context: E, cfg: Self::Config) -> Result<Self, Error> {
         Self::init(context, cfg).await
+    }
+
+    fn destroy_targets(&self) -> Vec<RemoveTarget> {
+        self.0.destroy_targets()
     }
 }
 
@@ -2713,38 +2844,6 @@ mod tests {
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_interrupted_destroy_reopens() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0u64..5 {
-                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
-            }
-            let mut journal = journal.sync().await.unwrap();
-
-            // Cancel the production future after the staged reset and one successful blob
-            // removal, leaving a nonempty suffix for initialization to clear.
-            journal.0.blobs.halt_destroy_after_first_remove();
-            {
-                let destroy = journal.destroy();
-                futures::pin_mut!(destroy);
-                assert!(
-                    futures::poll!(destroy.as_mut()).is_pending(),
-                    "destroy must park after removing its first blob"
-                );
-            }
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("interrupted destroy must leave openable storage");
-            journal.destroy().await.unwrap();
         });
     }
 
@@ -3906,6 +4005,119 @@ mod tests {
             let appended;
             (journal, appended) = journal.append(&test_digest(42)).await.unwrap();
             assert_eq!(appended, 4);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Repairing a damaged non-tail blob and discarding its successors is one storage commit.
+    #[test_traced]
+    fn test_fixed_recovery_batches_truncation_with_successor_removal() {
+        for post_commit in [false, true] {
+            let partition = format!("fixed-atomic-repair-{post_commit}");
+            let executor = deterministic::Runner::default();
+            let (size_before, checkpoint) = executor.start_and_recover({
+                let partition = partition.clone();
+                move |context| async move {
+                    let mut cfg = test_cfg(&context, NZU64!(10));
+                    cfg.partition = partition;
+                    let mut journal =
+                        Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                            .await
+                            .unwrap();
+                    for i in 0..15u64 {
+                        (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                    }
+                    journal = journal.commit().await.unwrap();
+                    drop(journal);
+
+                    corrupt_page(
+                        &context,
+                        &blob_partition(&cfg),
+                        0,
+                        3,
+                        PAGE_SIZE.get() as u64,
+                    )
+                    .await;
+                    let (_, size_before) = context
+                        .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                        .await
+                        .unwrap();
+
+                    *context.storage_fault_config().write() = if post_commit {
+                        deterministic::FaultConfig::default().batch_post_commit(1.0)
+                    } else {
+                        deterministic::FaultConfig::default().batch(1.0)
+                    };
+                    assert!(
+                        Journal::<_, Digest>::init(context.child("repair"), cfg)
+                            .await
+                            .is_err()
+                    );
+                    size_before
+                }
+            });
+
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let mut cfg = test_cfg(&context, NZU64!(10));
+                cfg.partition = partition;
+                let blobs = context.scan(&blob_partition(&cfg)).await.unwrap();
+                let (_, size_after) = context
+                    .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+
+                if post_commit {
+                    assert_eq!(blobs.len(), 1, "successor removal must commit");
+                    assert!(size_after < size_before, "truncation must commit");
+                } else {
+                    assert_eq!(blobs.len(), 2, "successor removal must not commit");
+                    assert_eq!(size_after, size_before, "truncation must not commit");
+                }
+
+                let journal = Journal::<_, Digest>::init(context.child("retry"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), 0..4);
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    /// Trimming junk after a complete blob must not discard a reachable successor.
+    #[test_traced]
+    fn test_fixed_recovery_preserves_successor_after_full_blob_junk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.commit().await.unwrap();
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            let mut writer = Writer::new(blob, size, 2048, cfg.page_cache.clone())
+                .await
+                .unwrap();
+            writer.append(&[0xff]).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..15);
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            assert_eq!(context.scan(&blob_partition(&cfg)).await.unwrap().len(), 2);
             journal.destroy().await.unwrap();
         });
     }

@@ -1,8 +1,8 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
-    Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor,
+    BatchOperation, Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs,
+    IoBufsMut, Metrics, Name, Spawner, Storage, Supervisor,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -560,8 +560,29 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
+    async fn apply_batch(&self, operations: Vec<BatchOperation<Self::Blob>>) -> Result<(), Error> {
+        let operations = operations
+            .into_iter()
+            .map(|operation| match operation {
+                BatchOperation::Remove(target) => BatchOperation::Remove(target),
+                BatchOperation::Resize { blob, len } => BatchOperation::Resize {
+                    blob: blob.inner,
+                    len,
+                },
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => BatchOperation::Update {
+                    blob: blob.inner,
+                    offset,
+                    data,
+                    len,
+                },
+            })
+            .collect();
+        self.inner.apply_batch(operations).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -910,8 +931,29 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
+    async fn apply_batch(&self, operations: Vec<BatchOperation<Self::Blob>>) -> Result<(), Error> {
+        let operations = operations
+            .into_iter()
+            .map(|operation| match operation {
+                BatchOperation::Remove(target) => BatchOperation::Remove(target),
+                BatchOperation::Resize { blob, len } => BatchOperation::Resize {
+                    blob: blob.inner,
+                    len,
+                },
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => BatchOperation::Update {
+                    blob: blob.inner,
+                    offset,
+                    data,
+                    len,
+                },
+            })
+            .collect();
+        self.inner.apply_batch(operations).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -1000,8 +1042,29 @@ impl<E: Storage> Storage for SyncFaultContext<E> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
+    async fn apply_batch(&self, operations: Vec<BatchOperation<Self::Blob>>) -> Result<(), Error> {
+        let operations = operations
+            .into_iter()
+            .map(|operation| match operation {
+                BatchOperation::Remove(target) => BatchOperation::Remove(target),
+                BatchOperation::Resize { blob, len } => BatchOperation::Resize {
+                    blob: blob.inner,
+                    len,
+                },
+                BatchOperation::Update {
+                    blob,
+                    offset,
+                    data,
+                    len,
+                } => BatchOperation::Update {
+                    blob: blob.inner,
+                    offset,
+                    data,
+                    len,
+                },
+            })
+            .collect();
+        self.inner.apply_batch(operations).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {

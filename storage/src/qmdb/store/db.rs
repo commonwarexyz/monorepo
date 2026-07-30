@@ -346,13 +346,9 @@ where
             ));
         }
 
-        // The floor justifying the boundary may exist only in buffered operations (it
-        // advances before its batch is durable), and pruning does not guarantee buffered
-        // appends are durable. Commit so the justification survives the prune.
-        self.log = self.log.commit().await?;
-
         // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-        // location may be less than requested.
+        // location may be less than requested. The journal makes buffered appends durable before
+        // deleting any blobs.
         let pruned;
         (self.log, pruned) = self.log.prune(*prune_loc).await?;
         if !pruned {
@@ -962,8 +958,8 @@ mod test {
             let op_count = db.bounds().end;
             drop(db);
 
-            // Reopening must succeed: prune committed the buffered operations first, so the
-            // replayed log reproduces the advanced floor.
+            // Reopening must succeed: journal pruning made the buffered operations durable before
+            // removing blobs, so the replayed log reproduces the advanced floor.
             let db = create_test_store(context.child("store").with_attribute("index", 1)).await;
             assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc, unsynced_floor);

@@ -3,13 +3,14 @@ use crate::SyncCompletion;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, BufferPooler, Error as RError, Handle, IoBufMut, Metrics, Storage,
+    BatchOperation, Blob, BufMut, BufferPooler, Error as RError, Handle, IoBufMut, Metrics,
+    RemoveTarget, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
 use futures::{FutureExt as _, future::try_join_all};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
@@ -81,10 +82,6 @@ struct Inner<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> {
     partition: String,
     state: State<E::Blob, K>,
 
-    /// Test-only: park destruction after this many successful blob removals.
-    #[cfg(test)]
-    halt_destroy_after_removals: usize,
-
     sync_overwrites: Counter,
     sync_rewrites: Counter,
     keys: Gauge,
@@ -137,9 +134,6 @@ impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Inner<E, K, V> {
                 blobs: [left_wrapper, right_wrapper],
                 pending: None,
             },
-            #[cfg(test)]
-            halt_destroy_after_removals: 0,
-
             sync_rewrites,
             sync_overwrites,
             keys,
@@ -552,44 +546,6 @@ impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Inner<E, K, V> {
         self.state.pending = Some(completion);
         handle
     }
-
-    /// See [Metadata::destroy].
-    async fn destroy(mut self) -> Result<(), Error> {
-        if let Some(pending) = self.state.pending.take() {
-            pending.await?;
-        }
-
-        let state = self.state;
-        // Remove the superseded copy first so interruption leaves either the newest state or no
-        // state. Both can be reopened to retry destruction.
-        let order = [1 - state.cursor, state.cursor];
-        let mut blobs = state.blobs.map(Some);
-        #[cfg(test)]
-        let mut removed = 0;
-        for i in order {
-            let wrapper = blobs[i].take().expect("metadata blob removed once");
-            drop(wrapper.blob);
-            self.context
-                .remove(&self.partition, Some(BLOB_NAMES[i]))
-                .await?;
-            debug!(blob = i, "destroyed blob");
-            #[cfg(test)]
-            {
-                removed += 1;
-                if self.halt_destroy_after_removals == removed {
-                    std::future::pending::<()>().await;
-                }
-            }
-        }
-        match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
-                // Partition already removed or never existed.
-            }
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-        Ok(())
-    }
 }
 
 /// Implementation of [Metadata] storage.
@@ -610,13 +566,6 @@ impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
-    }
-
-    /// Park destruction after `count` successful blob-removal awaits.
-    #[cfg(test)]
-    pub(crate) fn halt_destroy_after_removals(&mut self, count: usize) {
-        assert!((1..=2).contains(&count));
-        self.0.halt_destroy_after_removals = count;
     }
 
     /// Get a value from [Metadata] (if it exists).
@@ -710,10 +659,31 @@ impl<E: BufferPooler + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         self.0.poll_pending().map_err(Error::Runtime)
     }
 
+    /// Return the exact namespace entry owned by this store.
+    pub(crate) fn destroy_target(&self) -> RemoveTarget {
+        RemoveTarget::Partition(self.0.partition.clone())
+    }
+
+    /// Return a child context for removing this store's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.context.child("destroy")
+    }
+
+    /// Wait for an in-flight sync, then return the physical namespace entries this store owns.
+    pub(crate) async fn into_remove_targets(mut self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.wait_for_pending().await?;
+        let target = self.destroy_target();
+        drop(self);
+        Ok(vec![target])
+    }
+
     /// Remove the underlying blobs for this [Metadata].
-    ///
-    /// If interrupted, the store remains openable and `destroy` can be retried.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(BatchOperation::Remove).collect())
+            .await
+            .map_err(Error::Runtime)
     }
 }

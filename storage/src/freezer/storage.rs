@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, IoBuf, buffer,
+    BatchOperation, Blob, Buf, BufMut, BufferPooler, IoBuf, RemoveTarget, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -673,19 +673,18 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             return Err(Error::CheckpointMismatch);
         }
 
-        // A missing or empty checkpoint starts fresh: delete all existing freezer data
+        // A missing or empty checkpoint starts fresh: delete all existing freezer data.
         let reset = checkpoint.is_none();
         if reset {
-            for partition in [
+            let operations = [
                 &config.key_partition,
                 &config.value_partition,
                 &config.table_partition,
-            ] {
-                match context.remove(partition, None).await {
-                    Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
-                    Err(err) => return Err(Error::Runtime(err)),
-                }
-            }
+            ]
+            .into_iter()
+            .map(|partition| BatchOperation::Remove(RemoveTarget::Partition(partition.clone())))
+            .collect();
+            context.apply_batch(operations).await?;
         }
 
         // Open and preflight the table before destructively restoring the oversized journal. A
@@ -717,26 +716,34 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let oversized_checkpoint = checkpoint.map_or((0, 0), |checkpoint| {
             (checkpoint.section, checkpoint.oversized_size)
         });
-        let oversized: Oversized<E, Record<K>, V> = Oversized::init_from_checkpoint(
+        let mut operations = Vec::new();
+        let (mut oversized, prepared_oversized) = Oversized::init_from_checkpoint_into(
             context.child("oversized"),
             oversized_cfg,
             oversized_checkpoint,
+            &mut operations,
         )
         .await?;
+
+        if let Some(checkpoint) = checkpoint {
+            let expected_table_len = Self::table_offset(checkpoint.table_size);
+            if table_len > expected_table_len {
+                operations.push(BatchOperation::Resize {
+                    blob: table.clone(),
+                    len: expected_table_len,
+                });
+            }
+        }
+
+        if !operations.is_empty() {
+            context.apply_batch(operations).await?;
+        }
+        oversized.finalize_rewind(prepared_oversized);
 
         // Determine checkpoint based on initialization scenario
         let (checkpoint, resizable) = match checkpoint {
             // Non-empty checkpoint: align existing data to it
             Some(checkpoint) => {
-                // Discard only data beyond the checkpointed table.
-                let expected_table_len = Self::table_offset(checkpoint.table_size);
-                let mut modified = if table_len > expected_table_len {
-                    table.resize(expected_table_len).await?;
-                    true
-                } else {
-                    false
-                };
-
                 // Validate and clean invalid entries
                 let (table_modified, _, _, resizable) = Self::recover_table(
                     &context,
@@ -747,12 +754,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                     config.table_replay_buffer,
                 )
                 .await?;
-                if table_modified {
-                    modified = true;
-                }
 
-                // Sync table if needed
-                if modified {
+                // The physical resize was committed with the journals. Only recovery writes need
+                // a separate sync.
+                if table_modified {
                     table.sync().await?;
                 }
 
@@ -1160,21 +1165,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
         Ok(checkpoint)
     }
-
-    /// See [Freezer::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        // Destroy oversized journal
-        self.oversized.destroy().await?;
-
-        // Destroy the table
-        drop(self.table);
-        self.context
-            .remove(&self.table_partition, Some(TABLE_BLOB_NAME))
-            .await?;
-        self.context.remove(&self.table_partition, None).await?;
-
-        Ok(())
-    }
 }
 
 /// Implementation of [Freezer].
@@ -1248,14 +1238,38 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         self.0.close().await
     }
 
+    /// Return a context that can remove this freezer's storage targets.
+    fn destroy_context(&self) -> E {
+        self.0.oversized.destroy_context()
+    }
+
+    /// Wait for pending journal syncs, then return the freezer's namespace entries.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        let Inner {
+            table_partition,
+            table,
+            oversized,
+            ..
+        } = *self.0;
+        drop(table);
+
+        let mut targets = oversized.into_remove_targets().await?;
+        targets.push(RemoveTarget::Partition(table_partition));
+        Ok(targets)
+    }
+
     /// Close and remove any underlying blobs created by the [Freezer].
     ///
     /// The caller must durably invalidate any externally persisted [Checkpoint] before calling
-    /// this method. After an interrupted destroy, reopen with `None` or an empty checkpoint and
-    /// retry destruction; an old nonempty checkpoint may correctly reject the partially removed
-    /// storage.
+    /// this method.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(crate::journal::Error::Runtime)
+            .map_err(Error::Journal)
     }
 
     /// Get the current progress of the resize operation.

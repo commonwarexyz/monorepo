@@ -78,6 +78,51 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+    /// An exact namespace entry to remove with [`Storage::apply_batch`].
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum RemoveTarget {
+        /// Remove one blob from a partition.
+        Blob {
+            /// Partition containing the blob.
+            partition: String,
+            /// Exact blob name.
+            name: Vec<u8>,
+        },
+        /// Remove an entire partition.
+        Partition(String),
+    }
+
+    /// An operation applied atomically by [`Storage::apply_batch`].
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum BatchOperation<B> {
+        /// Remove an exact namespace entry.
+        Remove(RemoveTarget),
+        /// Resize a blob to `len` bytes.
+        Resize {
+            /// Current blob handle to resize.
+            blob: B,
+            /// New logical blob length in bytes.
+            len: u64,
+        },
+        /// Write bytes and set a blob's length atomically.
+        Update {
+            /// Current blob handle to update.
+            blob: B,
+            /// Logical byte offset at which to write `data`.
+            offset: u64,
+            /// Bytes to write.
+            data: IoBuf,
+            /// Final logical blob length in bytes.
+            len: u64,
+        },
+    }
+
+    impl<B> From<RemoveTarget> for BatchOperation<B> {
+        fn from(target: RemoveTarget) -> Self {
+            Self::Remove(target)
+        }
+    }
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
     pub enum Error {
@@ -675,6 +720,44 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: Option<&[u8]>,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            let target = name.map_or_else(
+                || RemoveTarget::Partition(partition.to_string()),
+                |name| RemoveTarget::Blob {
+                    partition: partition.to_string(),
+                    name: name.to_vec(),
+                },
+            );
+            self.apply_batch(vec![target.into()])
+        }
+
+        /// Atomically apply a set of removals and blob mutations.
+        ///
+        /// Implementations must validate every operation before mutation. A mutated handle must
+        /// belong to this storage instance and still identify the current generation of its
+        /// namespace entry. Missing mutation targets fail the batch. Each namespace blob may have
+        /// at most one mutation: identical duplicates are collapsed, while differing mutations,
+        /// resize/update combinations, and mutations covered by a removal are rejected. Duplicate
+        /// removals are collapsed, and blob removals subsumed by a partition removal are ignored.
+        /// Missing removal targets are considered successfully removed, including when every target
+        /// is missing. An empty batch succeeds.
+        ///
+        /// The batch has one durable commit point. Concurrent namespace operations observe either
+        /// all operations or none of them. Once committed, cancellation, an error, or a crash must
+        /// not expose a partially applied batch: recovery completes the committed operations before
+        /// another namespace operation proceeds. On platforms without durable directory
+        /// synchronization, directory-entry durability is best-effort, matching
+        /// [`Storage::remove`].
+        ///
+        /// Before committing, implementations make the current contents of every mutated blob
+        /// durable. A successful resize therefore durably sets the blob's logical length to `len`,
+        /// preserving existing bytes below that boundary and zero-filling any extension. An update
+        /// requires `offset + data.len() <= len`, durably writes all `data` at `offset`, and leaves
+        /// the blob at exactly `len` bytes. Open handles and recreated names have the same semantics
+        /// documented by [`Storage::remove`].
+        fn apply_batch(
+            &self,
+            operations: Vec<BatchOperation<Self::Blob>>,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Return all blobs in a given partition.

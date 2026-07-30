@@ -26,11 +26,13 @@
 //! 4. Decompress remaining bytes if compression enabled
 //! 5. Decode value
 
-use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
+use super::manager::{Config as ManagerConfig, Manager, PreparedRewind, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
-use commonware_runtime::{BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage};
+use commonware_runtime::{
+    BatchOperation, BufMut, BufferPooler, Error as RError, Handle, Metrics, RemoveTarget, Storage,
+};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -242,9 +244,14 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
         self.manager.remove_section(section).await
     }
 
-    /// See [Glob::destroy].
-    async fn destroy(self) -> Result<(), Error> {
-        self.manager.destroy().await
+    /// Return a context capable of removing this glob's namespace entries.
+    fn destroy_context(&self) -> E {
+        self.manager.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the glob's removal targets.
+    async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.manager.into_remove_targets().await
     }
 }
 
@@ -350,6 +357,16 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(self)
     }
 
+    /// Stage a rewind without applying or finalizing it.
+    pub(super) async fn rewind_into(
+        &mut self,
+        section: u64,
+        size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
+        self.0.manager.rewind_into(section, size, batch).await
+    }
+
     /// Rewind only the given section to a specific size.
     ///
     /// Unlike `rewind`, this does not affect other sections.
@@ -358,10 +375,41 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(self)
     }
 
+    /// Stage a single-section rewind without applying or finalizing it.
+    pub(super) async fn rewind_section_into(
+        &mut self,
+        section: u64,
+        size: u64,
+        batch: &mut Vec<BatchOperation<E::Blob>>,
+    ) -> Result<PreparedRewind, Error> {
+        self.0
+            .manager
+            .rewind_section_into(section, size, batch)
+            .await
+    }
+
+    /// Finalize a successfully applied rewind in memory.
+    pub(super) fn finalize_rewind(&mut self, prepared: PreparedRewind) {
+        self.0.manager.finalize_rewind(prepared);
+    }
+
     /// Prune sections before min.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let pruned = self.0.prune(min).await?;
         Ok((self, pruned))
+    }
+
+    /// Wait for pruned section syncs, then return their exact removal targets.
+    pub(super) async fn prune_targets(
+        &mut self,
+        min: u64,
+    ) -> Result<Vec<BatchOperation<E::Blob>>, Error> {
+        self.0.manager.prune_targets(min).await
+    }
+
+    /// Apply a successful prune to the glob's in-memory state.
+    pub(super) fn finalize_prune(&mut self, min: u64) -> bool {
+        self.0.manager.finalize_prune(min)
     }
 
     /// Returns true when `section` is below the prune floor.
@@ -393,9 +441,32 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok((self, removed))
     }
 
+    /// Remove selected sections as one namespace operation.
+    pub(super) async fn remove_sections(
+        &mut self,
+        sections: impl crate::Sections,
+    ) -> Result<usize, Error> {
+        self.0.manager.remove_sections(sections).await
+    }
+
     /// Destroy all blobs.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.0.destroy().await
+        let context = self.destroy_context();
+        let targets = self.into_remove_targets().await?;
+        context
+            .apply_batch(targets.into_iter().map(Into::into).collect())
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Return a context capable of removing this glob's namespace entries.
+    pub(crate) fn destroy_context(&self) -> E {
+        self.0.destroy_context()
+    }
+
+    /// Wait for pending section syncs, then return the glob's removal targets.
+    pub(crate) async fn into_remove_targets(self) -> Result<Vec<RemoveTarget>, Error> {
+        self.0.into_remove_targets().await
     }
 }
 

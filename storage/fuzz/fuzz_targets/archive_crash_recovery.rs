@@ -17,9 +17,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_storage_fuzz::{
-    RNG_BYTES, fuzz_runner, interrupt_faults, remove_faults, split_cycles,
-};
+use commonware_storage_fuzz::{RNG_BYTES, fuzz_runner, interrupt_faults, split_cycles};
 use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -123,13 +121,13 @@ struct Expected {
 enum OptionalRecovery {
     None,
     SectionPrefix,
-    Any,
+    AllOrNothing,
 }
 
 #[derive(Clone, Copy)]
 enum PruneRecovery {
     Unchanged,
-    RemovalMayHaveStarted,
+    CheckpointCommitted,
     Complete,
 }
 
@@ -297,7 +295,18 @@ where
                 .all(|index| !actual.contains_key(index)),
             "archive retained data beyond its published checkpoint"
         ),
-        OptionalRecovery::Any => {}
+        OptionalRecovery::AllOrNothing => {
+            let recovered = expected
+                .optional
+                .keys()
+                .filter(|index| actual.contains_key(index))
+                .count();
+            assert!(
+                recovered == 0 || recovered == expected.optional.len(),
+                "atomic prune retained {recovered}/{} old entries",
+                expected.optional.len()
+            );
+        }
     }
 
     let mut ranged = BTreeSet::new();
@@ -322,42 +331,6 @@ where
     );
 
     actual
-}
-
-fn assert_interrupted_prune(
-    actual: &Model,
-    before: &Model,
-    min: u64,
-    items_per_section: NonZeroU64,
-) {
-    let mut sections = BTreeMap::<u64, Vec<u64>>::new();
-    for &index in before.keys().filter(|&&index| index < min) {
-        sections
-            .entry(index / items_per_section.get())
-            .or_default()
-            .push(index);
-    }
-
-    let mut retained = false;
-    for (section, indices) in sections {
-        let recovered = indices
-            .iter()
-            .filter(|index| actual.contains_key(index))
-            .count();
-        assert!(
-            recovered == 0 || recovered == indices.len(),
-            "interrupted prune retained only {recovered}/{} entries in section {section}",
-            indices.len()
-        );
-        if recovered == 0 {
-            assert!(
-                !retained,
-                "interrupted ascending prune removed section {section} after retaining a lower section"
-            );
-        } else {
-            retained = true;
-        }
-    }
 }
 
 fn run_cycle<V: Variant>(
@@ -531,7 +504,7 @@ fn run<V: Variant>(input: FuzzInput) {
                 *fault_config.write() = interrupt_faults();
                 match V::prune(archive, FIRST_SENTINEL_INDEX).await {
                     Ok(_) => PruneRecovery::Complete,
-                    Err(Error::Journal(_)) => PruneRecovery::RemovalMayHaveStarted,
+                    Err(Error::Journal(_)) => PruneRecovery::CheckpointCommitted,
                     Err(_) => PruneRecovery::Unchanged,
                 }
             } else {
@@ -548,97 +521,80 @@ fn run<V: Variant>(input: FuzzInput) {
             )
         });
 
-    // Recovery may expose old sections or the advanced prune floor. Retained entries at and above
-    // the floor are invariant; retrying prune must converge before destroy is attempted.
-    let (_, checkpoint) =
-        deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let fault_config = context.storage_fault_config();
-            let mut archive = V::init(context, settings)
-                .await
-                .expect("archive must reopen after interrupted prune");
-            let mut recovery_expected = prune_expected.clone();
-            let optional_recovery = match prune_recovery {
-                PruneRecovery::Unchanged => OptionalRecovery::None,
-                PruneRecovery::RemovalMayHaveStarted => {
-                    let retained = recovery_expected.durable.split_off(&FIRST_SENTINEL_INDEX);
-                    recovery_expected.optional =
-                        std::mem::replace(&mut recovery_expected.durable, retained);
-                    OptionalRecovery::Any
-                }
-                PruneRecovery::Complete => {
-                    recovery_expected.durable =
-                        recovery_expected.durable.split_off(&FIRST_SENTINEL_INDEX);
-                    OptionalRecovery::None
-                }
+    // The checkpoint is committed before the physical removal batch. If that batch is interrupted,
+    // recovery exposes either every old section or the fully pruned state.
+    deterministic::Runner::from(checkpoint).start(move |context| async move {
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+        let mut archive = V::init(context, settings)
+            .await
+            .expect("archive must reopen after interrupted prune");
+        let mut recovery_expected = prune_expected.clone();
+        let optional_recovery = match prune_recovery {
+            PruneRecovery::Unchanged => OptionalRecovery::None,
+            PruneRecovery::CheckpointCommitted => {
+                let retained = recovery_expected.durable.split_off(&FIRST_SENTINEL_INDEX);
+                recovery_expected.optional =
+                    std::mem::replace(&mut recovery_expected.durable, retained);
+                OptionalRecovery::AllOrNothing
+            }
+            PruneRecovery::Complete => {
+                recovery_expected.durable =
+                    recovery_expected.durable.split_off(&FIRST_SENTINEL_INDEX);
+                OptionalRecovery::None
+            }
+        };
+        let mut live = recover_model(
+            &archive,
+            &recovery_expected,
+            optional_recovery,
+            settings.items_per_section,
+        )
+        .await;
+
+        archive = V::prune(archive, FIRST_SENTINEL_INDEX)
+            .await
+            .expect("prune retry should succeed");
+        if V::PRUNABLE {
+            live.retain(|&index, _| index >= FIRST_SENTINEL_INDEX);
+            let post_prune = Expected {
+                durable: live.clone(),
+                optional: Model::new(),
+                next_index: prune_expected.next_index,
             };
-            let mut live = recover_model(
+            recover_model(
                 &archive,
-                &recovery_expected,
-                optional_recovery,
+                &post_prune,
+                OptionalRecovery::None,
                 settings.items_per_section,
             )
             .await;
+        }
 
-            if matches!(prune_recovery, PruneRecovery::RemovalMayHaveStarted) {
-                assert_interrupted_prune(
-                    &live,
-                    &prune_expected.durable,
-                    FIRST_SENTINEL_INDEX,
-                    settings.items_per_section,
-                );
-            }
-
-            archive = V::prune(archive, FIRST_SENTINEL_INDEX)
-                .await
-                .expect("prune retry should succeed");
-            if V::PRUNABLE {
-                live.retain(|&index, _| index >= FIRST_SENTINEL_INDEX);
-                let post_prune = Expected {
-                    durable: live.clone(),
-                    optional: Model::new(),
-                    next_index: prune_expected.next_index,
-                };
-                recover_model(
-                    &archive,
-                    &post_prune,
-                    OptionalRecovery::None,
-                    settings.items_per_section,
-                )
-                .await;
-            }
-
-            let sentinel = [0x3C; 32];
-            archive = archive
-                .put(
-                    SECOND_SENTINEL_INDEX,
-                    key_for(SECOND_SENTINEL_INDEX),
-                    Value::new(sentinel),
-                )
-                .await
-                .expect("put after second recovery should succeed");
-            live.insert(SECOND_SENTINEL_INDEX, sentinel);
-            archive = archive
-                .sync()
-                .await
-                .expect("sync after second recovery should succeed");
-            assert_eq!(
-                archive
-                    .get(Identifier::Index(SECOND_SENTINEL_INDEX))
-                    .await
-                    .expect("sentinel get should succeed"),
-                Some(Value::new(sentinel))
-            );
-            *fault_config.write() = remove_faults();
-            let _ = archive.destroy().await;
-        });
-
-    deterministic::Runner::from(checkpoint).start(move |context| async move {
-        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let archive = V::init(context, settings)
+        let sentinel = [0x3C; 32];
+        archive = archive
+            .put(
+                SECOND_SENTINEL_INDEX,
+                key_for(SECOND_SENTINEL_INDEX),
+                Value::new(sentinel),
+            )
             .await
-            .expect("archive must reopen after interrupted destroy");
-        archive.destroy().await.expect("destroy retry must succeed");
+            .expect("put after second recovery should succeed");
+        live.insert(SECOND_SENTINEL_INDEX, sentinel);
+        archive = archive
+            .sync()
+            .await
+            .expect("sync after second recovery should succeed");
+        assert_eq!(
+            archive
+                .get(Identifier::Index(SECOND_SENTINEL_INDEX))
+                .await
+                .expect("sentinel get should succeed"),
+            Some(Value::new(sentinel))
+        );
+        archive
+            .destroy()
+            .await
+            .expect("cleanup destroy must succeed");
     });
 }
 
