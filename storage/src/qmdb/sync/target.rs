@@ -89,6 +89,17 @@ where
     }
 }
 
+impl<F: Family, D: Digest> Target<F, D> {
+    /// Whether this target advances `from`: its end is in domain and strictly beyond, and
+    /// its start has not moved backward. The single home for the rule; `validate_update`
+    /// and the engine's completion drain both consume it.
+    pub fn advances(&self, from: &Self) -> bool {
+        self.range.end().is_valid()
+            && self.range.end() > from.range.end()
+            && self.range.start() >= from.range.start()
+    }
+}
+
 /// Validate a target update against the current target
 pub fn validate_update<F, U, D>(
     old_target: &Target<F, D>,
@@ -109,9 +120,7 @@ where
     // Start must not decrease; end must strictly increase. Same end implies same tree size implies
     // same root (the Merkle structure is append-only), so retaining the old root under the old tree
     // size in `retained_roots` requires a distinct end.
-    if new_target.range.start() < old_target.range.start()
-        || new_target.range.end() <= old_target.range.end()
-    {
+    if !new_target.advances(old_target) {
         return Err(sync::Error::Engine(EngineError::SyncTargetMovedBackward {
             old: old_target.clone(),
             new: new_target.clone(),

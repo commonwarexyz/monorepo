@@ -33,7 +33,7 @@ use crate::{
         batch_chain::{self, Bounds},
         compact::{
             batch as compact_batch,
-            witness::{self, VerifiedWitness},
+            witness::{self, DerivedWitness},
         },
         operation::Key,
         sync::{Request, Response, Source, ValidityTx, compact as compact_sync},
@@ -411,7 +411,7 @@ where
     /// This reflects the last durably persisted commit, which may lag behind live in-memory
     /// mutations until [`Self::commit`] or [`Self::sync`] is called.
     pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
-        self.witness.with(VerifiedWitness::target)
+        self.witness.with(DerivedWitness::target)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.

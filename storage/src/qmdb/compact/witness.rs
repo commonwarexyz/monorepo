@@ -89,9 +89,9 @@ where
     }
 }
 
-/// A witness, the root it commits to, and the derived inclusion proof for its commit.
+/// A witness plus the root and commit inclusion proof derived from it.
 #[derive(Clone)]
-pub(crate) struct VerifiedWitness<F: Family, D: Digest> {
+pub(crate) struct DerivedWitness<F: Family, D: Digest> {
     pub(crate) witness: Witness<F, D>,
     /// Root committed by `witness`.
     pub(crate) root: D,
@@ -100,7 +100,7 @@ pub(crate) struct VerifiedWitness<F: Family, D: Digest> {
     pub(crate) proof: Proof<F, D>,
 }
 
-impl<F: Family, D: Digest> VerifiedWitness<F, D> {
+impl<F: Family, D: Digest> DerivedWitness<F, D> {
     /// Total leaves in the committed Merkle, which also identifies the last commit's location.
     pub(crate) const fn leaf_count(&self) -> Location<F> {
         self.witness.leaf_count
@@ -132,7 +132,7 @@ enum Durability {
 pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     journal: Journal<E, F, D>,
 
-    tip_witness: RwLock<VerifiedWitness<F, D>>,
+    tip_witness: RwLock<DerivedWitness<F, D>>,
 
     /// Whether the cached witness came from compact sync and has not been written to the
     /// journal yet. While set, the journal still holds the partition's previous contents; the
@@ -143,7 +143,7 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
 
 impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Wrap an opened journal and a verified witness into a store.
-    pub(crate) const fn new(journal: Journal<E, F, D>, witness: VerifiedWitness<F, D>) -> Self {
+    pub(crate) const fn new(journal: Journal<E, F, D>, witness: DerivedWitness<F, D>) -> Self {
         Self {
             journal,
             tip_witness: RwLock::new(witness),
@@ -157,7 +157,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// recovers it.
     pub(crate) const fn from_import(
         journal: Journal<E, F, D>,
-        witness: VerifiedWitness<F, D>,
+        witness: DerivedWitness<F, D>,
     ) -> Self {
         Self {
             journal,
@@ -167,7 +167,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     }
 
     /// Read the cached witness without exposing the underlying lock to db code.
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&VerifiedWitness<F, D>) -> R) -> R {
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&DerivedWitness<F, D>) -> R) -> R {
         f(&self.tip_witness.read())
     }
 
@@ -224,7 +224,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     }
 
     /// Replace the cached witness after the matching compact Merkle state is persisted or loaded.
-    pub(crate) fn replace(&self, witness: VerifiedWitness<F, D>) {
+    pub(crate) fn replace(&self, witness: DerivedWitness<F, D>) {
         *self.tip_witness.write() = witness;
     }
 
@@ -321,7 +321,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         merkle: &compact::Merkle<F, D, S>,
         inactivity_floor_loc: Location<F>,
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
-    ) -> Result<(Self, Option<VerifiedWitness<F, D>>), Error<F>>
+    ) -> Result<(Self, Option<DerivedWitness<F, D>>), Error<F>>
     where
         H: Hasher<Digest = D>,
         S: Strategy,
@@ -471,7 +471,7 @@ pub(crate) fn build_witness<F, H, S>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     inactivity_floor_loc: Location<F>,
     last_commit_op_bytes: Vec<u8>,
-) -> Result<VerifiedWitness<F, H::Digest>, Error<F>>
+) -> Result<DerivedWitness<F, H::Digest>, Error<F>>
 where
     F: Family,
     H: Hasher,
@@ -488,7 +488,7 @@ where
             .map(|pos| *mem.get_node_unchecked(pos))
             .collect::<Vec<_>>();
         let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
-        Ok(VerifiedWitness {
+        Ok(DerivedWitness {
             witness: Witness {
                 op_bytes: last_commit_op_bytes,
                 leaf_count,
@@ -520,7 +520,7 @@ async fn load_tip<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
     merkle: &compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
-) -> Result<(VerifiedWitness<F, H::Digest>, Op), Error<F>>
+) -> Result<(DerivedWitness<F, H::Digest>, Op), Error<F>>
 where
     E: Context,
     F: Family,
@@ -545,7 +545,7 @@ fn rebuild<F, D, H, S, Op>(
     witness: Witness<F, D>,
     merkle: &compact::Merkle<F, D, S>,
     commit_codec_config: &Op::Cfg,
-) -> Result<(VerifiedWitness<F, D>, Op), Error<F>>
+) -> Result<(DerivedWitness<F, D>, Op), Error<F>>
 where
     F: Family,
     D: Digest,
@@ -585,7 +585,7 @@ where
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
     merkle.prune_to_frontier();
     Ok((
-        VerifiedWitness {
+        DerivedWitness {
             witness,
             root,
             proof,

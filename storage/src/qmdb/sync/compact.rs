@@ -41,19 +41,9 @@ pub struct Target<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> Target<F, D> {
-    const INVALID_LEAF_COUNT: &'static str = "leaf_count must be in 1..=MAX_LEAVES";
-
     /// Create a compact-sync target.
     pub const fn new(root: D, leaf_count: Location<F>) -> Self {
         Self { root, leaf_count }
-    }
-
-    /// Validate a compact target that may have been constructed programmatically.
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if !self.leaf_count.is_valid() || self.leaf_count == 0 {
-            return Err(Self::INVALID_LEAF_COUNT);
-        }
-        Ok(())
     }
 }
 
@@ -93,11 +83,13 @@ impl<F: Family, D: Digest> Read for Target<F, D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
         let leaf_count = Location::<F>::read(buf)?;
-        let target = Self { root, leaf_count };
-        target.validate().map_err(|reason| {
-            CodecError::Invalid("storage::qmdb::sync::compact::Target", reason)
-        })?;
-        Ok(target)
+        if !leaf_count.is_valid() || leaf_count == 0 {
+            return Err(CodecError::Invalid(
+                "storage::qmdb::sync::compact::Target",
+                "leaf_count must be in 1..=MAX_LEAVES",
+            ));
+        }
+        Ok(Self { root, leaf_count })
     }
 }
 

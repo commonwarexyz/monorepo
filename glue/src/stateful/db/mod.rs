@@ -1465,6 +1465,40 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
 /// target, and the target-update and reached channels are translated between the compact
 /// target and the engine's ranged target.
 #[allow(clippy::too_many_arguments)]
+/// Run a standard replay sync: the shared body of every full database's
+/// [`StateSyncDb::sync_db`].
+pub(crate) async fn sync_standard_db<E, DB, R>(
+    context: E,
+    config: DB::Config,
+    source: R,
+    target: sync::Target<DB::Family, DB::Digest>,
+    tip_updates: mpsc::Receiver<sync::Target<DB::Family, DB::Digest>>,
+    finish: Option<mpsc::Receiver<()>>,
+    reached_target: Option<mpsc::Sender<sync::Target<DB::Family, DB::Digest>>>,
+    sync_config: SyncEngineConfig,
+) -> Result<DB, sync::Error<DB::Family, R::Error, DB::Digest>>
+where
+    DB: sync::Database<Context = E>,
+    DB::Op: Encode,
+    R: sync::SourceFor<DB>,
+{
+    sync::sync(sync::engine::Config {
+        context,
+        source,
+        target,
+        max_outstanding_requests: sync_config.max_outstanding_requests,
+        fetch_batch_size: sync_config.fetch_batch_size,
+        apply_batch_size: sync_config.apply_batch_size,
+        db_config: config,
+        update_rx: Some(tip_updates),
+        finish_rx: finish,
+        reached_target_tx: reached_target,
+        max_retained_roots: sync_config.max_retained_roots,
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_compact_db<E, DB, R>(
     context: E,
     config: DB::Config,
@@ -1497,14 +1531,12 @@ where
 
     let mut initial = engine_target(&target).map_err(sync::Error::Engine)?;
     // Start at the newest target already queued, so a caller that queued an update before
-    // starting the sync never has the stale target reported as reached. The guard mirrors
-    // validate_update's rule for updates taken mid-sync.
+    // starting the sync never has the stale target reported as reached.
     while let Ok(update) = tip_updates.try_recv() {
         let Ok(update) = engine_target(&update) else {
             continue;
         };
-        if update.range.end() > initial.range.end() && update.range.start() >= initial.range.start()
-        {
+        if update.advances(&initial) {
             initial = update;
         }
     }

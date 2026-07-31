@@ -52,26 +52,20 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         }
     }
 
-    /// Allocate the next request ID. Use with [`Self::insert`] after building
-    /// the future that embeds this ID.
-    pub const fn next_id(&mut self) -> Id {
+    /// Register a request, returning its assigned ID. `make` receives the ID and builds
+    /// the future that embeds it, so the tracker and the future cannot disagree. If a
+    /// request already exists at the same start location, the old one is superseded and
+    /// aborted.
+    pub fn insert<Fut>(&mut self, request: Request<F>, make: impl FnOnce(Id) -> Fut) -> Id
+    where
+        Fut: Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,
+    {
         let id = Id(self.next_id);
         self.next_id += 1;
-        id
-    }
-
-    /// Register a request with a previously allocated ID. If a request already
-    /// exists at the same start location, the old one is superseded and aborted.
-    pub fn insert(
-        &mut self,
-        id: Id,
-        request: Request<F>,
-        future: impl Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,
-    ) {
         if let Some(old_id) = self.by_location.insert(request.start(), id) {
             self.tracked.remove(&old_id);
         }
-        let aborter = self.futures.push(future);
+        let aborter = self.futures.push(make(id));
         self.tracked.insert(
             id,
             TrackedRequest {
@@ -79,6 +73,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
                 _aborter: aborter,
             },
         );
+        id
     }
 
     /// Complete a request by ID. Returns the request if it was tracked.

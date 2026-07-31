@@ -53,6 +53,23 @@ enum Event<F: Family, Op, D: Digest, E> {
     FinishChannelClosed,
 }
 
+/// The finish lifecycle: whether the engine completes as soon as it reaches its target.
+enum Finish {
+    /// No finish channel was configured; complete as soon as the target is reached.
+    Disabled,
+    /// Hold at the target and keep taking updates until the caller requests completion.
+    Waiting(mpsc::Receiver<()>),
+    /// The caller requested completion; ignore further updates and finish.
+    Requested,
+}
+
+impl Finish {
+    /// The caller requested completion.
+    fn request(&mut self) {
+        *self = Self::Requested;
+    }
+}
+
 /// Result from a fetch operation, tagged with its request ID.
 #[derive(Debug)]
 pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
@@ -66,10 +83,13 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
 /// Returns `None` when there are no outstanding requests and no channels to wait on.
 async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
     update_rx: &mut Option<mpsc::Receiver<Target<F, D>>>,
-    finish_rx: &mut Option<mpsc::Receiver<()>>,
+    finish: &mut Finish,
     outstanding_requests: &mut Requests<F, Op, D, E>,
 ) -> Option<Event<F, Op, D, E>> {
-    if outstanding_requests.len() == 0 && update_rx.is_none() && finish_rx.is_none() {
+    if outstanding_requests.len() == 0
+        && update_rx.is_none()
+        && !matches!(finish, Finish::Waiting(_))
+    {
         return None;
     }
 
@@ -77,10 +97,10 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
         || Either::Right(pending()),
         |update_rx| Either::Left(update_rx.recv()),
     );
-    let finish_fut = finish_rx.as_mut().map_or_else(
-        || Either::Right(pending()),
-        |finish_rx| Either::Left(finish_rx.recv()),
-    );
+    let finish_fut = match finish {
+        Finish::Waiting(finish_rx) => Either::Left(finish_rx.recv()),
+        Finish::Disabled | Finish::Requested => Either::Right(pending()),
+    };
     let batch_result_fut = outstanding_requests.next_completed();
 
     select! {
@@ -196,13 +216,9 @@ where
     /// Optional receiver for target updates during sync
     update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
 
-    /// Whether the caller has asked the sync to finish at the current target.
-    finish_requested: bool,
-
-    /// Channel that requests sync completion once the current target is reached.
-    ///
-    /// When `None`, sync completes as soon as the target is reached.
-    finish_rx: Option<mpsc::Receiver<()>>,
+    /// Whether the engine completes as soon as it reaches its target, or holds for a
+    /// finish request.
+    finish: Finish,
 
     /// Channel used to notify an observer once the current target is reached.
     /// The engine sends at most one notification for each target.
@@ -287,8 +303,7 @@ where
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,
-            finish_rx: config.finish_rx,
-            finish_requested: false,
+            finish: config.finish_rx.map_or(Finish::Disabled, Finish::Waiting),
             reached_target_tx: config.reached_target_tx,
             reached_current_target_reported: false,
             metrics,
@@ -315,11 +330,11 @@ where
                 start: self.target.range.start(),
             };
             let source = Arc::clone(&self.source);
-            let id = self.outstanding_requests.next_id();
-            self.outstanding_requests.insert(id, request, async move {
-                let result = source.serve(request).await;
-                IndexedFetchResult { id, result }
-            });
+            self.outstanding_requests
+                .insert(request, move |id| async move {
+                    let result = source.serve(request).await;
+                    IndexedFetchResult { id, result }
+                });
         }
 
         // Calculate the maximum number of requests to make
@@ -359,11 +374,11 @@ where
                 max_ops: batch_size,
             };
             let source = Arc::clone(&self.source);
-            let id = self.outstanding_requests.next_id();
-            self.outstanding_requests.insert(id, request, async move {
-                let result = source.serve(request).await;
-                IndexedFetchResult { id, result }
-            });
+            self.outstanding_requests
+                .insert(request, move |id| async move {
+                    let result = source.serve(request).await;
+                    IndexedFetchResult { id, result }
+                });
         }
 
         Ok(())
@@ -409,13 +424,12 @@ where
     /// disconnected before a finish request is observed, this returns
     /// [`EngineError::FinishChannelClosed`].
     fn drain_finish_requests(&mut self) -> Result<(), Error<DB, S>> {
-        let Some(finish_rx) = self.finish_rx.as_mut() else {
+        let Finish::Waiting(finish_rx) = &mut self.finish else {
             return Ok(());
         };
         match finish_rx.try_recv() {
             Ok(()) => {
-                self.finish_rx = None;
-                self.finish_requested = true;
+                self.finish.request();
                 Ok(())
             }
             Err(TryRecvError::Empty) => Ok(()),
@@ -681,8 +695,7 @@ where
                 Ok(NextStep::Continue(self))
             }
             Event::FinishRequested => {
-                self.finish_rx = None;
-                self.finish_requested = true;
+                self.finish.request();
                 Ok(NextStep::Continue(self))
             }
             Event::FinishChannelClosed => Err(SyncError::Engine(EngineError::FinishChannelClosed)),
@@ -717,15 +730,12 @@ where
         if self.is_ready_to_complete()? {
             // Take a queued target update before completing at the old target, unless the
             // caller already asked to finish. Updates that do not advance the target are
-            // discarded, matching validate_update's rule for updates taken mid-sync.
-            if !self.finish_requested {
+            // discarded.
+            if !matches!(self.finish, Finish::Requested) {
                 while let Some(update_rx) = self.update_rx.as_mut() {
                     match update_rx.try_recv() {
                         Ok(new_target) => {
-                            if new_target.range.end().is_valid()
-                                && new_target.range.end() > self.target.range.end()
-                                && new_target.range.start() >= self.target.range.start()
-                            {
+                            if new_target.advances(&self.target) {
                                 return self.handle_event(Event::TargetUpdate(new_target)).await;
                             }
                         }
@@ -739,10 +749,10 @@ where
 
             self.report_reached_target().await;
 
-            if self.finish_rx.is_some() {
+            if matches!(self.finish, Finish::Waiting(_)) {
                 let event = wait_for_event(
                     &mut self.update_rx,
-                    &mut self.finish_rx,
+                    &mut self.finish,
                     &mut self.outstanding_requests,
                 )
                 .await
@@ -750,41 +760,45 @@ where
                 return self.handle_event(event).await;
             }
 
-            self.journal = self.journal.sync().await?;
-
-            // Build the database from the completed sync
-            let database = DB::from_sync_result(
-                self.context,
-                self.config,
-                self.journal,
-                self.pinned_nodes,
-                self.target.range.clone(),
-                self.apply_batch_size,
-            )
-            .await?;
-
-            // Verify the final root digest matches the final target
-            let got_root = database.root();
-            let expected_root = self.target.root;
-            if got_root != expected_root {
-                return Err(SyncError::Engine(EngineError::RootMismatch {
-                    expected: expected_root,
-                    actual: got_root,
-                }));
-            }
-
-            return Ok(NextStep::Complete(database));
+            return Ok(NextStep::Complete(self.complete().await?));
         }
 
         // Wait for the next synchronization event
         let event = wait_for_event(
             &mut self.update_rx,
-            &mut self.finish_rx,
+            &mut self.finish,
             &mut self.outstanding_requests,
         )
         .await
         .ok_or(SyncError::Engine(EngineError::SyncStalled))?;
         self.handle_event(event).await
+    }
+
+    /// Build the final database from the completed sync and verify its root against the
+    /// target. The irreversible tail of [`Self::step`]: there is no path back to the loop.
+    async fn complete(mut self) -> Result<DB, Error<DB, S>> {
+        self.journal = self.journal.sync().await?;
+
+        let database = DB::from_sync_result(
+            self.context,
+            self.config,
+            self.journal,
+            self.pinned_nodes,
+            self.target.range.clone(),
+            self.apply_batch_size,
+        )
+        .await?;
+
+        let got_root = database.root();
+        let expected_root = self.target.root;
+        if got_root != expected_root {
+            return Err(SyncError::Engine(EngineError::RootMismatch {
+                expected: expected_root,
+                actual: got_root,
+            }));
+        }
+
+        Ok(database)
     }
 
     /// Run sync to completion, returning the final database when done.
@@ -1054,17 +1068,14 @@ mod tests {
 
     /// Helper to add a request at a given location.
     fn add(requests: &mut Requests<MmrFamily, i32, sha256::Digest, ()>, loc: u64) -> RequestId {
-        let id = requests.next_id();
         requests.insert(
-            id,
             Request::Operations {
                 size: Location::new(loc),
                 start: Location::new(loc),
                 max_ops: NZU64!(1),
             },
-            std::future::ready(dummy_result(id)),
-        );
-        id
+            |id| std::future::ready(dummy_result(id)),
+        )
     }
 
     #[test]
@@ -1174,15 +1185,13 @@ mod tests {
     fn test_remove_before_aborts_future() {
         deterministic::Runner::default().start(|_context| async move {
             let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
-            let id = requests.next_id();
             requests.insert(
-                id,
                 Request::Operations {
                     size: Location::new(5),
                     start: Location::new(5),
                     max_ops: NZU64!(1),
                 },
-                std::future::pending(),
+                |_| std::future::pending(),
             );
             requests.remove_before(Location::new(10));
             assert!(matches!(requests.next_completed().await, Err(Aborted)));
