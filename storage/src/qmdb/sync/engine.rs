@@ -113,7 +113,7 @@ where
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
     /// Number of operations to apply in a single batch
-    pub apply_batch_size: usize,
+    pub apply_batch_size: NonZeroU64,
     /// Database-specific configuration
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
@@ -175,7 +175,7 @@ where
     fetch_batch_size: NonZeroU64,
 
     /// Number of operations to apply in a single batch
-    apply_batch_size: usize,
+    apply_batch_size: NonZeroU64,
 
     /// Journal that operations are applied to during sync
     journal: DB::Journal,
@@ -279,8 +279,7 @@ where
             target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.fetch_batch_size,
-            // A zero batch size would make database construction spin without progress.
-            apply_batch_size: config.apply_batch_size.max(1),
+            apply_batch_size: config.apply_batch_size,
             journal,
             source: Arc::new(config.source),
             hasher: qmdb::hasher::<DB::Hasher>(),
@@ -892,7 +891,7 @@ mod tests {
             _journal: Self::Journal,
             _pinned_nodes: Option<Vec<Self::Digest>>,
             _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
-            _apply_batch_size: usize,
+            _apply_batch_size: NonZeroU64,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
             Ok(Self)
         }
@@ -954,7 +953,7 @@ mod tests {
             },
             max_outstanding_requests: 1,
             fetch_batch_size: NZU64!(1),
-            apply_batch_size: 1,
+            apply_batch_size: NZU64!(1),
             db_config: TestConfig {
                 journal_size,
                 pinned_node_probes,

@@ -146,7 +146,7 @@ where
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
         source,
-        apply_batch_size: 100,
+        apply_batch_size: NZU64!(100),
         max_outstanding_requests: 10,
         max_retained_roots: 8,
     };

@@ -417,7 +417,7 @@ pub struct SyncEngineConfig {
     pub fetch_batch_size: NonZeroU64,
 
     /// Number of operations applied per local apply step.
-    pub apply_batch_size: usize,
+    pub apply_batch_size: NonZeroU64,
 
     /// Maximum number of outstanding source requests.
     pub max_outstanding_requests: usize,
@@ -1712,7 +1712,10 @@ mod tests {
     use commonware_runtime::{
         Clock, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
     };
-    use commonware_utils::channel::{mpsc, oneshot, ring};
+    use commonware_utils::{
+        NZU64,
+        channel::{mpsc, oneshot, ring},
+    };
     use futures::{FutureExt, SinkExt, pin_mut};
     use std::{
         convert::Infallible,
@@ -3539,7 +3542,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
@@ -3578,7 +3581,7 @@ mod tests {
                 tip_rx,
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
+                    apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
@@ -3615,7 +3618,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
@@ -3665,7 +3668,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
@@ -3712,7 +3715,7 @@ mod tests {
                             tip_rx,
                             SyncEngineConfig {
                                 fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                                apply_batch_size: 1,
+                                apply_batch_size: NZU64!(1),
                                 max_outstanding_requests: 1,
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                                 max_retained_roots: 0,
@@ -3763,7 +3766,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
@@ -3822,7 +3825,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(8).unwrap(),
                             max_retained_roots: 0,
@@ -3880,7 +3883,7 @@ mod tests {
                 tip_rx,
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
+                    apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
@@ -3918,7 +3921,7 @@ mod tests {
                     tip_rx,
                     SyncEngineConfig {
                         fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                        apply_batch_size: 1,
+                        apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
                         max_retained_roots: 0,
@@ -3960,7 +3963,7 @@ mod tests {
                 tip_rx,
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
+                    apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
@@ -4002,7 +4005,7 @@ mod tests {
                     tip_rx,
                     SyncEngineConfig {
                         fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                        apply_batch_size: 1,
+                        apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
                         max_retained_roots: 0,
@@ -4135,7 +4138,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
@@ -4204,7 +4207,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
@@ -4267,7 +4270,7 @@ mod tests {
                             tip_rx,
                             SyncEngineConfig {
                                 fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                                apply_batch_size: 1,
+                                apply_batch_size: NZU64!(1),
                                 max_outstanding_requests: 1,
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                                 max_retained_roots: 0,

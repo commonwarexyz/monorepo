@@ -1254,7 +1254,7 @@ mod test {
                 },
                 context: ctx.child("client"),
                 source: target_db.clone(),
-                apply_batch_size: 1024,
+                apply_batch_size: NZU64!(1024),
                 max_outstanding_requests: 1,
                 update_rx: None,
                 finish_rx: None,

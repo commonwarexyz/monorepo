@@ -24,7 +24,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Runner as _, Supervisor as _, deterministic, deterministic::Context,
 };
-use commonware_utils::non_empty_range;
+use commonware_utils::{NZU64, non_empty_range};
 use rand::Rng as _;
 
 // ===== Harness Implementations =====
@@ -535,7 +535,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
                 range: commonware_utils::non_empty_range!(lower_bound, upper_bound),
             },
             source: target_db.clone(),
-            apply_batch_size: 1024,
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 4,
             update_rx: None,
             finish_rx: None,

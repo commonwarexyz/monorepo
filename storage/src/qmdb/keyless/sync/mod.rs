@@ -19,6 +19,7 @@ use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
+use std::num::NonZeroU64;
 
 impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
 where
@@ -60,7 +61,7 @@ where
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
-        apply_batch_size: usize,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
@@ -78,7 +79,7 @@ where
             merkle,
             log,
             hasher,
-            apply_batch_size as u64,
+            apply_batch_size.get(),
         )
         .await?;
 
@@ -169,7 +170,7 @@ where
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
-        _apply_batch_size: usize,
+        _apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
         let db = crate::qmdb::compact::from_sync_result(
             context,

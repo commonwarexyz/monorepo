@@ -73,7 +73,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
 use commonware_utils::{Array, bitmap::Prunable as BitMap, range::NonEmptyRange};
 use core::num::NonZeroUsize;
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -101,7 +101,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
-    apply_batch_size: usize,
+    apply_batch_size: NonZeroU64,
     init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
@@ -134,7 +134,7 @@ where
         merkle,
         log,
         qmdb::hasher::<H>(),
-        apply_batch_size as u64,
+        apply_batch_size.get(),
     )
     .await?;
 
@@ -277,7 +277,7 @@ macro_rules! impl_current_sync_database {
                 log: Self::Journal,
                 pinned_nodes: Option<Vec<Self::Digest>>,
                 range: NonEmptyRange<Location<F>>,
-                apply_batch_size: usize,
+                apply_batch_size: NonZeroU64,
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let metadata_partition = config.grafted_metadata_partition.clone();

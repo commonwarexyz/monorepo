@@ -7,7 +7,7 @@ use crate::{
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
-use std::future::Future;
+use std::{future::Future, num::NonZeroU64};
 
 /// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
@@ -63,7 +63,7 @@ pub trait Database: Sized + Send {
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<Self::Family>>,
-        apply_batch_size: usize,
+        apply_batch_size: NonZeroU64,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Return locally available pinned nodes for the target, if persisted local state can
