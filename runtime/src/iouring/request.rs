@@ -520,6 +520,9 @@ pub(crate) enum Cache {
     Disabled(Arc<AtomicBool>),
 }
 
+// These methods are only const without `iouring-storage`; the storage path reads and updates
+// shared backend support state through atomics.
+#[allow(clippy::missing_const_for_fn)]
 impl Cache {
     /// Return the write flag for this request, falling back to normal caching
     /// when another request has already found the hint unsupported.
