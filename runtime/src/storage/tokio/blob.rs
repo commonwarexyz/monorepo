@@ -95,7 +95,7 @@ impl Blob {
     /// Write `bufs` at `offset`, batching up to [IOVEC_BATCH_SIZE] iovecs per submission.
     ///
     /// `flags` apply to every submission, so callers must only pass durability flags for
-    /// writes that fit a single submission (see [Blob::write_at_sync]). Hinted submissions
+    /// writes that fit a single submission (see [WriteOptions::SYNC]). Hinted submissions
     /// carry `RWF_DONTCACHE` on Linux while the backend may support it. An EOPNOTSUPP clears
     /// that capability and retries the submission without the hint.
     fn write_vectored_at(
@@ -290,11 +290,6 @@ impl crate::Blob for Blob {
         .map_err(|_| Error::ReadFailed)?
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::NONE)
-            .await
-    }
-
     async fn write_at_with(
         &self,
         offset: u64,
@@ -302,15 +297,6 @@ impl crate::Blob for Blob {
         options: WriteOptions,
     ) -> Result<(), Error> {
         self.write_at_inner(offset, bufs.into(), options).await
-    }
-
-    async fn write_at_sync(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::SYNC)
-            .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

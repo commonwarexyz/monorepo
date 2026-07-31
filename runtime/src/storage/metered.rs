@@ -196,45 +196,24 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             .await
     }
 
+    #[tracing::instrument(
+        name = "runtime.storage.blob.write_at_with",
+        level = "info",
+        skip_all,
+        fields(
+            partition = %self.partition,
+            bytes = Empty,
+            sync = options.contains(WriteOptions::SYNC),
+            dont_cache = options.contains(WriteOptions::DONT_CACHE),
+        )
+    )]
     async fn write_at_with(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        if options.contains(WriteOptions::SYNC) {
-            self.write_at_inner(offset, bufs, options)
-                .instrument(tracing::info_span!(
-                    "runtime.storage.blob.write_at_sync",
-                    partition = %self.partition,
-                    bytes = Empty,
-                ))
-                .await
-        } else {
-            self.write_at_inner(offset, bufs, options)
-                .instrument(tracing::info_span!(
-                    "runtime.storage.blob.write_at",
-                    partition = %self.partition,
-                    bytes = Empty,
-                ))
-                .await
-        }
-    }
-
-    #[tracing::instrument(
-        name = "runtime.storage.blob.write_at_sync",
-        level = "info",
-        skip_all,
-        fields(partition = %self.partition, bytes = Empty)
-    )]
-    async fn write_at_sync(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::SYNC)
-            .await
+        self.write_at_inner(offset, bufs.into(), options).await
     }
 
     #[tracing::instrument(
@@ -274,7 +253,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             partition = %self.partition,
         )))
     }
-
 }
 
 #[cfg(test)]
@@ -285,6 +263,22 @@ mod tests {
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
+    use commonware_utils::sync::Mutex;
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Default)]
+    struct SpanNames(Arc<Mutex<Vec<&'static str>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanNames {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0.lock().push(attrs.metadata().name());
+        }
+    }
 
     fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
@@ -377,16 +371,18 @@ mod tests {
         );
 
         // Write and sync in a single call
-        blob.write_at_sync(11, b" again").await.unwrap();
+        blob.write_at_with(11, b" again", WriteOptions::SYNC)
+            .await
+            .unwrap();
         assert_eq!(
             storage.metrics.storage_writes.get(),
             2,
-            "storage_writes metric was not incremented after write_at_sync"
+            "storage_writes metric was not incremented after write_at_with(SYNC)"
         );
         assert_eq!(
             storage.metrics.storage_syncs.get(),
             2,
-            "storage_syncs metric was not incremented after write_at_sync"
+            "storage_syncs metric was not incremented after write_at_with(SYNC)"
         );
 
         // Resize the blob
@@ -405,6 +401,35 @@ mod tests {
         assert_eq!(
             open_blobs_after_drop, 0,
             "open_blobs metric was not decremented after dropping the blob"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_methods_have_distinct_spans() {
+        let spans = SpanNames::default();
+        let subscriber = tracing_subscriber::registry().with(spans.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+
+        blob.write_at(0, b"plain").await.unwrap();
+        blob.write_at_with(
+            5,
+            b"optioned",
+            WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *spans.0.lock(),
+            [
+                "runtime.storage.blob.write_at",
+                "runtime.storage.blob.write_at_with"
+            ]
         );
     }
 

@@ -129,9 +129,9 @@ impl<B: Blob> Writer<B> {
 
     /// Write bytes to the underlying blob and make them durable.
     ///
-    /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced
+    /// Uses [`Blob::write_at_with`] with [`WriteOptions::SYNC`] when there are no earlier unsynced
     /// mutations. Otherwise, writes the bytes and then syncs the blob.
-    async fn write_at_sync(
+    async fn write_at_durable(
         &mut self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -392,9 +392,9 @@ impl<B: Blob> Writer<B> {
     /// page is rewritten in full, resubmitting its committed prefix and protected CRC slot
     /// byte-identically (see the module docs on checksum slots).
     ///
-    /// If `sync` is true, that write is made durable immediately: with [`Blob::write_at_sync`]
-    /// when there are no earlier unsynced mutations, or by writing it and syncing the blob when
-    /// there are.
+    /// If `sync` is true, that write is made durable immediately: with [`Blob::write_at_with`] and
+    /// [`WriteOptions::SYNC`] when there are no earlier unsynced mutations, or by writing it and
+    /// syncing the blob when there are.
     ///
     /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
     async fn flush_internal(
@@ -467,7 +467,8 @@ impl<B: Blob> Writer<B> {
         // in full: its committed prefix and protected CRC slot are resubmitted byte-identically,
         // so a torn write cannot change their durable bytes.
         if sync {
-            self.write_at_sync(write_at_offset, physical_pages).await?;
+            self.write_at_durable(write_at_offset, physical_pages)
+                .await?;
         } else {
             self.write_at(write_at_offset, physical_pages).await?;
         }
@@ -745,13 +746,13 @@ impl<B: Blob> Writer<B> {
             .checked_add(new_slot.offset() as u64)
             .ok_or(Error::OffsetOverflow)?;
         let staged_slot = Checksum::slot_bytes(0, new_crc);
-        self.write_at_sync(new_slot_offset, staged_slot.to_vec())
+        self.write_at_durable(new_slot_offset, staged_slot.to_vec())
             .await?;
 
         // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
         // both slots may be valid, but recovery still chooses the old longer length.
         let published_len = Checksum::slot_len_bytes(new_len);
-        self.write_at_sync(new_slot_offset, published_len.to_vec())
+        self.write_at_durable(new_slot_offset, published_len.to_vec())
             .await?;
 
         // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
@@ -760,7 +761,7 @@ impl<B: Blob> Writer<B> {
         let old_slot_offset = crc_start
             .checked_add(old_slot.offset() as u64)
             .ok_or(Error::OffsetOverflow)?;
-        self.write_at_sync(old_slot_offset, Checksum::slot_len_bytes(0).to_vec())
+        self.write_at_durable(old_slot_offset, Checksum::slot_len_bytes(0).to_vec())
             .await?;
 
         Ok(ActiveChecksum::new(new_slot, new_len, new_crc))
@@ -829,8 +830,9 @@ impl<B: Blob> Writer<B> {
 
     /// Flushes buffered data and makes all pending mutations durable.
     ///
-    /// The flush's write can be persisted with [`Blob::write_at_sync`]. If there are earlier
-    /// unsynced mutations, durability is completed with [`Blob::sync`].
+    /// The flush's write can be persisted with [`Blob::write_at_with`] and
+    /// [`WriteOptions::SYNC`]. If there are earlier unsynced mutations, durability is completed
+    /// with [`Blob::sync`].
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Flush any buffered data, including any partial page. A flush that writes to the blob
         // makes that write durable itself and returns true.
@@ -2615,14 +2617,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Keep the write buffered so sync attempts the clean `write_at_sync` path.
+            // Keep the write buffered so sync attempts the clean range-scoped write path.
             append.append(b"abc").await.unwrap();
 
             // Removing the blob makes the range-sync flush fail.
             context.remove("test_partition", Some(name)).await.unwrap();
             assert!(append.sync().await.is_err());
 
-            // The failed `write_at_sync` must leave a pending full-sync barrier, so a
+            // The failed range-scoped write must leave a pending full-sync barrier, so a
             // later sync cannot report success.
             assert!(append.sync().await.is_err());
         });
@@ -2959,29 +2961,11 @@ mod tests {
             self.inner.read_at_buf(offset, len, bufs).await
         }
 
-        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            let bufs = bufs.into();
-            let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
-            if write == self.fail_on {
-                let bytes = bufs.coalesce();
-                self.failed_write_len.store(bytes.len(), Ordering::SeqCst);
-                let partial_len = self.partial_len.min(bytes.len());
-                self.inner
-                    .write_at(offset, bytes.slice(..partial_len))
-                    .await?;
-                self.inner.sync().await?;
-                return Err(Error::Io(
-                    std::io::Error::other("injected partial write").into(),
-                ));
-            }
-
-            self.inner.write_at(offset, bufs).await
-        }
-
-        async fn write_at_sync(
+        async fn write_at_with(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
         ) -> Result<(), Error> {
             let bufs = bufs.into();
             let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2990,14 +2974,17 @@ mod tests {
                 self.failed_write_len.store(bytes.len(), Ordering::SeqCst);
                 let partial_len = self.partial_len.min(bytes.len());
                 self.inner
-                    .write_at_sync(offset, bytes.slice(..partial_len))
+                    .write_at_with(offset, bytes.slice(..partial_len), options)
                     .await?;
+                if !options.contains(WriteOptions::SYNC) {
+                    self.inner.sync().await?;
+                }
                 return Err(Error::Io(
                     std::io::Error::other("injected partial write").into(),
                 ));
             }
 
-            self.inner.write_at_sync(offset, bufs).await
+            self.inner.write_at_with(offset, bufs, options).await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -3103,16 +3090,13 @@ mod tests {
             self.inner.read_at_buf(offset, len, bufs).await
         }
 
-        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs).await
-        }
-
-        async fn write_at_sync(
+        async fn write_at_with(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
         ) -> Result<(), Error> {
-            self.inner.write_at_sync(offset, bufs).await
+            self.inner.write_at_with(offset, bufs, options).await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {

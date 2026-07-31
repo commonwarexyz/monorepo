@@ -1244,7 +1244,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Runner, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner, Storage, Supervisor as _, WriteOptions, buffer::paged::CacheRef, deterministic,
         deterministic::Context,
     };
     use commonware_utils::{
@@ -1390,7 +1390,9 @@ mod tests {
                 corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
                 // Corrupt CRC of second slot (last 4 bytes of second slot)
                 corrupted.as_mut()[Entry::FULL_SIZE - 4] ^= 0xFF;
-                blob.write_at_sync(0, corrupted).await.unwrap();
+                blob.write_at_with(0, corrupted, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reopen to trigger recovery. The bug would set both cleared entries to
@@ -1730,7 +1732,9 @@ mod tests {
                 let byte = blob.read_at(len - 1, 1).await.unwrap();
                 let mut corrupted = byte.coalesce();
                 corrupted.as_mut()[0] ^= 0xFF;
-                blob.write_at_sync(len - 1, corrupted).await.unwrap();
+                blob.write_at_with(len - 1, corrupted, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Recovery restores the checkpointed state without probing committed

@@ -23,8 +23,8 @@ use std::num::NonZeroUsize;
 /// flushed data and may not see the latest buffered writes until [Self::sync], [Self::resize], or
 /// an overlapping [Self::write_at] flushes them. Those raw handles must not be used to write,
 /// resize, or otherwise mutate the blob while a [Write] exists. External mutations bypass the
-/// buffer state and [Self::sync] may use [Blob::write_at_sync], which is not a durability barrier
-/// for those external mutations.
+/// buffer state and [Self::sync] may use [Blob::write_at_with] with [WriteOptions::SYNC], which is
+/// not a durability barrier for those external mutations.
 ///
 /// # Example
 ///
@@ -259,8 +259,8 @@ impl<B: Blob> Write<B> {
 
     /// Write bytes to the underlying blob and make them durable.
     ///
-    /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced mutations. Otherwise, writes
-    /// the bytes and then syncs the blob.
+    /// Uses [`Blob::write_at_with`] with [`WriteOptions::SYNC`] when there are no earlier unsynced
+    /// mutations. Otherwise, writes the bytes and then syncs the blob.
     async fn write_blob_sync(
         &mut self,
         offset: u64,

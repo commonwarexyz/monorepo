@@ -9,7 +9,7 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
     Blob as _, Buf, BufMut, BufferPooler, Error as RuntimeError, Runner, Storage as _,
-    Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Supervisor as _, WriteOptions, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::journal::{
     Error as JournalError,
@@ -260,7 +260,9 @@ fn fuzz(input: FuzzInput) {
                         if overlaps_existing_blob(offset, data.len(), size) {
                             index_page_integrity_may_be_invalidated = true;
                         }
-                        let _ = blob.write_at_sync(offset, data.to_vec()).await;
+                        let _ = blob
+                            .write_at_with(offset, data.to_vec(), WriteOptions::SYNC)
+                            .await;
                     }
                 }
                 CorruptionType::CorruptGlobBytes {
@@ -273,7 +275,9 @@ fn fuzz(input: FuzzInput) {
                         && size > 0
                     {
                         let offset = (size * (*offset_factor as u64)) / 256;
-                        let _ = blob.write_at_sync(offset, data.to_vec()).await;
+                        let _ = blob
+                            .write_at_with(offset, data.to_vec(), WriteOptions::SYNC)
+                            .await;
                     }
                 }
                 CorruptionType::DeleteIndex { section } => {
@@ -290,14 +294,18 @@ fn fuzz(input: FuzzInput) {
                     if let Ok((blob, size)) =
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
-                        let _ = blob.write_at_sync(size, garbage.to_vec()).await;
+                        let _ = blob
+                            .write_at_with(size, garbage.to_vec(), WriteOptions::SYNC)
+                            .await;
                     }
                 }
                 CorruptionType::ExtendGlob { section, garbage } => {
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                     {
-                        let _ = blob.write_at_sync(size, garbage.to_vec()).await;
+                        let _ = blob
+                            .write_at_with(size, garbage.to_vec(), WriteOptions::SYNC)
+                            .await;
                     }
                 }
             }

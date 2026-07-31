@@ -80,7 +80,7 @@ stability_scope!(BETA {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
+    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage, WriteOptions};
     use futures::FutureExt;
 
     /// Runs the full suite of tests on the provided storage implementation.
@@ -104,7 +104,7 @@ pub(crate) mod tests {
         test_overwrite_data(&storage).await;
         test_read_beyond_bound(&storage).await;
         test_write_at_large_offset(&storage).await;
-        test_write_at_sync(&storage).await;
+        test_write_at_with_sync(&storage).await;
         test_start_sync(&storage).await;
         test_append_data(&storage).await;
         test_vectored_write_at(&storage).await;
@@ -567,37 +567,45 @@ pub(crate) mod tests {
     }
 
     /// Test writing and syncing data in one operation.
-    async fn test_write_at_sync<S>(storage: &S)
+    async fn test_write_at_with_sync<S>(storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
         let (blob, _) = storage
-            .open("test_write_at_sync", b"test_blob")
+            .open("test_write_at_with_sync", b"test_blob")
             .await
             .unwrap();
 
         // Empty writes should be accepted without extending the blob.
-        blob.write_at_sync(1024, Vec::<u8>::new()).await.unwrap();
+        blob.write_at_with(1024, Vec::<u8>::new(), WriteOptions::SYNC)
+            .await
+            .unwrap();
         drop(blob);
 
         let (blob, len) = storage
-            .open("test_write_at_sync", b"test_blob")
+            .open("test_write_at_with_sync", b"test_blob")
             .await
             .unwrap();
         assert_eq!(len, 0);
 
         // Non-empty writes must be visible after reopen without a separate sync call.
-        blob.write_at_sync(0, b"hello").await.unwrap();
-        blob.write_at_sync(5, vec![IoBuf::from(b" "), IoBuf::from(b"world")])
+        blob.write_at_with(0, b"hello", WriteOptions::SYNC)
             .await
             .unwrap();
+        blob.write_at_with(
+            5,
+            vec![IoBuf::from(b" "), IoBuf::from(b"world")],
+            WriteOptions::SYNC,
+        )
+        .await
+        .unwrap();
         drop(blob);
 
         // Reopening a blob in the same process may still observe dirty kernel
         // page-cache state, so this doesn't really prove write durability.
         let (blob, len) = storage
-            .open("test_write_at_sync", b"test_blob")
+            .open("test_write_at_with_sync", b"test_blob")
             .await
             .unwrap();
         assert_eq!(len, 11);

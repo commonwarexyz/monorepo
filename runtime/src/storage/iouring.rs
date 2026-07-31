@@ -380,11 +380,6 @@ impl crate::Blob for Blob {
         }
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::NONE)
-            .await
-    }
-
     async fn write_at_with(
         &self,
         offset: u64,
@@ -392,15 +387,6 @@ impl crate::Blob for Blob {
         options: WriteOptions,
     ) -> Result<(), Error> {
         self.write_at_inner(offset, bufs.into(), options).await
-    }
-
-    async fn write_at_sync(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::SYNC)
-            .await
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831

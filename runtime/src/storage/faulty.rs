@@ -348,11 +348,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs.into()).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::NONE)
-            .await
-    }
-
     async fn write_at_with(
         &self,
         offset: u64,
@@ -360,15 +355,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         options: WriteOptions,
     ) -> Result<(), Error> {
         self.write_at_inner(offset, bufs.into(), options).await
-    }
-
-    async fn write_at_sync(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::SYNC)
-            .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -486,25 +472,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_write_at_sync_write_always_fails() {
+    async fn test_faulty_storage_write_at_with_sync_write_always_fails() {
         let h = Harness::new(Config::default().write(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at_sync(0, b"data".to_vec()).await,
+            blob.write_at_with(0, b"data".to_vec(), WriteOptions::SYNC).await,
             Err(Error::Io(_))
         ));
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_write_at_sync_sync_failure_is_not_durable() {
+    async fn test_faulty_storage_write_at_with_sync_failure_is_not_durable() {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at_sync(0, b"data".to_vec()).await,
+            blob.write_at_with(0, b"data".to_vec(), WriteOptions::SYNC).await,
             Err(Error::Io(_))
         ));
 
@@ -513,13 +499,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_empty_write_at_sync_does_not_sync_prior_write() {
+    async fn test_faulty_storage_empty_write_at_with_sync_does_not_sync_prior_write() {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"data".to_vec()).await.unwrap();
 
-        blob.write_at_sync(4, Vec::<u8>::new()).await.unwrap();
+        blob.write_at_with(4, Vec::<u8>::new(), WriteOptions::SYNC)
+            .await
+            .unwrap();
 
         let (_reopened, size) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0);

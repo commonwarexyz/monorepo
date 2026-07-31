@@ -3,7 +3,7 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut,
+    Blob, BufMut, Error as RError, Handle, IoBufMut, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -507,7 +507,10 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         } else {
             // Non-shrinking rewrites are a single write and can use range-scoped
             // durability.
-            target.blob.write_at_sync(0, next_data.clone()).await?;
+            target
+                .blob
+                .write_at_with(0, next_data.clone(), WriteOptions::SYNC)
+                .await?;
             None
         };
 

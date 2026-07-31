@@ -602,9 +602,9 @@ async fn fetch_cacheable_page(
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        Buf, BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _,
-        Spawner as _, Storage as _, Supervisor as _, buffer::paged::CHECKSUM_SIZE, deterministic,
-        telemetry::metrics::Registry,
+        BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _,
+        Spawner as _, Storage as _, Supervisor as _, WriteOptions,
+        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -665,26 +665,13 @@ mod tests {
             unreachable!()
         }
 
-        async fn write_at(
+        async fn write_at_with(
             &self,
             _offset: u64,
             _bufs: impl Into<crate::IoBufs> + Send,
+            _options: WriteOptions,
         ) -> Result<(), Error> {
             Ok(())
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<crate::IoBufs> + Send,
-        ) -> Result<(), Error> {
-            let bufs = bufs.into();
-            if !bufs.has_remaining() {
-                return Ok(());
-            }
-
-            self.write_at(offset, bufs).await?;
-            self.sync().await
         }
 
         async fn resize(&self, _len: u64) -> Result<(), Error> {
@@ -748,26 +735,13 @@ mod tests {
             }
         }
 
-        async fn write_at(
+        async fn write_at_with(
             &self,
             _offset: u64,
             _bufs: impl Into<crate::IoBufs> + Send,
+            _options: WriteOptions,
         ) -> Result<(), Error> {
             Ok(())
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<crate::IoBufs> + Send,
-        ) -> Result<(), Error> {
-            let bufs = bufs.into();
-            if !bufs.has_remaining() {
-                return Ok(());
-            }
-
-            self.write_at(offset, bufs).await?;
-            self.sync().await
         }
 
         async fn resize(&self, _len: u64) -> Result<(), Error> {
@@ -956,20 +930,13 @@ mod tests {
                 Ok(IoBufsMut::from(self.page.as_ref().clone()))
             }
 
-            async fn write_at(
+            async fn write_at_with(
                 &self,
                 _offset: u64,
                 _bufs: impl Into<IoBufs> + Send,
+                _options: WriteOptions,
             ) -> Result<(), Error> {
                 Ok(())
-            }
-
-            async fn write_at_sync(
-                &self,
-                offset: u64,
-                bufs: impl Into<IoBufs> + Send,
-            ) -> Result<(), Error> {
-                self.write_at(offset, bufs).await
             }
 
             async fn resize(&self, _len: u64) -> Result<(), Error> {

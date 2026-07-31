@@ -14,6 +14,7 @@ use std::num::NonZeroU16;
 
 mod append;
 mod read;
+mod sync;
 
 // An aligned physical page (4096 on disk), so benches measure the layout production
 // should use (see paged::page_size).
@@ -35,6 +36,6 @@ async fn destroy_append<C: Storage>(ctx: &C, append: Writer<C::Blob>, name: &[u8
     ctx.remove("bench_partition", Some(name)).await.unwrap();
 }
 
-criterion_group!(benches, append::bench, read::bench);
+criterion_group!(benches, append::bench, read::bench, sync::bench);
 
 criterion_main!(benches);

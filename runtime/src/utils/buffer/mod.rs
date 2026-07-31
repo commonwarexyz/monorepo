@@ -1,5 +1,6 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
+use crate::WriteOptions;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 
 pub mod paged;
@@ -90,11 +91,11 @@ impl SyncState {
         blob: &impl crate::Blob,
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
-        options: crate::WriteOptions,
+        options: WriteOptions,
     ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         let bufs = bufs.into();
-        if !options.contains(crate::WriteOptions::SYNC) {
+        if !options.contains(WriteOptions::SYNC) {
             blob.write_at_with(offset, bufs, options).await?;
             self.mark_dirty();
             return Ok(());
@@ -103,7 +104,7 @@ impl SyncState {
         match self {
             Self::Dirty => {
                 // Earlier mutations need a full durability barrier too.
-                blob.write_at_with(offset, bufs, options.without(crate::WriteOptions::SYNC))
+                blob.write_at_with(offset, bufs, options.without(WriteOptions::SYNC))
                     .await?;
                 blob.sync().await?;
                 *self = Self::Clean;
@@ -196,7 +197,7 @@ mod tests {
 
     /// Test blob with separate visible and durable state.
     ///
-    /// Writes and resizes only update `data`. `write_at_sync` updates `data`
+    /// Writes and resizes only update `data`. `write_at_with(SYNC)` updates `data`
     /// and then copies only that submitted range into `durable`. `sync` copies all
     /// of `data` to `durable`. This lets tests assert that `Write::sync` uses range
     /// sync only when no earlier unsynced mutation needs a full durability barrier.
@@ -265,10 +266,6 @@ mod tests {
             Ok(out)
         }
 
-        async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.write_at_with(offset, buf, WriteOptions::NONE).await
-        }
-
         async fn write_at_with(
             &self,
             offset: u64,
@@ -293,14 +290,6 @@ mod tests {
                 }
             }
             Ok(())
-        }
-
-        async fn write_at_sync(
-            &self,
-            offset: u64,
-            buf: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.write_at_with(offset, buf, WriteOptions::SYNC).await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -1706,7 +1695,7 @@ mod tests {
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
 
-            // The prior sync used write_at_sync, so there is still no pending full-sync barrier.
+            // The prior sync used a range-scoped write, so there is no pending full-sync barrier.
             writer.sync().await.unwrap();
             let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abc");
@@ -1756,14 +1745,14 @@ mod tests {
             let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
             writer.sync().await.unwrap();
 
-            // Keep the write buffered so sync attempts the clean `write_at_sync` path.
+            // Keep the write buffered so sync attempts the clean range-scoped write path.
             writer.write_at(0, b"abc").await.unwrap();
 
             // Removing the blob makes the range-sync flush fail.
             context.remove("partition", Some(name)).await.unwrap();
             assert!(writer.sync().await.is_err());
 
-            // The failed `write_at_sync` must leave a pending full-sync barrier, so a
+            // The failed range-scoped write must leave a pending full-sync barrier, so a
             // later sync cannot report success.
             assert!(writer.sync().await.is_err());
         });

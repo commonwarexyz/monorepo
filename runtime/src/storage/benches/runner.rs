@@ -5,7 +5,7 @@ use crate::{
     error::Result,
     report::Stats,
 };
-use commonware_runtime::{Blob, IoBufMut, IoBufs};
+use commonware_runtime::{Blob, IoBufMut, IoBufs, WriteOptions};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::time::Instant;
 
@@ -146,8 +146,9 @@ pub async fn run_sync_write_loop(
                 blob.write_at(offset, payload.clone()).await?;
                 blob.sync().await?;
             }
-            SyncMethod::WriteAtSync => {
-                blob.write_at_sync(offset, payload.clone()).await?;
+            SyncMethod::WriteAtWith => {
+                blob.write_at_with(offset, payload.clone(), WriteOptions::SYNC)
+                    .await?;
             }
         }
         stats.record(io_size, started.map(|s| s.elapsed()));

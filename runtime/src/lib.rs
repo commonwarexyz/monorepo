@@ -692,8 +692,7 @@ stability_scope!(BETA {
 
         /// Durably persist the submitted bytes before returning.
         ///
-        /// This has the same guarantee as [`Blob::write_at_sync`]: it is not a durability barrier
-        /// for earlier operations.
+        /// This is not a durability barrier for earlier operations.
         pub const SYNC: Self = Self(1 << 0);
 
         /// Advise that the submitted bytes need not remain in the OS page cache.
@@ -777,43 +776,26 @@ stability_scope!(BETA {
             len: usize,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Write `bufs` to the blob at the given offset.
+        /// Write `bufs` to the blob at the given offset without additional options.
         fn write_at(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            self.write_at_with(offset, bufs, WriteOptions::NONE)
+        }
 
         /// Write `bufs` to the blob at the given offset with composable [`WriteOptions`].
         ///
-        /// By default, [`WriteOptions::SYNC`] selects [`Blob::write_at_sync`] and all other
-        /// options are ignored. Implementations that support additional options should override
-        /// this method.
+        /// With [`WriteOptions::SYNC`], the submitted bytes are durably persisted before this
+        /// operation returns. This is not a durability barrier for previous operations: earlier
+        /// writes without [`WriteOptions::SYNC`] and earlier [`Blob::resize`] calls require
+        /// [`Blob::sync`] to become durable.
         fn write_at_with(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
             options: WriteOptions,
-        ) -> impl Future<Output = Result<(), Error>> + Send {
-            async move {
-                if options.contains(WriteOptions::SYNC) {
-                    self.write_at_sync(offset, bufs).await
-                } else {
-                    self.write_at(offset, bufs).await
-                }
-            }
-        }
-
-        /// Write `bufs` to the blob at the given offset and durably persist that write.
-        ///
-        /// This is not a durability barrier for previous operations. When it completes,
-        /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
-        /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
-        /// durable.
-        fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Resize the blob to the given length.

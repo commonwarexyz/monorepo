@@ -704,8 +704,8 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, Buf, BufMut, BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef,
-        deterministic, mocks::SyncFaultContext,
+        Blob as _, Buf, BufMut, BufferPooler, Runner, Supervisor as _, WriteOptions,
+        buffer::paged::CacheRef, deterministic, mocks::SyncFaultContext,
     };
     use commonware_utils::{NZU16, NZUsize};
 
@@ -1488,7 +1488,11 @@ mod tests {
                 .expect("Failed to open index blob");
             assert_eq!(size, 5 * physical_page);
             index_blob
-                .write_at_sync(2 * physical_page + TestEntry::SIZE as u64, vec![0xFF; 12])
+                .write_at_with(
+                    2 * physical_page + TestEntry::SIZE as u64,
+                    vec![0xFF; 12],
+                    WriteOptions::SYNC,
+                )
                 .await
                 .expect("Failed to corrupt index page");
             drop(index_blob);
@@ -1500,11 +1504,11 @@ mod tests {
                 .await
                 .expect("Failed to open values blob");
             values_blob
-                .write_at_sync(60, vec![0xFF; 20])
+                .write_at_with(60, vec![0xFF; 20], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt value");
             values_blob
-                .write_at_sync(80, vec![0xFF; 20])
+                .write_at_with(80, vec![0xFF; 20], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt value");
             drop(values_blob);
@@ -2005,7 +2009,7 @@ mod tests {
             // Last page CRC starts at offset 160 - 12 = 148
             assert_eq!(size, 160);
             let last_page_crc_offset = size - 12;
-            blob.write_at_sync(last_page_crc_offset, vec![0xFF; 12])
+            blob.write_at_with(last_page_crc_offset, vec![0xFF; 12], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt");
             drop(blob);
@@ -3486,7 +3490,7 @@ mod tests {
 
             // Write 100 bytes of garbage (simulating partial/failed value write)
             let garbage = vec![0xDE; 100];
-            blob.write_at_sync(size, garbage)
+            blob.write_at_with(size, garbage, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write garbage");
             drop(blob);
@@ -3599,7 +3603,7 @@ mod tests {
             // Write the complete physical page: entry_data + crc_record
             let mut page = entry_data;
             page.extend_from_slice(&crc_record);
-            blob.write_at_sync(0, page)
+            blob.write_at_with(0, page, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write corrupted page");
             drop(blob);

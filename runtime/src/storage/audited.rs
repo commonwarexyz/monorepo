@@ -129,11 +129,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::NONE)
-            .await
-    }
-
     async fn write_at_with(
         &self,
         offset: u64,
@@ -141,15 +136,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         options: WriteOptions,
     ) -> Result<(), Error> {
         self.write_at_inner(offset, bufs.into(), options).await
-    }
-
-    async fn write_at_sync(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), WriteOptions::SYNC)
-            .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -378,40 +364,20 @@ mod tests {
             unreachable!("not used in test");
         }
 
-        async fn write_at(
-            &self,
-            _offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.write_chunk_counts
-                .lock()
-                .push(bufs.into().chunk_count());
-            Ok(())
-        }
-
-        async fn write_at_sync(
-            &self,
-            _offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.sync_write_chunk_counts
-                .lock()
-                .push(bufs.into().chunk_count());
-            Ok(())
-        }
-
         async fn write_at_with(
             &self,
-            offset: u64,
+            _offset: u64,
             bufs: impl Into<IoBufs> + Send,
             options: WriteOptions,
         ) -> Result<(), Error> {
             self.write_options.lock().push(options);
+            let chunk_count = bufs.into().chunk_count();
             if options.contains(WriteOptions::SYNC) {
-                self.write_at_sync(offset, bufs).await
+                self.sync_write_chunk_counts.lock().push(chunk_count);
             } else {
-                self.write_at(offset, bufs).await
+                self.write_chunk_counts.lock().push(chunk_count);
             }
+            Ok(())
         }
 
         async fn resize(&self, _len: u64) -> Result<(), Error> {
@@ -450,15 +416,14 @@ mod tests {
                 IoBuf::from(b"b".to_vec()),
                 IoBuf::from(b"c".to_vec()),
                 IoBuf::from(b"d".to_vec()),
-            ]),
-        )
+            ]))
         .await
         .unwrap();
 
         assert_eq!(*write_chunk_counts.lock(), vec![4]);
         assert!(sync_write_chunk_counts.lock().is_empty());
 
-        blob.write_at_sync(
+        blob.write_at_with(
             0,
             IoBufs::from(vec![
                 IoBuf::from(b"a".to_vec()),
@@ -466,6 +431,7 @@ mod tests {
                 IoBuf::from(b"c".to_vec()),
                 IoBuf::from(b"d".to_vec()),
             ]),
+            WriteOptions::SYNC,
         )
         .await
         .unwrap();
