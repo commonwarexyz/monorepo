@@ -8,13 +8,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Per-platform guarantee:
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
-    /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
-    ///   crash-durable.
-    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`; it needs admin and is skipped
-    ///   otherwise, so it is **not** crash-durable.
+    /// - **macOS/BSD**: best-effort `sync(2)`, which does not flush the drive cache, so it is
+    ///   **not** crash-durable.
+    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`, which needs admin and is
+    ///   skipped otherwise, so it is **not** crash-durable.
     ///
-    /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
-    /// >= 5.8. A missing `dir` is treated as success.
+    /// Assumes storage lives on a single filesystem. On Linux reliable error detection needs
+    /// kernel >= 5.8. A missing `dir` is treated as success.
     pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
@@ -24,8 +24,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                     Err(e) => return Err(e),
                 };
-                // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
-                // that fd, performs no memory access, and returns -1 on error.
+                // SAFETY: `file` owns a valid fd that lives across the call, and `syncfs` takes
+                // only that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -96,10 +96,31 @@ stability_scope!(ALPHA {
     pub mod faulty;
     pub mod memory;
 });
-stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
+stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub mod iouring;
 });
-stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage"))) {
+// The storage benchmark's ring-size arithmetic lives in a bench-target source
+// file, and the harness-free bench binary cannot run tests. Include the file
+// here so its tests run under the crate's unit-test harness.
+#[cfg(all(test, target_os = "linux", feature = "iouring"))]
+#[path = "benches/ring_size.rs"]
+mod bench_ring_size;
+
+#[cfg(all(test, target_os = "linux", feature = "iouring"))]
+mod bench_ring_size_drift {
+    /// Property: the ring-size limit mirrored in the shared bench source
+    /// stays equal to the runtime's real constant. Setup: none. Action:
+    /// compare the two constants. Expected: equality, so the bench boundary
+    /// tests cannot go stale against the runtime.
+    #[test]
+    fn test_mirrored_max_ring_size_matches_runtime() {
+        assert_eq!(
+            super::bench_ring_size::MIRRORED_MAX_RING_SIZE,
+            crate::iouring::MAX_RING_SIZE
+        );
+    }
+}
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
 stability_scope!(BETA {
@@ -258,8 +279,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// Re-opening a removed blob's name creates an independent blob; the pre-removal handle keeps
-    /// observing the removed blob's contents.
+    /// Re-opening a removed blob's name creates an independent blob, and the pre-removal handle
+    /// keeps observing the removed blob's contents.
     async fn test_recreate_after_remove<S>(storage: &S)
     where
         S: Storage + Send + Sync,
@@ -497,22 +518,21 @@ pub(crate) mod tests {
         blob.write_at(0, b"concurrent write").await.unwrap();
 
         // Read and write concurrently
-        let write_task = tokio::spawn({
+        let write_task = {
             let blob = blob.clone();
             async move {
                 blob.write_at(0, IoBuf::from(b"concurrent write"))
                     .await
                     .unwrap();
             }
-        });
+        };
 
-        let read_task = tokio::spawn({
+        let read_task = {
             let blob = blob.clone();
             async move { blob.read_at(0, 16).await.unwrap() }
-        });
+        };
 
-        write_task.await.unwrap();
-        let buffer = read_task.await.unwrap();
+        let ((), buffer) = futures::join!(write_task, read_task);
 
         assert_eq!(
             buffer.coalesce(),

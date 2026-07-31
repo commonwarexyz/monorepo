@@ -1,14 +1,26 @@
 //! Hybrid futex/eventfd wake coordination for the io_uring loop.
 //!
-//! This module implements the producer-to-loop wake protocol used by [`super::IoUringLoop`]:
-//! - Producers call [`Waker::publish`] after enqueueing work.
-//! - The loop calls [`Waker::park_idle`] when it is fully idle.
-//! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before
-//!   blocking in `submit_and_wait`.
-//! - Producers wake only the currently armed wait target.
-//! - A dedicated "wake signalled" bit coalesces repeated wake attempts.
-//! - Out-of-band wake requests use [`Waker::wake`].
+//! This module implements the wake protocol used by [`super::IoUringLoop`].
+//! The active protocol is the out-of-band wake latch:
+//! - Producers publish work through their own synchronized containers and
+//!   then call [`Waker::wake`], which latches a dedicated "wake signalled"
+//!   bit and signals only the currently armed wait target. Task wakes,
+//!   sleeper alarms, and stop notifications are cross-thread sources: their
+//!   same-thread deliveries skip the ring waker entirely because the
+//!   executor rechecks ready tasks and alarms before every park. The orphan
+//!   mailbox always wakes directly.
+//! - The latch coalesces repeated wake attempts: while a wake is already
+//!   pending, further wakes write nothing.
+//! - The loop calls [`Waker::park_idle`] when it is fully idle, sleeping in
+//!   futex wait on the packed state word.
+//! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before blocking in
+//!   `submit_and_wait` and is woken through `eventfd` readiness while armed.
 //! - Wake CQEs are acknowledged with [`Waker::acknowledge`].
+//!
+//! Both wait paths follow a lock-free arm-and-recheck handshake: the loop
+//! blocks only when the post-arm snapshot (produced by the same atomic
+//! transition that armed the wait target) still shows no latched wake, so a
+//! wake racing the sleep transition is never lost.
 //!
 //! The packed atomic state combines:
 //! - bit 0: waiting on futex
@@ -16,9 +28,21 @@
 //! - bit 2: wake already signalled
 //! - bits 3..: submitted sequence
 //!
-//! This keeps the arm-and-recheck handshake lock-free, enables futex sleep when
-//! the loop is truly idle, and avoids repeated wake writes while a wake is
-//! already pending.
+//! # Retained dormant submission sequence
+//!
+//! The sequence half of the state word belongs to a cross-thread submission
+//! protocol this runtime does not currently exercise: submissions are staged
+//! on the loop thread itself, so production producers only ever call
+//! [`Waker::wake`], and [`Waker::publish`] is called only by this file's
+//! tests and loom models. The loop's idle spin still probes
+//! [`Waker::pending`], but the sequence it reads never advances in
+//! production. The protocol is retained for a future cross-thread submission
+//! path, where a producer would increment the sequence with `publish` after
+//! enqueueing work and the loop would compare the published sequence against
+//! its own `processed_seq` using half-range modular ordering.
+//! [`MAX_RING_SIZE`](super::MAX_RING_SIZE) derives from that ordering: the
+//! rounded ring size stays strictly below half the sequence domain so the
+//! modular delta remains directional.
 
 use super::UserData;
 use io_uring::squeue::SubmissionQueue;
@@ -58,6 +82,11 @@ const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_SIG
 /// Mask covering just the current wait target bits.
 const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 /// Packed-state increment for one submitted operation (low bits are reserved).
+///
+/// The runtime stages submissions on the loop thread itself, so the publish
+/// protocol is currently exercised only by tests and loom models. It is
+/// retained for a future cross-thread submission path.
+#[allow(dead_code)]
 const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Full sequence domain used by the packed submission counter (state >> 3).
 pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
@@ -100,13 +129,22 @@ impl Drop for ArmGuard<'_> {
 /// - bits 0..2: wait target and wake state
 /// - bits 3..: submitted sequence (`submitted_seq`)
 ///
-/// Submitters always increment `submitted_seq` after enqueueing onto the MPSC. The
-/// loop tracks how many submissions it has drained from the MPSC (`processed_seq`,
-/// stored in loop-local state). After arming a wait target, the loop blocks only
-/// if the same post-arm snapshot still shows no latched wake and still carries
-/// the exact `submitted_seq == processed_seq` snapshot the loop armed against.
+/// The sequence bits belong to the retained (currently unexercised)
+/// cross-thread submission protocol: a producer would increment
+/// `submitted_seq` after publishing work, and the loop would track how much
+/// it has drained (`processed_seq`, stored in loop-local state). Today's
+/// producers (the executor's `Tasks::queue` and `queue_root`,
+/// `register_alarm`, and the driver's orphan mailbox) publish through their
+/// own synchronized containers and use only the out-of-band
+/// `WAKE_SIGNALLED_BIT` latch via [`Waker::wake`], the task and alarm
+/// producers only when called from a foreign thread (same-thread deliveries
+/// are observed by the executor's pre-park rechecks) and the orphan mailbox
+/// unconditionally. After arming a wait
+/// target, the loop blocks only if the same post-arm snapshot still shows no
+/// latched wake and still carries the exact `submitted_seq == processed_seq`
+/// snapshot the loop armed against.
 ///
-/// The loop bounds the rounded channel/ring size strictly below half the packed
+/// The loop bounds the rounded ring size strictly below half the packed
 /// sequence domain. That makes the modular delta `submitted_seq - processed_seq`
 /// directional: any non-zero delta smaller than half the domain means
 /// `submitted_seq` is ahead, while larger deltas mean the visible submission
@@ -156,13 +194,16 @@ struct WakerInner {
 
 /// Internal hybrid futex/eventfd wake source for the io_uring loop.
 ///
-/// - Publish submissions from producers via [`Waker::publish`]
-/// - Wake without publishing via [`Waker::wake`]
-/// - Test whether published work is still pending via [`Waker::pending`]
+/// - Wake out of band via [`Waker::wake`] (the production wake path)
 /// - Park in the fully-idle path via [`Waker::park_idle`]
 /// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
 /// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
 /// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
+/// - Test whether published work is still pending via [`Waker::pending`]
+///   (probed by the loop's idle spin, though the sequence never advances in
+///   production)
+/// - Publish submissions via [`Waker::publish`] (the retained dormant
+///   sequence protocol, exercised only by tests and loom models)
 ///
 /// This type intentionally separates:
 /// - sequence publication (`state` high bits)
@@ -223,13 +264,16 @@ impl Waker {
     /// the bit.
     ///
     /// All claimed wakes flow through this path, whether they come from
-    /// `publish()` on an armed epoch or from an out-of-band caller such as the
-    /// final sender disconnecting.
+    /// `publish()` on an armed epoch or from an out-of-band caller (a task
+    /// enqueue, an alarm registration, or an orphan-mailbox push from a
+    /// foreign thread).
     pub fn wake(&self) {
-        // `HandleInner::drop` uses this path without bumping the submission
-        // sequence. Publish that disconnect here so that after the loop resumes
-        // and `clear_wait()` acquires, the next channel check cannot observe
-        // the wake without also observing the disconnect that caused it.
+        // Out-of-band wakes carry no submission-sequence bump: their payload
+        // lives in a separately synchronized container (the ready queue, the
+        // alarm heap, or the orphan mailbox). The `Release` here pairs with
+        // `clear_wait()`'s `Acquire` so that once the loop resumes, its next
+        // pass over those containers cannot observe the wake without also
+        // observing the state change that caused it.
         let prev = self
             .inner
             .state
@@ -256,18 +300,22 @@ impl Waker {
     /// Publish one submitted operation and optionally wake the currently armed
     /// wait target.
     ///
-    /// Callers must invoke this only after successfully enqueueing work into
-    /// the MPSC channel.
+    /// A future cross-thread submitter must invoke this only after its work
+    /// is visible to the loop's staging pass.
     ///
     /// The common unarmed path performs only one `fetch_add`. When a wait is
     /// armed and no wake has yet been claimed for that epoch, this caller
     /// claims `WAKE_SIGNALLED_BIT` with a follow-up atomic update and then
     /// signals the armed wait target.
+    /// The runtime stages submissions on the loop thread itself, so this is
+    /// currently exercised only by tests and loom models. It is retained for
+    /// a future cross-thread submission path.
+    #[allow(dead_code)]
     #[inline]
     pub fn publish(&self) {
         // Use `Release` so that when `pending()` later observes a published-ahead
-        // sequence delta with its `Acquire` load, a following
-        // `self.receiver.try_recv()` in `fill_submission_queue()` must observe
+        // sequence delta with its `Acquire` load, the loop's following pass
+        // over the (future) cross-thread submission container must observe
         // the corresponding request.
         let prev = self
             .inner
@@ -299,6 +347,18 @@ impl Waker {
 
         let delta = published_seq.wrapping_sub(processed_seq) & SUBMISSION_SEQ_MASK;
         delta != 0 && delta < HALF_SUBMISSION_SEQUENCE_DOMAIN
+    }
+
+    /// Return whether an out-of-band wake is currently latched.
+    ///
+    /// This is a hint for opportunistic checks (e.g. the idle spinner): the
+    /// load carries no synchronization and does not consume the latch, so
+    /// callers must follow up with an arming wait primitive ([Self::park_idle]
+    /// or [Self::arm]) whose post-arm snapshot revalidates the latch and whose
+    /// wait-state clear consumes it.
+    #[inline]
+    pub fn signalled(&self) -> bool {
+        self.inner.state.load(Ordering::Relaxed) & WAKE_SIGNALLED_BIT != 0
     }
 
     /// Park on the idle path until the packed wake state changes.
@@ -477,9 +537,10 @@ impl Waker {
     #[inline]
     fn clear_wait(&self) {
         // Pair with `wake()`'s `Release`. This is the first common point after
-        // resuming from a wake and before the next channel check, so acquiring
-        // here ensures the loop cannot observe the wake without also observing
-        // the sender-side state change that caused it.
+        // resuming from a wake and before the loop's next pass over the
+        // producers' containers (ready queue, alarm heap, orphan mailbox), so
+        // acquiring here ensures the loop cannot observe the wake without
+        // also observing the producer-side state change that caused it.
         self.inner.state.fetch_and(!STATE_MASK, Ordering::Acquire);
     }
 
@@ -666,18 +727,6 @@ pub mod tests {
         os::fd::{AsRawFd, FromRawFd},
     };
 
-    pub fn wait_until_futex_armed(waker: &Waker) {
-        while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_FUTEX_BIT == 0 {
-            std::hint::spin_loop();
-        }
-    }
-
-    pub fn wait_until_eventfd_armed(waker: &Waker) {
-        while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_EVENTFD_BIT == 0 {
-            std::hint::spin_loop();
-        }
-    }
-
     pub fn state_bits(waker: &Waker) -> u32 {
         waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
     }
@@ -724,7 +773,7 @@ pub mod tests {
         waker.publish();
         assert_eq!(submitted_seq(&waker), 1);
 
-        // Arm and publish should trigger an eventfd wake; acknowledge drains it.
+        // Arm and publish should trigger an eventfd wake, and acknowledge drains it.
         let arm = waker.arm(1);
         assert!(arm.still_idle());
         assert!(!arm.wake_latched());

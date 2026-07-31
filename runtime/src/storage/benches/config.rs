@@ -135,7 +135,7 @@ impl fmt::Display for SyncMode {
     name = "storage_bench",
     about = "Benchmark the runtime storage backend",
     after_help = "The storage backend is selected at build time.\n\
-                  Build normally for Tokio storage, or with `--features iouring-storage` for io_uring storage.",
+                  Build normally for Tokio storage, or with `--features iouring` for io_uring storage.",
     styles = Styles::styled(),
 )]
 pub struct Config {
@@ -223,10 +223,19 @@ impl Config {
         Duration::from_secs(self.duration)
     }
 
-    /// Initial file size (panics if not set; only call after validation).
+    /// Initial file size (panics if not set, so only call after validation).
     pub const fn file_size(&self) -> u64 {
         self.file_size
             .expect("validated configuration must include --file-size")
+    }
+
+    /// Validated io_uring ring size for the requested concurrency.
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    pub fn iouring_ring_size(&self) -> Result<u32, String> {
+        crate::ring_size::iouring_ring_size(
+            self.inflight,
+            commonware_runtime::iouring::MAX_RING_SIZE,
+        )
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -314,6 +323,10 @@ impl Config {
         } else if self.sync_method != SyncMethod::WriteThenSync {
             return Err("--sync-method is only valid for write_sync".into());
         }
+
+        // Last so every pre-existing validation error keeps its precedence.
+        #[cfg(all(target_os = "linux", feature = "iouring"))]
+        self.iouring_ring_size()?;
 
         Ok(())
     }

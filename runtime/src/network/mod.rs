@@ -7,21 +7,19 @@ stability_scope!(ALPHA {
 stability_scope!(BETA {
     pub(crate) mod metered;
 });
-stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network"))) {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod tokio;
 });
-stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-network")) {
+stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub(crate) mod iouring;
 });
 
 #[cfg(test)]
 mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
-    use commonware_macros::select;
-    use commonware_utils::sync::Barrier;
-    use futures::{FutureExt, join};
+    use commonware_utils::{channel::oneshot, sync::Barrier};
+    use futures::{FutureExt, StreamExt, future::join_all, join, poll, stream::FuturesUnordered};
     use std::{net::SocketAddr, sync::Arc, time::Duration};
-    use tokio::{sync::oneshot, task::JoinSet};
 
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
     const SERVER_SEND_DATA: &[u8] = b"server_send_data";
@@ -54,10 +52,10 @@ mod tests {
         // Get the local address of the listener
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
-        // Spawn server. Returning the socket halves keeps them alive until both
-        // join handles are awaited below.
-        let server = tokio::spawn(async move {
-            // Server accepts a client, verifies the payload, and sends a reply.
+        // Server accepts a client, verifies the payload, and sends a reply.
+        // Returning the socket halves keeps them alive until both branches
+        // are joined below.
+        let server = async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
             let received = stream
                 .recv(CLIENT_SEND_DATA.len())
@@ -68,13 +66,10 @@ mod tests {
                 .await
                 .expect("Failed to send");
             (sink, stream)
-        });
+        };
 
-        // Spawn client, connect to server, send and receive data over connection.
-        // Returning the socket halves keeps them alive until both join handles
-        // are awaited below.
-        let client = tokio::spawn(async move {
-            // Client connects to the server, sends a payload, and reads the reply.
+        // Client connects to the server, sends a payload, and reads the reply.
+        let client = async move {
             // Connect to the server
             let (mut sink, mut stream) = network
                 .dial(listener_addr)
@@ -90,12 +85,10 @@ mod tests {
                 .expect("Failed to receive data");
             assert_eq!(received.coalesce(), SERVER_SEND_DATA);
             (sink, stream)
-        });
+        };
 
-        // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        server_result.expect("Server task failed");
-        client_result.expect("Client task failed");
+        // Wait for both branches to complete
+        let (_server_halves, _client_halves) = join!(server, client);
     }
 
     // Test sending a multi-buffer payload.
@@ -118,9 +111,9 @@ mod tests {
         ]);
         let expected = message.clone().coalesce();
 
-        // Spawn a server and read exactly the logical message size. The receive
-        // side should observe the same byte stream regardless of send chunking.
-        let server = tokio::spawn(async move {
+        // The receive side should observe the same byte stream regardless of
+        // send chunking, so read exactly the logical message size.
+        let server = async move {
             // Server receives the vectored payload as one logical byte stream.
             let (_, sink, mut stream) = listener.accept().await.expect("Failed to accept");
             let received = stream
@@ -129,11 +122,10 @@ mod tests {
                 .expect("Failed to receive");
             assert_eq!(received.coalesce(), expected.as_ref());
             (sink, stream)
-        });
+        };
 
-        // Spawn client
-        let client = tokio::spawn(async move {
-            // Client connects and sends the pre-built vectored message.
+        // Client connects and sends the pre-built vectored message.
+        let client = async move {
             // Connect to the server
             let (mut sink, stream) = network
                 .dial(listener_addr)
@@ -143,12 +135,10 @@ mod tests {
             // Send the pre-built vectored message.
             sink.send(message).await.expect("Failed to send data");
             (sink, stream)
-        });
+        };
 
-        // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        server_result.expect("Server task failed");
-        client_result.expect("Client task failed");
+        // Wait for both branches to complete
+        let (_server_halves, _client_halves) = join!(server, client);
     }
 
     // Test handling multiple clients
@@ -166,15 +156,16 @@ mod tests {
         // Keep all sockets alive until every participant finishes.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
 
-        // Server task
+        // Server branch: accept every client, serving already-accepted
+        // connections concurrently with later accepts so the ring sees a
+        // mixed accept and recv/send workload.
         let server_barrier = barrier.clone();
-        let server = tokio::spawn(async move {
-            // Handle multiple clients
-            let mut set = JoinSet::new();
+        let server = async move {
+            let mut handlers = FuturesUnordered::new();
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
                 let barrier = server_barrier.clone();
-                set.spawn(async move {
+                handlers.push(async move {
                     let received = stream
                         .recv(CLIENT_SEND_DATA.len())
                         .await
@@ -187,18 +178,18 @@ mod tests {
                     // Hold the connection open until every peer has finished.
                     barrier.wait().await;
                 });
+                // Drive ready handlers without blocking the accept loop.
+                while let Some(Some(())) = handlers.next().now_or_never() {}
             }
-            while let Some(result) = set.join_next().await {
-                result.expect("Server connection task failed");
-            }
-        });
+            while handlers.next().await.is_some() {}
+        };
 
-        // Start multiple clients
-        let mut set = JoinSet::new();
+        // Client branches
+        let mut clients = Vec::new();
         for _ in 0..NUM_CLIENTS {
             let network = network.clone();
             let barrier = barrier.clone();
-            set.spawn(async move {
+            clients.push(async move {
                 // Connect to the server
                 let (mut sink, mut stream) = network
                     .dial(listener_addr)
@@ -224,11 +215,8 @@ mod tests {
             });
         }
 
-        // Wait for all servers and clients to complete.
-        while let Some(result) = set.join_next().await {
-            result.expect("Client task failed");
-        }
-        server.await.expect("Server task failed");
+        // Wait for the server and all clients to complete.
+        join!(server, join_all(clients));
     }
 
     // Test large data transfer
@@ -243,9 +231,8 @@ mod tests {
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
-        // Spawn server. Returning the socket halves keeps them alive until both
-        // join handles are awaited below.
-        let server = tokio::spawn(async move {
+        // Server branch echoes large data in chunks.
+        let server = async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             // Receive and echo large data in chunks
@@ -257,11 +244,10 @@ mod tests {
                 sink.send(received).await.expect("Failed to send chunk");
             }
             (sink, stream)
-        });
+        };
 
-        // Client task. Returning the socket halves keeps them alive until both
-        // join handles are awaited below.
-        let client = tokio::spawn(async move {
+        // Client branch sends and verifies every chunk.
+        let client = async move {
             // Connect to the server
             let (mut sink, mut stream) = network
                 .dial(listener_addr)
@@ -283,12 +269,10 @@ mod tests {
                 assert_eq!(received.coalesce(), &pattern[..]);
             }
             (sink, stream)
-        });
+        };
 
-        // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        server_result.expect("Server task failed");
-        client_result.expect("Client task failed");
+        // Wait for both branches to complete
+        let (_server_halves, _client_halves) = join!(server, client);
     }
 
     // Tests dialing and binding errors
@@ -321,14 +305,14 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         // Server sends data
-        let server = tokio::spawn(async move {
+        let server = async move {
             let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
             sink.send(IoBuf::from(DATA)).await.expect("Failed to send");
             (sink, stream)
-        });
+        };
 
         // Client receives and tests peek
-        let client = tokio::spawn(async move {
+        let client = async move {
             // Connect to the server
             let (sink, mut stream) = network
                 .dial(listener_addr)
@@ -363,12 +347,10 @@ mod tests {
             let final_peek = stream.peek(100);
             assert!(final_peek.is_empty());
             (sink, stream)
-        });
+        };
 
-        // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        server_result.expect("Server task failed");
-        client_result.expect("Client task failed");
+        // Wait for both branches to complete
+        let (_server_halves, _client_halves) = join!(server, client);
     }
 
     async fn test_network_canceled_recv_poisons_stream<N: crate::Network>(network: N) {
@@ -378,16 +360,18 @@ mod tests {
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
-        let server = tokio::spawn(async move {
+        let server = async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
-            // Cancel a recv mid-flight
-            select! {
-                v = stream.recv(100) => {
-                    panic!("unexpected value: {v:?}");
-                },
-                _ = tokio::time::sleep(Duration::from_millis(5)) => {},
-            };
+            // Cancel a recv mid-flight: poll it once so the operation is
+            // issued, then drop the future.
+            {
+                let mut recv = std::pin::pin!(stream.recv(100));
+                assert!(
+                    poll!(recv.as_mut()).is_pending(),
+                    "recv should block with no data available"
+                );
+            }
 
             // Stream should be poisoned after cancellation
             assert!(matches!(stream.recv(1).await, Err(crate::Error::Closed)));
@@ -398,9 +382,9 @@ mod tests {
                 .expect("sink should remain usable after stream cancellation");
 
             (sink, stream)
-        });
+        };
 
-        let client = tokio::spawn(async move {
+        let client = async move {
             let (sink, mut stream) = network
                 .dial(listener_addr)
                 .await
@@ -410,12 +394,10 @@ mod tests {
             assert_eq!(received.coalesce(), b"ok");
 
             (sink, stream)
-        });
+        };
 
-        // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        server_result.expect("Server task failed");
-        client_result.expect("Client task failed");
+        // Wait for both branches to complete
+        let (_server_halves, _client_halves) = join!(server, client);
     }
 
     async fn test_network_canceled_send_poisons_sink<N: crate::Network>(network: N) {
@@ -432,7 +414,7 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
         let (canceled_sender, canceled_receiver) = oneshot::channel();
 
-        let server = tokio::spawn(async move {
+        let server = async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             // Poll multiple sends until backpressure makes one pending, then
@@ -464,9 +446,9 @@ mod tests {
             assert_eq!(received.coalesce(), b"ok");
 
             (sink, stream)
-        });
+        };
 
-        let client = tokio::spawn(async move {
+        let client = async move {
             let (mut sink, stream) = network
                 .dial(listener_addr)
                 .await
@@ -479,12 +461,10 @@ mod tests {
             sink.send(IoBuf::from(b"ok")).await.expect("Failed to send");
 
             (sink, stream)
-        });
+        };
 
-        // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        server_result.expect("Server task failed");
-        client_result.expect("Client task failed");
+        // Wait for both branches to complete
+        let (_server_halves, _client_halves) = join!(server, client);
     }
 
     async fn test_network_recv_error_poisons_stream<N: crate::Network>(network: N) {
@@ -496,7 +476,7 @@ mod tests {
 
         // Server triggers a recv error after a partial read, then verifies the
         // stream is poisoned while the sink remains usable.
-        let server = tokio::spawn(async move {
+        let server = async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             let err = stream
@@ -511,11 +491,11 @@ mod tests {
                 .expect("sink should remain usable after stream error");
 
             (sink, stream)
-        });
+        };
 
         // Client sends a partial payload, half-closes its write direction, and
         // still receives the server's response on the read half.
-        let client = tokio::spawn(async move {
+        let client = async move {
             let (mut sink, mut stream) = network
                 .dial(listener_addr)
                 .await
@@ -530,12 +510,10 @@ mod tests {
             assert_eq!(received.coalesce(), b"ok");
 
             stream
-        });
+        };
 
-        // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        server_result.expect("Server task failed");
-        client_result.expect("Client task failed");
+        // Wait for both branches to complete
+        let (_server_halves, _client_stream) = join!(server, client);
     }
 
     async fn test_network_send_error_poisons_sink<N: crate::Network>(network: N) {
@@ -551,7 +529,7 @@ mod tests {
 
         // Server sends a response, waits for the client to buffer it, then
         // closes the connection so the client's next send eventually fails.
-        let server = tokio::spawn(async move {
+        let server = async move {
             let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
 
             sink.send(IoBuf::from(DATA))
@@ -568,11 +546,11 @@ mod tests {
             closed_sender
                 .send(())
                 .expect("client should still be waiting for the close");
-        });
+        };
 
         // Client confirms the read half remains usable after the server closes,
         // then verifies the sink is poisoned after the first send error.
-        let client = tokio::spawn(async move {
+        let client = async move {
             let (mut sink, mut stream) = network
                 .dial(listener_addr)
                 .await
@@ -591,9 +569,13 @@ mod tests {
             let mut err = None;
             for _ in 0..10 {
                 // A peer close is not guaranteed to make the next send fail
-                // immediately, so retry briefly until the error becomes visible.
+                // immediately, so retry briefly until the error becomes
+                // visible. The bounded blocking sleep briefly stalls
+                // single-threaded runtimes, which is harmless here: the
+                // oneshot handshakes above guarantee nothing else needs the
+                // executor during it.
                 match sink.send(vec![9u8]).await {
-                    Ok(()) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Ok(()) => std::thread::sleep(Duration::from_millis(5)),
                     Err(send_err) => {
                         err = Some(send_err);
                         break;
@@ -614,12 +596,10 @@ mod tests {
             assert_eq!(suffix.coalesce(), &DATA[2..]);
 
             (sink, stream)
-        });
+        };
 
-        // Wait for both tasks to complete
-        let (server_result, client_result) = join!(server, client);
-        server_result.expect("Server task failed");
-        client_result.expect("Client task failed");
+        // Wait for both branches to complete
+        let ((), _client_halves) = join!(server, client);
     }
 
     /// Test a network backend's connect timeout against a real TCP connection.
@@ -661,17 +641,22 @@ mod tests {
     }
 
     /// Network stress tests
-    pub(super) async fn stress_test_network_trait<N, F>(new_network: F)
+    pub(super) async fn stress_test_network_trait<N, F, S>(new_network: F, context: S)
     where
         F: Fn() -> N,
         N: crate::Network,
+        S: crate::Spawner + crate::Supervisor,
     {
-        stress_concurrent_streams(new_network()).await;
+        stress_concurrent_streams(new_network(), context).await;
     }
 
     /// Creates a large number of concurrent streams and sends messages
     /// back and forth between them.
-    async fn stress_concurrent_streams<N: crate::Network>(network: N) {
+    async fn stress_concurrent_streams<N, S>(network: N, context: S)
+    where
+        N: crate::Network,
+        S: crate::Spawner + crate::Supervisor,
+    {
         const NUM_CLIENTS: usize = 96;
         const NUM_MESSAGES: usize = 16_384;
         const MESSAGE_SIZE: usize = 4096;
@@ -688,12 +673,12 @@ mod tests {
 
         // Spawn a server task that echoes messages from many clients.
         let server_barrier = barrier.clone();
-        let server = tokio::spawn(async move {
-            let mut set = JoinSet::new();
+        let server = context.child("server").spawn(move |context| async move {
+            let mut set = Vec::with_capacity(NUM_CLIENTS);
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
                 let barrier = server_barrier.clone();
-                set.spawn(async move {
+                set.push(context.child("echo").spawn(move |_| async move {
                     // Echo every message back to the connected client.
                     for _ in 0..NUM_MESSAGES {
                         let received = stream.recv(MESSAGE_SIZE).await.unwrap();
@@ -702,19 +687,19 @@ mod tests {
 
                     // Hold the connection open until every peer has finished.
                     barrier.wait().await;
-                });
+                }));
             }
-            while let Some(result) = set.join_next().await {
-                result.unwrap();
+            for handle in set {
+                handle.await.unwrap();
             }
         });
 
         // Spawn all clients.
-        let mut set = JoinSet::new();
+        let mut set = Vec::with_capacity(NUM_CLIENTS);
         for _ in 0..NUM_CLIENTS {
             let network = network.clone();
             let barrier = barrier.clone();
-            set.spawn(async move {
+            set.push(context.child("client").spawn(move |_| async move {
                 // Dial the server and repeatedly verify the echoed payload.
                 let (mut sink, mut stream) = network.dial(addr).await.unwrap();
                 let payload = vec![42u8; MESSAGE_SIZE];
@@ -726,12 +711,12 @@ mod tests {
 
                 // Hold the connection open until every peer has finished.
                 barrier.wait().await;
-            });
+            }));
         }
 
         // Wait for all servers and clients to complete.
-        while let Some(result) = set.join_next().await {
-            result.unwrap();
+        for handle in set {
+            handle.await.unwrap();
         }
         server.await.unwrap();
     }

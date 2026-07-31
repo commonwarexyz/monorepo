@@ -42,9 +42,6 @@ jobs:
           - package: commonware-storage
             cargo_flags: "--features test-traits"
             benchmark_name: "commonware-storage"
-          - package: commonware-storage
-            cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
-            benchmark_name: "commonware-storage --features"
           - package: commonware-coding
             cargo_flags: ""
             benchmark_name: "commonware-coding"
@@ -98,8 +95,6 @@ jobs:
             benchmark_name: "commonware-cryptography"
           - package: commonware-storage
             benchmark_name: "commonware-storage"
-          - package: commonware-storage
-            benchmark_name: "commonware-storage --features"
           - package: commonware-coding
             benchmark_name: "commonware-coding"
           - package: commonware-formatting

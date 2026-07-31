@@ -26,7 +26,7 @@ use tracing::error;
 /// Handle to an asynchronous result.
 ///
 /// Handles returned by [`crate::Spawner::spawn`] abort the spawned task. Completion handles only
-/// stop waiting when aborted, resolving to [`Error::Aborted`]; they do not cancel the underlying
+/// stop waiting when aborted, resolving to [`Error::Aborted`], and do not cancel the underlying
 /// work.
 pub struct Handle<T>
 where
@@ -107,20 +107,28 @@ where
             let result =
                 Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
 
+            // Mark the task as aborted and abort all descendants before
+            // publishing the result: a handle awaited on another worker can
+            // resume as soon as the send lands, and any spawn it then issues
+            // from a context derived from the consumed one must observe the
+            // closure.
+            tree.abort();
+
             // Handle result
             match result {
                 Ok(Ok(result)) => {
                     let _ = sender.send(Ok(result));
                 }
                 Ok(Err(panic)) => {
-                    panicker.notify(panic);
+                    // An undeliverable payload here means the root completed
+                    // on another thread in the same instant. The executors
+                    // using this wrapper have no later shutdown path to
+                    // route it through, so it is logged and dropped.
+                    let _ = panicker.notify(panic);
                     let _ = sender.send(Err(Error::Exited));
                 }
                 Err(Aborted) => {}
             }
-
-            // Mark the task as aborted and abort all descendants.
-            tree.abort();
 
             // Finish the metric.
             metric_handle.finish();
@@ -136,6 +144,40 @@ where
                 },
             },
         )
+    }
+
+    /// Returns a task handle assembled from its parts.
+    ///
+    /// Used by executors that build the result channel before the task's
+    /// wrapper exists (e.g. work deferred to a thread that has not started
+    /// yet): the wrapper on the remote side owns `sender` and the paired
+    /// abort registration, mirroring what [Handle::init] builds inline.
+    // The only caller lives in the ALPHA-scoped `iouring` module, so the
+    // allowance must cover every configuration that compiles the caller out:
+    // the feature being disabled, or any stability level above ALPHA.
+    #[cfg_attr(
+        any(
+            not(all(target_os = "linux", feature = "iouring")),
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ),
+        allow(dead_code)
+    )]
+    pub(crate) const fn from_parts(
+        receiver: oneshot::Receiver<Result<T, Error>>,
+        abort_handle: AbortHandle,
+        metric: MetricHandle,
+    ) -> Self {
+        Self {
+            state: HandleState::Task {
+                receiver,
+                abort_handle,
+                metric,
+            },
+        }
     }
 
     /// Returns a handle backed by a completion receiver.
@@ -292,25 +334,31 @@ impl Panicker {
         self.catch
     }
 
-    /// Notifies the [Panicker] that a panic has occurred.
-    pub(crate) fn notify(&self, panic: Box<dyn Any + Send + 'static>) {
+    /// Notify the runtime of a task panic.
+    ///
+    /// Returns the payload when it could not be delivered: panics are not
+    /// being caught, no earlier panic claimed the interrupt, but the root
+    /// future (and its receiver) is already gone. Callers with a later
+    /// shutdown path should route the returned payload through it rather
+    /// than let the panic vanish.
+    pub(crate) fn notify(
+        &self,
+        panic: Box<dyn Any + Send + 'static>,
+    ) -> Option<Box<dyn Any + Send + 'static>> {
         // Log the panic
         let err = extract_panic_message(&*panic);
         error!(?err, "task panicked");
 
-        // If we are catching panics, just return
+        // If we are catching panics, the payload is absorbed by policy.
         if self.catch {
-            return;
+            return None;
         }
 
-        // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock();
-        let Some(sender) = sender.take() else {
-            return;
-        };
+        // If we've already sent a panic, later ones rank below it.
+        let sender = self.sender.lock().take()?;
 
-        // Send the panic
-        let _ = sender.send(panic);
+        // Send the panic. A dead receiver hands the payload back.
+        sender.send(panic).err()
     }
 }
 

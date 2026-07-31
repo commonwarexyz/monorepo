@@ -29,7 +29,6 @@ commonware-utils = { workspace = true, features = ["std"] }
 crossbeam-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
-io-uring = { workspace = true, optional = true }
 libc.workspace = true
 loom = { workspace = true, optional = true }
 opentelemetry.workspace = true
@@ -55,6 +54,9 @@ features = ["wasm_js"]
 package = "getrandom"
 version = "0.2"
 features = ["js"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum.workspace = true
@@ -83,9 +85,7 @@ bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
 test-utils = []
-iouring = [ "iouring-network", "iouring-storage" ]
-iouring-network = [ "io-uring" ]
-iouring-storage = [ "io-uring" ]
+iouring = [ "dep:io-uring" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]

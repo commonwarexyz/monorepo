@@ -120,7 +120,10 @@ impl crate::Network for Network {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::{deterministic as DeterministicNetwork, tests};
+    use crate::{
+        Runner as _,
+        network::{deterministic as DeterministicNetwork, tests},
+    };
     use commonware_macros::test_group;
 
     #[tokio::test]
@@ -129,8 +132,10 @@ mod tests {
     }
 
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        tests::stress_test_network_trait(DeterministicNetwork::Network::default).await;
+    #[test]
+    fn test_stress_trait() {
+        crate::deterministic::Runner::default().start(|context| async move {
+            tests::stress_test_network_trait(DeterministicNetwork::Network::default, context).await;
+        });
     }
 }
