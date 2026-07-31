@@ -11,10 +11,12 @@
 //!
 //! # When compact state changes
 //!
-//! The servable compact state advances only on durable persistence. A db-local commit appends
-//! one witness entry during `sync`, and `rewind` restores the witness from the target journal
-//! entry. Unsynced in-memory mutations are therefore intentionally not servable. `target()`
-//! and served responses lag behind `apply_batch()` until the db's next sync.
+//! The servable compact state advances only when a commit is persisted. A db-local commit
+//! appends one witness entry during `commit`, `sync`, or `start_sync`. An entry appended by
+//! `start_sync` is servable when the call returns and is proven durable only when its handle
+//! completes. `rewind` restores the witness from the target journal entry. Unpersisted
+//! in-memory mutations are therefore intentionally not servable. `target()` and served
+//! responses lag behind `apply_batch()` until the db's next persist.
 
 pub(crate) mod batch;
 pub(crate) mod witness;

@@ -42,7 +42,6 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
 * [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
-* [sync](./examples/sync/README.md): Synchronize state between a server and client.
 
 ## Miscellaneous
 
