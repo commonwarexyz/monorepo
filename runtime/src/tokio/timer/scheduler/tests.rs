@@ -44,7 +44,7 @@ mod ordinary {
         now: AtomicU64,
         /// Number of platform-limit queries made through the alarm.
         max_deadline_reads: AtomicUsize,
-        /// Ordered native operations requested by the service.
+        /// Ordered native operations requested by the scheduler.
         operations: TestMutex<Vec<AlarmOperation>>,
         /// One latched readiness event.
         ready: AtomicBool,
@@ -995,7 +995,7 @@ mod ordinary {
         assert_eq!(first_entry.poll(&mut context), Poll::Pending);
         consume_signal(&shard);
 
-        // Normal service stop drains every queued sleep without waking tasks.
+        // Normal scheduler stop drains every queued sleep without waking tasks.
         shard.stop();
 
         // The first stop reaches the driver and quiesces all resident state.
@@ -1046,7 +1046,7 @@ mod ordinary {
     #[test]
     fn clean_runtime_shutdown_does_not_report_pending_sleeps() {
         const CHILD_ENV: &str = "_COMMONWARE_RUNTIME_TIMER_CLEAN_SHUTDOWN_CHILD";
-        const TEST_NAME: &str = "tokio::timer::service::tests::ordinary::clean_runtime_shutdown_does_not_report_pending_sleeps";
+        const TEST_NAME: &str = "tokio::timer::scheduler::tests::ordinary::clean_runtime_shutdown_does_not_report_pending_sleeps";
 
         // Isolate the global tracing subscriber in a child test process.
         if std::env::var_os(CHILD_ENV).is_none() {
@@ -1072,7 +1072,7 @@ mod ordinary {
                 "clean-shutdown child did not execute the regression\nstdout:\n{stdout}\nstderr:\n{stderr}"
             );
             assert!(
-                !stderr.contains("high-resolution timer service failed"),
+                !stderr.contains("high-resolution timer scheduler failed"),
                 "clean-shutdown child reported a timer failure panic\nstderr:\n{stderr}"
             );
             return;
@@ -1441,7 +1441,7 @@ mod ordinary {
     }
 
     #[tokio::test]
-    async fn disarm_failure_fails_the_running_service() {
+    async fn disarm_failure_fails_the_running_scheduler() {
         // Arm one entry, cancel it, and inject failure in the requested disarm.
         let (shard, control, panicked) = observed_fake_shard();
         let (_entry, registered) = register(&shard, at(10));
@@ -1692,7 +1692,7 @@ mod ordinary {
         }
 
         // Repeatedly block the original worker while its replacement
-        // services another task and reaches the production park callback.
+        // runs another task and reaches the production park callback.
         runtime.block_on(async {
             for iteration in 0..REPETITIONS {
                 let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
@@ -1747,7 +1747,7 @@ mod ordinary {
                 probe.await.expect("replacement-worker probe must complete");
 
                 let (index, assignment) =
-                    progress.expect("replacement worker did not service the probe task");
+                    progress.expect("replacement worker did not run the probe task");
                 assert_eq!(index, assignment.0);
                 assert!(index < affinity.worker_threads);
                 if iteration == 0 {
@@ -1988,7 +1988,7 @@ mod loom_tests {
             let panic = outcome.expect_err("modeled failed entry completed without unwinding");
             assert_eq!(
                 extract_panic_message(&*panic),
-                "high-resolution timer service failed"
+                "high-resolution timer scheduler failed"
             );
             assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_FAILED);
             assert!(entry.take_waker().is_none());

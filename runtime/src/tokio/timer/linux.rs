@@ -1,6 +1,6 @@
 //! Linux monotonic timerfd adapter.
 
-use super::service::{Alarm, AlarmInitError, Deadline};
+use super::scheduler::{Alarm, AlarmInitError, Deadline};
 use std::{
     io,
     mem::size_of,
@@ -275,7 +275,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri does not support timerfd readiness")]
     async fn descriptor_flags_and_absolute_readiness() {
-        // Create two adapters as the service does for separate shards.
+        // Create two adapters as the scheduler does for separate shards.
         let alarm = NativeAlarm::new(0).unwrap();
         let other = NativeAlarm::new(1).unwrap();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();

@@ -48,7 +48,7 @@
 //! Driver errors and panics claim root interruption before waking failed
 //! sleepers, so an ordinary task panic cannot replace the infrastructure
 //! diagnostic. Failed sleepers unwind with an already-reported marker so they
-//! do not duplicate that diagnostic. Orderly service teardown instead marks
+//! do not duplicate that diagnostic. Orderly scheduler teardown instead marks
 //! queued sleeps stopped without waking them, signals drivers, and aborts
 //! their tasks.
 
@@ -57,7 +57,7 @@ cfg_if::cfg_if! {
         #[cfg(test)]
         mod fallback;
         mod heap;
-        mod service;
+        mod scheduler;
 
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
@@ -68,8 +68,8 @@ cfg_if::cfg_if! {
         }
 
         #[cfg(test)]
-        pub(crate) use service::AssignmentKind;
-        pub(super) use service::{Builder, Timer};
+        pub(crate) use scheduler::AssignmentKind;
+        pub(super) use scheduler::{Builder, Timer};
     } else {
         mod fallback;
 

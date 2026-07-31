@@ -1,6 +1,6 @@
 //! macOS Mach absolute kqueue timer adapter.
 
-use super::service::{Alarm, AlarmInitError, Deadline};
+use super::scheduler::{Alarm, AlarmInitError, Deadline};
 use std::{
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -468,7 +468,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
     async fn critical_absolute_timer_is_ready_and_consumed() {
-        // Create two alarms as the service does for separate shards.
+        // Create two alarms as the scheduler does for separate shards.
         let alarm = NativeAlarm::new(0).unwrap();
         let other = NativeAlarm::new(1).unwrap();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();

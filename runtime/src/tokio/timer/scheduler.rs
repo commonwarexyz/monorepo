@@ -1,4 +1,4 @@
-//! Native sharded timer service and concurrency protocols.
+//! Native sharded timer scheduler and concurrency protocols.
 
 mod sync;
 
@@ -54,7 +54,7 @@ const ENTRY_CANCELED: u8 = 2;
 /// Entry state after timer infrastructure fails.
 const ENTRY_FAILED: u8 = 3;
 
-/// Entry state after orderly timer service shutdown.
+/// Entry state after orderly timer scheduler shutdown.
 const ENTRY_STOPPED: u8 = 4;
 
 /// Heap index used by entries that are not resident.
@@ -170,7 +170,7 @@ pub(super) trait Alarm: Send + Sync + Sized + 'static {
 
 /// Bridges timer configuration before and after the Tokio runtime is built.
 pub(crate) struct Builder {
-    /// Shared allocator used by callbacks and the eventual service.
+    /// Shared allocator used by callbacks and the eventual scheduler.
     affinity: Arc<Affinity>,
 }
 
@@ -207,7 +207,7 @@ impl Builder {
     }
 }
 
-/// Owns the production native timer service.
+/// Owns the production native timer scheduler.
 pub(crate) struct Timer {
     /// Shards selected by worker or cached fallback affinity.
     shards: Vec<Arc<Shard<NativeAlarm>>>,
@@ -382,7 +382,7 @@ impl Entry {
         // Acquire observes the terminal transition before returning its outcome.
         match self.state.load(AtomicOrdering::Acquire) {
             ENTRY_FIRED => return Poll::Ready(()),
-            ENTRY_FAILED => resume_reported_panic("high-resolution timer service failed"),
+            ENTRY_FAILED => resume_reported_panic("high-resolution timer scheduler failed"),
             ENTRY_STOPPED => return Poll::Pending,
             _ => {}
         }
@@ -398,7 +398,7 @@ impl Entry {
             }
             ENTRY_FAILED => {
                 self.waker.take();
-                resume_reported_panic("high-resolution timer service failed");
+                resume_reported_panic("high-resolution timer scheduler failed");
             }
             ENTRY_STOPPED => {
                 self.waker.take();
