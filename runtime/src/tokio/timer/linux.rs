@@ -1,6 +1,6 @@
 //! Linux monotonic timerfd adapter.
 
-use super::scheduler::{Alarm, AlarmInitError, Deadline};
+use super::scheduler::{Alarm, Deadline};
 use std::{
     io,
     mem::size_of,
@@ -17,7 +17,7 @@ pub(super) struct NativeAlarm {
 
 impl NativeAlarm {
     /// Creates and registers one timerfd with the active Tokio reactor.
-    pub(super) fn new() -> Result<Self, AlarmInitError> {
+    pub(super) fn new() -> Self {
         let raw = retry_interrupted(|| {
             // SAFETY: `timerfd_create` takes no pointers and returns a new descriptor.
             unsafe {
@@ -27,14 +27,16 @@ impl NativeAlarm {
                 )
             }
         })
-        .map_err(|error| AlarmInitError::new("create timerfd", error))?;
+        .unwrap_or_else(|error| panic!("failed to create timerfd: {error}"));
 
         // SAFETY: `raw` is a fresh descriptor whose ownership has not moved.
         let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
-        let descriptor = AsyncFd::with_interest(descriptor, Interest::READABLE)
-            .map_err(|error| AlarmInitError::new("register timerfd with Tokio reactor", error))?;
+        let descriptor =
+            AsyncFd::with_interest(descriptor, Interest::READABLE).unwrap_or_else(|error| {
+                panic!("failed to register timerfd with Tokio reactor: {error}")
+            });
 
-        Ok(Self { descriptor })
+        Self { descriptor }
     }
 
     /// Arms an absolute one-shot deadline or disarms with a zero specification.
@@ -259,7 +261,7 @@ mod tests {
     async fn maximum_deadline_respects_kernel_and_abi_limits() {
         // Construct an adapter and compute both independent limits imposed by
         // timespec and signed kernel hrtimer storage.
-        let alarm = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
         let maximum = alarm.max_deadline();
         let ktime_limit =
             Duration::from_nanos(u64::try_from(i64::MAX).expect("i64::MAX must fit u64"));
@@ -286,8 +288,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support timerfd readiness")]
     async fn descriptor_flags_and_absolute_readiness() {
         // Create two adapters as the scheduler does for separate shards.
-        let alarm = NativeAlarm::new().unwrap();
-        let other = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
+        let other = NativeAlarm::new();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();
 
         // Each alarm owns a distinct timerfd rather than sharing kernel state.
@@ -342,7 +344,7 @@ mod tests {
     async fn rearm_after_unconsumed_expiry_replaces_stale_readiness() {
         // Arm a short deadline and wait for Tokio to observe readability without
         // consuming the timerfd expiration count.
-        let alarm = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
         let first = alarm
             .now()
             .unwrap()
@@ -376,7 +378,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support timerfd readiness")]
     async fn elapsed_arm_rearm_and_disarm() {
         // An already elapsed absolute deadline must become readable promptly.
-        let alarm = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
         let now = alarm.now().unwrap();
         alarm.arm(now).unwrap();
         tokio::time::timeout(Duration::from_secs(2), alarm.wait())

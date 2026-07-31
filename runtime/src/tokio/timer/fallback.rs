@@ -3,7 +3,6 @@
 use crate::utils::Panicker;
 use futures::future::Either;
 use std::{
-    convert::Infallible,
     future::Future,
     time::{Duration, SystemTime},
 };
@@ -20,12 +19,8 @@ impl Builder {
     }
 
     /// Creates the descriptor-free fallback timer facade.
-    pub(crate) fn build(
-        self,
-        _runtime: &Runtime,
-        _panicker: Panicker,
-    ) -> Result<Timer, Infallible> {
-        Ok(Timer)
+    pub(crate) fn build(self, _runtime: &Runtime, _panicker: Panicker) -> Timer {
+        Timer
     }
 }
 
@@ -77,7 +72,7 @@ mod tests {
         let (panicker, _panicked) = Panicker::new(false);
 
         // Fallback construction requires no active reactor or driver state.
-        timer_builder.build(&runtime, panicker).unwrap();
+        timer_builder.build(&runtime, panicker);
     }
 
     #[test]

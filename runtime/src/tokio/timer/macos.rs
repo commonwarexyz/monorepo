@@ -1,6 +1,6 @@
 //! macOS Mach absolute kqueue timer adapter.
 
-use super::scheduler::{Alarm, AlarmInitError, Deadline};
+use super::scheduler::{Alarm, Deadline};
 use std::{
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -33,13 +33,13 @@ pub(super) struct NativeAlarm {
 
 impl NativeAlarm {
     /// Creates and registers one kqueue with the active Tokio reactor.
-    pub(super) fn new() -> Result<Self, AlarmInitError> {
+    pub(super) fn new() -> Self {
         let timebase = Timebase::get();
         let raw = retry_interrupted(|| {
             // SAFETY: `kqueue` takes no pointers and returns a new descriptor.
             unsafe { libc::kqueue() }
         })
-        .map_err(|error| AlarmInitError::new("create kqueue", error))?;
+        .unwrap_or_else(|error| panic!("failed to create kqueue: {error}"));
 
         // SAFETY: `raw` is a fresh descriptor whose ownership has not moved.
         let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
@@ -51,21 +51,23 @@ impl NativeAlarm {
             // SAFETY: `raw` is live and F_GETFD uses no variadic argument.
             unsafe { libc::fcntl(raw, libc::F_GETFD) }
         })
-        .map_err(|error| AlarmInitError::new("read kqueue descriptor flags", error))?;
+        .unwrap_or_else(|error| panic!("failed to read kqueue descriptor flags: {error}"));
         retry_interrupted(|| {
             // SAFETY: `raw` is live and the variadic argument is an integer flag set.
             unsafe { libc::fcntl(raw, libc::F_SETFD, flags | libc::FD_CLOEXEC) }
         })
-        .map_err(|error| AlarmInitError::new("set kqueue close-on-exec", error))?;
+        .unwrap_or_else(|error| panic!("failed to set kqueue close-on-exec: {error}"));
 
-        let descriptor = AsyncFd::with_interest(descriptor, Interest::READABLE)
-            .map_err(|error| AlarmInitError::new("register kqueue with Tokio reactor", error))?;
+        let descriptor =
+            AsyncFd::with_interest(descriptor, Interest::READABLE).unwrap_or_else(|error| {
+                panic!("failed to register kqueue with Tokio reactor: {error}")
+            });
 
-        Ok(Self {
+        Self {
             descriptor,
             timebase,
             installed: AtomicBool::new(false),
-        })
+        }
     }
 
     /// Applies one change to the private kqueue timer.
@@ -385,7 +387,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support kqueue descriptors")]
     async fn maximum_deadline_respects_kqueue_data_limit() {
         // Construct an adapter and derive the positive limit of kqueue's data field.
-        let alarm = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
         let maximum = alarm.max_deadline();
         let max_ticks = u64::try_from(libc::intptr_t::MAX).expect("intptr_t maximum must fit u64");
 
@@ -454,8 +456,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
     async fn critical_absolute_timer_is_ready_and_consumed() {
         // Create two alarms as the scheduler does for separate shards.
-        let alarm = NativeAlarm::new().unwrap();
-        let other = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
+        let other = NativeAlarm::new();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();
 
         // Each alarm owns a distinct kqueue rather than sharing kernel state.
@@ -502,7 +504,7 @@ mod tests {
     async fn rearm_after_unconsumed_expiry_replaces_stale_readiness() {
         // Arm a short deadline and wait for Tokio to observe readability without
         // retrieving the expired EV_ONESHOT event from the kqueue.
-        let alarm = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
         let first = alarm
             .now()
             .unwrap()
@@ -537,7 +539,7 @@ mod tests {
     async fn disarm_removes_unconsumed_expired_event() {
         // Arm a short deadline and observe descriptor readiness without retrieving
         // the expired EV_ONESHOT event.
-        let alarm = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
         let deadline = alarm
             .now()
             .unwrap()
@@ -564,7 +566,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
     async fn elapsed_rearm_and_disarm() {
         // Create one alarm.
-        let alarm = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
 
         // An already elapsed absolute deadline becomes readable.
         alarm.arm(alarm.now().unwrap()).unwrap();
@@ -627,7 +629,7 @@ mod tests {
     async fn disarm_rejects_missing_recorded_timer() {
         // Record a future timer in the adapter, then remove its kernel registration
         // directly without updating the adapter's bookkeeping.
-        let alarm = NativeAlarm::new().unwrap();
+        let alarm = NativeAlarm::new();
         let deadline = alarm
             .now()
             .unwrap()

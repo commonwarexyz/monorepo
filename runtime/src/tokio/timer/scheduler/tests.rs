@@ -1,11 +1,11 @@
 #[cfg(not(feature = "loom"))]
 mod ordinary {
     use super::super::{
-        Affinity, Alarm, AlarmInitError, AssignmentKind, Batch, Deadline, DriverFailure,
-        DriverSignal, ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING,
-        EXPIRY_YIELD_BUDGET, Entry, InitError, NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle,
-        Sleep, ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id,
-        initialize_shards, run_driver, run_driver_loop,
+        Affinity, Alarm, AssignmentKind, Batch, Deadline, DriverFailure, DriverSignal,
+        ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING,
+        EXPIRY_YIELD_BUDGET, Entry, NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle, Sleep,
+        ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id, run_driver,
+        run_driver_loop,
     };
     use crate::{
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
@@ -393,14 +393,6 @@ mod ordinary {
         }
     }
 
-    /// Extracts an expected synchronous initialization error.
-    fn initialization_error<T>(result: Result<T, InitError>) -> InitError {
-        match result {
-            Ok(_) => panic!("timer initialization unexpectedly succeeded"),
-            Err(error) => error,
-        }
-    }
-
     /// Constructs one fake-backed shard without retaining its fatal receiver.
     fn fake_shard() -> (Arc<Shard<FakeAlarm>>, FakeAlarmControl) {
         let (alarm, control) = FakeAlarm::controlled();
@@ -550,98 +542,6 @@ mod ordinary {
             .into_iter()
             .map(|thread| thread.join().unwrap())
             .collect()
-    }
-
-    #[test]
-    fn constructor_failure_cleans_up_every_initialized_shard() {
-        // Build two validated shards before injecting construction failure at shard two.
-        let controls = Arc::new(TestMutex::new(Vec::new()));
-        let (panicker, _panicked) = Panicker::new(true);
-        let result = initialize_shards::<FakeAlarm, _>(4, panicker, |index| {
-            if index == 2 {
-                return Err(AlarmInitError::new(
-                    "create fake alarm",
-                    injected_error("construction"),
-                ));
-            }
-            let (alarm, control) = FakeAlarm::controlled();
-            controls.lock().push(control);
-            Ok(alarm)
-        });
-
-        // Initialization must stop at the failed shard with precise operation context.
-        let error = initialization_error(result);
-        assert_eq!(error.shard, 2);
-        assert_eq!(error.operation, "create fake alarm");
-        assert_eq!(
-            error.to_string(),
-            "failed to initialize timer shard 2 during create fake alarm: \
-             injected fake alarm construction failure"
-        );
-        assert_eq!(
-            std::error::Error::source(&error)
-                .expect("initialization error must retain its I/O source")
-                .to_string(),
-            "injected fake alarm construction failure"
-        );
-        let controls = controls.lock();
-        assert_eq!(controls.len(), 2);
-
-        // Returning the error must drop both earlier shards after arm and disarm validation.
-        let expected = vec![
-            AlarmOperation::Arm(Deadline::from_duration(Duration::from_nanos(u64::MAX))),
-            AlarmOperation::Disarm,
-        ];
-        assert!(controls.iter().all(FakeAlarmControl::is_shutdown));
-        assert!(
-            controls
-                .iter()
-                .all(|control| control.operations() == expected)
-        );
-    }
-
-    #[test]
-    fn initialization_validation_failures_drop_prior_and_current_alarms() {
-        type ValidationCase = (&'static str, fn(&FakeAlarmControl), usize);
-
-        let maximum = Deadline::from_duration(Duration::from_nanos(u64::MAX));
-        let validation = [AlarmOperation::Arm(maximum), AlarmOperation::Disarm];
-        let cases: [ValidationCase; 3] = [
-            ("read monotonic clock", FakeAlarmControl::fail_next_now, 0),
-            ("validate initial arm", FakeAlarmControl::fail_next_arm, 1),
-            (
-                "validate initial disarm",
-                FakeAlarmControl::fail_next_disarm,
-                2,
-            ),
-        ];
-
-        for (operation, inject, failing_operations) in cases {
-            // Let shard zero validate, then inject one validation failure on shard one.
-            let controls = Arc::new(TestMutex::new(Vec::new()));
-            let (panicker, _panicked) = Panicker::new(true);
-            let result = initialize_shards::<FakeAlarm, _>(3, panicker, |index| {
-                let (alarm, control) = FakeAlarm::controlled();
-                if index == 1 {
-                    inject(&control);
-                }
-                controls.lock().push(control);
-                Ok(alarm)
-            });
-
-            let error = initialization_error(result);
-            let controls = controls.lock();
-
-            // Context identifies the failed validation and no later shard is built.
-            assert_eq!(error.shard, 1);
-            assert_eq!(error.operation, operation);
-            assert_eq!(controls.len(), 2);
-
-            // Both alarm owners are dropped with precisely the operations reached.
-            assert!(controls.iter().all(FakeAlarmControl::is_shutdown));
-            assert_eq!(controls[0].operations(), validation);
-            assert_eq!(controls[1].operations(), validation[..failing_operations]);
-        }
     }
 
     #[test]

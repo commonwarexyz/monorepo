@@ -399,9 +399,7 @@ impl crate::Runner for Runner {
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
 
         // Build timer shards against this runtime before invoking user code.
-        let timer = timer_builder
-            .build(&runtime, panicker.clone())
-            .unwrap_or_else(|error| panic!("{error}"));
+        let timer = timer_builder.build(&runtime, panicker.clone());
 
         // Collect process metrics.
         //

@@ -108,34 +108,6 @@ impl Deadline {
     }
 }
 
-/// Error raised while synchronously constructing a timer shard.
-#[derive(Debug, Error)]
-#[error("failed to initialize timer shard {shard} during {operation}: {source}")]
-pub(crate) struct InitError {
-    /// Zero-based shard index.
-    shard: usize,
-    /// Native or reactor operation that failed.
-    operation: &'static str,
-    /// Underlying I/O error.
-    source: io::Error,
-}
-
-/// Error raised while constructing a native alarm object.
-#[derive(Debug)]
-pub(super) struct AlarmInitError {
-    /// Native or reactor operation that failed.
-    pub(super) operation: &'static str,
-    /// Underlying I/O error.
-    pub(super) source: io::Error,
-}
-
-impl AlarmInitError {
-    /// Creates an initialization error with operation context.
-    pub(super) const fn new(operation: &'static str, source: io::Error) -> Self {
-        Self { operation, source }
-    }
-}
-
 /// Statically dispatched boundary around a platform alarm.
 pub(super) trait Alarm: Send + Sync + Sized + 'static {
     /// Largest monotonic deadline that can be armed safely.
@@ -177,21 +149,42 @@ impl Builder {
     }
 
     /// Enters the built runtime, validates every shard, and starts its drivers.
-    pub(crate) fn build(self, runtime: &Runtime, panicker: Panicker) -> Result<Timer, InitError> {
+    pub(crate) fn build(self, runtime: &Runtime, panicker: Panicker) -> Timer {
         // AsyncFd registration requires the reactor selected by this builder.
         let _guard = runtime.enter();
-        let shards = initialize_shards(self.affinity.worker_threads, panicker, |_| {
-            NativeAlarm::new()
-        })?;
+
+        // Construct and validate every shard before starting any driver. If one
+        // operation panics, unwinding drops its alarm and all prior shards.
+        let mut shards = Vec::with_capacity(self.affinity.worker_threads);
+        for index in 0..self.affinity.worker_threads {
+            let alarm = NativeAlarm::new();
+
+            // Fail during runtime startup rather than the first user timer.
+            alarm.now().unwrap_or_else(|error| {
+                panic!(
+                    "failed to initialize timer shard {index} during read monotonic clock: {error}"
+                )
+            });
+            alarm.arm(alarm.max_deadline()).unwrap_or_else(|error| {
+                panic!("failed to initialize timer shard {index} during initial arm: {error}")
+            });
+            alarm.disarm().unwrap_or_else(|error| {
+                panic!("failed to initialize timer shard {index} during initial disarm: {error}")
+            });
+
+            shards.push(Arc::new(Shard::new(index, alarm, panicker.clone())));
+        }
+
         let drivers = shards
             .iter()
             .map(|shard| runtime.spawn(run_driver(Arc::clone(shard))))
             .collect();
-        Ok(Timer {
+
+        Timer {
             shards,
             drivers,
             affinity: self.affinity,
-        })
+        }
     }
 }
 
@@ -203,41 +196,6 @@ pub(crate) struct Timer {
     drivers: Vec<JoinHandle<()>>,
     /// Per-runtime shard selection state.
     affinity: Arc<Affinity>,
-}
-
-/// Constructs and synchronously validates every alarm-backed shard.
-fn initialize_shards<A, F>(
-    worker_threads: usize,
-    panicker: Panicker,
-    mut create_alarm: F,
-) -> Result<Vec<Arc<Shard<A>>>, InitError>
-where
-    A: Alarm,
-    F: FnMut(usize) -> Result<A, AlarmInitError>,
-{
-    // Timer starts drivers only after every alarm completes this validation.
-    // On error, Vec and local-value RAII drop all prior and current alarms.
-    let mut shards = Vec::with_capacity(worker_threads);
-    for index in 0..worker_threads {
-        let init_error = |operation, source| InitError {
-            shard: index,
-            operation,
-            source,
-        };
-        let alarm =
-            create_alarm(index).map_err(|error| init_error(error.operation, error.source))?;
-        alarm
-            .now()
-            .map_err(|source| init_error("read monotonic clock", source))?;
-        alarm
-            .arm(alarm.max_deadline())
-            .map_err(|source| init_error("validate initial arm", source))?;
-        alarm
-            .disarm()
-            .map_err(|source| init_error("validate initial disarm", source))?;
-        shards.push(Arc::new(Shard::new(index, alarm, panicker.clone())));
-    }
-    Ok(shards)
 }
 
 impl Timer {
@@ -581,10 +539,7 @@ impl<A: Alarm> Shard<A> {
         // Consumed one-shot readiness makes the prior armed deadline non-authoritative.
         state.armed_deadline = None;
         while batch.entries.len() < WAKE_BATCH
-            && state
-                .entries
-                .peek()
-                .is_some_and(|deadline| deadline <= now)
+            && state.entries.peek().is_some_and(|deadline| deadline <= now)
         {
             let entry = state.entries.pop().expect("timer heap minimum disappeared");
             // Commit expiry before teardown can observe the removed entry.
@@ -593,10 +548,7 @@ impl<A: Alarm> Shard<A> {
             let _ = entry.transition(ENTRY_FIRED);
             batch.entries.push(entry);
         }
-        Ok(state
-            .entries
-            .peek()
-            .is_some_and(|deadline| deadline <= now))
+        Ok(state.entries.peek().is_some_and(|deadline| deadline <= now))
     }
 
     /// Marks orderly teardown and releases every queued sleep without waking it.
