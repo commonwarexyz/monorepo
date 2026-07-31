@@ -13,24 +13,27 @@ use commonware_runtime::buffer::paged::CacheRef;
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 
-/// Controls whether and how the engine proactively forwards certified blocks
-/// when entering the next view.
+/// Controls whether and how the engine proactively forwards blocks when
+/// entering the next view.
 ///
-/// Forwarding is a best-effort liveness aid: when enabled, the batcher
-/// broadcasts only after we locally certify a proposal and enter the next
-/// view, avoiding sends for proposals that never pass certification.
+/// Forwarding is a best-effort liveness aid. When enabled, the batcher
+/// broadcasts on entering the next view for a proposal that is finalized, or
+/// notarized without a failed certification, avoiding sends for proposals
+/// certification has already rejected. Targets come from votes observed
+/// locally, so a certificate signer whose vote never reached us is still one.
 #[derive(Debug, Clone, Copy)]
 pub enum ForwardingPolicy {
-    /// Do nothing when a certified proposal becomes eligible for forwarding.
+    /// Do nothing when a proposal becomes eligible for forwarding.
     Disabled,
-    /// Forward the block to all participants that did not vote for the proposal.
+    /// Forward the block to all participants whose matching vote was not
+    /// observed locally.
     ///
     /// To only send to the leader of the newly entered view, see [ForwardingPolicy::SilentLeader].
     SilentVoters,
-    /// Forward the block to the leader of the newly entered view if they did not
-    /// vote for the proposal.
+    /// Forward the block to the leader of the newly entered view if the
+    /// leader's matching vote was not observed locally.
     ///
-    /// To forward to all participants that did not vote for the proposal, see [ForwardingPolicy::SilentVoters].
+    /// To forward to all such participants, see [ForwardingPolicy::SilentVoters].
     SilentLeader,
 }
 
@@ -195,8 +198,7 @@ where
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: NonZeroUsize,
 
-    /// Policy for proactively forwarding certified blocks when entering the
-    /// next view.
+    /// Policy for proactively forwarding blocks when entering the next view.
     pub forwarding: ForwardingPolicy,
 }
 

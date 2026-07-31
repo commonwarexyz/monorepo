@@ -1262,7 +1262,7 @@ mod tests {
             elector::{self, Elector as _, RoundRobin},
             scheme::ed25519,
         },
-        types::Epoch,
+        types::{Epoch, ViewDelta},
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
     use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
@@ -2275,14 +2275,22 @@ mod tests {
         let term_length = TermLength::new(NZU32!(3));
         let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
             Elector::new(
-                RoundRobin::<Sha256>::default().with_term(term_length, Duration::from_secs(10)),
+                RoundRobin::<Sha256>::default().with_term(
+                    term_length,
+                    Duration::from_secs(10),
+                    ViewDelta::new(0),
+                ),
                 &scenario,
                 3,
             ),
             &participants,
         );
         let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
-            RoundRobin::<Sha256>::default().with_term(term_length, Duration::from_secs(10)),
+            RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(10),
+                ViewDelta::new(0),
+            ),
             &participants,
         );
 

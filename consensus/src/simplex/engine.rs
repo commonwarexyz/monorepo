@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     CertifiableAutomaton, Relay, Reporter,
-    simplex::{Plan, scheme::Scheme},
+    simplex::{Lookahead, Plan, scheme::Scheme},
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
@@ -81,7 +81,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 view_retention: cfg.view_retention,
                 skip_timeout: cfg.skip_timeout,
-                term_length,
+                lookahead: Lookahead::new(&terms),
                 forwarding: cfg.forwarding,
                 floor: cfg.floor.view(),
             },

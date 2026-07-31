@@ -1,6 +1,6 @@
 use crate::{
     Viewable,
-    simplex::types::{Certificate, Notarization},
+    simplex::types::Certificate,
     types::{TermLength, View},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
@@ -50,10 +50,16 @@ pub(crate) enum Effect {
 pub struct State<S: Scheme, D: Digest> {
     /// Highest seen view.
     current_view: View,
-    /// Most recent certified notarization or finalization.
-    floor: Option<Certificate<S, D>>,
-    /// Notarizations pending certification (possible floors).
-    notarizations: BTreeMap<View, Notarization<S, D>>,
+    /// Highest finalization observed (always a [Certificate::Finalization]).
+    /// Kept until a higher finalization arrives, because it is the one
+    /// certificate any peer at or below its view can always use.
+    finalized: Option<Certificate<S, D>>,
+    /// View of the highest certified notarization above the finalization,
+    /// if any. The certificate itself lives in `notarizations`.
+    certified: Option<View>,
+    /// Notarizations pending certification (possible floors), plus those
+    /// retained below the floor (see [`Self::notarization_cutoff`]).
+    notarizations: BTreeMap<View, Certificate<S, D>>,
     /// Nullifications that cover any view greater than the floor.
     nullifications: BTreeMap<View, Certificate<S, D>>,
     /// Window of requests to send to the resolver.
@@ -76,7 +82,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub fn new(fetch_concurrent: NonZeroUsize, term_length: TermLength) -> Self {
         Self {
             current_view: View::zero(),
-            floor: None,
+            finalized: None,
+            certified: None,
             notarizations: BTreeMap::new(),
             nullifications: BTreeMap::new(),
             fetch_concurrent: fetch_concurrent.get(),
@@ -115,14 +122,23 @@ impl<S: Scheme, D: Digest> State<S, D> {
             }
             Certificate::Notarization(notarization) => {
                 let view = notarization.view();
-                if view > self.floor_view() {
-                    self.notarizations.insert(view, notarization);
+                // Admit anything `prune` would retain, including views the
+                // floor has already passed.
+                if view >= self.notarization_cutoff() {
+                    self.notarizations
+                        .insert(view, Certificate::Notarization(notarization));
                 }
             }
             Certificate::Finalization(finalization) => {
                 let view = finalization.view();
-                if view > self.floor_view() || self.can_upgrade_floor(view) {
-                    self.floor = Some(Certificate::Finalization(finalization));
+                if view > self.finalized_view() {
+                    self.finalized = Some(Certificate::Finalization(finalization));
+                    // A finalization settles everything at or below it, making
+                    // a certified notarization there useless (`certified` is
+                    // always above the finalization when set).
+                    if self.certified.is_some_and(|certified| certified <= view) {
+                        self.certified = None;
+                    }
                     effects.push(self.prune());
                 }
             }
@@ -136,15 +152,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub fn handle_certified(&mut self, view: View, success: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
         if success {
-            // Certification passed: raise the floor to the notarization if we
-            // still hold it. This may occur before or after a nullification
-            // for the same view (and should always be favored). Finalization
-            // remains the stronger proof and can later supersede this floor
-            // at the same or higher view.
-            if let Some(notarization) = self.notarizations.remove(&view)
-                && view > self.floor_view()
-            {
-                self.floor = Some(Certificate::Notarization(notarization));
+            if view > self.floor_view() && self.notarizations.contains_key(&view) {
+                // The notarization stays in the map: same-term peers stuck
+                // below the new floor still need it (see `prune`).
+                self.certified = Some(view);
                 effects.push(self.prune());
             }
 
@@ -172,17 +183,27 @@ impl<S: Scheme, D: Digest> State<S, D> {
         effects
     }
 
-    /// Get the best certificate for a given view (or the floor
-    /// if the view is below the floor).
+    /// Get the best certificate for a given view.
+    ///
+    /// A finalization at or above the view settles the request outright.
+    /// Below the certified-notarization floor, serves the exact-view
+    /// notarization when one is retained (see [`Self::notarization_cutoff`]
+    /// for why the exact view matters), otherwise the floor. Above the floor,
+    /// serves the nullification covering the view, if any.
     pub fn get(&self, view: View) -> Option<&Certificate<S, D>> {
-        // If view is <= floor, return the floor
-        if let Some(floor) = &self.floor
-            && view <= floor.view()
+        if let Some(finalized) = &self.finalized
+            && finalized.view() >= view
         {
-            return Some(floor);
+            return Some(finalized);
         }
-
-        // Otherwise, return the nullification covering the view if it exists.
+        if let Some(certified) = self.certified
+            && view <= certified
+        {
+            return self
+                .notarizations
+                .get(&view)
+                .or_else(|| self.notarizations.get(&certified));
+        }
         self.covering_nullification(view)
     }
 
@@ -197,26 +218,43 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .map(|(_, n)| n)
     }
 
-    /// Get the view of the floor.
+    /// Get the view of the floor: the highest view settled by a finalization
+    /// or a certified notarization.
     fn floor_view(&self) -> View {
-        self.floor
+        self.finalized_view()
+            .max(self.certified.unwrap_or(View::zero()))
+    }
+
+    /// Get the view of the highest finalization observed.
+    fn finalized_view(&self) -> View {
+        self.finalized
             .as_ref()
-            .map(|floor| floor.view())
+            .map(|finalized| finalized.view())
             .unwrap_or(View::zero())
+    }
+
+    /// Get the lowest view whose notarization is still useful.
+    ///
+    /// Below a certified-notarization floor, notarizations remain useful back
+    /// to the floor's term start: peers stuck below the floor must certify
+    /// each view of the term in order, which requires the exact-view
+    /// certificates. A finalization floor settles everything below it instead
+    /// (`certified` is cleared when a finalization overtakes it).
+    ///
+    /// This makes retention scale with the term. A term that notarizes
+    /// without finalizing holds up to `term_length` notarizations, whereas a
+    /// finalization floor holds none. Long terms should account for that.
+    fn notarization_cutoff(&self) -> View {
+        self.certified.map_or_else(
+            || self.floor_view().next(),
+            |certified| certified.term_start(self.term_length),
+        )
     }
 
     /// Returns whether `view` still needs a covering nullification to make
     /// progress: it is above the floor and no stored nullification covers it.
     fn needs_nullification(&self, view: View) -> bool {
         view > self.floor_view() && self.covering_nullification(view).is_none()
-    }
-
-    /// Returns true if the floor can be upgraded at the given view.
-    fn can_upgrade_floor(&self, view: View) -> bool {
-        matches!(
-            self.floor.as_ref(),
-            Some(Certificate::Notarization(n)) if n.view() == view
-        )
     }
 
     /// Return requests for any missing nullifications.
@@ -248,8 +286,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// Prune stored certificates and requests that are not higher than the floor.
     fn prune(&mut self) -> Effect {
         let floor = self.floor_view();
-        self.notarizations.retain(|view, _| *view > floor);
         let term_length = self.term_length;
+        self.notarizations = self.notarizations.split_off(&self.notarization_cutoff());
         self.nullifications
             .retain(|view, _| covers_above_floor(*view, term_length, floor));
         self.failed_views.retain(|view| *view > floor);
@@ -503,7 +541,8 @@ mod tests {
         let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
         let effects = state.handle(Certificate::Notarization(notarization));
         apply_effects(&mut outstanding, &effects);
-        assert!(state.floor.is_none());
+        assert!(state.finalized.is_none());
+        assert!(state.certified.is_none());
         assert_eq!(state.nullifications.len(), 3);
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
@@ -512,7 +551,7 @@ mod tests {
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(6))]);
         apply_effects(&mut outstanding, &effects);
         assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization)
+            matches!(state.finalized.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization)
         );
         assert!(state.notarizations.is_empty());
         assert!(state.nullifications.is_empty());
@@ -610,9 +649,9 @@ mod tests {
         // Certification succeeds for view 5
         let effects = state.handle_certified(View::new(5), true);
 
-        // The certified notarization becomes the floor and view 5 is not marked failed
+        assert_eq!(state.certified, Some(View::new(5)));
         assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
+            matches!(state.get(View::new(5)), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
         assert!(!state.is_failed(View::new(5)));
@@ -633,7 +672,7 @@ mod tests {
         // The notarization answers the request for anchor 1, so the fetch
         // cursor advances to the next missing anchor instead of re-requesting.
         let notarization_v5 = build_notarization(&schemes, &verifier, EPOCH, View::new(5));
-        let effects = state.handle(Certificate::Notarization(notarization_v5.clone()));
+        let effects = state.handle(Certificate::Notarization(notarization_v5));
         assert_eq!(
             effects,
             vec![fetch(6, 5, FetchReason::MissingNullification)]
@@ -645,9 +684,7 @@ mod tests {
         let effects = state.handle_certified(View::new(5), true);
         apply_effects(&mut outstanding, &effects);
 
-        assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
-        );
+        assert_eq!(state.certified, Some(View::new(5)));
         assert_eq!(state.current_view, View::new(14));
         assert_eq!(outstanding_views(&outstanding), vec![6, 11]);
     }
@@ -667,7 +704,7 @@ mod tests {
         // A mid-term notarization answers the request for anchor 1, but once
         // certified it only covers views 1..=3 of term [1, 5].
         let notarization_v3 = build_notarization(&schemes, &verifier, EPOCH, View::new(3));
-        let effects = state.handle(Certificate::Notarization(notarization_v3.clone()));
+        let effects = state.handle(Certificate::Notarization(notarization_v3));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
@@ -678,10 +715,147 @@ mod tests {
         // from just above the mid-term floor rather than from the cursor.
         let effects = state.handle_certified(View::new(3), true);
         apply_effects(&mut outstanding, &effects);
-        assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v3)
-        );
+        assert_eq!(state.certified, Some(View::new(3)));
         assert_eq!(outstanding_views(&outstanding), vec![4, 6, 11]);
+    }
+
+    #[test]
+    fn notarization_floor_serves_exact_same_term_views_below() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
+
+        // Certified notarizations at views 7 and 8 of term [6, 10] promote
+        // the floor step by step, as when running optimistically ahead.
+        let notarization_v7 = build_notarization(&schemes, &verifier, EPOCH, View::new(7));
+        state.handle(Certificate::Notarization(notarization_v7.clone()));
+        state.handle_certified(View::new(7), true);
+        let notarization_v8 = build_notarization(&schemes, &verifier, EPOCH, View::new(8));
+        state.handle(Certificate::Notarization(notarization_v8.clone()));
+        state.handle_certified(View::new(8), true);
+        assert_eq!(state.certified, Some(View::new(8)));
+
+        // A peer stuck below the floor must certify view 7 before it can use
+        // the floor at view 8, so the exact-view notarization is served
+        // instead of the floor.
+        assert!(
+            matches!(state.get(View::new(7)), Some(Certificate::Notarization(n)) if n == &notarization_v7)
+        );
+        assert!(
+            matches!(state.get(View::new(8)), Some(Certificate::Notarization(n)) if n == &notarization_v8)
+        );
+
+        // A finalization floor settles everything below it, so the retained
+        // same-term notarizations are dropped and the floor is served.
+        let finalization_v9 = build_finalization(&schemes, &verifier, EPOCH, View::new(9));
+        state.handle(Certificate::Finalization(finalization_v9.clone()));
+        assert!(state.notarizations.is_empty());
+        assert!(
+            matches!(state.get(View::new(7)), Some(Certificate::Finalization(f)) if f == &finalization_v9)
+        );
+    }
+
+    #[test]
+    fn notarization_floor_served_when_exact_view_absent() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
+
+        // A certified notarization at view 8 of term [6, 10] becomes the
+        // floor; view 7's notarization was never received.
+        let notarization_v8 = build_notarization(&schemes, &verifier, EPOCH, View::new(8));
+        state.handle(Certificate::Notarization(notarization_v8.clone()));
+        state.handle_certified(View::new(8), true);
+        assert_eq!(state.certified, Some(View::new(8)));
+
+        // Requests below the floor without a retained exact-view notarization
+        // fall back to the floor itself, whether in the floor's term (view 7)
+        // or an earlier term (view 3).
+        assert!(
+            matches!(state.get(View::new(7)), Some(Certificate::Notarization(n)) if n == &notarization_v8)
+        );
+        assert!(
+            matches!(state.get(View::new(3)), Some(Certificate::Notarization(n)) if n == &notarization_v8)
+        );
+    }
+
+    #[test]
+    fn notarization_below_floor_retained_when_still_useful() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
+
+        // A certified notarization at view 8 of term [6, 10] becomes the floor.
+        let notarization_v8 = build_notarization(&schemes, &verifier, EPOCH, View::new(8));
+        state.handle(Certificate::Notarization(notarization_v8));
+        state.handle_certified(View::new(8), true);
+        assert_eq!(state.certified, Some(View::new(8)));
+
+        // View 7's notarization arrives only after the floor passed it. It is
+        // still what a same-term peer stuck below the floor needs, so
+        // admission must match what `prune` would retain.
+        let notarization_v7 = build_notarization(&schemes, &verifier, EPOCH, View::new(7));
+        state.handle(Certificate::Notarization(notarization_v7.clone()));
+        assert!(
+            matches!(state.get(View::new(7)), Some(Certificate::Notarization(n)) if n == &notarization_v7)
+        );
+
+        // Views below the floor's term start are settled by the floor itself
+        // and are not retained.
+        let notarization_v3 = build_notarization(&schemes, &verifier, EPOCH, View::new(3));
+        state.handle(Certificate::Notarization(notarization_v3));
+        assert!(!state.notarizations.contains_key(&View::new(3)));
+    }
+
+    #[test]
+    fn promoted_floor_keeps_serving_lower_finalization() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU32!(5)));
+
+        // A finalization at view 7 of term [6, 10] becomes the floor, then a
+        // certified notarization at view 8 promotes past it.
+        let finalization_v7 = build_finalization(&schemes, &verifier, EPOCH, View::new(7));
+        state.handle(Certificate::Finalization(finalization_v7.clone()));
+        let notarization_v8 = build_notarization(&schemes, &verifier, EPOCH, View::new(8));
+        state.handle(Certificate::Notarization(notarization_v8.clone()));
+        state.handle_certified(View::new(8), true);
+        assert_eq!(state.certified, Some(View::new(8)));
+
+        // The finalization must remain servable. A peer stuck at or below
+        // view 7 cannot use the mid-term notarization floor (it lacks the
+        // exact parents to certify it) but a finalization at or above its
+        // request settles it outright.
+        assert!(
+            matches!(state.get(View::new(6)), Some(Certificate::Finalization(f)) if f == &finalization_v7)
+        );
+        assert!(
+            matches!(state.get(View::new(7)), Some(Certificate::Finalization(f)) if f == &finalization_v7)
+        );
+        assert!(
+            matches!(state.get(View::new(8)), Some(Certificate::Notarization(n)) if n == &notarization_v8)
+        );
+
+        // Further same-term promotions keep the finalization and the
+        // exact-view notarizations between it and the floor.
+        let notarization_v9 = build_notarization(&schemes, &verifier, EPOCH, View::new(9));
+        state.handle(Certificate::Notarization(notarization_v9));
+        state.handle_certified(View::new(9), true);
+        assert!(
+            matches!(state.get(View::new(7)), Some(Certificate::Finalization(f)) if f == &finalization_v7)
+        );
+        assert!(
+            matches!(state.get(View::new(8)), Some(Certificate::Notarization(n)) if n == &notarization_v8)
+        );
+
+        // A finalization catching up to the floor upgrades it and drops the
+        // retained certificates below, because the floor settles everything.
+        let finalization_v9 = build_finalization(&schemes, &verifier, EPOCH, View::new(9));
+        state.handle(Certificate::Finalization(finalization_v9.clone()));
+        assert!(state.notarizations.is_empty());
+        assert!(
+            matches!(state.get(View::new(7)), Some(Certificate::Finalization(f)) if f == &finalization_v9)
+        );
     }
 
     #[test]
@@ -695,7 +869,7 @@ mod tests {
         // fetch scan requests anchor 1, and the cursor jumps past the
         // current view to the next term anchor.
         let notarization_v4 = build_notarization(&schemes, &verifier, EPOCH, View::new(4));
-        let effects = state.handle(Certificate::Notarization(notarization_v4.clone()));
+        let effects = state.handle(Certificate::Notarization(notarization_v4));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1]);
 
@@ -705,9 +879,7 @@ mod tests {
         // fetched here.
         let effects = state.handle_certified(View::new(4), true);
         apply_effects(&mut outstanding, &effects);
-        assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v4)
-        );
+        assert_eq!(state.certified, Some(View::new(4)));
         assert!(outstanding_views(&outstanding).is_empty());
 
         // Once the current view grows, the scan must resume from just above
@@ -800,16 +972,21 @@ mod tests {
         let effects = state.handle_certified(View::new(5), true);
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
 
+        assert_eq!(state.certified, Some(View::new(5)));
         assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
+            matches!(state.get(View::new(5)), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
         assert_eq!(state.floor_view(), View::new(5));
 
         let finalization_v5 = build_finalization(&schemes, &verifier, EPOCH, View::new(5));
         let effects = state.handle(Certificate::Finalization(finalization_v5.clone()));
 
+        // The finalization supersedes the certified notarization at the same
+        // view: the notarization is dropped and the finalization is served.
+        assert!(state.certified.is_none());
+        assert!(state.notarizations.is_empty());
         assert!(
-            matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization_v5)
+            matches!(state.get(View::new(5)), Some(Certificate::Finalization(f)) if f == &finalization_v5)
         );
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
     }

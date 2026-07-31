@@ -2,14 +2,14 @@ use super::{Config, Mailbox, Message, Round};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
-        Plan, Viewport,
+        Lookahead, Plan, Viewport,
         actors::voter,
         config::ForwardingPolicy,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
     },
-    types::{Epoch, Participant, Round as Rnd, TermLength, View, ViewDelta},
+    types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Digest;
@@ -35,12 +35,16 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, info_span, trace};
 
-/// Tracks the current view, its leader, and whether the voter has
-/// already been told to timeout this view.
+/// Tracks the current view, its leader, and whether the voter has already been
+/// sent the leader-nullify hint for it.
+///
+/// The hint is tracked on its own rather than alongside other timeout reasons
+/// because the voter may ignore an inactivity hint (a buffered proposal
+/// disproves it) but must always act on the leader's own nullify.
 struct Current {
     view: View,
     leader: Option<Participant>,
-    timed_out: bool,
+    leader_nullify_hinted: bool,
 }
 
 pub struct Actor<E, S, B, D, Re, Rl, T>
@@ -66,7 +70,7 @@ where
     skip_timeout: Duration,
     forwarding: ForwardingPolicy,
     epoch: Epoch,
-    term_length: TermLength,
+    lookahead: Lookahead,
     floor: View,
 
     /// Tracks the last activity time for each participant, indexed by
@@ -151,7 +155,7 @@ where
                 skip_timeout: cfg.skip_timeout,
                 forwarding: cfg.forwarding,
                 epoch: cfg.epoch,
-                term_length: cfg.term_length,
+                lookahead: cfg.lookahead,
                 floor: cfg.floor,
 
                 mailbox_receiver: receiver,
@@ -223,7 +227,7 @@ where
             finalized,
             current,
             view_retention: self.view_retention,
-            term_length: self.term_length,
+            lookahead: self.lookahead,
         }
     }
 
@@ -237,7 +241,7 @@ where
             .collect()
     }
 
-    /// Selects forwarding targets for a certified proposal under the active policy.
+    /// Selects forwarding targets for a forwardable proposal under the active policy.
     fn forward_targets(
         &self,
         round: &Round<S, B, D, Re>,
@@ -273,7 +277,7 @@ where
     /// Returns true if the leader has nullified the current view
     /// and we have not yet notified the voter.
     fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, Re>>) -> bool {
-        if current.timed_out {
+        if current.leader_nullify_hinted {
             return false;
         }
         let Some(leader) = current.leader else {
@@ -281,6 +285,77 @@ where
         };
         work.get(&current.view)
             .is_some_and(|round| round.has_nullify(leader))
+    }
+
+    /// Returns the round for `view`, creating it if needed and stamping the
+    /// stable leader when the view is within the admission window.
+    fn round_for_view<'a>(
+        &self,
+        current: &Current,
+        work: &'a mut BTreeMap<View, Round<S, B, D, Re>>,
+        view: View,
+    ) -> &'a mut Round<S, B, D, Re> {
+        let round = work.entry(view).or_insert_with(|| self.new_round(view));
+        self.stamp_leader(current, view, round);
+        round
+    }
+
+    /// Stamps the current term's stable leader on `view`'s round when the
+    /// view is current or inside the admission window.
+    fn stamp_leader(&self, current: &Current, view: View, round: &mut Round<S, B, D, Re>) {
+        let Some(leader) = current.leader else {
+            return;
+        };
+
+        if view == current.view || self.lookahead.in_admission_window(current.view, view) {
+            round.set_leader(leader);
+        }
+    }
+
+    /// Batch-verifies any ready votes for `view` and forwards newly
+    /// constructible certificates to the voter.
+    async fn process_view(
+        &mut self,
+        voter: &mut voter::Mailbox<S, D>,
+        view: View,
+        round: &mut Round<S, B, D, Re>,
+    ) {
+        loop {
+            let timer = self.verify_latency.timer(self.context.as_ref());
+            let Some((batch, failed)) = round
+                .try_verify(self.context.as_mut(), &self.strategy)
+                .await
+            else {
+                trace!(%view, "no verifier ready");
+                break;
+            };
+
+            timer.observe(self.context.as_ref());
+
+            trace!(%view, batch, "batch verified votes");
+            self.verified.inc_by(batch as u64);
+            self.batch_size.observe(batch as f64);
+
+            for invalid in failed {
+                if let Some(signer) = self.scheme.participants().key(invalid) {
+                    commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+                }
+            }
+        }
+
+        // Construct and forward every certificate with a verified quorum
+        while let Some(certificate) = self
+            .recover_latency
+            .time_some(
+                self.context.as_ref(),
+                round.try_construct_certificate(&self.strategy),
+            )
+            .await
+        {
+            let kind = certificate.kind();
+            debug!(%view, %kind, "constructed certificate, forwarding to voter");
+            voter.recovered(certificate);
+        }
     }
 
     pub fn start(
@@ -311,15 +386,17 @@ where
         let mut current = Current {
             view: View::zero(),
             leader: None,
-            timed_out: false,
+            leader_nullify_hinted: false,
         };
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
+        // Views to (re)process this iteration. Reused to keep the per-vote
+        // path allocation-free; a duplicate entry only costs a no-op pass.
+        let mut dirty_views: Vec<View> = Vec::new();
         select_loop! {
             self.context,
             on_start => {
-                // Track which view was modified (if any) for certificate construction
-                let updated_view;
+                dirty_views.clear();
             },
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
@@ -343,7 +420,7 @@ where
                         current: new_current,
                         leader,
                         finalized: new_finalized,
-                        certified_proposal,
+                        forwardable_proposal,
                     } => {
                         let process = process_span(span.clone());
                         let _guard = process.entered();
@@ -352,7 +429,7 @@ where
                         current = Current {
                             view: new_current,
                             leader: Some(leader),
-                            timed_out: false,
+                            leader_nullify_hinted: false,
                         };
                         finalized = new_finalized;
 
@@ -363,11 +440,20 @@ where
 
                         // Track the new current view, adopting the voter's view
                         // span so all of its work shares one trace
-                        let round = work
-                            .entry(current.view)
-                            .or_insert_with(|| self.new_round(current.view));
+                        let round = self.round_for_view(&current, &mut work, current.view);
                         round.set_span(span);
-                        round.set_leader(leader);
+                        dirty_views.push(current.view);
+
+                        // Revisit rounds in the admission window now that the
+                        // current view advanced: rounds already visited are
+                        // cheap no-ops to reprocess.
+                        let limit = self.lookahead.admission_limit(current.view);
+                        if current.view < limit {
+                            for (&view, round) in work.range_mut(current.view.next()..=limit) {
+                                self.stamp_leader(&current, view, round);
+                                dirty_views.push(view);
+                            }
+                        }
 
                         // If the leader nullified this view or has not been active
                         // recently, tell the voter to reduce the leader timeout to now.
@@ -392,12 +478,13 @@ where
                             },
                         };
                         if let Some(timeout_reason) = timeout_reason {
-                            current.timed_out = true;
+                            current.leader_nullify_hinted =
+                                matches!(timeout_reason, TimeoutReason::LeaderNullify);
                             voter.timeout(Rnd::new(self.epoch, current.view), timeout_reason);
                         }
 
                         // Forward the proposal, if enabled and we have something to forward
-                        if let Some((proposal, round)) = certified_proposal
+                        if let Some((proposal, round)) = forwardable_proposal
                             .filter(|_| self.forwarding.is_enabled())
                             .and_then(|proposal| {
                                 work.get(&proposal.view()).map(|round| (proposal, round))
@@ -407,8 +494,6 @@ where
                             self.forward_proposal(proposal, participants);
                         }
 
-                        // Setting leader may enable batch verification
-                        updated_view = current.view;
                     }
                     Message::Constructed(message) => {
                         // Skip votes below the viewport floor. Our own votes
@@ -421,13 +506,15 @@ where
                             continue;
                         }
 
-                        // Add the message to the verifier
-                        let round = work.entry(view).or_insert_with(|| self.new_round(view));
+                        // Add the message to the verifier. Since these are our own
+                        // votes, we can safely add the message even if the view is
+                        // arbitrarily far in the future.
+                        let round = self.round_for_view(&current, &mut work, view);
                         let process = process_span(round.span());
                         let _guard = process.entered();
                         round.add_constructed(message);
                         self.added.inc();
-                        updated_view = view;
+                        dirty_views.push(view);
                     }
                 }
             },
@@ -465,8 +552,7 @@ where
                 // Skip certificates we already have for the view
                 let kind = message.kind();
                 let round = work.get(&view);
-                let duplicate = round.is_some_and(|round| round.has_certificate(kind));
-                if duplicate {
+                if round.is_some_and(|round| round.has_certificate(kind)) {
                     trace!(%view, %kind, "skipping duplicate certificate");
                     continue;
                 }
@@ -483,44 +569,19 @@ where
                 );
                 let _guard = span.entered();
 
-                // Verify the certificate
-                let valid = match &message {
-                    Certificate::Notarization(notarization) => notarization.verify(
-                        self.context.as_mut(),
-                        self.scheme.as_ref(),
-                        &self.strategy,
-                    ),
-                    Certificate::Nullification(nullification) => nullification.verify::<_, D>(
-                        self.context.as_mut(),
-                        self.scheme.as_ref(),
-                        &self.strategy,
-                    ),
-                    Certificate::Finalization(finalization) => finalization.verify(
-                        self.context.as_mut(),
-                        self.scheme.as_ref(),
-                        &self.strategy,
-                    ),
-                };
-                if !valid {
+                // Verify the certificate.
+                if !message.verify(self.context.as_mut(), self.scheme.as_ref(), &self.strategy) {
                     commonware_p2p::block!(self.blocker, sender, %view, %kind, "invalid certificate");
                     continue;
                 }
 
-                // Store and forward to voter
-                let reprocess_votes = work
-                    .entry(view)
-                    .or_insert_with(|| self.new_round(view))
-                    .record_certificate(&message);
-                voter.recovered(message);
-
-                // A notarization may make buffered finalize votes newly eligible,
-                // requiring another verification and construction pass.
-                if !reprocess_votes {
-                    // Otherwise, certificates are already forwarded to voter,
-                    // no need for construction.
-                    continue;
+                // Store and forward to voter, revisiting the round when the
+                // certificate may have unlocked already-buffered votes.
+                let round = self.round_for_view(&current, &mut work, view);
+                if round.record_certificate(&message) {
+                    dirty_views.push(view);
                 }
-                updated_view = view;
+                voter.recovered(message);
             },
             // Handle votes from the network
             Ok((sender, message)) = vote_receiver.recv() else break => {
@@ -555,11 +616,8 @@ where
                 }
 
                 // Add the vote to the verifier
-                if work
-                    .entry(view)
-                    .or_insert_with(|| self.new_round(view))
-                    .add_network(sender.clone(), message)
-                {
+                let round = self.round_for_view(&current, &mut work, view);
+                if round.add_network(sender.clone(), message) {
                     self.added.inc();
 
                     // Update per-peer latest vote metric (only if higher than current)
@@ -572,7 +630,7 @@ where
                     // the voter so it can fast-path timeout without waiting for its local
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
-                        current.timed_out = true;
+                        current.leader_nullify_hinted = true;
                         let round = Rnd::new(self.epoch, current.view);
                         let _guard = work
                             .get(&current.view)
@@ -581,98 +639,51 @@ where
                             .entered();
                         voter.timeout(round, TimeoutReason::LeaderNullify);
                     }
+                    dirty_views.push(view);
                 }
-                updated_view = view;
             },
             on_end => {
-                assert!(
-                    updated_view != View::zero(),
-                    "updated view must be greater than zero"
-                );
-
-                // Forward the selected proposal to voter if we are not the
-                // leader and have not already forwarded it.
-                if let Some(round) = work.get_mut(&current.view)
-                    && let Some(me) = self.scheme.me()
-                    && let Some(proposal) = round.try_forward_proposal(me)
-                {
-                    round.span().in_scope(|| voter.proposal(proposal));
-                }
-
-                // Skip verification and construction for views at or below finalized.
-                //
-                // We still admit votes at or below finalized (see
-                // [Viewport::retains]) because we want to notify the reporter of
-                // all votes within the activity timeout (even if we don't need
-                // them in the voter).
-                if updated_view <= finalized {
+                if dirty_views.is_empty() {
                     continue;
                 }
 
-                // Process the updated view (if any)
-                let Some(round) = work.get_mut(&updated_view) else {
-                    continue;
-                };
-                let span = round.span();
-                async {
-                    // Batch verify every ready kind. Multiple vote kinds may
-                    // be ready at the same time.
-                    let mut verified_any = false;
-                    loop {
-                        let timer = self.verify_latency.timer(self.context.as_ref());
-                        let Some((batch, failed)) = round
-                            .try_verify(self.context.as_mut(), &self.strategy)
-                            .await
-                        else {
-                            break;
-                        };
-                        timer.observe(self.context.as_ref());
-                        verified_any = true;
+                let me = self.scheme.me();
 
-                        // Process verified votes.
-                        trace!(%updated_view, batch, "batch verified votes");
-                        self.verified.inc_by(batch as u64);
-                        self.batch_size.observe(batch as f64);
-
-                        // Block invalid signers
-                        for invalid in failed {
-                            if let Some(signer) = self.scheme.participants().key(invalid) {
-                                commonware_p2p::block!(
-                                    self.blocker,
-                                    signer.clone(),
-                                    "invalid signature"
-                                );
-                            }
-                        }
+                for view in dirty_views.drain(..) {
+                    // Skip verification and construction for views at or below
+                    // finalized. We still admit votes there (see
+                    // [Viewport::retains]) to notify the reporter of all votes
+                    // within the retained window (even if we don't need them
+                    // in the voter).
+                    if view <= finalized {
+                        continue;
                     }
-                    if !verified_any {
-                        trace!(
-                            current = %current.view,
-                            %finalized,
-                            "no verifier ready"
-                        );
-                    }
+                    let Some(round) = work.get_mut(&view) else {
+                        continue;
+                    };
 
-                    // Construct and forward every certificate with a verified quorum
-                    while let Some(certificate) = self
-                        .recover_latency
-                        .time_some(
-                            self.context.as_ref(),
-                            round.try_construct_certificate(&self.strategy),
-                        )
-                        .await
+                    // Forward the round's proposal once known, keeping
+                    // optimistic followers fed. No window check needed: the
+                    // proposal comes from a stamped leader's vote (stamping is
+                    // window-gated) or from a verified certificate.
+                    if let Some(me) = me
+                        && let Some(proposal) = round.try_forward_proposal(me)
                     {
-                        let kind = certificate.kind();
-                        debug!(
-                            %updated_view,
-                            %kind,
-                            "constructed certificate, forwarding to voter"
-                        );
-                        voter.recovered(certificate);
+                        round.span().in_scope(|| voter.proposal(proposal));
                     }
+
+                    // We only process bounded future work. This keeps memory and
+                    // verification bounded while still enabling optimistic lookahead.
+                    if !self.lookahead.admits(current.view, view) {
+                        trace!(current = %current.view, %view, "skipping out-of-window round processing");
+                        continue;
+                    }
+
+                    let span = round.span();
+                    self.process_view(&mut voter, view, round)
+                        .instrument(span)
+                        .await;
                 }
-                .instrument(span)
-                .await;
 
                 // Drop any rounds that are no longer retained
                 let viewport = self.viewport(finalized, current.view);
