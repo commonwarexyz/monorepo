@@ -10,10 +10,7 @@
 
 ## Platform Compatibility
 
-Commonware supports Linux and macOS. Windows is not supported.
-The `io_uring` storage and network backends are Linux-only.
-Selected crates are also checked for `wasm32-unknown-unknown` and `no_std`.
-Compatibility outside the supported native platforms varies by crate.
+Commonware supports Linux and macOS. Windows is not supported. The `io_uring` storage and network backends are Linux-only. Selected crates are also checked for `wasm32-unknown-unknown` and `no_std`. Compatibility outside the supported native platforms varies by crate.
 
 ## Primitives
 
