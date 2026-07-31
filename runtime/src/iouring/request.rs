@@ -1370,7 +1370,7 @@ mod tests {
 
     #[cfg(feature = "iouring-storage")]
     #[test]
-    fn test_uncached_write_retries_without_hint_when_unsupported() {
+    fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
         let dont_cache_supported = Arc::new(AtomicBool::new(true));
         let (tx, _rx) = oneshot::channel();
         let mut request = WriteAtRequest {
@@ -1378,16 +1378,19 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            sync: true,
             cache: Cache::Disabled(dont_cache_supported.clone()),
             result: None,
             sender: tx,
         };
 
-        assert_eq!(request.rw_flags(), libc::RWF_DONTCACHE);
+        assert_eq!(
+            request.rw_flags(),
+            libc::RWF_DSYNC | libc::RWF_DONTCACHE
+        );
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        assert_eq!(request.rw_flags(), 0);
+        assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
     }
 
     #[test]

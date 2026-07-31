@@ -42,7 +42,7 @@ use super::{
     view::View,
 };
 use crate::{
-    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
+    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs, WriteOptions,
     buffer::{
         SyncState,
         paged::{CHECKSUM_SIZE, CacheRef, Checksum, Slot},
@@ -124,7 +124,7 @@ impl<B: Blob> Writer<B> {
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.sync_state
-            .write_at_uncached(&self.blob, offset, bufs)
+            .write_at(&self.blob, offset, bufs, WriteOptions::DONT_CACHE)
             .await
     }
 
@@ -138,7 +138,12 @@ impl<B: Blob> Writer<B> {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         self.sync_state
-            .write_at_sync_uncached(&self.blob, offset, bufs)
+            .write_at(
+                &self.blob,
+                offset,
+                bufs,
+                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+            )
             .await
     }
 

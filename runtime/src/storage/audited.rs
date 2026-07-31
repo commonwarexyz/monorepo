@@ -1,4 +1,4 @@
-use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::Auditor};
+use crate::{Error, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::Auditor};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -85,38 +85,20 @@ impl<B: crate::Blob> Blob<B> {
         &self,
         offset: u64,
         bufs: IoBufs,
-        uncached: bool,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        self.auditor.event(b"write_at", |hasher| {
+        let operation: &[u8] = if options.contains(WriteOptions::SYNC) {
+            b"write_at_sync"
+        } else {
+            b"write_at"
+        };
+        self.auditor.event(operation, |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(offset.to_be_bytes());
             hasher.update_bufs(&bufs);
         });
-        if uncached {
-            self.inner.write_at_uncached(offset, bufs).await
-        } else {
-            self.inner.write_at(offset, bufs).await
-        }
-    }
-
-    async fn write_at_sync_inner(
-        &self,
-        offset: u64,
-        bufs: IoBufs,
-        uncached: bool,
-    ) -> Result<(), Error> {
-        self.auditor.event(b"write_at_sync", |hasher| {
-            hasher.update(self.partition.as_bytes());
-            hasher.update(&self.name);
-            hasher.update(offset.to_be_bytes());
-            hasher.update_bufs(&bufs);
-        });
-        if uncached {
-            self.inner.write_at_sync_uncached(offset, bufs).await
-        } else {
-            self.inner.write_at_sync(offset, bufs).await
-        }
+        self.inner.write_at_with(offset, bufs, options).await
     }
 }
 
@@ -148,15 +130,17 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), false).await
+        self.write_at_inner(offset, bufs.into(), WriteOptions::NONE)
+            .await
     }
 
-    async fn write_at_uncached(
+    async fn write_at_with(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), true).await
+        self.write_at_inner(offset, bufs.into(), options).await
     }
 
     async fn write_at_sync(
@@ -164,15 +148,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.write_at_sync_inner(offset, bufs.into(), false).await
-    }
-
-    async fn write_at_sync_uncached(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.write_at_sync_inner(offset, bufs.into(), true).await
+        self.write_at_inner(offset, bufs.into(), WriteOptions::SYNC)
+            .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -206,7 +183,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
-        Storage as _,
+        Storage as _, WriteOptions,
         deterministic::Auditor,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
@@ -384,6 +361,7 @@ mod tests {
     struct RecordingBlob {
         write_chunk_counts: Arc<Mutex<Vec<usize>>>,
         sync_write_chunk_counts: Arc<Mutex<Vec<usize>>>,
+        write_options: Arc<Mutex<Vec<WriteOptions>>>,
     }
 
     impl crate::Blob for RecordingBlob {
@@ -422,6 +400,20 @@ mod tests {
             Ok(())
         }
 
+        async fn write_at_with(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> Result<(), Error> {
+            self.write_options.lock().push(options);
+            if options.contains(WriteOptions::SYNC) {
+                self.write_at_sync(offset, bufs).await
+            } else {
+                self.write_at(offset, bufs).await
+            }
+        }
+
         async fn resize(&self, _len: u64) -> Result<(), Error> {
             Ok(())
         }
@@ -436,9 +428,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_audited_blob_writes_preserve_chunking() {
+    async fn test_audited_blob_writes_preserve_chunking_and_options() {
         let write_chunk_counts = Arc::new(Mutex::new(Vec::new()));
         let sync_write_chunk_counts = Arc::new(Mutex::new(Vec::new()));
+        let write_options = Arc::new(Mutex::new(Vec::new()));
         let blob = super::Blob {
             auditor: Arc::new(crate::deterministic::Auditor::default()),
             partition: "partition".into(),
@@ -446,6 +439,7 @@ mod tests {
             inner: RecordingBlob {
                 write_chunk_counts: write_chunk_counts.clone(),
                 sync_write_chunk_counts: sync_write_chunk_counts.clone(),
+                write_options: write_options.clone(),
             },
         };
 
@@ -478,5 +472,16 @@ mod tests {
 
         assert_eq!(*write_chunk_counts.lock(), vec![4]);
         assert_eq!(*sync_write_chunk_counts.lock(), vec![4]);
+
+        let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
+        blob.write_at_with(0, IoBuf::from(b"e".to_vec()), options)
+            .await
+            .unwrap();
+
+        assert_eq!(*sync_write_chunk_counts.lock(), vec![4, 1]);
+        assert_eq!(
+            *write_options.lock(),
+            vec![WriteOptions::NONE, WriteOptions::SYNC, options]
+        );
     }
 }

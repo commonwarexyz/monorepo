@@ -1,6 +1,6 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::BoxDynRng};
+use crate::{Error, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::BoxDynRng};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
@@ -288,57 +288,22 @@ impl<B: crate::Blob> Blob<B> {
         &self,
         offset: u64,
         bufs: IoBufs,
-        uncached: bool,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         let total_bytes = bufs.remaining() as u64;
-
-        let (should_fail, partial_rate) = self.ctx.check_write_fault();
-        if should_fail {
-            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
-                // Partial write: write some bytes, sync, then fail
-                let bufs = bufs.coalesce().slice(..bytes as usize);
-                if uncached {
-                    self.inner.write_at_uncached(offset, bufs).await?;
-                } else {
-                    self.inner.write_at(offset, bufs).await?;
-                }
-                self.inner.sync().await?;
-                self.size
-                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
-                return Err(injected_io_error().into());
-            }
-            return Err(injected_io_error().into());
-        }
-
-        if uncached {
-            self.inner.write_at_uncached(offset, bufs).await?;
-        } else {
-            self.inner.write_at(offset, bufs).await?;
-        }
-        self.size
-            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
-        Ok(())
-    }
-
-    async fn write_at_sync_inner(
-        &self,
-        offset: u64,
-        bufs: IoBufs,
-        uncached: bool,
-    ) -> Result<(), Error> {
-        let total_bytes = bufs.remaining() as u64;
-        if total_bytes == 0 {
+        let sync = options.contains(WriteOptions::SYNC);
+        if sync && total_bytes == 0 {
             return Ok(());
         }
 
         let (should_fail, partial_rate) = self.ctx.check_write_fault();
         if should_fail {
             if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
+                // Partial write: write some bytes, sync, then fail
                 let bufs = bufs.coalesce().slice(..bytes as usize);
-                if uncached {
-                    self.inner.write_at_sync_uncached(offset, bufs).await?;
-                } else {
-                    self.inner.write_at_sync(offset, bufs).await?;
+                self.inner.write_at_with(offset, bufs, options).await?;
+                if !sync {
+                    self.inner.sync().await?;
                 }
                 self.size
                     .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
@@ -347,22 +312,16 @@ impl<B: crate::Blob> Blob<B> {
             return Err(injected_io_error().into());
         }
 
-        if self.ctx.should_fail(Op::Sync) {
-            if uncached {
-                self.inner.write_at_uncached(offset, bufs).await?;
-            } else {
-                self.inner.write_at(offset, bufs).await?;
-            }
+        if sync && self.ctx.should_fail(Op::Sync) {
+            self.inner
+                .write_at_with(offset, bufs, options.without(WriteOptions::SYNC))
+                .await?;
             self.size
                 .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
             return Err(injected_io_error().into());
         }
 
-        if uncached {
-            self.inner.write_at_sync_uncached(offset, bufs).await?;
-        } else {
-            self.inner.write_at_sync(offset, bufs).await?;
-        }
+        self.inner.write_at_with(offset, bufs, options).await?;
         self.size
             .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
         Ok(())
@@ -390,15 +349,17 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), false).await
+        self.write_at_inner(offset, bufs.into(), WriteOptions::NONE)
+            .await
     }
 
-    async fn write_at_uncached(
+    async fn write_at_with(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), true).await
+        self.write_at_inner(offset, bufs.into(), options).await
     }
 
     async fn write_at_sync(
@@ -406,15 +367,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.write_at_sync_inner(offset, bufs.into(), false).await
-    }
-
-    async fn write_at_sync_uncached(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.write_at_sync_inner(offset, bufs.into(), true).await
+        self.write_at_inner(offset, bufs.into(), WriteOptions::SYNC)
+            .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

@@ -84,81 +84,27 @@ impl SyncState {
         }
     }
 
-    /// Write data that will require a later sync.
+    /// Write data with the requested cache and durability behavior.
     async fn write_at(
         &mut self,
         blob: &impl crate::Blob,
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
-    ) -> Result<(), crate::Error> {
-        self.write_at_inner(blob, offset, bufs, false).await
-    }
-
-    /// Write data with an uncached hint that will require a later sync.
-    async fn write_at_uncached(
-        &mut self,
-        blob: &impl crate::Blob,
-        offset: u64,
-        bufs: impl Into<crate::IoBufs> + Send,
-    ) -> Result<(), crate::Error> {
-        self.write_at_inner(blob, offset, bufs, true).await
-    }
-
-    async fn write_at_inner(
-        &mut self,
-        blob: &impl crate::Blob,
-        offset: u64,
-        bufs: impl Into<crate::IoBufs> + Send,
-        uncached: bool,
+        options: crate::WriteOptions,
     ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         let bufs = bufs.into();
-        if uncached {
-            blob.write_at_uncached(offset, bufs).await?;
-        } else {
-            blob.write_at(offset, bufs).await?;
+        if !options.contains(crate::WriteOptions::SYNC) {
+            blob.write_at_with(offset, bufs, options).await?;
+            self.mark_dirty();
+            return Ok(());
         }
-        self.mark_dirty();
-        Ok(())
-    }
 
-    /// Write data and make it durable before returning.
-    async fn write_at_sync(
-        &mut self,
-        blob: &impl crate::Blob,
-        offset: u64,
-        bufs: impl Into<crate::IoBufs> + Send,
-    ) -> Result<(), crate::Error> {
-        self.write_at_sync_inner(blob, offset, bufs, false).await
-    }
-
-    /// Write data with an uncached hint and make it durable before returning.
-    async fn write_at_sync_uncached(
-        &mut self,
-        blob: &impl crate::Blob,
-        offset: u64,
-        bufs: impl Into<crate::IoBufs> + Send,
-    ) -> Result<(), crate::Error> {
-        self.write_at_sync_inner(blob, offset, bufs, true).await
-    }
-
-    async fn write_at_sync_inner(
-        &mut self,
-        blob: &impl crate::Blob,
-        offset: u64,
-        bufs: impl Into<crate::IoBufs> + Send,
-        uncached: bool,
-    ) -> Result<(), crate::Error> {
-        self.wait_for_pending().await?;
-        let bufs = bufs.into();
         match self {
             Self::Dirty => {
                 // Earlier mutations need a full durability barrier too.
-                if uncached {
-                    blob.write_at_uncached(offset, bufs).await?;
-                } else {
-                    blob.write_at(offset, bufs).await?;
-                }
+                blob.write_at_with(offset, bufs, options.without(crate::WriteOptions::SYNC))
+                    .await?;
                 blob.sync().await?;
                 *self = Self::Clean;
                 Ok(())
@@ -166,11 +112,7 @@ impl SyncState {
             Self::Clean => {
                 // If this fails, a later sync must still cover the attempted write.
                 self.mark_dirty();
-                if uncached {
-                    blob.write_at_sync_uncached(offset, bufs).await?;
-                } else {
-                    blob.write_at_sync(offset, bufs).await?;
-                }
+                blob.write_at_with(offset, bufs, options).await?;
                 *self = Self::Clean;
                 Ok(())
             }
@@ -218,7 +160,7 @@ mod tests {
     use super::*;
     use crate::{
         Blob as _, BufMut, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner, Storage,
-        deterministic,
+        WriteOptions, deterministic,
         mocks::{DelayedSyncBlob, next_pending_sync},
     };
     use commonware_macros::test_traced;
@@ -324,20 +266,32 @@ mod tests {
         }
 
         async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.write_at_with(offset, buf, WriteOptions::NONE).await
+        }
+
+        async fn write_at_with(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> Result<(), Error> {
             let buf = buf.into().coalesce();
             let mut state = self.state.lock();
             Self::write(&mut state.data, offset, buf.as_ref())?;
             state.writes += 1;
-            Ok(())
-        }
 
-        async fn write_at_uncached(
-            &self,
-            offset: u64,
-            buf: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.write_at(offset, buf).await?;
-            self.state.lock().uncached_writes += 1;
+            let sync = options.contains(WriteOptions::SYNC);
+            if sync {
+                Self::write(&mut state.durable, offset, buf.as_ref())?;
+                state.range_syncs += 1;
+            }
+            if options.contains(WriteOptions::DONT_CACHE) {
+                if sync {
+                    state.uncached_range_syncs += 1;
+                } else {
+                    state.uncached_writes += 1;
+                }
+            }
             Ok(())
         }
 
@@ -346,23 +300,7 @@ mod tests {
             offset: u64,
             buf: impl Into<IoBufs> + Send,
         ) -> Result<(), Error> {
-            let buf = buf.into().coalesce();
-            let mut state = self.state.lock();
-            Self::write(&mut state.data, offset, buf.as_ref())?;
-            Self::write(&mut state.durable, offset, buf.as_ref())?;
-            state.writes += 1;
-            state.range_syncs += 1;
-            Ok(())
-        }
-
-        async fn write_at_sync_uncached(
-            &self,
-            offset: u64,
-            buf: impl Into<IoBufs> + Send,
-        ) -> Result<(), Error> {
-            self.write_at_sync(offset, buf).await?;
-            self.state.lock().uncached_range_syncs += 1;
-            Ok(())
+            self.write_at_with(offset, buf, WriteOptions::SYNC).await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {

@@ -156,7 +156,7 @@
 //!   later queued requests, otherwise the loop can deadlock.
 
 use crate::{
-    Error, IoBufMut, IoBufs,
+    Error, IoBufMut, IoBufs, WriteOptions,
     telemetry::metrics::{Gauge, Register, raw},
 };
 use commonware_utils::channel::{
@@ -425,71 +425,27 @@ impl Handle {
         })
     }
 
-    /// Submit a logical positioned write request and wait for its completion.
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    pub async fn write_at(
-        &self,
-        file: Arc<File>,
-        offset: u64,
-        bufs: IoBufs,
-    ) -> Result<(), Error> {
-        self.write_at_with_cache(file, offset, bufs, Cache::Enabled)
-            .await
-    }
-
-    /// Submit a logical positioned write request with an explicit page-cache policy.
-    pub(crate) async fn write_at_with_cache(
-        &self,
-        file: Arc<File>,
-        offset: u64,
-        bufs: IoBufs,
-        cache: Cache,
-    ) -> Result<(), Error> {
-        let (tx, rx) = oneshot::channel();
-        self.enqueue(Request::WriteAt(WriteAtRequest {
-            file,
-            offset,
-            written: 0,
-            write: bufs.into(),
-            sync: false,
-            cache,
-            result: None,
-            sender: tx,
-        }))
-        .await
-        .map_err(|_| Error::WriteFailed)?;
-        rx.await.map_err(|_| Error::WriteFailed)?
-    }
-
-    /// Submit a logical positioned write with per-write sync and wait for its completion.
+    /// Submit a logical positioned write request with the requested cache and durability behavior.
     ///
     /// Durability is fused into the write (`RWF_DSYNC`) only when the whole write fits one
     /// submission: fusing every submission would serialize the submissions behind per-SQE
-    /// durability waits. A larger write is submitted plain and made durable with one
-    /// trailing fsync, which keeps the device pipelined and pays a single wait at the end.
+    /// durability waits. A larger durable write is submitted plain and followed by one fsync,
+    /// which keeps the device pipelined and pays a single wait at the end.
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    pub async fn write_at_sync(
+    pub(crate) async fn write_at(
         &self,
         file: Arc<File>,
         offset: u64,
         bufs: IoBufs,
-    ) -> Result<(), Error> {
-        self.write_at_sync_with_cache(file, offset, bufs, Cache::Enabled)
-            .await
-    }
-
-    /// Submit a logical positioned write with per-write sync and an explicit page-cache policy.
-    pub(crate) async fn write_at_sync_with_cache(
-        &self,
-        file: Arc<File>,
-        offset: u64,
-        bufs: IoBufs,
+        options: WriteOptions,
         cache: Cache,
     ) -> Result<(), Error> {
-        let fused = bufs.chunk_count() <= IOVEC_BATCH_SIZE;
+        let durable = options.contains(WriteOptions::SYNC);
+        let fused = durable && bufs.chunk_count() <= IOVEC_BATCH_SIZE;
+        let trailing_sync = (durable && !fused).then(|| file.clone());
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
-            file: file.clone(),
+            file,
             offset,
             written: 0,
             write: bufs.into(),
@@ -501,10 +457,10 @@ impl Handle {
         .await
         .map_err(|_| Error::WriteFailed)?;
         rx.await.map_err(|_| Error::WriteFailed)??;
-        if fused {
-            return Ok(());
+        if let Some(file) = trailing_sync {
+            self.sync(file).await?;
         }
-        self.sync(file).await
+        Ok(())
     }
 
     /// Submit a logical fsync request and wait for its completion.

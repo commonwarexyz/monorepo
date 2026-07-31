@@ -22,7 +22,7 @@
 
 use super::Header;
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
+    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, WriteOptions,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
@@ -310,7 +310,7 @@ impl Blob {
         &self,
         offset: u64,
         bufs: IoBufs,
-        cache: iouring::Cache,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         let offset = offset
             .checked_add(self.data_offset)
@@ -320,46 +320,14 @@ impl Blob {
             return Ok(());
         }
 
-        match cache {
-            iouring::Cache::Enabled => {
-                self.io_handle
-                    .write_at(self.file.clone(), offset, bufs)
-                    .await
-            }
-            cache @ iouring::Cache::Disabled(_) => {
-                self.io_handle
-                    .write_at_with_cache(self.file.clone(), offset, bufs, cache)
-                    .await
-            }
-        }
-    }
-
-    async fn write_at_sync_inner(
-        &self,
-        offset: u64,
-        bufs: IoBufs,
-        cache: iouring::Cache,
-    ) -> Result<(), Error> {
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        match cache {
-            iouring::Cache::Enabled => {
-                self.io_handle
-                    .write_at_sync(self.file.clone(), offset, bufs)
-                    .await
-            }
-            cache @ iouring::Cache::Disabled(_) => {
-                self.io_handle
-                    .write_at_sync_with_cache(self.file.clone(), offset, bufs, cache)
-                    .await
-            }
-        }
+        let cache = if options.contains(WriteOptions::DONT_CACHE) {
+            iouring::Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            iouring::Cache::Enabled
+        };
+        self.io_handle
+            .write_at(self.file.clone(), offset, bufs, options, cache)
+            .await
     }
 }
 
@@ -413,21 +381,17 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), iouring::Cache::Enabled)
+        self.write_at_inner(offset, bufs.into(), WriteOptions::NONE)
             .await
     }
 
-    async fn write_at_uncached(
+    async fn write_at_with(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        self.write_at_inner(
-            offset,
-            bufs.into(),
-            iouring::Cache::Disabled(self.dont_cache_supported.clone()),
-        )
-        .await
+        self.write_at_inner(offset, bufs.into(), options).await
     }
 
     async fn write_at_sync(
@@ -435,21 +399,8 @@ impl crate::Blob for Blob {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        self.write_at_sync_inner(offset, bufs.into(), iouring::Cache::Enabled)
+        self.write_at_inner(offset, bufs.into(), WriteOptions::SYNC)
             .await
-    }
-
-    async fn write_at_sync_uncached(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.write_at_sync_inner(
-            offset,
-            bufs.into(),
-            iouring::Cache::Disabled(self.dont_cache_supported.clone()),
-        )
-        .await
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831

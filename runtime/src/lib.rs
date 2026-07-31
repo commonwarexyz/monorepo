@@ -682,6 +682,55 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
+    /// Options that alter one [`Blob::write_at_with`] operation.
+    ///
+    /// Combine options with `|`, such as `WriteOptions::SYNC | WriteOptions::DONT_CACHE`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct WriteOptions(u8);
+
+    impl WriteOptions {
+        /// No write options.
+        pub const NONE: Self = Self(0);
+
+        /// Durably persist the submitted bytes before returning.
+        ///
+        /// This has the same guarantee as [`Blob::write_at_sync`]: it is not a durability barrier
+        /// for earlier operations.
+        pub const SYNC: Self = Self(1 << 0);
+
+        /// Advise that the submitted bytes need not remain in the OS page cache.
+        ///
+        /// This is a best-effort performance hint for callers that maintain their own cache.
+        /// Implementations may ignore it. It does not change visibility or durability.
+        pub const DONT_CACHE: Self = Self(1 << 1);
+
+        /// Return whether all of `options` are set.
+        #[must_use]
+        pub const fn contains(self, options: Self) -> bool {
+            self.0 & options.0 == options.0
+        }
+
+        /// Return these options with `options` cleared.
+        #[must_use]
+        pub const fn without(self, options: Self) -> Self {
+            Self(self.0 & !options.0)
+        }
+    }
+
+    impl std::ops::BitOr for WriteOptions {
+        type Output = Self;
+
+        fn bitor(self, rhs: Self) -> Self::Output {
+            Self(self.0 | rhs.0)
+        }
+    }
+
+    impl std::ops::BitOrAssign for WriteOptions {
+        fn bitor_assign(&mut self, rhs: Self) {
+            self.0 |= rhs.0;
+        }
+    }
+
     /// Interface to read and write to a blob.
     ///
     /// To support blob implementations that enable concurrent reads and
@@ -737,17 +786,24 @@ stability_scope!(BETA {
             bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Write `bufs` while advising that the submitted bytes need not remain in the OS page
-        /// cache.
+        /// Write `bufs` to the blob at the given offset with composable [`WriteOptions`].
         ///
-        /// This is a best-effort performance hint for callers that maintain their own cache.
-        /// Implementations may ignore it. It does not change the write's visibility or durability.
-        fn write_at_uncached(
+        /// By default, [`WriteOptions::SYNC`] selects [`Blob::write_at_sync`] and all other
+        /// options are ignored. Implementations that support additional options should override
+        /// this method.
+        fn write_at_with(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
         ) -> impl Future<Output = Result<(), Error>> + Send {
-            self.write_at(offset, bufs)
+            async move {
+                if options.contains(WriteOptions::SYNC) {
+                    self.write_at_sync(offset, bufs).await
+                } else {
+                    self.write_at(offset, bufs).await
+                }
+            }
         }
 
         /// Write `bufs` to the blob at the given offset and durably persist that write.
@@ -761,16 +817,6 @@ stability_scope!(BETA {
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
-
-        /// [`Blob::write_at_sync`] with the best-effort cache hint from
-        /// [`Blob::write_at_uncached`].
-        fn write_at_sync_uncached(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> impl Future<Output = Result<(), Error>> + Send {
-            self.write_at_sync(offset, bufs)
-        }
 
         /// Resize the blob to the given length.
         ///
@@ -883,6 +929,18 @@ mod tests {
         task::{Context as TContext, Poll, Waker},
     };
     use utils::reschedule;
+
+    #[test]
+    fn test_write_options_compose() {
+        let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
+        assert!(options.contains(WriteOptions::SYNC));
+        assert!(options.contains(WriteOptions::DONT_CACHE));
+        assert_eq!(
+            options.without(WriteOptions::SYNC),
+            WriteOptions::DONT_CACHE
+        );
+        assert_eq!(WriteOptions::default(), WriteOptions::NONE);
+    }
 
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
