@@ -387,8 +387,9 @@ where
                                 true => None,
                                 // If we are not the leader and the leader isn't
                                 // active, we should timeout.
-                                false => (!self.is_active(leader))
-                                    .then_some(TimeoutReason::Inactivity)
+                                false => {
+                                    (!self.is_active(leader)).then_some(TimeoutReason::Inactivity)
+                                }
                             },
                         };
                         if let Some(timeout_reason) = timeout_reason {
@@ -458,7 +459,10 @@ where
                 self.record_peer_activity(&sender);
 
                 // Skip certificates outside the viewport
-                if !self.viewport(finalized, current.view).admits_certificate(view) {
+                if !self
+                    .viewport(finalized, current.view)
+                    .admits_certificate(view)
+                {
                     continue;
                 }
 

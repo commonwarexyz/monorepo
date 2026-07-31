@@ -240,10 +240,11 @@ where
                             })
                             .flatten();
                         let has_payload = payload.is_some();
-                        let reservation = payload
-                            .map(|payload| crate::dkg::reshare::mailbox::LogReservation::new(
+                        let reservation = payload.map(|payload| {
+                            crate::dkg::reshare::mailbox::LogReservation::new(
                                 height, payload, release,
-                            ));
+                            )
+                        });
                         if response.send_lossy(reservation) && has_payload {
                             served_at = Some(height);
                         }
@@ -282,13 +283,9 @@ where
                             finalized_tip,
                             final_height,
                         };
-                        let Some(pending_logs) = pending_logs(
-                            scan,
-                            ancestry,
-                            self.context.stopped(),
-                            &mut response,
-                        )
-                        .await
+                        let Some(pending_logs) =
+                            pending_logs(scan, ancestry, self.context.stopped(), &mut response)
+                                .await
                         else {
                             return;
                         };
@@ -306,11 +303,9 @@ where
                             )
                             .await;
                         let result = match artifact {
-                            Some(artifact) => {
-                                EpochInfoResponse::Available(Some(Payload::EpochInfo(
-                                    artifact.info,
-                                )))
-                            }
+                            Some(artifact) => EpochInfoResponse::Available(Some(
+                                Payload::EpochInfo(artifact.info),
+                            )),
                             None if matches!(self.mode, Mode::Dkg { .. }) => {
                                 EpochInfoResponse::Available(None)
                             }

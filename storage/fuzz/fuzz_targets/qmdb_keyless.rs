@@ -238,7 +238,7 @@ async fn reopen<F: Family, S: Strategy>(
 fn fuzz_family<F: Family, S: Strategy>(
     input: &FuzzInput,
     suffix: &str,
-    strategy: impl FnOnce(&deterministic::Context) -> S,
+    strategy: impl FnOnce(&deterministic::Context) -> S + Send,
 ) {
     let runner = deterministic::Runner::default();
 

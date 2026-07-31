@@ -65,14 +65,17 @@ use crate::{
         Panicker,
         signal::{Signal, Stopper},
         supervision::Tree,
+        thread,
     },
 };
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
+#[cfg(target_arch = "wasm32")]
+use commonware_utils::Cached;
 use commonware_utils::{
-    Cached, SystemTimeExt,
+    SystemTimeExt,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
 };
@@ -86,7 +89,9 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
+#[cfg(target_arch = "wasm32")]
+use rayon::ThreadPoolBuildError;
+use rayon::ThreadPoolBuilder;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
@@ -230,6 +235,17 @@ pub struct Config {
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
 
+    /// Stack size to use for the runtime thread.
+    ///
+    /// Defaults to the system stack size when the current platform exposes it,
+    /// and otherwise falls back to Rust's default spawned-thread stack size.
+    ///
+    /// On `wasm32`, the runtime executes on the caller thread and this setting
+    /// has no effect.
+    ///
+    /// See [thread::system_thread_stack_size].
+    thread_stack_size: usize,
+
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
 
@@ -269,6 +285,7 @@ impl Config {
             cycle: Duration::from_millis(1),
             start_time: UNIX_EPOCH,
             timeout: None,
+            thread_stack_size: thread::system_thread_stack_size(),
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
             network_buffer_pool_cfg,
@@ -305,6 +322,11 @@ impl Config {
     /// See [Config]
     pub const fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
+        self
+    }
+    /// See [Config]
+    pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
+        self.thread_stack_size = n;
         self
     }
     /// See [Config]
@@ -345,6 +367,10 @@ impl Config {
     /// See [Config]
     pub const fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+    /// See [Config]
+    pub const fn thread_stack_size(&self) -> usize {
+        self.thread_stack_size
     }
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
@@ -396,6 +422,8 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
+    thread_stack_size: usize,
+    thread_pool: ThreadPool,
 }
 
 impl Executor {
@@ -481,6 +509,7 @@ pub struct Checkpoint {
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
+    thread_stack_size: usize,
     network_buffer_pool_cfg: BufferPoolConfig,
     storage_buffer_pool_cfg: BufferPoolConfig,
 }
@@ -545,15 +574,63 @@ impl Runner {
 
     /// Like [crate::Runner::start], but also returns a [Checkpoint] that can be used
     /// to recover the state of the runtime in a subsequent run.
+    ///
+    /// On `wasm32`, where spawning threads is unsupported, the runtime executes on
+    /// the caller thread.
     pub fn start_and_recover<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
+    where
+        F: FnOnce(Context) -> Fut + Send,
+        Fut: Future,
+        Fut::Output: Send,
+    {
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "wasm32")] {
+                self.run(
+                    f,
+                    shared_thread_pool()
+                        .expect("failed to create deterministic Rayon thread pool"),
+                )
+            } else {
+                let thread_stack_size = match &self.state {
+                    State::Config(config) => config.thread_stack_size,
+                    State::Checkpoint(checkpoint) => checkpoint.thread_stack_size,
+                };
+                let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+                // `use_current_thread` leaks its Rayon registry. Let Rayon manage the native
+                // executor thread to avoid leaking one registry per runtime invocation.
+                let thread_pool = Arc::new(
+                    ThreadPoolBuilder::new()
+                        .num_threads(1)
+                        .thread_name(|_| "deterministic-rt-root".to_string())
+                        .stack_size(thread_stack_size)
+                        .build()
+                        .expect("failed to spawn thread"),
+                );
+                thread_pool.install({
+                    let thread_pool = thread_pool.clone();
+                    move || {
+                        tracing::dispatcher::with_default(&dispatcher, || {
+                            self.run(f, thread_pool)
+                        })
+                    }
+                })
+            }
+        }
+    }
+
+    /// Run the runtime on the current thread and return a checkpoint.
+    ///
+    /// `thread_pool` owns the current executor thread and backs every strategy
+    /// created by the runtime.
+    fn run<F, Fut>(self, f: F, thread_pool: ThreadPool) -> (Fut::Output, Checkpoint)
     where
         F: FnOnce(Context) -> Fut,
         Fut: Future,
     {
         // Setup context and return strong reference to executor
         let (context, executor, panicked) = match self.state {
-            State::Config(config) => Context::new(config),
-            State::Checkpoint(checkpoint) => Context::recover(checkpoint),
+            State::Config(config) => Context::new(config, thread_pool),
+            State::Checkpoint(checkpoint) => Context::recover(checkpoint, thread_pool),
         };
 
         // Pin root task to the heap
@@ -723,6 +800,7 @@ impl Runner {
             storage,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
+            thread_stack_size: executor.thread_stack_size,
             network_buffer_pool_cfg,
             storage_buffer_pool_cfg,
         };
@@ -742,8 +820,9 @@ impl crate::Runner for Runner {
 
     fn start<F, Fut>(self, f: F) -> Fut::Output
     where
-        F: FnOnce(Self::Context) -> Fut,
+        F: FnOnce(Self::Context) -> Fut + Send,
         Fut: Future,
+        Fut::Output: Send,
     {
         let (output, _) = self.start_and_recover(f);
         output
@@ -913,7 +992,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
+    fn new(cfg: Config, thread_pool: ThreadPool) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -973,6 +1052,8 @@ impl Context {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             dns: Mutex::new(HashMap::new()),
+            thread_stack_size: cfg.thread_stack_size,
+            thread_pool,
         });
 
         (
@@ -1003,7 +1084,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
+    fn recover(checkpoint: Checkpoint, thread_pool: ThreadPool) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -1035,6 +1116,8 @@ impl Context {
             rng: checkpoint.rng,
             time: checkpoint.time,
             dns: checkpoint.dns,
+            thread_stack_size: checkpoint.thread_stack_size,
+            thread_pool,
 
             // New state for the new runtime
             registry,
@@ -1198,12 +1281,18 @@ impl crate::Spawner for Context {
 
 // Rayon permits one permanent registry registration per OS thread. Cache the pool that
 // registered the executor thread so later requests and runners reuse it.
+//
+// On `wasm32`, the caller thread is the executor thread, so the cache is scoped to it.
+#[cfg(target_arch = "wasm32")]
 commonware_utils::thread_local_cache!(static THREAD_POOL: ThreadPool);
 
 /// Returns the single-threaded pool the executor thread registered with, created on first use.
 ///
 /// All pool work executes inline on the executor thread, so a larger pool would only
 /// add permanently unstarted workers.
+///
+/// On `wasm32`, this avoids attempting to spawn an unsupported worker thread.
+#[cfg(target_arch = "wasm32")]
 fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
     let pool = Cached::take(
         &THREAD_POOL,
@@ -1219,21 +1308,14 @@ fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
     Ok(Arc::clone(&pool))
 }
 
-/// Spawning threads would be nondeterministic, so the pool has no background workers. The
-/// executor thread registers itself as its sole member and all work executes inline.
+/// The executor thread is the sole member of its Rayon pool, so all work executes inline.
 ///
-/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool
-/// can ever execute work on the executor thread. Every request (including from a later
-/// runner on the same thread) returns a strategy on that single-threaded pool with its
-/// planning parallelism set independently. This controls adaptive decisions and manual
-/// partitioning hints while Rayon executes on the sole registered thread. The returned
-/// strategy is therefore tied to the executor thread.
+/// Each request returns a strategy on that pool with its planning parallelism set independently.
+/// This controls adaptive decisions and manual partitioning hints while Rayon executes on the
+/// executor thread.
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        Rayon::with_pool(
-            shared_thread_pool().expect("failed to create deterministic Rayon thread pool"),
-        )
-        .with_parallelism(parallelism)
+        Rayon::with_pool(Arc::clone(&self.executor().thread_pool)).with_parallelism(parallelism)
     }
 }
 
@@ -2351,12 +2433,15 @@ mod tests {
         });
     }
 
-    /// A strategy with parallelism greater than one must behave as configured under the
-    /// deterministic runtime even though no worker threads exist.
+    /// A strategy with parallelism greater than one must behave as configured
+    /// even though its pool contains only the executor thread.
     #[test]
     fn test_parallel_strategy_spawn_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The runtime thread is also the sole Rayon worker.
+            assert_eq!(rayon::current_thread_index(), Some(0));
+
             let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
             assert_eq!(strategy.parallelism(), 2);
 
@@ -2368,11 +2453,11 @@ mod tests {
         });
     }
 
-    /// Strategies share the pool registered with the executor thread, but each request must
-    /// retain its own planning parallelism and execute work. This covers multiple strategies
-    /// within one runner and a later runner on the same thread.
+    /// Strategies share their runtime's pool, but each request must retain its
+    /// own planning parallelism and execute work. A later runtime must
+    /// initialize and use its own pool.
     #[test]
-    fn test_strategies_reuse_pool_across_runners() {
+    fn test_strategies_share_runtime_pool() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
@@ -2407,9 +2492,8 @@ mod tests {
         });
     }
 
-    /// Tasks may suspend while a pool exists: pools have no worker tasks for the executor
-    /// to poll (a polled rayon worker loop would block or abort the runtime), so suspension
-    /// must leave the pool usable.
+    /// Tasks may suspend while a pool exists, so suspension must leave the pool
+    /// usable.
     #[test]
     fn test_pool_survives_suspension() {
         let executor = deterministic::Runner::default();

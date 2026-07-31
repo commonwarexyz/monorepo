@@ -1883,7 +1883,8 @@ mod tests {
                 Vec<Peer<S>>,
                 Vec<NonParticipant<S>>,
                 CodingConfig,
-            ) -> F,
+            ) -> F
+            + Send,
         ) {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {

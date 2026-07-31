@@ -304,7 +304,7 @@ pub mod tests {
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
-        Fn: FnMut(Context, String) -> Fut + 'static,
+        Fn: FnMut(Context, String) -> Fut + Send + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
         let executor = deterministic::Runner::default();
@@ -461,7 +461,7 @@ pub mod tests {
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
-        Fn: FnMut(Context, String) -> Fut + 'static,
+        Fn: FnMut(Context, String) -> Fut + Send + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
         let executor = deterministic::Runner::default();
@@ -532,7 +532,7 @@ pub mod tests {
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
-        Fn: FnMut(Context, String) -> Fut + 'static,
+        Fn: FnMut(Context, String) -> Fut + Send + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
         let executor = deterministic::Runner::default();
@@ -613,7 +613,7 @@ pub mod tests {
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
-        Fn: FnMut(Context, String) -> Fut + 'static,
+        Fn: FnMut(Context, String) -> Fut + Send + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
         let executor = deterministic::Runner::default();
@@ -666,7 +666,7 @@ pub mod tests {
         V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
-        Fn: FnMut(Context, String) -> Fut + 'static,
+        Fn: FnMut(Context, String) -> Fut + Send + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
         let executor = deterministic::Runner::default();
