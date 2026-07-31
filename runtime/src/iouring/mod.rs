@@ -425,7 +425,7 @@ impl Handle {
         })
     }
 
-    /// Submit a positioned write with the requested cache and durability behavior.
+    /// Submit a positioned write with the provided options.
     ///
     /// Durability is fused into the write (`RWF_DSYNC`) only when the whole write fits one
     /// submission. Fusing every submission would serialize the batches behind per-SQE durability

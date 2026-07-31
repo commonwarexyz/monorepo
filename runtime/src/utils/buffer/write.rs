@@ -179,7 +179,7 @@ impl<B: Blob> Write<B> {
                 && let Some((old_buf, old_offset)) = self.buffer.take()
             {
                 self.sync_state
-                    .write_at(&self.blob, old_offset, old_buf, WriteOptions::NONE)
+                    .write_at(&self.blob, old_offset, old_buf)
                     .await?;
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
@@ -194,7 +194,7 @@ impl<B: Blob> Write<B> {
             // below. Removing this inefficiency may not be worth the additional complexity.
             let direct = bufs.split_to(chunk_len);
             self.sync_state
-                .write_at(&self.blob, current_offset, direct, WriteOptions::NONE)
+                .write_at(&self.blob, current_offset, direct)
                 .await?;
             current_offset += chunk_len as u64;
 
@@ -215,9 +215,7 @@ impl<B: Blob> Write<B> {
         //
         // This can only happen if the new size is greater than the current size.
         if let Some((buf, offset)) = self.buffer.resize(len) {
-            self.sync_state
-                .write_at(&self.blob, offset, buf, WriteOptions::NONE)
-                .await?;
+            self.sync_state.write_at(&self.blob, offset, buf).await?;
         }
 
         self.sync_state.resize(&self.blob, len).await?;
@@ -241,10 +239,7 @@ impl<B: Blob> Write<B> {
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
         if let Some((buf, offset)) = self.buffer.take()
-            && let Err(err) = self
-                .sync_state
-                .write_at(&self.blob, offset, buf, WriteOptions::NONE)
-                .await
+            && let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await
         {
             return Handle::ready(Err(err));
         }
@@ -267,7 +262,7 @@ impl<B: Blob> Write<B> {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         self.sync_state
-            .write_at(&self.blob, offset, bufs, WriteOptions::SYNC)
+            .write_at_with(&self.blob, offset, bufs, WriteOptions::SYNC)
             .await
     }
 

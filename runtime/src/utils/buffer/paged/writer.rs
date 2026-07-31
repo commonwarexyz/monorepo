@@ -120,32 +120,6 @@ pub struct Writer<B: Blob> {
 }
 
 impl<B: Blob> Writer<B> {
-    /// Write bytes to the underlying blob and mark them as needing sync.
-    async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.sync_state
-            .write_at(&self.blob, offset, bufs, WriteOptions::DONT_CACHE)
-            .await
-    }
-
-    /// Write bytes to the underlying blob and make them durable.
-    ///
-    /// Uses [`Blob::write_at_with`] with [`WriteOptions::SYNC`] when no earlier mutation is pending.
-    /// Otherwise, it writes the bytes and then syncs the blob.
-    async fn write_at_durable(
-        &mut self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
-        self.sync_state
-            .write_at(
-                &self.blob,
-                offset,
-                bufs,
-                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
-            )
-            .await
-    }
-
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
     /// reads are cached through `cache_ref` and appends stage in a write buffer of capacity
     /// `capacity`. Rewinds the blob if necessary so it only contains checksum-validated data.
@@ -377,7 +351,14 @@ impl<B: Blob> Writer<B> {
 
         let physical_page_size = page_size as u64 + CHECKSUM_SIZE;
         let write_at_offset = boundary / page_size as u64 * physical_page_size;
-        self.write_at(write_at_offset, physical_pages).await?;
+        self.sync_state
+            .write_at_with(
+                &self.blob,
+                write_at_offset,
+                physical_pages,
+                WriteOptions::DONT_CACHE,
+            )
+            .await?;
 
         Ok(offset)
     }
@@ -464,10 +445,23 @@ impl<B: Blob> Writer<B> {
         // Rewriting a physical page resubmits its committed bytes and protected checksum
         // unchanged, so a torn write leaves the previous state recoverable.
         if sync {
-            self.write_at_durable(write_at_offset, physical_pages)
+            self.sync_state
+                .write_at_with(
+                    &self.blob,
+                    write_at_offset,
+                    physical_pages,
+                    WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+                )
                 .await?;
         } else {
-            self.write_at(write_at_offset, physical_pages).await?;
+            self.sync_state
+                .write_at_with(
+                    &self.blob,
+                    write_at_offset,
+                    physical_pages,
+                    WriteOptions::DONT_CACHE,
+                )
+                .await?;
         }
         Ok(sync)
     }
@@ -740,13 +734,25 @@ impl<B: Blob> Writer<B> {
             .checked_add(new_slot.offset() as u64)
             .ok_or(Error::OffsetOverflow)?;
         let staged_slot = Checksum::slot_bytes(0, new_crc);
-        self.write_at_durable(new_slot_offset, staged_slot.to_vec())
+        self.sync_state
+            .write_at_with(
+                &self.blob,
+                new_slot_offset,
+                staged_slot.to_vec(),
+                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+            )
             .await?;
 
         // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
         // both slots may be valid, but recovery still chooses the old longer length.
         let published_len = Checksum::slot_len_bytes(new_len);
-        self.write_at_durable(new_slot_offset, published_len.to_vec())
+        self.sync_state
+            .write_at_with(
+                &self.blob,
+                new_slot_offset,
+                published_len.to_vec(),
+                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+            )
             .await?;
 
         // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
@@ -755,7 +761,13 @@ impl<B: Blob> Writer<B> {
         let old_slot_offset = crc_start
             .checked_add(old_slot.offset() as u64)
             .ok_or(Error::OffsetOverflow)?;
-        self.write_at_durable(old_slot_offset, Checksum::slot_len_bytes(0).to_vec())
+        self.sync_state
+            .write_at_with(
+                &self.blob,
+                old_slot_offset,
+                Checksum::slot_len_bytes(0).to_vec(),
+                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+            )
             .await?;
 
         Ok(ActiveChecksum::new(new_slot, new_len, new_crc))

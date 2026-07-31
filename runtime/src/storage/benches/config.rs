@@ -80,8 +80,8 @@ pub enum SyncMethod {
     #[value(name = "write_then_sync")]
     WriteThenSync,
     /// Call `write_at_with` with `WriteOptions::SYNC`.
-    #[value(name = "write_at_with")]
-    WriteAtWith,
+    #[value(name = "write_and_sync")]
+    WriteAndSync,
 }
 
 /// Write durability policy.

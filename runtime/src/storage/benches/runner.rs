@@ -146,7 +146,7 @@ pub async fn run_sync_write_loop(
                 blob.write_at(offset, payload.clone()).await?;
                 blob.sync().await?;
             }
-            SyncMethod::WriteAtWith => {
+            SyncMethod::WriteAndSync => {
                 blob.write_at_with(offset, payload.clone(), WriteOptions::SYNC)
                     .await?;
             }

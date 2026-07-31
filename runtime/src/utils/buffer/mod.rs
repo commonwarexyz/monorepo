@@ -85,8 +85,21 @@ impl SyncState {
         }
     }
 
-    /// Write data with the requested cache and durability behavior.
+    /// Write data and require a later sync.
     async fn write_at(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+    ) -> Result<(), crate::Error> {
+        self.wait_for_pending().await?;
+        blob.write_at(offset, bufs).await?;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Write data with the provided options while tracking durability.
+    async fn write_at_with(
         &mut self,
         blob: &impl crate::Blob,
         offset: u64,

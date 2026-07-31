@@ -616,8 +616,7 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         self.inner
             .write_at_with(offset, bufs, options.without(WriteOptions::SYNC))
             .await?;
-        self.pending.wait().await?;
-        self.inner.sync().await
+        self.sync().await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
