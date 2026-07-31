@@ -45,7 +45,7 @@ pub fn page_size() -> usize {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(unix))]
     {
         4096
     }

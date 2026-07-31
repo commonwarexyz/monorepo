@@ -12,7 +12,7 @@ use tokio::{
     sync::Mutex,
 };
 
-mod unix;
+mod blob;
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly
@@ -82,7 +82,7 @@ impl Storage {
 }
 
 impl crate::Storage for Storage {
-    type Blob = unix::Blob;
+    type Blob = blob::Blob;
 
     async fn open_versioned(
         &self,
