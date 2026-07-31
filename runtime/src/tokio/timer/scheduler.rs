@@ -144,11 +144,6 @@ pub(super) trait Alarm: Send + Sync + Sized + 'static {
     /// Reads monotonic time without making a relative deadline early.
     fn now(&self) -> io::Result<Deadline>;
 
-    /// Reads monotonic time without classifying a future deadline as expired.
-    fn now_for_expiry(&self) -> io::Result<Deadline> {
-        self.now()
-    }
-
     /// Arms a one-shot alarm at an absolute monotonic deadline.
     fn arm(&self, deadline: Deadline) -> io::Result<()>;
 
@@ -576,7 +571,7 @@ impl<A: Alarm> Shard<A> {
     fn take_expired(&self, batch: &mut Batch) -> Result<bool, DriverFailure> {
         let now = self
             .alarm
-            .now_for_expiry()
+            .now()
             .map_err(|error| DriverFailure::io("read monotonic clock during expiry", error))?;
         let mut state = self.state.lock();
         assert!(

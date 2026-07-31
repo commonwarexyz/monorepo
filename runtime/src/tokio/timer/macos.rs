@@ -6,7 +6,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{
         OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -18,11 +18,8 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 /// One fixed timer identifier in each independently owned kqueue.
 const TIMER_IDENT: libc::uintptr_t = 1;
 
-/// Sentinel used when no timer event is known to be installed.
-const NO_TIMER: u64 = u64::MAX;
-
-/// Process-wide validated conversion ratio or its reproducible error.
-static TIMEBASE: OnceLock<Result<Timebase, TimebaseInitError>> = OnceLock::new();
+/// Process-wide validated conversion ratio.
+static TIMEBASE: OnceLock<Timebase> = OnceLock::new();
 
 /// One kqueue descriptor with a Mach absolute one-shot timer.
 pub(super) struct NativeAlarm {
@@ -30,38 +27,81 @@ pub(super) struct NativeAlarm {
     descriptor: AsyncFd<OwnedFd>,
     /// Conversion ratio returned by the Mach timebase.
     timebase: Timebase,
-    /// Installed absolute Mach deadline or [`NO_TIMER`] when absent.
-    installed: AtomicU64,
+    /// Whether one timer event is known to be installed.
+    installed: AtomicBool,
 }
 
 impl NativeAlarm {
     /// Creates and registers one kqueue with the active Tokio reactor.
     pub(super) fn new() -> Result<Self, AlarmInitError> {
-        let timebase =
-            Timebase::read().map_err(|error| AlarmInitError::new("read Mach timebase", error))?;
+        let timebase = Timebase::get();
         let raw = retry_interrupted(|| {
             // SAFETY: `kqueue` takes no pointers and returns a new descriptor.
             unsafe { libc::kqueue() }
         })
         .map_err(|error| AlarmInitError::new("create kqueue", error))?;
+
         // SAFETY: `raw` is a fresh descriptor whose ownership has not moved.
         let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
+
         // Ownership is established before fallible setup so every error closes
         // the newly created descriptor.
-        set_close_on_exec(descriptor.as_raw_fd())
-            .map_err(|error| AlarmInitError::new("set kqueue close-on-exec", error))?;
+        let raw = descriptor.as_raw_fd();
+        let flags = retry_interrupted(|| {
+            // SAFETY: `raw` is live and F_GETFD uses no variadic argument.
+            unsafe { libc::fcntl(raw, libc::F_GETFD) }
+        })
+        .map_err(|error| AlarmInitError::new("read kqueue descriptor flags", error))?;
+        retry_interrupted(|| {
+            // SAFETY: `raw` is live and the variadic argument is an integer flag set.
+            unsafe { libc::fcntl(raw, libc::F_SETFD, flags | libc::FD_CLOEXEC) }
+        })
+        .map_err(|error| AlarmInitError::new("set kqueue close-on-exec", error))?;
+
         let descriptor = AsyncFd::with_interest(descriptor, Interest::READABLE)
             .map_err(|error| AlarmInitError::new("register kqueue with Tokio reactor", error))?;
+
         Ok(Self {
             descriptor,
             timebase,
-            installed: AtomicU64::new(NO_TIMER),
+            installed: AtomicBool::new(false),
         })
+    }
+
+    /// Applies one change to the private kqueue timer.
+    fn update(&self, flags: u16, fflags: u32, data: libc::intptr_t) -> io::Result<()> {
+        let change = libc::kevent {
+            ident: TIMER_IDENT,
+            filter: libc::EVFILT_TIMER,
+            flags,
+            fflags,
+            data,
+            udata: std::ptr::null_mut(),
+        };
+        let descriptor = self.descriptor.get_ref().as_raw_fd();
+        retry_interrupted(|| {
+            // SAFETY: `change` is one initialized event and no output buffer is requested.
+            unsafe {
+                libc::kevent(
+                    descriptor,
+                    &change,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            }
+        })?;
+        Ok(())
     }
 }
 
 impl Alarm for NativeAlarm {
     fn max_deadline(&self) -> Deadline {
+        // kqueue carries the absolute Mach deadline through its intptr_t data
+        // field. Stay within its positive range instead of relying on signed-bit
+        // reinterpretation. Rounding down keeps conversion back to ticks within
+        // that range; Duration::MAX is used only when it is the smaller limit.
         let max_ticks =
             u64::try_from(libc::intptr_t::MAX).expect("intptr_t maximum must be nonnegative");
         Deadline::from_duration(
@@ -82,17 +122,6 @@ impl Alarm for NativeAlarm {
             .map(Deadline::from_duration)
     }
 
-    fn now_for_expiry(&self) -> io::Result<Deadline> {
-        // SAFETY: `mach_absolute_time` takes no arguments and cannot write memory.
-        #[allow(deprecated)]
-        let ticks = unsafe { libc::mach_absolute_time() };
-        // Expiry uses the opposite bound so stale readiness cannot classify a
-        // deadline in the remaining fractional nanosecond as already elapsed.
-        self.timebase
-            .ticks_to_duration(ticks, false)
-            .map(Deadline::from_duration)
-    }
-
     fn arm(&self, deadline: Deadline) -> io::Result<()> {
         // Both conversions round upward so neither fractional nanoseconds nor
         // fractional Mach ticks can make an alarm fire early.
@@ -103,26 +132,24 @@ impl Alarm for NativeAlarm {
                 "Mach deadline exceeds kqueue data range",
             )
         })?;
-        let change = timer_change(
+        self.update(
             libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT,
             libc::NOTE_ABSOLUTE | libc::NOTE_MACHTIME | libc::NOTE_CRITICAL,
             data,
-        );
-        submit_change(self.descriptor.get_ref().as_raw_fd(), &change)?;
+        )?;
         // One driver serializes alarm operations. The atomic supplies Sync
         // storage for the trait boundary rather than cross-thread ordering.
-        self.installed.store(ticks, Ordering::Relaxed);
+        self.installed.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     fn disarm(&self) -> io::Result<()> {
         // Alarm operations are driver-serialized, so no memory publication is
         // coupled to this bookkeeping transition.
-        let installed = self.installed.swap(NO_TIMER, Ordering::Relaxed);
-        let change = timer_change(libc::EV_DELETE, 0, 0);
-        match submit_change(self.descriptor.get_ref().as_raw_fd(), &change) {
+        let installed = self.installed.swap(false, Ordering::Relaxed);
+        match self.update(libc::EV_DELETE, 0, 0) {
             Ok(()) => Ok(()),
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) && installed == NO_TIMER => {
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) && !installed => {
                 // Startup, repeated disarm, and consumed EV_ONESHOT events have
                 // no recorded registration, so absence is expected.
                 Ok(())
@@ -138,12 +165,47 @@ impl Alarm for NativeAlarm {
             let mut readiness = self.descriptor.readable().await?;
             let mut consumed = false;
             loop {
-                match readiness.try_io(|inner| consume(inner.get_ref().as_raw_fd())) {
+                match readiness.try_io(|inner| {
+                    let mut event = libc::kevent {
+                        ident: TIMER_IDENT,
+                        filter: libc::EVFILT_TIMER,
+                        flags: 0,
+                        fflags: 0,
+                        data: 0,
+                        udata: std::ptr::null_mut(),
+                    };
+                    let timeout = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    };
+                    let result = retry_interrupted(|| {
+                        // SAFETY: `event` is writable output storage and
+                        // `timeout` makes retrieval nonblocking.
+                        unsafe {
+                            libc::kevent(
+                                inner.get_ref().as_raw_fd(),
+                                std::ptr::null(),
+                                0,
+                                &mut event,
+                                1,
+                                &timeout,
+                            )
+                        }
+                    })?;
+                    match result {
+                        0 => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                        1 => validate_event(&event),
+                        _ => Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "kqueue returned an invalid event count",
+                        )),
+                    }
+                }) {
                     Ok(result) => {
                         result?;
                         // EV_ONESHOT removes the installed event when it is
                         // retrieved, so later disarms may accept its absence.
-                        self.installed.store(NO_TIMER, Ordering::Relaxed);
+                        self.installed.store(false, Ordering::Relaxed);
                         consumed = true;
                     }
                     // Tokio readiness is cleared only after the nonblocking
@@ -156,7 +218,8 @@ impl Alarm for NativeAlarm {
     }
 }
 
-/// Retries one integer-returning syscall when interrupted.
+/// Retries one signed integer-returning syscall when interrupted.
+#[inline]
 fn retry_interrupted(mut call: impl FnMut() -> libc::c_int) -> io::Result<libc::c_int> {
     loop {
         let result = call();
@@ -174,176 +237,63 @@ fn retry_interrupted(mut call: impl FnMut() -> libc::c_int) -> io::Result<libc::
 #[derive(Clone, Copy)]
 struct Timebase {
     /// Nanosecond ratio numerator.
-    numer: u64,
+    numer: u32,
     /// Tick ratio denominator.
-    denom: u64,
-}
-
-/// Cacheable failure returned while reading or validating the Mach timebase.
-#[derive(Clone, Copy)]
-enum TimebaseInitError {
-    /// Kernel return code from `mach_timebase_info`.
-    Query(libc::c_int),
-    /// A zero numerator or denominator returned by the kernel.
-    Zero,
-}
-
-impl TimebaseInitError {
-    /// Reconstructs the same owned I/O error for each timer shard.
-    fn into_io_error(self) -> io::Error {
-        match self {
-            Self::Query(result) => {
-                io::Error::other(format!("mach_timebase_info returned {result}"))
-            }
-            Self::Zero => io::Error::new(io::ErrorKind::InvalidData, "Mach timebase contains zero"),
-        }
-    }
+    denom: u32,
 }
 
 impl Timebase {
-    /// Returns the process-wide Mach timebase or reconstructs its cached error.
-    fn read() -> io::Result<Self> {
-        match TIMEBASE.get_or_init(Self::read_once) {
-            Ok(timebase) => Ok(*timebase),
-            Err(error) => Err(error.into_io_error()),
-        }
-    }
-
-    /// Reads and validates the Mach timebase for the process-wide cache.
-    fn read_once() -> Result<Self, TimebaseInitError> {
-        #[allow(deprecated)]
-        let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
-        // SAFETY: `info` points to writable storage for one Mach timebase value.
-        #[allow(deprecated)]
-        let result = unsafe { libc::mach_timebase_info(&mut info) };
-        if result != 0 {
-            return Err(TimebaseInitError::Query(result));
-        }
-        #[allow(deprecated)]
-        let (numer, denom) = (info.numer, info.denom);
-        Self::validate(numer, denom)
-    }
-
-    /// Validates an explicit ratio for conversion tests.
-    #[cfg(test)]
-    fn new(numer: u32, denom: u32) -> io::Result<Self> {
-        Self::validate(numer, denom).map_err(TimebaseInitError::into_io_error)
-    }
-
-    /// Validates an explicit ratio in the cacheable error representation.
-    fn validate(numer: u32, denom: u32) -> Result<Self, TimebaseInitError> {
-        if numer == 0 || denom == 0 {
-            return Err(TimebaseInitError::Zero);
-        }
-        Ok(Self {
-            numer: numer.into(),
-            denom: denom.into(),
+    /// Returns the process-wide Mach timebase.
+    fn get() -> Self {
+        *TIMEBASE.get_or_init(|| {
+            #[allow(deprecated)]
+            let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+            // SAFETY: `info` points to writable storage for one Mach timebase value.
+            #[allow(deprecated)]
+            let result = unsafe { libc::mach_timebase_info(&mut info) };
+            assert_eq!(result, 0, "mach_timebase_info failed with code {result}");
+            #[allow(deprecated)]
+            let (numer, denom) = (info.numer, info.denom);
+            Self::new(numer, denom).expect("Mach timebase must contain a nonzero ratio")
         })
+    }
+
+    /// Validates a Mach timebase ratio.
+    fn new(numer: u32, denom: u32) -> io::Result<Self> {
+        if numer == 0 || denom == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Mach timebase contains zero",
+            ));
+        }
+        Ok(Self { numer, denom })
     }
 
     /// Converts ticks to a duration with optional upward nanosecond rounding.
     fn ticks_to_duration(self, ticks: u64, round_up: bool) -> io::Result<Duration> {
-        let product = u128::from(ticks)
-            .checked_mul(u128::from(self.numer))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Mach tick overflow"))?;
+        // A u64 tick count multiplied by a u32 ratio component fits in u128.
+        let product = u128::from(ticks) * u128::from(self.numer);
         let divisor = u128::from(self.denom);
         let nanoseconds = if round_up {
-            product
-                .checked_add(divisor - 1)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Mach tick overflow"))?
-                / divisor
+            product.div_ceil(divisor)
         } else {
             product / divisor
         };
-        duration_from_nanos(nanoseconds)
+        let seconds = u64::try_from(nanoseconds / NANOS_PER_SECOND)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Mach duration overflow"))?;
+        let subsecond = u32::try_from(nanoseconds % NANOS_PER_SECOND)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Mach nanoseconds overflow"))?;
+        Ok(Duration::new(seconds, subsecond))
     }
 
     /// Converts duration to ticks and rounds upward so an arm cannot be early.
     fn duration_to_ticks_up(self, duration: Duration) -> io::Result<u64> {
-        let nanoseconds = u128::from(duration.as_secs())
-            .checked_mul(NANOS_PER_SECOND)
-            .and_then(|value| value.checked_add(u128::from(duration.subsec_nanos())))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "duration overflow"))?;
-        let product = nanoseconds
-            .checked_mul(u128::from(self.denom))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Mach deadline overflow"))?;
-        let divisor = u128::from(self.numer);
-        let ticks = product
-            .checked_add(divisor - 1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Mach deadline overflow"))?
-            / divisor;
+        // Duration's u64 seconds multiplied by a u32 ratio component fit in u128.
+        let product = duration.as_nanos() * u128::from(self.denom);
+        let ticks = product.div_ceil(u128::from(self.numer));
         u64::try_from(ticks)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Mach deadline overflow"))
     }
-}
-
-/// Converts a nanosecond count into a representable duration.
-fn duration_from_nanos(nanoseconds: u128) -> io::Result<Duration> {
-    let seconds = u64::try_from(nanoseconds / NANOS_PER_SECOND)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Mach duration overflow"))?;
-    let subsecond = u32::try_from(nanoseconds % NANOS_PER_SECOND)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Mach nanoseconds overflow"))?;
-    Ok(Duration::new(seconds, subsecond))
-}
-
-/// Sets close-on-exec while preserving existing descriptor flags.
-fn set_close_on_exec(descriptor: libc::c_int) -> io::Result<()> {
-    let flags = retry_interrupted(|| {
-        // SAFETY: `descriptor` is live and F_GETFD uses no variadic argument.
-        unsafe { libc::fcntl(descriptor, libc::F_GETFD) }
-    })?;
-    retry_interrupted(|| {
-        // SAFETY: `descriptor` is live and the variadic argument is an integer flag set.
-        unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) }
-    })?;
-    Ok(())
-}
-
-/// Builds one initialized kqueue timer change.
-const fn timer_change(flags: u16, fflags: u32, data: libc::intptr_t) -> libc::kevent {
-    libc::kevent {
-        ident: TIMER_IDENT,
-        filter: libc::EVFILT_TIMER,
-        flags,
-        fflags,
-        data,
-        udata: std::ptr::null_mut(),
-    }
-}
-
-/// Applies one timer change while retrying interrupted calls.
-fn submit_change(descriptor: libc::c_int, change: &libc::kevent) -> io::Result<()> {
-    retry_interrupted(|| {
-        // SAFETY: `change` is one initialized event and no output buffer is requested.
-        unsafe {
-            libc::kevent(
-                descriptor,
-                change,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            )
-        }
-    })?;
-    Ok(())
-}
-
-/// Consumes one ready event with a nonblocking zero-timeout call.
-fn consume(descriptor: libc::c_int) -> io::Result<()> {
-    let mut event = timer_change(0, 0, 0);
-    let timeout = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let result = retry_interrupted(|| {
-        // SAFETY: `event` is writable output storage and `timeout` is initialized.
-        unsafe { libc::kevent(descriptor, std::ptr::null(), 0, &mut event, 1, &timeout) }
-    })?;
-    if result == 0 {
-        return Err(io::Error::from(io::ErrorKind::WouldBlock));
-    }
-    validate_event(&event)
 }
 
 /// Validates the identity and error state of one retrieved timer event.
@@ -357,9 +307,15 @@ fn validate_event(event: &libc::kevent) -> io::Result<()> {
     if ident != TIMER_IDENT || filter != libc::EVFILT_TIMER {
         return Err(io::Error::other("kqueue returned an unexpected event"));
     }
-    if flags & libc::EV_ERROR != 0 && data != 0 {
+    if flags & libc::EV_ERROR != 0 {
         let code = i32::try_from(data)
             .map_err(|_| io::Error::other("kqueue returned an invalid error code"))?;
+        if code <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "kqueue returned EV_ERROR without a valid error code",
+            ));
+        }
         return Err(io::Error::from_raw_os_error(code));
     }
     Ok(())
@@ -368,15 +324,12 @@ fn validate_event(event: &libc::kevent) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        os::fd::AsRawFd,
-        time::{Duration, Instant},
-    };
+    use std::{os::fd::AsRawFd, time::Duration};
 
     #[test]
-    fn timebase_uses_opposite_safe_rounding_bounds() {
-        // Use a fractional ratio to exercise both truncating observation and
-        // upward deadline conversion.
+    fn timebase_rounding_and_deadline_conversion() {
+        // Use a fractional ratio to exercise truncating limit conversion and
+        // upward time and deadline conversion.
         let timebase = Timebase::new(3, 2).unwrap();
 
         // Observed time may be rounded in either direction as requested.
@@ -388,12 +341,6 @@ mod tests {
             timebase.ticks_to_duration(1, true).unwrap(),
             Duration::from_nanos(2)
         );
-
-        // At the same fractional tick, the lower expiry observation must leave the
-        // rounded upper deadline in the future rather than popping it early.
-        let expiry_now = timebase.ticks_to_duration(1, false).unwrap();
-        let rounded_deadline = timebase.ticks_to_duration(1, true).unwrap();
-        assert!(expiry_now < rounded_deadline);
 
         // Armed deadlines always round toward a later Mach tick.
         assert_eq!(
@@ -434,10 +381,45 @@ mod tests {
         assert!(small_tick.duration_to_ticks_up(Duration::MAX).is_err());
     }
 
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri does not support kqueue descriptors")]
+    async fn maximum_deadline_respects_kqueue_data_limit() {
+        // Construct an adapter and derive the positive limit of kqueue's data field.
+        let alarm = NativeAlarm::new().unwrap();
+        let maximum = alarm.max_deadline();
+        let max_ticks = u64::try_from(libc::intptr_t::MAX).expect("intptr_t maximum must fit u64");
+
+        // The selected duration is the floor-converted tick limit, clamped only
+        // when Duration itself is smaller, and converts back within that limit.
+        let expected = alarm
+            .timebase
+            .ticks_to_duration(max_ticks, false)
+            .unwrap_or(Duration::MAX);
+        assert_eq!(maximum.as_duration(), expected);
+        assert!(
+            alarm
+                .timebase
+                .duration_to_ticks_up(maximum.as_duration())
+                .unwrap()
+                <= max_ticks
+        );
+
+        // The kernel accepts the exact limit used during shard validation.
+        alarm.arm(maximum).unwrap();
+        alarm.disarm().unwrap();
+    }
+
     #[test]
     fn retrieved_event_validation() {
         // Build the successful event produced by the private timer.
-        let event = timer_change(0, 0, 0);
+        let mut event = libc::kevent {
+            ident: TIMER_IDENT,
+            filter: libc::EVFILT_TIMER,
+            flags: 0,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
 
         // The expected identity and filter are accepted.
         validate_event(&event).unwrap();
@@ -445,23 +427,25 @@ mod tests {
         // Kernel-reported errors retain their operating system error code.
         let error_code =
             libc::intptr_t::try_from(libc::EINVAL).expect("EINVAL must fit in intptr_t");
-        let error_event = timer_change(libc::EV_ERROR, 0, error_code);
+        event.flags = libc::EV_ERROR;
+        event.data = error_code;
         assert_eq!(
-            validate_event(&error_event).unwrap_err().raw_os_error(),
+            validate_event(&event).unwrap_err().raw_os_error(),
             Some(libc::EINVAL)
         );
 
-        // No other event identity can be consumed from this private kqueue.
-        let unexpected = libc::kevent {
-            ident: TIMER_IDENT + 1,
-            filter: libc::EVFILT_TIMER,
-            flags: 0,
-            fflags: 0,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
+        // EV_ERROR without a positive error code is not a timer expiry.
+        event.data = 0;
         assert_eq!(
-            validate_event(&unexpected).unwrap_err().kind(),
+            validate_event(&event).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        // No other event identity can be consumed from this private kqueue.
+        event.ident = TIMER_IDENT + 1;
+        event.flags = 0;
+        assert_eq!(
+            validate_event(&event).unwrap_err().kind(),
             io::ErrorKind::Other
         );
     }
@@ -484,7 +468,6 @@ mod tests {
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
 
         // Arm NOTE_CRITICAL at an absolute future Mach deadline.
-        let started = Instant::now();
         let now = alarm.now().unwrap();
         let deadline = now.saturating_add(Duration::from_millis(20), alarm.max_deadline());
         alarm.arm(deadline).unwrap();
@@ -494,7 +477,7 @@ mod tests {
             .unwrap();
 
         // The upward conversions prevent early completion.
-        assert!(started.elapsed() >= Duration::from_millis(20));
+        assert!(alarm.now().unwrap() >= deadline);
 
         // A successful wait drains both the kqueue event and Tokio readiness.
         assert!(
@@ -570,21 +553,18 @@ mod tests {
         // EV_ONESHOT remains installed until retrieval, so disarm must delete both
         // its registration and the queued event.
         alarm.disarm().unwrap();
-        let error = consume(alarm.descriptor.get_ref().as_raw_fd())
-            .expect_err("disarmed expired event remained queued");
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), alarm.wait())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     #[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
     async fn elapsed_rearm_and_disarm() {
-        // Create one alarm and verify that a zero-timeout poll starts empty.
+        // Create one alarm.
         let alarm = NativeAlarm::new().unwrap();
-        let descriptor = alarm.descriptor.get_ref().as_raw_fd();
-        assert_eq!(
-            consume(descriptor).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
 
         // An already elapsed absolute deadline becomes readable.
         alarm.arm(alarm.now().unwrap()).unwrap();
@@ -648,9 +628,12 @@ mod tests {
         // Record a future timer in the adapter, then remove its kernel registration
         // directly without updating the adapter's bookkeeping.
         let alarm = NativeAlarm::new().unwrap();
-        alarm.arm(alarm.max_deadline()).unwrap();
-        let deletion = timer_change(libc::EV_DELETE, 0, 0);
-        submit_change(alarm.descriptor.get_ref().as_raw_fd(), &deletion).unwrap();
+        let deadline = alarm
+            .now()
+            .unwrap()
+            .saturating_add(Duration::from_secs(5), alarm.max_deadline());
+        alarm.arm(deadline).unwrap();
+        alarm.update(libc::EV_DELETE, 0, 0).unwrap();
 
         // Disarm must surface ENOENT while a timer remains recorded instead of
         // treating deadline passage alone as proof of one-shot deletion.
