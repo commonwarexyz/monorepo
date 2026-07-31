@@ -138,11 +138,9 @@ impl<D: Digest, S> CertificateVerifier<D> for S where
 ///
 /// # Deterministic Signatures
 ///
-/// Conflict checking (see
-/// [`crate::simplex::Config::report_conflicting_votes`]) currently compares
-/// complete signed votes. Schemes used with that option must produce equal
-/// signature encodings whenever the same participant signs the same
-/// [`Subject`] more than once.
+/// Conflict checking currently compares complete signed votes. Schemes must
+/// produce equal signature encodings whenever the same participant signs the
+/// same [`Subject`] more than once.
 pub trait Scheme<D: Digest>:
     CertificateVerifier<D> + for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
 {

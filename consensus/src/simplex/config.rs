@@ -145,24 +145,18 @@ where
     /// may differ from the one exported before the crash.
     pub reporter: F,
 
-    /// Retain votes after certification to detect and report conflicting votes.
+    /// Retain full votes after their corresponding certificate is recovered.
+    ///
+    /// The batcher detects and reports conflicts while the required full votes
+    /// remain in memory. When this is disabled, those votes are released once
+    /// certified, so conflict evidence that requires a released vote can no longer
+    /// be constructed. Compact signer data remains available for forwarding and
+    /// duplicate suppression.
     ///
     /// This is disabled by default in provided configurations because retaining
     /// full signed votes for every tracked view can consume substantial memory,
-    /// especially when certificates arrive far ahead of the current view. When
-    /// disabled, votes needed for certificate assembly are released as soon as
-    /// the corresponding certificate exists. Compact signer data is retained for
-    /// forwarding and duplicate suppression.
-    ///
-    /// Individual votes are still exported through `reporter`, so a downstream
-    /// application may independently observe conflicting activity. This option
-    /// controls the batcher's retention, comparison, and emission of explicit
-    /// conflict-evidence activities.
-    ///
-    /// Enabling this currently requires deterministic signatures: signing the
-    /// same subject twice must produce equal signature encodings (see
-    /// [`super::scheme::Scheme`]).
-    pub report_conflicting_votes: bool,
+    /// especially when certificates arrive far ahead of the current view.
+    pub retain_votes_after_certification: bool,
 
     /// Strategy for parallel operations.
     pub strategy: T,

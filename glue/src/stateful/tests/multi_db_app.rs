@@ -726,7 +726,7 @@ impl EngineDefinition for MultiDbEngine {
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),
             forwarding: ForwardingPolicy::Disabled,
-            report_conflicting_votes: false,
+            retain_votes_after_certification: false,
         };
 
         let engine = simplex::Engine::new(context, simplex_config);

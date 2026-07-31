@@ -75,7 +75,7 @@ impl<
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
-                report_conflicting_votes: cfg.report_conflicting_votes,
+                retain_votes_after_certification: cfg.retain_votes_after_certification,
                 relay: cfg.relay.clone(),
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,

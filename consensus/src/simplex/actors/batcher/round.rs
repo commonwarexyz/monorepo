@@ -39,8 +39,6 @@ pub struct Round<
     /// verified. Used for duplicate detection, conflict reporting, and
     /// proposal-switch recovery.
     votes: VoteTracker<S, D>,
-    /// Whether to retain full votes for conflict evidence after certification.
-    report_conflicting_votes: bool,
 
     /// Whether we've already sent the selected proposal to the voter.
     proposal_sent: bool,
@@ -63,7 +61,7 @@ impl<
         scheme: Arc<S>,
         blocker: B,
         reporter: R,
-        report_conflicting_votes: bool,
+        retain_votes_after_certification: bool,
     ) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
         let len = scheme.participants().len();
@@ -72,8 +70,7 @@ impl<
             reporter,
             verifier: Verifier::new(round, scheme, quorum),
 
-            votes: VoteTracker::new(len),
-            report_conflicting_votes,
+            votes: VoteTracker::new(len, retain_votes_after_certification),
 
             proposal_sent: false,
 
@@ -131,10 +128,6 @@ impl<
 
     /// Releases full votes that are no longer needed for certificate assembly.
     fn release_votes(&mut self, kind: Kind) {
-        if self.report_conflicting_votes {
-            return;
-        }
-
         match kind {
             Kind::Notarization => {
                 let proposal = self
@@ -152,6 +145,49 @@ impl<
                 self.votes.release_finalizes(proposal);
             }
         }
+    }
+
+    /// Accepts and reports a vote after sender and conflict checks.
+    ///
+    /// Full votes are forwarded to the verifier and retained while needed for
+    /// certification. When post-certification retention is disabled, compact
+    /// state preserves duplicate suppression and proposal forwarding without
+    /// reallocating the released vote map.
+    fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> bool {
+        let retain_full = self.votes.retains_full(&message);
+
+        if retain_full
+            && constructed
+            && let Vote::Finalize(finalize) = &message
+        {
+            // The voter only constructs a finalize after independently
+            // authenticating the proposal.
+            self.set_authoritative_proposal(&finalize.proposal);
+        }
+
+        let inserted = self.votes.record(&message, self.verifier.proposal());
+        if !inserted {
+            if retain_full && constructed {
+                match message {
+                    Vote::Notarize(_) => panic!("duplicate notarize"),
+                    Vote::Nullify(_) => {}
+                    Vote::Finalize(_) => panic!("duplicate finalize"),
+                }
+            }
+            return false;
+        }
+
+        let verifier_message = retain_full.then(|| message.clone());
+        let activity = match message {
+            Vote::Notarize(notarize) => Activity::Notarize(notarize),
+            Vote::Nullify(nullify) => Activity::Nullify(nullify),
+            Vote::Finalize(finalize) => Activity::Finalize(finalize),
+        };
+        self.reporter.report(activity);
+        if let Some(message) = verifier_message {
+            self.verifier.add(message, constructed);
+        }
+        true
     }
 
     /// Makes an independently authenticated proposal authoritative, restoring
@@ -194,37 +230,20 @@ impl<
                     return false;
                 }
 
-                // Once certified, the vote is useful only for activity and
-                // proposal-forwarding hints unless conflict checking is enabled.
-                if !self.report_conflicting_votes && self.has_certificate(Kind::Notarization) {
-                    let matching = self.verifier.proposal() == Some(&notarize.proposal);
-                    if !self.votes.remember_notarize(index, matching) {
-                        return false;
-                    }
-                    self.reporter.report(Activity::Notarize(notarize));
-                    return true;
-                }
-
                 // Try to reserve
-                match (self.report_conflicting_votes, self.votes.notarize(index)) {
-                    (true, Some(previous)) if previous.proposal != notarize.proposal => {
-                        let activity = ConflictingNotarize::new(previous.clone(), notarize);
-                        self.reporter
-                            .report(Activity::ConflictingNotarize(activity));
-                        commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
+                match self.votes.notarize(index) {
+                    Some(previous) => {
+                        if previous.proposal != notarize.proposal {
+                            let activity = ConflictingNotarize::new(previous.clone(), notarize);
+                            self.reporter
+                                .report(Activity::ConflictingNotarize(activity));
+                            commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
+                        } else if previous != &notarize {
+                            commonware_p2p::block!(self.blocker, sender, "invalid signature");
+                        }
                         false
                     }
-                    (true, Some(previous)) if previous != &notarize => {
-                        commonware_p2p::block!(self.blocker, sender, "invalid signature");
-                        false
-                    }
-                    (_, Some(_)) => false,
-                    (_, None) => {
-                        self.reporter.report(Activity::Notarize(notarize.clone()));
-                        self.votes.insert_notarize(notarize.clone());
-                        self.verifier.add(Vote::Notarize(notarize), false);
-                        true
-                    }
+                    None => self.accept_vote(Vote::Notarize(notarize), false),
                 }
             }
             Vote::Nullify(nullify) => {
@@ -234,20 +253,8 @@ impl<
                     return false;
                 }
 
-                // Once certified, retain only the signer for duplicate suppression.
-                // The full vote is only needed when conflict reporting is enabled.
-                if !self.report_conflicting_votes && self.has_certificate(Kind::Nullification) {
-                    if !self.votes.remember_nullify(index) {
-                        return false;
-                    }
-                    self.reporter.report(Activity::Nullify(nullify));
-                    return true;
-                }
-
                 // Check if finalized
-                if self.report_conflicting_votes
-                    && let Some(previous) = self.votes.finalize(index)
-                {
+                if let Some(previous) = self.votes.finalize(index) {
                     let activity = NullifyFinalize::new(nullify, previous.clone());
                     self.reporter.report(Activity::NullifyFinalize(activity));
                     commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
@@ -255,18 +262,14 @@ impl<
                 }
 
                 // Try to reserve
-                match (self.report_conflicting_votes, self.votes.nullify(index)) {
-                    (true, Some(previous)) if previous != &nullify => {
-                        commonware_p2p::block!(self.blocker, sender, "conflicting nullify");
+                match self.votes.nullify(index) {
+                    Some(previous) => {
+                        if previous != &nullify {
+                            commonware_p2p::block!(self.blocker, sender, "conflicting nullify");
+                        }
                         false
                     }
-                    (_, Some(_)) => false,
-                    (_, None) => {
-                        self.reporter.report(Activity::Nullify(nullify.clone()));
-                        self.votes.insert_nullify(nullify.clone());
-                        self.verifier.add(Vote::Nullify(nullify), false);
-                        true
-                    }
+                    None => self.accept_vote(Vote::Nullify(nullify), false),
                 }
             }
             Vote::Finalize(finalize) => {
@@ -276,22 +279,8 @@ impl<
                     return false;
                 }
 
-                // Once certified, retain only compact state for duplicate suppression
-                // and proposal forwarding. The full vote is only needed when conflict
-                // reporting is enabled.
-                if !self.report_conflicting_votes && self.has_certificate(Kind::Finalization) {
-                    let matching = self.verifier.proposal() == Some(&finalize.proposal);
-                    if !self.votes.remember_finalize(index, matching) {
-                        return false;
-                    }
-                    self.reporter.report(Activity::Finalize(finalize));
-                    return true;
-                }
-
                 // Check if nullified
-                if self.report_conflicting_votes
-                    && let Some(previous) = self.votes.nullify(index)
-                {
+                if let Some(previous) = self.votes.nullify(index) {
                     let activity = NullifyFinalize::new(previous.clone(), finalize);
                     self.reporter.report(Activity::NullifyFinalize(activity));
                     commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
@@ -299,25 +288,19 @@ impl<
                 }
 
                 // Try to reserve
-                match (self.report_conflicting_votes, self.votes.finalize(index)) {
-                    (true, Some(previous)) if previous.proposal != finalize.proposal => {
-                        let activity = ConflictingFinalize::new(previous.clone(), finalize);
-                        self.reporter
-                            .report(Activity::ConflictingFinalize(activity));
-                        commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
+                match self.votes.finalize(index) {
+                    Some(previous) => {
+                        if previous.proposal != finalize.proposal {
+                            let activity = ConflictingFinalize::new(previous.clone(), finalize);
+                            self.reporter
+                                .report(Activity::ConflictingFinalize(activity));
+                            commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
+                        } else if previous != &finalize {
+                            commonware_p2p::block!(self.blocker, sender, "invalid signature");
+                        }
                         false
                     }
-                    (true, Some(previous)) if previous != &finalize => {
-                        commonware_p2p::block!(self.blocker, sender, "invalid signature");
-                        false
-                    }
-                    (_, Some(_)) => false,
-                    (_, None) => {
-                        self.reporter.report(Activity::Finalize(finalize.clone()));
-                        self.votes.insert_finalize(finalize.clone());
-                        self.verifier.add(Vote::Finalize(finalize), false);
-                        true
-                    }
+                    None => self.accept_vote(Vote::Finalize(finalize), false),
                 }
             }
         }
@@ -332,70 +315,7 @@ impl<
     ///
     /// Panics if a notarize or finalize vote is added more than once.
     pub fn add_constructed(&mut self, message: Vote<S, D>) {
-        match &message {
-            Vote::Notarize(notarize) => {
-                if !self.report_conflicting_votes && self.has_certificate(Kind::Notarization) {
-                    let matching = self.verifier.proposal() == Some(&notarize.proposal);
-                    if !self.votes.remember_notarize(notarize.signer(), matching) {
-                        return;
-                    }
-                    self.reporter.report(Activity::Notarize(notarize.clone()));
-                    return;
-                }
-
-                // Our own votes are already verified
-                assert!(
-                    self.votes.insert_notarize(notarize.clone()),
-                    "duplicate notarize"
-                );
-
-                // Report activity
-                self.reporter.report(Activity::Notarize(notarize.clone()));
-            }
-            Vote::Nullify(nullify) => {
-                if !self.report_conflicting_votes && self.has_certificate(Kind::Nullification) {
-                    if !self.votes.remember_nullify(nullify.signer()) {
-                        return;
-                    }
-                    self.reporter.report(Activity::Nullify(nullify.clone()));
-                    return;
-                }
-
-                // The voter re-sends its nullify on every timeout retry (the
-                // batcher's state does not survive a restart), so duplicates
-                // are expected and ignored.
-                if !self.votes.insert_nullify(nullify.clone()) {
-                    return;
-                }
-
-                // Report activity
-                self.reporter.report(Activity::Nullify(nullify.clone()));
-            }
-            Vote::Finalize(finalize) => {
-                if !self.report_conflicting_votes && self.has_certificate(Kind::Finalization) {
-                    let matching = self.verifier.proposal() == Some(&finalize.proposal);
-                    if !self.votes.remember_finalize(finalize.signer(), matching) {
-                        return;
-                    }
-                    self.reporter.report(Activity::Finalize(finalize.clone()));
-                    return;
-                }
-
-                // The voter only constructs a finalize after independently
-                // authenticating the proposal.
-                self.set_authoritative_proposal(&finalize.proposal);
-                assert!(
-                    self.votes.insert_finalize(finalize.clone()),
-                    "duplicate finalize"
-                );
-
-                // Report activity
-                self.reporter.report(Activity::Finalize(finalize.clone()));
-            }
-        }
-
-        // The verifier drops votes for a different proposal than the selected one.
-        self.verifier.add(message, true);
+        self.accept_vote(message, true);
     }
 
     /// Sets the leader for this view. If the leader's notarize has already
