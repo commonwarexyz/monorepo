@@ -51,10 +51,8 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         }
     }
 
-    /// Register a request, returning its assigned ID. `make` receives the ID and builds
-    /// the future that embeds it, so the tracker and the future cannot disagree. If a
-    /// request already exists at the same start location, the old one is superseded and
-    /// aborted.
+    /// Register a request, returning its assigned ID. If a request already exists at the same
+    /// start location, the old one is superseded and aborted.
     pub fn insert<Fut>(&mut self, request: Request<F>, make: impl FnOnce(Id) -> Fut) -> Id
     where
         Fut: Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,

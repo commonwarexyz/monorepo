@@ -2,12 +2,7 @@ use crate::{
     Context,
     journal::{authenticated, contiguous::Contiguous},
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
-    qmdb::{
-        self,
-        operation::{Floored, Key},
-        sync::ServeError,
-    },
-    translator::Translator,
+    qmdb::{self, operation::Floored, sync::ServeError},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -568,54 +563,6 @@ where
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         self.log.serve(request).await
-    }
-}
-impl<F, E, K, V, C, H, T, S> Source for crate::qmdb::immutable::Immutable<F, E, K, V, C, H, T, S>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: crate::qmdb::any::value::ValueEncoding,
-    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::immutable::Operation<F, K, V>>,
-    C::Item: commonware_codec::EncodeShared,
-    H: Hasher,
-    T: Translator + Send + Sync,
-    T::Key: Send + Sync,
-    S: Strategy,
-{
-    type Family = F;
-    type Digest = H::Digest;
-    type Op = crate::qmdb::immutable::Operation<F, K, V>;
-    type Error = qmdb::Error<F>;
-
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
-        self.journal.serve(request).await
-    }
-}
-
-impl<F, E, V, C, H, S> Source for crate::qmdb::keyless::Keyless<F, E, V, C, H, S>
-where
-    F: Family,
-    E: Context,
-    V: crate::qmdb::any::value::ValueEncoding,
-    C: crate::journal::contiguous::Mutable<Item = crate::qmdb::keyless::Operation<F, V>>,
-    H: Hasher,
-    S: Strategy,
-    crate::qmdb::keyless::Operation<F, V>: commonware_codec::EncodeShared,
-{
-    type Family = F;
-    type Digest = H::Digest;
-    type Op = crate::qmdb::keyless::Operation<F, V>;
-    type Error = qmdb::Error<F>;
-
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
-        self.journal.serve(request).await
     }
 }
 

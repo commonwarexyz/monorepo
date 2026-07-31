@@ -164,7 +164,7 @@ pub struct Immutable<
     C::Item: EncodeShared,
 {
     /// Authenticated journal of operations.
-    pub(crate) journal: authenticated::Journal<F, E, C, H, S>,
+    journal: authenticated::Journal<F, E, C, H, S>,
 
     /// Cached canonical operations root.
     pub(crate) root: H::Digest,
@@ -799,6 +799,38 @@ where
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok((self, range))
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> crate::qmdb::sync::Source for Immutable<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    C::Item: EncodeShared,
+    H: Hasher,
+    T: Translator + Send + Sync,
+    T::Key: Send + Sync,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, K, V>;
+    type Error = Error<F>;
+
+    async fn serve(
+        &self,
+        request: crate::qmdb::sync::Request<F>,
+    ) -> Result<
+        (
+            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
+            crate::qmdb::sync::ValidityTx,
+        ),
+        Self::Error,
+    > {
+        self.journal.serve(request).await
     }
 }
 

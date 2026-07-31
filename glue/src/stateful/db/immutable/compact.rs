@@ -217,10 +217,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        sync::CompactTarget::new(
-            initial_root::<F, K, FixedEncoding<V>, H>(),
-            Location::new(1),
-        )
+        sync::CompactTarget {
+            root: initial_root::<F, K, FixedEncoding<V>, H>(),
+            size: Location::new(1),
+        }
     }
 
     async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
@@ -284,10 +284,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        sync::CompactTarget::new(
-            initial_root::<F, K, VariableEncoding<V>, H>(),
-            Location::new(1),
-        )
+        sync::CompactTarget {
+            root: initial_root::<F, K, VariableEncoding<V>, H>(),
+            size: Location::new(1),
+        }
     }
 
     async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {

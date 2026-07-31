@@ -191,8 +191,6 @@ where
         _target: &sync::Target<F, Self::Digest>,
         _journal: &Self::Journal,
     ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        // The in-memory sync journal never resumes at the target, so this is unreachable in
-        // practice. Fetching from peers is always correct.
         Ok(None)
     }
 

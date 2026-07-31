@@ -29,9 +29,7 @@ pub use target::{CompactTarget, Target};
 
 mod requests;
 
-/// A [`Source`] of operations whose associated types match a specific `Database`.
-///
-/// `'static` is the engine's requirement, not one on sources in general.
+/// A [`Source`] of operations for the given database.
 pub trait SourceFor<DB: Database>:
     Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static
 {

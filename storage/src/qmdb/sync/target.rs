@@ -97,37 +97,17 @@ where
 }
 
 /// Target state for syncing to a compact-storage database.
-///
-/// Compact sync is ordinary [`crate::qmdb::sync::sync`] over a one-operation range. To reach
-/// `CompactTarget { root, size: N }`, the client syncs the range `[N - 1, N)`
-/// ([`Target::try_from`] performs the conversion). The engine's boundary request fetches the
-/// final commit operation, proven at `N`, plus the pinned nodes one operation below it, and
-/// verifies all of it against `root` before construction. A full database answers that request
-/// from its operation log like any other request. A compact database answers from its witness,
-/// refusing requests outside the single state it retains.
-///
-/// Authenticates only the final committed root and size. There is no lower replay
-/// bound because the replayed range is always the single final commit.
 #[derive(Debug)]
 pub struct CompactTarget<F: Family, D: Digest> {
-    /// Authenticated root of the committed compact state.
+    /// Target database root.
     pub root: D,
-    /// The committed size (total operations) of that state.
+    /// Target database size.
     pub size: Location<F>,
-}
-
-impl<F: Family, D: Digest> CompactTarget<F, D> {
-    /// Create a compact-sync target.
-    pub const fn new(root: D, size: Location<F>) -> Self {
-        Self { root, size }
-    }
 }
 
 impl<F: Family, D: Digest> TryFrom<&CompactTarget<F, D>> for Target<F, D> {
     type Error = EngineError<F, D>;
 
-    /// The ranged target that replays the one operation ending at `target`. Fails when
-    /// `size` is zero, which no committed state has.
     fn try_from(target: &CompactTarget<F, D>) -> Result<Self, Self::Error> {
         let end = target.size;
         let start = end.checked_sub(1).ok_or(EngineError::InvalidTarget {
