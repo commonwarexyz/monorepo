@@ -10,9 +10,10 @@
 //!
 //! The witness journal holds a complete snapshot of every published commit, so [`Db::rewind`] can
 //! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind rebuild the Merkle from the stored pinned nodes and operation. A snapshot that cannot
-//! rebuild surfaces as [`Error::DataCorrupted`]. The witness is also what lets compact nodes
-//! serve compact sync without retaining historical operations.
+//! and rewind restore the db's in-memory state from an entry: the Merkle is rebuilt from the
+//! stored pinned nodes and operation, and the commit fields are decoded from the operation. An
+//! entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is also what lets
+//! compact nodes serve compact sync without retaining historical operations.
 //!
 //! # Inactivity floor
 //!

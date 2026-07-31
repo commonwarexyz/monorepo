@@ -40,7 +40,7 @@ pub trait Journal<F: Family>: Sized + Send {
     /// Persist the journal.
     fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// The size of the journal (number of operations it has seen)
+    /// The number of operations in the journal, including pruned nodes.
     fn size(&self) -> u64;
 
     /// Append a non-empty batch of operations.
@@ -241,6 +241,51 @@ mod tests {
             page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
             write_buffer: NZUsize!(2048),
         }
+    }
+
+    #[test_traced]
+    fn test_memory_journal() {
+        type Mem = Memory<F, (), u64>;
+        deterministic::Runner::default().start(|_context| async move {
+            let range = non_empty_range!(Location::new(10), Location::new(20));
+
+            // A fresh journal is empty at the range start.
+            let journal = <Mem as Journal<F>>::new((), (), range.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 10);
+
+            // Appends extend the size.
+            let journal = journal.append(&[1, 2, 3]).await.unwrap();
+            assert_eq!(journal.size(), 13);
+
+            // A resize within the retained ops drains the prefix.
+            let journal = journal.resize(Location::new(12)).await.unwrap();
+            assert_eq!(journal.size(), 13);
+            let (start, ops) = journal.into_parts();
+            assert_eq!(start, Location::new(12));
+            assert_eq!(ops, vec![3]);
+
+            // A resize at or beyond the size clears to an empty journal at the new start.
+            let journal = <Mem as Journal<F>>::new((), (), range.clone())
+                .await
+                .unwrap();
+            let journal = journal.append(&[1, 2]).await.unwrap();
+            let journal = journal.resize(Location::new(15)).await.unwrap();
+            assert_eq!(journal.size(), 15);
+            let (start, ops) = journal.into_parts();
+            assert_eq!(start, Location::new(15));
+            assert!(ops.is_empty());
+
+            // A resize before the start clears.
+            let journal = <Mem as Journal<F>>::new((), (), range).await.unwrap();
+            let journal = journal.append(&[1]).await.unwrap();
+            let journal = journal.resize(Location::new(5)).await.unwrap();
+            assert_eq!(journal.size(), 5);
+            let (start, ops) = journal.into_parts();
+            assert_eq!(start, Location::new(5));
+            assert!(ops.is_empty());
+        });
     }
 
     #[test_traced]

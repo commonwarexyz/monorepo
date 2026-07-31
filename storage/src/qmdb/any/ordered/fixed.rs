@@ -139,11 +139,13 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
+        journal::contiguous::Contiguous as _,
         merkle::{
             Location as GenericLocation,
             mmr::{self, Location},
         },
         qmdb::{
+            SnapshotBuild as _,
             any::{
                 ordered::{
                     Update,
@@ -169,7 +171,10 @@ pub(crate) mod test {
     use commonware_utils::{NZU64, NZUsize, TestRng, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::{Rng, seq::IteratorRandom};
-    use std::collections::{BTreeMap, HashMap};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        sync::Arc,
+    };
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
@@ -744,9 +749,6 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
-            use crate::{journal::contiguous::Contiguous as _, qmdb::SnapshotBuild as _};
-            use std::sync::Arc;
-
             type FailDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
@@ -813,9 +815,6 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_empty_log() {
         deterministic::Runner::default().start(|context| async move {
-            use crate::qmdb::SnapshotBuild as _;
-            use std::sync::Arc;
-
             let mut results = Vec::new();
             for concurrency in [1usize, 4] {
                 let cfg = fixed_db_config_partitioned::<OneCap>("ordered_parallel_empty", &context);
@@ -861,9 +860,6 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_bitmap_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            use crate::{journal::contiguous::Contiguous as _, qmdb::SnapshotBuild as _};
-            use std::sync::Arc;
-
             type BitmapDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 

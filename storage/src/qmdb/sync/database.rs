@@ -130,3 +130,28 @@ where
         .map(Some)
         .map_err(Into::into)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::journal_covers_range;
+    use crate::merkle::{Location, mmr::Family as MmrFamily};
+    use commonware_utils::{non_empty_range, range::NonEmptyRange};
+
+    #[test]
+    fn test_journal_covers_range() {
+        let range: NonEmptyRange<Location<MmrFamily>> =
+            non_empty_range!(Location::new(10), Location::new(20));
+
+        // Bounds reaching at least back to the start and ending exactly at the end cover.
+        assert!(journal_covers_range(10..20, &range));
+        assert!(journal_covers_range(5..20, &range));
+
+        // Bounds starting after the range start do not cover.
+        assert!(!journal_covers_range(11..20, &range));
+
+        // Bounds ending anywhere but exactly at the range end do not cover.
+        assert!(!journal_covers_range(10..19, &range));
+        assert!(!journal_covers_range(10..21, &range));
+        assert!(!journal_covers_range(0..0, &range));
+    }
+}

@@ -1457,8 +1457,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
-/// Run a standard replay sync. This is the shared body of every full database's
-/// [`StateSyncDb::sync_db`].
+/// Sync a database that durably persists an operation log.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_standard_db<E, DB, S>(
     context: E,
@@ -1491,9 +1490,7 @@ where
     .await
 }
 
-/// Run engine sync for a compact database. The sync range is the one operation ending at the
-/// target, and the target-update and reached channels are translated between the compact
-/// target and the engine's ranged target.
+/// Sync a database that does not durably persist an operation log.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_compact_db<E, DB, S>(
     context: E,
@@ -1512,8 +1509,7 @@ where
     S: sync::SourceFor<DB>,
 {
     let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
-    // Start at the newest target already queued, so a caller that queued an update before
-    // starting the sync never has the stale target reported as reached.
+    // Start at the newest target already queued.
     while let Ok(update) = tip_updates.try_recv() {
         let Ok(update) = sync::Target::try_from(&update) else {
             continue;
@@ -1526,7 +1522,7 @@ where
     let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
     context.child("compact_updates").spawn(move |_| async move {
         while let Some(update) = tip_updates.recv().await {
-            // A malformed update cannot supersede anything, so skip it like a stale one.
+            // Ignore malformed updates.
             let Ok(update) = sync::Target::try_from(&update) else {
                 continue;
             };

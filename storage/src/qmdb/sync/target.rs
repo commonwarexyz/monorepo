@@ -221,6 +221,7 @@ where
 mod tests {
     use super::*;
     use crate::merkle::mmr::Family as MmrFamily;
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::sha256;
     use commonware_utils::non_empty_range;
     use rstest::rstest;
@@ -359,7 +360,6 @@ mod tests {
 
     #[test]
     fn test_compact_target_decode_rejects_zero_size() {
-        use commonware_codec::{DecodeExt as _, Encode as _};
         let unused_root = sha256::Digest::from([42; 32]);
         let encoded = CompactTarget::<MmrFamily, sha256::Digest> {
             root: unused_root,
@@ -368,6 +368,98 @@ mod tests {
         .encode();
 
         assert!(CompactTarget::<MmrFamily, sha256::Digest>::decode(encoded).is_err());
+    }
+
+    #[test]
+    fn test_advances() {
+        let root = sha256::Digest::from([0; 32]);
+        let current = target(root, 10, 100);
+
+        // End strictly increases, start does not decrease.
+        assert!(target(root, 10, 101).advances(&current));
+        assert!(target(root, 50, 200).advances(&current));
+
+        // Same or smaller end does not advance.
+        assert!(!target(root, 10, 100).advances(&current));
+        assert!(!target(root, 10, 50).advances(&current));
+
+        // A start moving backward does not advance, even with a larger end.
+        assert!(!target(root, 5, 200).advances(&current));
+
+        // An end outside the location domain does not advance.
+        let beyond = target(root, 10, *MmrFamily::MAX_LEAVES + 1);
+        assert!(!beyond.advances(&current));
+    }
+
+    #[test]
+    fn test_compact_target_serialization() {
+        let target = CompactTarget::<MmrFamily, sha256::Digest> {
+            root: sha256::Digest::from([42; 32]),
+            size: Location::new(100),
+        };
+
+        // Serialize
+        let mut buffer = Vec::new();
+        target.write(&mut buffer);
+
+        // Verify encoded size matches actual size
+        assert_eq!(buffer.len(), target.encode_size());
+
+        // Deserialize
+        let mut cursor = Cursor::new(buffer);
+        let deserialized = CompactTarget::read(&mut cursor).unwrap();
+
+        // Verify
+        assert_eq!(target, deserialized);
+        assert_eq!(target.root, deserialized.root);
+        assert_eq!(target.size, deserialized.size);
+    }
+
+    #[test]
+    fn test_compact_target_decode_rejects_size_beyond_domain() {
+        let mut buffer = Vec::new();
+        sha256::Digest::from([42; 32]).write(&mut buffer);
+        Location::<MmrFamily>::new(*MmrFamily::MAX_LEAVES + 1).write(&mut buffer);
+
+        let mut cursor = Cursor::new(buffer);
+        assert!(matches!(
+            CompactTarget::<MmrFamily, sha256::Digest>::read(&mut cursor),
+            Err(CodecError::Invalid(_, _))
+        ));
+    }
+
+    #[test]
+    fn test_compact_target_to_ranged() {
+        let root = sha256::Digest::from([42; 32]);
+
+        // The derived range replays the one operation ending at the target.
+        let compact = CompactTarget::<MmrFamily, _> {
+            root,
+            size: Location::new(100),
+        };
+        let ranged = Target::try_from(&compact).unwrap();
+        assert_eq!(ranged.root, root);
+        assert_eq!(ranged.range.start(), Location::new(99));
+        assert_eq!(ranged.range.end(), Location::new(100));
+
+        // The genesis boundary yields [0, 1).
+        let genesis = CompactTarget::<MmrFamily, _> {
+            root,
+            size: Location::new(1),
+        };
+        let ranged = Target::try_from(&genesis).unwrap();
+        assert_eq!(ranged.range.start(), Location::new(0));
+        assert_eq!(ranged.range.end(), Location::new(1));
+
+        // A zero size has no operation to replay.
+        let empty = CompactTarget::<MmrFamily, _> {
+            root,
+            size: Location::new(0),
+        };
+        assert!(matches!(
+            Target::try_from(&empty),
+            Err(EngineError::InvalidTarget { .. })
+        ));
     }
 
     #[cfg(feature = "arbitrary")]

@@ -1,7 +1,7 @@
 //! Manages outstanding fetch requests with monotonically increasing request IDs.
 //!
 //! Each request is assigned a unique ID and keeps the request it was issued for, letting
-//! the engine check replies against what was asked. Removing a request aborts its future.
+//! the engine check replies against what was requested. Removing a request aborts its future.
 
 use crate::{
     merkle::{Family, Location},
@@ -82,8 +82,9 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         {
             // Only remove from by_location if it still points to this ID.
             // A newer request may have superseded this location.
-            if self.by_location.get(&request.start()) == Some(&id) {
-                self.by_location.remove(&request.start());
+            let start = request.start();
+            if self.by_location.get(&start) == Some(&id) {
+                self.by_location.remove(&start);
             }
             Some(request)
         } else {
