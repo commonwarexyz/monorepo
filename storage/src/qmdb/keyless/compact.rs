@@ -739,6 +739,25 @@ mod tests {
         db
     }
 
+    /// Leave a failed recovery-watermark sync retained after dropping its public handle.
+    async fn fail_dropped_watermark_sync(mut db: DelayedDb, pending: &PendingSyncs) -> DelayedDb {
+        // Prove the data durable so the next call only advances recovery metadata.
+        let first;
+        (db, first) = db.start_sync().await.unwrap();
+        drive_pending_syncs(pending, first).await.unwrap();
+
+        let dropped;
+        (db, dropped) = db.start_sync().await.unwrap();
+        assert_eq!(
+            pending.lock().len(),
+            1,
+            "expected only the recovery-watermark sync"
+        );
+        fail_pending_syncs(pending);
+        drop(dropped);
+        db
+    }
+
     /// A sync handle must not block database use while the witness sync is pending.
     #[test_traced]
     fn test_compact_start_sync_overlaps_work() {
@@ -898,6 +917,34 @@ mod tests {
                 .unwrap();
             assert_eq!(db.root(), root);
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// A no-op `sync` returns a retained metadata failure before starting new journal work.
+    #[test_traced]
+    fn test_compact_start_sync_then_noop_sync_fails_without_new_work() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(
+                &ctx,
+                "delayed",
+                "keyless-start-sync-noop-sync-fail",
+                &pending,
+            );
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+            db = fail_dropped_watermark_sync(db, &pending).await;
+
+            let starts_before = pending.starts();
+            assert!(
+                drive_pending_syncs(&pending, db.sync()).await.is_err(),
+                "sync absorbed the retained metadata failure"
+            );
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "sync started new journal work before returning the retained failure"
+            );
         });
     }
 
@@ -1104,21 +1151,8 @@ mod tests {
             );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
-
-            // Prove the data durable so the next call only advances recovery metadata.
-            let first;
-            (db, first) = db.start_sync().await.unwrap();
-            drive_pending_syncs(&pending, first).await.unwrap();
-
-            let dropped;
-            (db, dropped) = db.start_sync().await.unwrap();
-            assert_eq!(
-                pending.lock().len(),
-                1,
-                "expected only the recovery-watermark sync"
-            );
-            fail_pending_syncs(&pending);
-            drop(dropped);
+            // Leave only the failed recovery-watermark completion for the next call to observe.
+            db = fail_dropped_watermark_sync(db, &pending).await;
 
             // The store retains the dropped handle's completion. Deferred failures stay on the
             // handle channel, so this call succeeds but its handle must fail.
