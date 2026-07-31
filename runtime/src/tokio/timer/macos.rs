@@ -34,10 +34,9 @@ pub(super) struct NativeAlarm {
     installed: AtomicU64,
 }
 
-impl Alarm for NativeAlarm {
-    const PLATFORM: &'static str = "macos";
-
-    fn new(_shard: usize) -> Result<Self, AlarmInitError> {
+impl NativeAlarm {
+    /// Creates and registers one kqueue with the active Tokio reactor.
+    pub(super) fn new() -> Result<Self, AlarmInitError> {
         let timebase =
             Timebase::read().map_err(|error| AlarmInitError::new("read Mach timebase", error))?;
         let raw = retry_interrupted(|| {
@@ -59,7 +58,9 @@ impl Alarm for NativeAlarm {
             installed: AtomicU64::new(NO_TIMER),
         })
     }
+}
 
+impl Alarm for NativeAlarm {
     fn max_deadline(&self) -> Deadline {
         let max_ticks =
             u64::try_from(libc::intptr_t::MAX).expect("intptr_t maximum must be nonnegative");
@@ -469,8 +470,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
     async fn critical_absolute_timer_is_ready_and_consumed() {
         // Create two alarms as the scheduler does for separate shards.
-        let alarm = NativeAlarm::new(0).unwrap();
-        let other = NativeAlarm::new(1).unwrap();
+        let alarm = NativeAlarm::new().unwrap();
+        let other = NativeAlarm::new().unwrap();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();
 
         // Each alarm owns a distinct kqueue rather than sharing kernel state.
@@ -518,7 +519,7 @@ mod tests {
     async fn rearm_after_unconsumed_expiry_replaces_stale_readiness() {
         // Arm a short deadline and wait for Tokio to observe readability without
         // retrieving the expired EV_ONESHOT event from the kqueue.
-        let alarm = NativeAlarm::new(0).unwrap();
+        let alarm = NativeAlarm::new().unwrap();
         let first = alarm
             .now()
             .unwrap()
@@ -553,7 +554,7 @@ mod tests {
     async fn disarm_removes_unconsumed_expired_event() {
         // Arm a short deadline and observe descriptor readiness without retrieving
         // the expired EV_ONESHOT event.
-        let alarm = NativeAlarm::new(0).unwrap();
+        let alarm = NativeAlarm::new().unwrap();
         let deadline = alarm
             .now()
             .unwrap()
@@ -578,7 +579,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support kqueue readiness")]
     async fn elapsed_rearm_and_disarm() {
         // Create one alarm and verify that a zero-timeout poll starts empty.
-        let alarm = NativeAlarm::new(0).unwrap();
+        let alarm = NativeAlarm::new().unwrap();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();
         assert_eq!(
             consume(descriptor).unwrap_err().kind(),
@@ -646,7 +647,7 @@ mod tests {
     async fn disarm_rejects_missing_recorded_timer() {
         // Record a future timer in the adapter, then remove its kernel registration
         // directly without updating the adapter's bookkeeping.
-        let alarm = NativeAlarm::new(0).unwrap();
+        let alarm = NativeAlarm::new().unwrap();
         alarm.arm(alarm.max_deadline()).unwrap();
         let deletion = timer_change(libc::EV_DELETE, 0, 0);
         submit_change(alarm.descriptor.get_ref().as_raw_fd(), &deletion).unwrap();

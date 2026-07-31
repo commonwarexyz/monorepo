@@ -111,10 +111,8 @@ impl Deadline {
 
 /// Error raised while synchronously constructing a timer shard.
 #[derive(Debug, Error)]
-#[error("failed to initialize {platform} timer shard {shard} during {operation}: {source}")]
+#[error("failed to initialize timer shard {shard} during {operation}: {source}")]
 pub(crate) struct InitError {
-    /// Operating system adapter being initialized.
-    platform: &'static str,
     /// Zero-based shard index.
     shard: usize,
     /// Native or reactor operation that failed.
@@ -141,12 +139,6 @@ impl AlarmInitError {
 
 /// Statically dispatched boundary around a platform alarm.
 pub(super) trait Alarm: Send + Sync + Sized + 'static {
-    /// Human-readable platform name for fatal diagnostics.
-    const PLATFORM: &'static str;
-
-    /// Creates and registers one alarm with the active Tokio reactor.
-    fn new(shard: usize) -> Result<Self, AlarmInitError>;
-
     /// Largest monotonic deadline that can be armed safely.
     fn max_deadline(&self) -> Deadline;
 
@@ -194,7 +186,9 @@ impl Builder {
     pub(crate) fn build(self, runtime: &Runtime, panicker: Panicker) -> Result<Timer, InitError> {
         // AsyncFd registration requires the reactor selected by this builder.
         let _guard = runtime.enter();
-        let shards = initialize_shards(self.affinity.worker_threads, panicker, NativeAlarm::new)?;
+        let shards = initialize_shards(self.affinity.worker_threads, panicker, |_| {
+            NativeAlarm::new()
+        })?;
         let drivers = shards
             .iter()
             .map(|shard| runtime.spawn(run_driver(Arc::clone(shard))))
@@ -232,7 +226,6 @@ where
     let mut shards = Vec::with_capacity(worker_threads);
     for index in 0..worker_threads {
         let init_error = |operation, source| InitError {
-            platform: A::PLATFORM,
             shard: index,
             operation,
             source,
@@ -643,12 +636,9 @@ impl<A: Alarm> Shard<A> {
             let armed = state.armed_deadline;
             let notified = self.signal.is_notified();
             let message = format!(
-                "{} timer shard {} failed during {}: {}; snapshot=ShardSnapshot {{ queued: \
+                "timer shard {} failed during {}: {}; snapshot=ShardSnapshot {{ queued: \
                  {queued}, desired: {desired:?}, armed: {armed:?}, notified: {notified} }}",
-                A::PLATFORM,
-                self.index,
-                failure.operation,
-                failure.cause
+                self.index, failure.operation, failure.cause
             );
             state.lifecycle = ShardLifecycle::Failed;
             state.armed_deadline = None;
@@ -662,7 +652,6 @@ impl<A: Alarm> Shard<A> {
         // Every failed shard emits its own actionable diagnostic, even when
         // another panic already claimed or closed root interruption.
         tracing::error!(
-            platform = A::PLATFORM,
             shard = self.index,
             operation = failure.operation,
             error = %failure.cause,

@@ -15,10 +15,9 @@ pub(super) struct NativeAlarm {
     descriptor: AsyncFd<OwnedFd>,
 }
 
-impl Alarm for NativeAlarm {
-    const PLATFORM: &'static str = "linux";
-
-    fn new(_shard: usize) -> Result<Self, AlarmInitError> {
+impl NativeAlarm {
+    /// Creates and registers one timerfd with the active Tokio reactor.
+    pub(super) fn new() -> Result<Self, AlarmInitError> {
         let raw = retry_interrupted(|| {
             // SAFETY: `timerfd_create` takes no pointers and returns a new descriptor.
             unsafe {
@@ -29,27 +28,83 @@ impl Alarm for NativeAlarm {
             }
         })
         .map_err(|error| AlarmInitError::new("create timerfd", error))?;
+
         // SAFETY: `raw` is a fresh descriptor whose ownership has not moved.
         let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
         let descriptor = AsyncFd::with_interest(descriptor, Interest::READABLE)
             .map_err(|error| AlarmInitError::new("register timerfd with Tokio reactor", error))?;
+
         Ok(Self { descriptor })
     }
 
+    /// Arms an absolute one-shot deadline or disarms with a zero specification.
+    fn update(&self, deadline: Option<Deadline>) -> io::Result<()> {
+        let specification = libc::itimerspec {
+            it_interval: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: match deadline {
+                Some(deadline) => deadline_timespec(deadline)?,
+                None => libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+            },
+        };
+        let flags = if deadline.is_some() {
+            libc::TFD_TIMER_ABSTIME
+        } else {
+            0
+        };
+        let descriptor = self.descriptor.get_ref().as_raw_fd();
+
+        retry_interrupted(|| {
+            // SAFETY: the descriptor is an owned timerfd and `specification` is initialized.
+            unsafe {
+                libc::timerfd_settime(descriptor, flags, &specification, std::ptr::null_mut())
+            }
+        })?;
+
+        Ok(())
+    }
+}
+
+impl Alarm for NativeAlarm {
     fn max_deadline(&self) -> Deadline {
-        Deadline::from_duration(max_timerfd_duration())
+        // timerfd accepts a timespec, whose largest normalized value is
+        // time_t::MAX seconds plus 999_999_999 nanoseconds.
+        let time_t_seconds =
+            u64::try_from(libc::time_t::MAX).expect("time_t maximum must be nonnegative");
+        let time_t_limit = Duration::new(time_t_seconds, 999_999_999);
+
+        // The kernel ultimately stores hrtimer deadlines as signed nanoseconds.
+        let ktime_nanoseconds =
+            u64::try_from(i64::MAX).expect("signed ktime maximum must be nonnegative");
+        let ktime_limit = Duration::from_nanos(ktime_nanoseconds);
+
+        Deadline::from_duration(time_t_limit.min(ktime_limit))
     }
 
     fn now(&self) -> io::Result<Deadline> {
-        monotonic_now()
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+
+        retry_interrupted(|| {
+            // SAFETY: `value` points to writable storage for one timespec.
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) }
+        })?;
+        duration_from_timespec(value).map(Deadline::from_duration)
     }
 
     fn arm(&self, deadline: Deadline) -> io::Result<()> {
-        update_timerfd(self.descriptor.get_ref().as_raw_fd(), Some(deadline))
+        self.update(Some(deadline))
     }
 
     fn disarm(&self) -> io::Result<()> {
-        update_timerfd(self.descriptor.get_ref().as_raw_fd(), None)
+        self.update(None)
     }
 
     async fn wait(&self) -> io::Result<()> {
@@ -57,7 +112,32 @@ impl Alarm for NativeAlarm {
             let mut readiness = self.descriptor.readable().await?;
             let mut consumed = false;
             loop {
-                match readiness.try_io(|inner| consume(inner.get_ref().as_raw_fd())) {
+                match readiness.try_io(|inner| {
+                    // The expiration count itself is irrelevant, reading it
+                    // drains the one-shot timerfd readiness.
+                    let mut expirations = 0_u64;
+                    let result = retry_interrupted(|| {
+                        // SAFETY: `expirations` provides eight writable bytes
+                        // for a timerfd read.
+                        unsafe {
+                            libc::read(
+                                inner.get_ref().as_raw_fd(),
+                                (&mut expirations as *mut u64).cast(),
+                                size_of::<u64>(),
+                            )
+                        }
+                    })?;
+
+                    // A successful timerfd read must return exactly one u64.
+                    if result as usize == size_of::<u64>() {
+                        Ok(())
+                    } else {
+                        Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "timerfd returned a partial expiration count",
+                        ))
+                    }
+                }) {
                     Ok(result) => {
                         result?;
                         consumed = true;
@@ -72,11 +152,15 @@ impl Alarm for NativeAlarm {
     }
 }
 
-/// Retries one integer-returning syscall when interrupted.
-fn retry_interrupted(mut call: impl FnMut() -> libc::c_int) -> io::Result<libc::c_int> {
+/// Retries one signed integer-returning syscall when interrupted.
+#[inline]
+fn retry_interrupted<T>(mut call: impl FnMut() -> T) -> io::Result<T>
+where
+    T: Copy + From<i8> + PartialOrd,
+{
     loop {
         let result = call();
-        if result >= 0 {
+        if result >= T::from(0) {
             return Ok(result);
         }
         let error = io::Error::last_os_error();
@@ -86,40 +170,18 @@ fn retry_interrupted(mut call: impl FnMut() -> libc::c_int) -> io::Result<libc::
     }
 }
 
-/// Returns the smaller of the timerfd ABI and kernel hrtimer limits.
-fn max_timerfd_duration() -> Duration {
-    let time_t_seconds =
-        u64::try_from(libc::time_t::MAX).expect("time_t maximum must be nonnegative");
-    let time_t_limit = Duration::new(time_t_seconds, 999_999_999);
-    let ktime_nanoseconds =
-        u64::try_from(i64::MAX).expect("signed ktime maximum must be nonnegative");
-    let ktime_limit = Duration::from_nanos(ktime_nanoseconds);
-    time_t_limit.min(ktime_limit)
-}
-
-/// Reads `CLOCK_MONOTONIC` and validates the returned timespec.
-fn monotonic_now() -> io::Result<Deadline> {
-    let mut value = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    retry_interrupted(|| {
-        // SAFETY: `value` points to writable storage for one timespec.
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) }
-    })?;
-    duration_from_timespec(value).map(Deadline::from_duration)
-}
-
 /// Converts a validated nonnegative timespec to a duration.
 fn duration_from_timespec(value: libc::timespec) -> io::Result<Duration> {
     let seconds = u64::try_from(value.tv_sec)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative monotonic seconds"))?;
+
     let nanoseconds = u32::try_from(value.tv_nsec)
         .ok()
         .filter(|value| *value < 1_000_000_000)
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "invalid monotonic nanoseconds")
         })?;
+
     Ok(Duration::new(seconds, nanoseconds))
 }
 
@@ -132,65 +194,11 @@ fn deadline_timespec(deadline: Deadline) -> io::Result<libc::timespec> {
             "monotonic deadline exceeds time_t",
         )
     })?;
+
     Ok(libc::timespec {
         tv_sec: seconds,
         tv_nsec: duration.subsec_nanos().into(),
     })
-}
-
-/// Arms an absolute one-shot deadline or disarms with a zero specification.
-fn update_timerfd(descriptor: libc::c_int, deadline: Option<Deadline>) -> io::Result<()> {
-    let specification = libc::itimerspec {
-        it_interval: libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        },
-        it_value: match deadline {
-            Some(deadline) => deadline_timespec(deadline)?,
-            None => libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            },
-        },
-    };
-    let flags = if deadline.is_some() {
-        libc::TFD_TIMER_ABSTIME
-    } else {
-        0
-    };
-    retry_interrupted(|| {
-        // SAFETY: `descriptor` is an owned timerfd and `specification` is initialized.
-        unsafe { libc::timerfd_settime(descriptor, flags, &specification, std::ptr::null_mut()) }
-    })?;
-    Ok(())
-}
-
-/// Consumes one timerfd readiness count without blocking.
-fn consume(descriptor: libc::c_int) -> io::Result<()> {
-    let mut expirations = 0_u64;
-    loop {
-        // SAFETY: `expirations` provides eight writable bytes for a timerfd read.
-        let result = unsafe {
-            libc::read(
-                descriptor,
-                (&mut expirations as *mut u64).cast(),
-                size_of::<u64>(),
-            )
-        };
-        if result as usize == size_of::<u64>() {
-            return Ok(());
-        }
-        if result >= 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "timerfd returned a partial expiration count",
-            ));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -200,7 +208,6 @@ mod tests {
 
     #[test]
     fn timespec_validation() {
-        // Start with an ordinary normalized value and verify exact conversion.
         assert_eq!(
             duration_from_timespec(libc::timespec {
                 tv_sec: 1,
@@ -210,8 +217,6 @@ mod tests {
             Duration::new(1, 2)
         );
 
-        // Kernel output is adversarial input. Negative seconds and nanoseconds
-        // outside the normalized range must be rejected before arithmetic.
         assert!(
             duration_from_timespec(libc::timespec {
                 tv_sec: -1,
@@ -250,10 +255,12 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
-    #[test]
-    fn maximum_deadline_respects_kernel_and_abi_limits() {
-        // Compute both independent limits imposed by timespec and signed ktime.
-        let maximum = max_timerfd_duration();
+    #[tokio::test]
+    async fn maximum_deadline_respects_kernel_and_abi_limits() {
+        // Construct an adapter and compute both independent limits imposed by
+        // timespec and signed kernel hrtimer storage.
+        let alarm = NativeAlarm::new().unwrap();
+        let maximum = alarm.max_deadline();
         let ktime_limit =
             Duration::from_nanos(u64::try_from(i64::MAX).expect("i64::MAX must fit u64"));
         let time_t_limit = Duration::new(
@@ -263,12 +270,15 @@ mod tests {
 
         // The selected deadline is exactly the smaller limit and still converts
         // into the platform timespec without narrowing.
-        assert_eq!(maximum, ktime_limit.min(time_t_limit));
-        let converted = deadline_timespec(Deadline::from_duration(maximum)).unwrap();
-        assert_eq!(u64::try_from(converted.tv_sec).unwrap(), maximum.as_secs());
+        assert_eq!(maximum.as_duration(), ktime_limit.min(time_t_limit));
+        let converted = deadline_timespec(maximum).unwrap();
+        assert_eq!(
+            u64::try_from(converted.tv_sec).unwrap(),
+            maximum.as_duration().as_secs()
+        );
         assert_eq!(
             u32::try_from(converted.tv_nsec).unwrap(),
-            maximum.subsec_nanos()
+            maximum.as_duration().subsec_nanos()
         );
     }
 
@@ -276,8 +286,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support timerfd readiness")]
     async fn descriptor_flags_and_absolute_readiness() {
         // Create two adapters as the scheduler does for separate shards.
-        let alarm = NativeAlarm::new(0).unwrap();
-        let other = NativeAlarm::new(1).unwrap();
+        let alarm = NativeAlarm::new().unwrap();
+        let other = NativeAlarm::new().unwrap();
         let descriptor = alarm.descriptor.get_ref().as_raw_fd();
 
         // Each alarm owns a distinct timerfd rather than sharing kernel state.
@@ -332,7 +342,7 @@ mod tests {
     async fn rearm_after_unconsumed_expiry_replaces_stale_readiness() {
         // Arm a short deadline and wait for Tokio to observe readability without
         // consuming the timerfd expiration count.
-        let alarm = NativeAlarm::new(0).unwrap();
+        let alarm = NativeAlarm::new().unwrap();
         let first = alarm
             .now()
             .unwrap()
@@ -366,7 +376,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support timerfd readiness")]
     async fn elapsed_arm_rearm_and_disarm() {
         // An already elapsed absolute deadline must become readable promptly.
-        let alarm = NativeAlarm::new(0).unwrap();
+        let alarm = NativeAlarm::new().unwrap();
         let now = alarm.now().unwrap();
         alarm.arm(now).unwrap();
         tokio::time::timeout(Duration::from_secs(2), alarm.wait())

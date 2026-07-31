@@ -138,12 +138,6 @@ mod ordinary {
     }
 
     impl Alarm for FakeAlarm {
-        const PLATFORM: &'static str = "fake";
-
-        fn new(_shard: usize) -> Result<Self, AlarmInitError> {
-            Ok(Self::controlled().0)
-        }
-
         fn max_deadline(&self) -> Deadline {
             self.state
                 .max_deadline_reads
@@ -577,12 +571,11 @@ mod ordinary {
 
         // Initialization must stop at the failed shard with precise operation context.
         let error = initialization_error(result);
-        assert_eq!(error.platform, FakeAlarm::PLATFORM);
         assert_eq!(error.shard, 2);
         assert_eq!(error.operation, "create fake alarm");
         assert_eq!(
             error.to_string(),
-            "failed to initialize fake timer shard 2 during create fake alarm: \
+            "failed to initialize timer shard 2 during create fake alarm: \
              injected fake alarm construction failure"
         );
         assert_eq!(
@@ -1766,9 +1759,8 @@ mod ordinary {
 #[cfg(feature = "loom")]
 mod loom_tests {
     use super::super::{
-        Alarm, AlarmInitError, Batch, Deadline, DriverFailure, DriverSignal, ENTRY_CANCELED,
-        ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING, Entry, NOT_IN_HEAP, Shard,
-        ShardLifecycle,
+        Alarm, Batch, Deadline, DriverFailure, DriverSignal, ENTRY_CANCELED, ENTRY_FAILED,
+        ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING, Entry, NOT_IN_HEAP, Shard, ShardLifecycle,
     };
     use crate::utils::{Panicker, extract_panic_message};
     use loom::{
@@ -1854,12 +1846,6 @@ mod loom_tests {
     }
 
     impl Alarm for ModelAlarm {
-        const PLATFORM: &'static str = "loom";
-
-        fn new(_shard: usize) -> Result<Self, AlarmInitError> {
-            unreachable!("Loom tests construct the modeled alarm directly")
-        }
-
         fn max_deadline(&self) -> Deadline {
             deadline(u64::MAX)
         }
