@@ -5,9 +5,9 @@ pub(super) use commonware_utils::sync::Mutex;
 #[cfg(not(feature = "loom"))]
 pub(super) use futures::task::AtomicWaker;
 #[cfg(feature = "loom")]
-pub(in crate::tokio::timer) use loom::sync::Arc as EntryArc;
+pub(super) use loom::sync::Arc as EntryArc;
 #[cfg(not(feature = "loom"))]
-pub(in crate::tokio::timer) use std::sync::Arc as EntryArc;
+pub(super) use std::sync::Arc as EntryArc;
 #[cfg(feature = "loom")]
 use std::task::Waker;
 
