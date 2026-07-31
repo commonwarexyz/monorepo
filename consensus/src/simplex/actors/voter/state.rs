@@ -823,8 +823,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     ///
     /// When ancestry is missing, requests the exact certificate from the
     /// elected leader. An honest leader must hold evidence for every view its
-    /// proposal skips and for the parent it names. The proposal alone can
-    /// therefore induce work only toward that leader.
+    /// proposal skips and for the parent it names. The resulting repair request
+    /// targets only that leader.
     pub fn try_verify(&mut self) -> Verify<S, D> {
         let view = self.view;
         let Some((leader, proposal)) = self

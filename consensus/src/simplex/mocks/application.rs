@@ -140,10 +140,6 @@ pub enum Certifier<D: Digest> {
     /// (e.g., missing verification context in Marshaled).
     Cancel,
     /// Hold the sender alive without ever responding.
-    ///
-    /// This test-only mode deliberately violates the live-automaton contract. It verifies that
-    /// consensus actors remain responsive while an application request stalls, but it does not
-    /// model a validator covered by the consensus liveness guarantee.
     Pending,
 }
 

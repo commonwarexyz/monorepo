@@ -179,10 +179,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// # Liveness Requirement
         ///
-        /// Certification is consensus-critical work while no protocol certificate establishes
-        /// the result. A validator is live only if every request that remains relevant eventually
-        /// produces `true` or `false`. A request may remain pending for an arbitrarily long time,
-        /// but not forever.
+        /// Certification remains consensus-critical until the application returns a verdict, a
+        /// dependent notarization proves success, or finalization makes the request unnecessary. A
+        /// validator is live only if every request that remains relevant eventually produces `true`
+        /// or `false`. A request may remain pending for an arbitrarily long time, but not forever.
         ///
         /// If certification does not finish before the certification timeout expires, the
         /// validator times out the current view and issues a nullify vote. The validator can enter
@@ -197,13 +197,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// for shutdown or another condition that prevents the implementation from ever producing
         /// a verdict.
         ///
-        /// If the receiver remains open forever, no dependent notarization establishes success,
-        /// and no finalization makes the request obsolete, the validator is unavailable for
-        /// executions that require that verdict. The validator therefore does not count as live
-        /// for the consensus liveness guarantee.
-        ///
-        /// Consensus can request certification again after restart if the previous result was not
-        /// durably recorded.
+        /// A validator whose relevant request remains unresolved forever cannot make progress in
+        /// any execution that depends on the verdict. It does not count as live for the consensus
+        /// liveness guarantee.
         ///
         /// # Determinism Requirement
         ///
