@@ -120,13 +120,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// `propose` also commits the local proposer to certifying that same
         /// `(round, payload)` if it later becomes notarized.
         ///
-        /// The parent named in the context is not guaranteed to be settled.
-        /// Implementations that run ahead optimistically (see [`simplex`]) may
-        /// request a payload while the parent is only notarized, or only
-        /// locally voted for, and may do so before consensus has entered the
-        /// context's own view. Build on the named parent regardless of how far
-        /// it has progressed; if the parent is later abandoned, so is this
-        /// proposal.
+        /// A consensus engine that runs ahead optimistically (see [`simplex`])
+        /// may request a payload while the parent named in the context is only
+        /// notarized, or only voted for locally, and before consensus enters
+        /// the context's view. Build on the named parent regardless; if the
+        /// parent is later abandoned, this proposal is abandoned with it.
         fn propose(
             &mut self,
             context: Self::Context,
@@ -149,11 +147,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
         /// for temporary inability to decide.
         ///
-        /// The parent settlement caveat on [`Self::propose`] applies here too,
-        /// and makes the guidance above load-bearing. A `false` verdict (or a
-        /// closed channel) for a future view is retained and acted upon as
-        /// soon as that view is entered, so declining because the payload
-        /// cannot be validated *yet* converts the optimization into a stall.
+        /// The parent caveat on [`Self::propose`] applies here too: an
+        /// optimistic request may arrive before consensus enters the context's
+        /// view. A `false` verdict (or a closed channel) for such a view is
+        /// remembered and nullifies the view once consensus enters it.
+        /// Rejecting a payload that cannot be validated *yet* therefore
+        /// forfeits the view.
         fn verify(
             &mut self,
             context: Self::Context,

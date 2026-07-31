@@ -140,8 +140,9 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
 
 impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> State<E, S, L, D> {
     /// Returns true when `view` is within the optimistic *issuance* window:
-    /// a directly-notarized view anchors it no more than `optimistic_views`
-    /// hops above that anchor's child (see [`Lookahead::issuance_floor`]).
+    /// a directly-notarized anchor exists and `view` sits at most
+    /// `optimistic_views` hops above the anchor's child (see
+    /// [`Lookahead::issuance_floor`]).
     ///
     /// The scanned range spans at most `optimistic_views + 1` views, so
     /// reading the rounds directly is cheap and avoids maintaining a parallel
@@ -160,9 +161,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns the lowest tracked view at or above `from`.
     ///
-    /// Walking the tracked views by cursor rather than collecting them keeps
-    /// the forward scans in [`Self::try_propose`] and [`Self::try_verify`]
-    /// allocation-free while leaving their bodies free to take `&mut self`.
+    /// A cursor keeps the forward scans in [`Self::try_propose`] and
+    /// [`Self::try_verify`] allocation-free and lets their bodies take
+    /// `&mut self`.
     fn next_tracked_view(&self, from: View) -> Option<View> {
         self.views.range(from..).next().map(|(&view, _)| view)
     }
@@ -930,7 +931,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// The completion then reports on ancestry we no longer hold and says
     /// nothing about the proposal under the parent we now accept.
     ///
-    /// The proposal is deliberately not re-queued for verification under the
+    /// The proposal is not re-queued for verification under the
     /// replacement parent: displacement implies the leader equivocated, and
     /// the proposal commits to the parent it was built on. The view instead
     /// resolves through a peer's notarization of the proposal or the normal

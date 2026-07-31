@@ -18,9 +18,9 @@ use std::{num::NonZeroUsize, time::Duration};
 ///
 /// Forwarding is a best-effort liveness aid. When enabled, the batcher
 /// broadcasts on entering the next view for a proposal that is finalized, or
-/// notarized without a failed certification, avoiding sends for proposals
-/// certification has already rejected. Targets come from votes observed
-/// locally, so a certificate signer whose vote never reached us is still one.
+/// notarized without a failed certification. Targets are chosen from votes observed
+/// locally, so a certificate signer whose vote never reached us still counts
+/// as silent.
 #[derive(Debug, Clone, Copy)]
 pub enum ForwardingPolicy {
     /// Do nothing when a proposal becomes eligible for forwarding.

@@ -474,10 +474,11 @@ cfg_if::cfg_if! {
         mod metrics;
 
         /// The view geometry of a term: its length and `optimistic_views`, the
-        /// depth of the *admission* window (anchored at the current view, see
-        /// [`Self::in_admission_window`]) and the *issuance* window (anchored
-        /// at the last directly-notarized view, see [`Self::issuance_floor`]).
-        /// See the [module docs] for what each governs.
+        /// depth of the two optimistic windows. The *admission* window is
+        /// anchored at the current view ([`Self::in_admission_window`]); the
+        /// *issuance* window at the last directly-notarized view
+        /// ([`Self::issuance_floor`]). See the [module docs] for what each
+        /// governs.
         ///
         /// `current` arguments must be locally derived views (they feed
         /// panicking arithmetic in [`View::term_end`]); candidate arguments
@@ -1716,8 +1717,8 @@ mod tests {
     /// leader elected for view 1 (stable for the whole term), and the network
     /// oracle.
     ///
-    /// The 1.5s leader / 3.5s certification timeouts are load-bearing
-    /// relative to the callers' link latencies: with latency near or above
+    /// The 1.5s leader and 3.5s certification timeouts are tuned to the
+    /// callers' link latencies: with latency near or above
     /// half the leader timeout, a view that waits for its parent's
     /// certification (two or more network trips) times out, so runs stay
     /// nullification-free only when views pipeline optimistically.

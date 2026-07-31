@@ -916,7 +916,8 @@ mod tests {
 
     /// Harness for the buffered-finalization tests: a started batcher for
     /// participant 0 (leader 1, view 1) with a finalize quorum for `proposal`
-    /// buffered unverifiable, since the leader's proposal is not yet known.
+    /// buffered but not yet verifiable, since the leader's proposal is not
+    /// yet known.
     struct BufferedFinalization {
         oracle: Oracle<PublicKey, deterministic::Context>,
         participants: Vec<PublicKey>,
@@ -936,7 +937,7 @@ mod tests {
         ),
     }
 
-    /// Builds a [`BufferedFinalization`]: finalize votes buffer unverifiable
+    /// Builds a [`BufferedFinalization`]: finalize votes cannot be verified
     /// while the leader's proposal is unknown, so each test reveals the
     /// proposal its own way and expects the buffered quorum to drain.
     async fn buffered_finalization_setup(

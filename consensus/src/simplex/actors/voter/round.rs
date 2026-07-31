@@ -139,7 +139,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns the leader key and proposal ready for verification, without
     /// recording the request. Resolve ancestry before calling
-    /// [`Self::request_verify`], which retires the round from later offers.
+    /// [`Self::request_verify`], after which this method returns `None`.
     #[allow(clippy::type_complexity)]
     pub fn pending_verification(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.verify_ready()?;

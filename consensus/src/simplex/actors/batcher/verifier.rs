@@ -63,8 +63,8 @@ impl<V: Attributable> Certification<V> {
     /// certificate recovery), unless its signer is already counted: a
     /// verified vote displaces the signer's pending duplicate, while a
     /// pending vote is dropped if the signer is already buffered. This keeps
-    /// each signer's vote counted at most once toward the quorum. Dropped
-    /// once complete.
+    /// each signer's vote counted at most once toward the quorum. Votes that
+    /// arrive after the certificate is complete are dropped.
     fn add(&mut self, vote: V, is_verified: bool) {
         let State::Incomplete { pending, verified } = &mut self.state else {
             return;
@@ -467,9 +467,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// # Panics
     ///
     /// Panics if a different leader was already set or if `notarize` is not
-    /// from `leader`. Both values are locally derived (round stamping and
-    /// voter updates), never taken from peers, so neither assertion can fire
-    /// on adversarial input.
+    /// from `leader`. Both values are locally derived, so neither assertion
+    /// can fire on adversarial input.
     pub fn set_leader(&mut self, leader: Participant, notarize: Option<&Notarize<S, D>>) {
         if let Some(existing) = self.leader {
             // Enforces the stable-leader contract (see `Elector::elect`).

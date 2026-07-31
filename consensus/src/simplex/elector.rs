@@ -104,7 +104,9 @@ impl Terms {
     /// `optimistic_views` is how far a participant may optimistically run
     /// ahead of certified ancestry within a term; zero disables optimistic
     /// validation entirely, and values wider than `length` are accepted but
-    /// capped by the windows themselves. See [Optimistic Validation] for what
+    /// capped by the windows themselves. The voter tracks a round for every
+    /// optimistic view, so memory scales with the smaller of
+    /// `optimistic_views` and `length`. See [Optimistic Validation] for what
     /// it governs. Like the stall timeout, this is local policy: mismatched
     /// values across participants only degrade the optimization, never
     /// safety.
@@ -207,11 +209,9 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// stable-leader term (as defined by [`Self::terms`]): nullification
     /// coverage, finalize gating, and leader-inactivity tracking all assume the
     /// leader is constant for the remainder of a term. This contract is not
-    /// enforced at runtime: once a round's leader is set (including in-term
-    /// rounds stamped from the current term leader), the elector is not
-    /// consulted again for that round, so a non-conforming implementation
-    /// leaves participants with inconsistent cached leaders and stalls
-    /// progress rather than failing fast.
+    /// enforced at runtime: once a round's leader is set, the elector is not
+    /// consulted again for that round. A non-conforming implementation leaves
+    /// participants with inconsistent leaders and stalls progress.
     ///
     /// The `certificate` is expected to be `None` only for view 1.
     ///

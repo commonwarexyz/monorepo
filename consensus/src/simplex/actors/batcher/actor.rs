@@ -38,9 +38,9 @@ use tracing::{Instrument as _, Span, debug, info_span, trace};
 /// Tracks the current view, its leader, and whether the voter has already been
 /// sent the leader-nullify hint for it.
 ///
-/// The hint is tracked on its own rather than alongside other timeout reasons
-/// because the voter may ignore an inactivity hint (a buffered proposal
-/// disproves it) but must always act on the leader's own nullify.
+/// The hint is tracked separately from other timeout reasons because the
+/// voter may ignore an inactivity hint (a buffered proposal disproves it)
+/// but must always act on the leader's own nullify.
 struct Current {
     view: View,
     leader: Option<Participant>,
