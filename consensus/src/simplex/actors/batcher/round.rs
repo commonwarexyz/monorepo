@@ -234,6 +234,8 @@ impl<
                     return false;
                 }
 
+                // Once certified, retain only the signer for duplicate suppression.
+                // The full vote is only needed when conflict reporting is enabled.
                 if !self.report_conflicting_votes && self.has_certificate(Kind::Nullification) {
                     if !self.votes.remember_nullify(index) {
                         return false;
@@ -274,6 +276,9 @@ impl<
                     return false;
                 }
 
+                // Once certified, retain only compact state for duplicate suppression
+                // and proposal forwarding. The full vote is only needed when conflict
+                // reporting is enabled.
                 if !self.report_conflicting_votes && self.has_certificate(Kind::Finalization) {
                     let matching = self.verifier.proposal() == Some(&finalize.proposal);
                     if !self.votes.remember_finalize(index, matching) {
