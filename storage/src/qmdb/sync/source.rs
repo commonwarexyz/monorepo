@@ -28,13 +28,13 @@ pub enum Request<F: Family> {
         /// Maximum number of operations to return.
         max_ops: NonZeroU64,
     },
-    /// Fetch the single operation at `start` plus the pinned nodes at that boundary, the lowest
+    /// Fetch the single operation at `start` plus the pinned nodes at `start`, the lowest
     /// location the client will retain. The proof in the response authenticates the pinned nodes,
     /// so there is no way to request them on their own.
     Boundary {
         /// Prove against the root the database had at this size.
         size: Location<F>,
-        /// The operation to return, which is also the pinned-node boundary.
+        /// The operation to return, which is also the location of the returned pinned nodes.
         start: Location<F>,
     },
 }
@@ -242,7 +242,7 @@ pub enum Response<F: Family, Op, D: Digest> {
         proof: Proof<F, D>,
         /// The operation at the requested boundary.
         op: Op,
-        /// Pinned nodes at the requested boundary.
+        /// Pinned nodes at the requested location.
         pinned_nodes: Vec<D>,
     },
 }
@@ -573,6 +573,7 @@ pub(crate) mod tests {
         merkle::mmr,
         translator::{OneCap, TwoCap},
     };
+    use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_parallel::Rayon;
     use commonware_runtime::{Runner as _, deterministic};
@@ -640,7 +641,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Fetch `target`'s final commit operation and boundary pinned nodes from `source`.
+    /// Fetch `target`'s final commit operation and pinned nodes from `source`.
     pub async fn fetch_compact_state<R: Source>(
         source: &R,
         target: crate::qmdb::sync::CompactTarget<R::Family, R::Digest>,
@@ -851,7 +852,6 @@ pub(crate) mod tests {
     /// The request codec refuses frames whose start reaches their size, and unknown tags.
     #[test]
     fn test_request_decode_rejects_malformed() {
-        use commonware_codec::{DecodeExt as _, Encode as _};
         let valid = Request::<mmr::Family>::Operations {
             size: Location::new(10),
             start: Location::new(3),
@@ -868,6 +868,103 @@ pub(crate) mod tests {
 
         let bad_tag = [7u8];
         assert!(Request::<mmr::Family>::decode(&bad_tag[..]).is_err());
+    }
+
+    /// Requests are map keys, so equality and ordering must separate every distinct request.
+    /// A `Boundary` differs from a one-op `Operations` at the same coordinates only by variant.
+    #[test]
+    fn test_request_identity() {
+        let operations = Request::<mmr::Family>::Operations {
+            size: Location::new(10),
+            start: Location::new(3),
+            max_ops: NZU64!(1),
+        };
+        let boundary = Request::<mmr::Family>::Boundary {
+            size: Location::new(10),
+            start: Location::new(3),
+        };
+        assert_eq!(boundary.max_ops(), NZU64!(1));
+        assert_ne!(operations, boundary);
+
+        let mut set = std::collections::BTreeSet::new();
+        assert!(set.insert(operations));
+        assert!(set.insert(boundary));
+        assert!(!set.insert(operations));
+        assert_eq!(set.len(), 2);
+
+        // Ordering is by size, then start, then max_ops.
+        let smaller_size = Request::<mmr::Family>::Operations {
+            size: Location::new(9),
+            start: Location::new(8),
+            max_ops: NZU64!(5),
+        };
+        let smaller_start = Request::<mmr::Family>::Operations {
+            size: Location::new(10),
+            start: Location::new(2),
+            max_ops: NZU64!(5),
+        };
+        let fewer_ops = Request::<mmr::Family>::Operations {
+            size: Location::new(10),
+            start: Location::new(3),
+            max_ops: NZU64!(2),
+        };
+        let larger_ops = Request::<mmr::Family>::Operations {
+            size: Location::new(10),
+            start: Location::new(3),
+            max_ops: NZU64!(5),
+        };
+        assert!(smaller_size < smaller_start);
+        assert!(smaller_start < fewer_ops);
+        assert!(fewer_ops < larger_ops);
+    }
+
+    /// The response codec enforces the request-derived caps and rejects unknown tags.
+    #[test]
+    fn test_response_decode_rejects_malformed() {
+        type R = Response<mmr::Family, u64, ShaDigest>;
+        let digest = ShaDigest::from([7u8; 32]);
+        let proof = Proof::<mmr::Family, ShaDigest> {
+            leaves: Location::new(3),
+            inactive_peaks: 0,
+            digests: vec![digest],
+        };
+
+        // More operations than the request's max_ops.
+        let response = R::Operations {
+            proof: proof.clone(),
+            operations: vec![1, 2, 3],
+        };
+        assert!(R::decode_cfg(response.encode(), &(3, ())).is_ok());
+        assert!(R::decode_cfg(response.encode(), &(2, ())).is_err());
+
+        // More proof digests than the request-derived budget.
+        let oversized = Proof::<mmr::Family, ShaDigest> {
+            leaves: Location::new(3),
+            inactive_peaks: 0,
+            digests: vec![digest; MAX_PROOF_DIGESTS_PER_ELEMENT + 1],
+        };
+        let response = R::Operations {
+            proof: oversized,
+            operations: vec![1],
+        };
+        assert!(R::decode_cfg(response.encode(), &(1, ())).is_err());
+
+        // More pinned nodes than the codec allows.
+        let response = R::Boundary {
+            proof: proof.clone(),
+            op: 1,
+            pinned_nodes: vec![digest; MAX_PINNED_NODES + 1],
+        };
+        assert!(R::decode_cfg(response.encode(), &(1, ())).is_err());
+        let response = R::Boundary {
+            proof,
+            op: 1,
+            pinned_nodes: vec![digest; MAX_PINNED_NODES],
+        };
+        assert!(R::decode_cfg(response.encode(), &(1, ())).is_ok());
+
+        // Unknown tag.
+        assert!(R::decode_cfg(&[9u8][..], &(1, ())).is_err());
     }
 
     /// A source behind a lock reaches the source and reports its error.

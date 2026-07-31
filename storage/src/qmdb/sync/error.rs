@@ -2,7 +2,7 @@
 
 use crate::{
     merkle::{Family, Location},
-    qmdb::{self, sync::Target},
+    qmdb::{self},
 };
 use commonware_cryptography::Digest;
 
@@ -36,12 +36,6 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Sync target root unchanged
     #[error("sync target root unchanged")]
     SyncTargetRootUnchanged,
-    /// Sync target moved backward
-    #[error("sync target moved backward: {old:?} -> {new:?}")]
-    SyncTargetMovedBackward {
-        old: Target<F, D>,
-        new: Target<F, D>,
-    },
     /// Sync stalled - no pending fetches
     #[error("sync stalled - no pending fetches")]
     SyncStalled,

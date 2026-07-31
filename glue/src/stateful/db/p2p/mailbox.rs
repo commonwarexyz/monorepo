@@ -185,14 +185,14 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
-            let op_count = mmr::Location::new(10);
+            let size = mmr::Location::new(10);
             let start_loc = mmr::Location::new(3);
             let max_ops = NZU64!(2);
 
             // Poll once so the request is enqueued, then abandon the fetch.
             {
                 let get = mailbox.serve(Request::Operations {
-                    size: op_count,
+                    size,
                     start: start_loc,
                     max_ops,
                 });
@@ -202,7 +202,7 @@ mod tests {
 
             match receiver.recv().await.expect("request should be queued") {
                 Message::GetOperations { request, .. } => {
-                    assert_eq!(request.size(), op_count);
+                    assert_eq!(request.size(), size);
                     assert_eq!(request.start(), start_loc);
                     assert_eq!(request.max_ops(), max_ops);
                     assert!(matches!(request, Request::Operations { .. }));
@@ -213,7 +213,7 @@ mod tests {
 
             match receiver.recv().await.expect("cancel should be queued") {
                 Message::CancelOperations { request } => {
-                    assert_eq!(request.size(), op_count);
+                    assert_eq!(request.size(), size);
                     assert_eq!(request.start(), start_loc);
                     assert_eq!(request.max_ops(), max_ops);
                     assert!(matches!(request, Request::Operations { .. }));

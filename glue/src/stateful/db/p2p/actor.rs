@@ -453,9 +453,9 @@ mod tests {
         }
     }
 
-    fn test_request_at(op_count: Location) -> Request<mmr::Family> {
+    fn test_request_at(size: Location) -> Request<mmr::Family> {
         Request::Operations {
-            size: op_count,
+            size,
             start: Location::new(0),
             max_ops: NZU64!(1),
         }
@@ -532,12 +532,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
-            let op_count = db.read().await.bounds().end;
+            let size = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
-                .handle_produce(test_request_at(op_count), response_tx)
+                .handle_produce(test_request_at(size), response_tx)
                 .await;
 
             let payload = response_rx
@@ -552,11 +552,11 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
-            let op_count = db.read().await.bounds().end;
+            let size = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
             let request = Request::Operations {
-                size: op_count,
+                size,
                 start: Location::new(0),
                 max_ops: NZU64!(1_000),
             };
@@ -602,14 +602,14 @@ mod tests {
                 async {
                     let (_response, validity_tx) = sub1_rx.await.unwrap();
                     validity_tx
-                        .expect("standard deliveries should include feedback")
+                        .expect("deliveries should include feedback")
                         .send(true)
                         .unwrap();
                 },
                 async {
                     let (_response, validity_tx) = sub2_rx.await.unwrap();
                     validity_tx
-                        .expect("standard deliveries should include feedback")
+                        .expect("deliveries should include feedback")
                         .send(false)
                         .unwrap();
                 }
@@ -639,7 +639,7 @@ mod tests {
                 async {
                     let (_response, validity_tx) = sub2_rx.await.unwrap();
                     validity_tx
-                        .expect("standard deliveries should include feedback")
+                        .expect("deliveries should include feedback")
                         .send(true)
                         .unwrap();
                 }

@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) struct Witness<F: Family, D: Digest> {
     /// The encoded last commit operation at `size - 1`.
     pub(crate) op_bytes: Vec<u8>,
-    /// The committed size of the Merkle.
+    /// The committed database size.
     pub(crate) size: Location<F>,
     /// Pinned nodes at the commit operation, in the order returned by
     /// [`Family::nodes_to_pin`].
@@ -104,7 +104,7 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
         self.witness.size
     }
 
-    /// The compact-sync target this witness can serve: its root and size.
+    /// The compact-sync target (root and size) this witness can serve.
     pub(crate) const fn target(&self) -> CompactTarget<F, D> {
         CompactTarget {
             root: self.root,
@@ -289,7 +289,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// it, make it durable per `durability`, and install it as the cached tip.
     ///
     /// A pending import is cleared only after the entry is durable, so an interrupted journal
-    /// replacement is retried by the next persist.
+    /// replacement is retried by the next persist. [`Self::start_sync`] clears it at append
+    /// instead. A crash before its handle completes leaves a journal that fails to reopen and
+    /// is recovered by re-syncing.
     async fn persist<H, S>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
@@ -411,13 +413,13 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         // start_sync may still be proving that tip durable, which pending_sync tracks separately.
         // During a pending import the cached witness is not in the journal yet, so it is exactly
         // what must be persisted. Replace the journal's contents with it.
-        let cached_leaves = self.with(|w| w.size());
-        let verified = if cached_leaves == merkle.leaves() {
+        let cached_size = self.with(|w| w.size());
+        let verified = if cached_size == merkle.leaves() {
             if !self.import_pending.load(Ordering::Relaxed) {
                 return Ok((self, None));
             }
             self.with(|w| w.clone())
-        } else if cached_leaves > merkle.leaves() {
+        } else if cached_size > merkle.leaves() {
             return Err(Error::DataCorrupted("witness ahead of in-memory state"));
         } else {
             build_witness::<F, H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes())?

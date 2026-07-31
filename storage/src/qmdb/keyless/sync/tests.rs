@@ -162,7 +162,7 @@ where
         let target_db = Arc::new(target_db);
         let (size, start) = (bounds.end, bounds.start);
         // The arm mapping below assumes every request is an Operations request, which
-        // holds only while the boundary needs no pinned nodes.
+        // holds only while the lower sync bound needs no pinned nodes.
         assert_eq!(*start, 0);
         let max_ops = NZU64!(*size - *start);
         let (good, _) = target_db
@@ -734,13 +734,10 @@ where
             .await
             .unwrap();
 
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(
-                sync::EngineError::SyncTargetMovedBackward { .. }
-            ))
-        ));
+        // The non-advancing update is discarded and the sync completes at the original target.
+        let synced_db = client.sync().await.unwrap();
+        assert_eq!(H::db_root(&synced_db), initial_root);
+        H::destroy(synced_db).await;
 
         let target_db =
             Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
@@ -792,13 +789,10 @@ where
             .await
             .unwrap();
 
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(
-                sync::EngineError::SyncTargetMovedBackward { .. }
-            ))
-        ));
+        // The non-advancing update is discarded and the sync completes at the original target.
+        let synced_db = client.sync().await.unwrap();
+        assert_eq!(H::db_root(&synced_db), initial_root);
+        H::destroy(synced_db).await;
 
         let target_db =
             Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
@@ -1865,8 +1859,8 @@ mod compact_variable_mmr {
                 Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
             ));
 
-            // A target below the retained tip is refused outright because the witness prunes
-            // everything before its latest commit.
+            // A target below the retained tip is refused outright because the witness serves
+            // only its latest commit.
             let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("stale_client"),
                 source.clone(),
@@ -2590,8 +2584,8 @@ mod compact_variable_mmb {
                 Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
             ));
 
-            // A target below the retained tip is refused outright because the witness prunes
-            // everything before its latest commit.
+            // A target below the retained tip is refused outright because the witness serves
+            // only its latest commit.
             let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("stale_client"),
                 source.clone(),

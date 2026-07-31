@@ -533,7 +533,7 @@ where
     });
 }
 
-/// Test that the client fails to sync if the lower bound is decreased via target update.
+/// Test that a target update that decreases the lower bound is ignored.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
@@ -592,13 +592,10 @@ where
             .await
             .unwrap();
 
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(
-                sync::EngineError::SyncTargetMovedBackward { .. }
-            ))
-        ));
+        // The non-advancing update is discarded and the sync completes at the original target.
+        let synced_db: H::Db = client.sync().await.unwrap();
+        assert_eq!(synced_db.root(), target_db.root());
+        synced_db.destroy().await.unwrap();
 
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -608,7 +605,7 @@ where
     });
 }
 
-/// Test that the client fails to sync if the upper bound is decreased via target update.
+/// Test that a target update that decreases the upper bound is ignored.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
@@ -661,13 +658,10 @@ where
             .await
             .unwrap();
 
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(
-                sync::EngineError::SyncTargetMovedBackward { .. }
-            ))
-        ));
+        // The non-advancing update is discarded and the sync completes at the original target.
+        let synced_db: H::Db = client.sync().await.unwrap();
+        assert_eq!(synced_db.root(), target_db.root());
+        synced_db.destroy().await.unwrap();
 
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -831,8 +825,8 @@ where
     });
 }
 
-/// Test that prune-only target updates are rejected as backward target movement.
-pub(crate) fn test_target_update_prune_only_rejected<H: SyncTestHarness>()
+/// Test that prune-only target updates (same end, larger start) are ignored.
+pub(crate) fn test_target_update_prune_only_ignored<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
@@ -882,13 +876,10 @@ where
         update_sender.send(first_target).await.unwrap();
         update_sender.send(second_target).await.unwrap();
 
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(
-                sync::EngineError::SyncTargetMovedBackward { .. }
-            ))
-        ));
+        // The non-advancing update is discarded and the sync completes at the original target.
+        let synced_db: H::Db = client.sync().await.unwrap();
+        assert_eq!(synced_db.root(), target_db.root());
+        synced_db.destroy().await.unwrap();
 
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -2832,8 +2823,8 @@ macro_rules! sync_tests_for_harness {
             }
 
             #[test]
-            fn test_target_update_prune_only_rejected() {
-                super::test_target_update_prune_only_rejected::<$harness>();
+            fn test_target_update_prune_only_ignored() {
+                super::test_target_update_prune_only_ignored::<$harness>();
             }
 
             #[test_traced("WARN")]

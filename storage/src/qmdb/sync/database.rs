@@ -93,7 +93,7 @@ pub(crate) fn journal_covers_range<F: Family>(
 }
 
 /// Shared body for [`Database::local_pinned_nodes`] implementations backed by a persisted
-/// [`full::Merkle`]: reopen it from `config` under `context` and return the pinned nodes at
+/// [`full::Merkle`]. Reopens it from `config` under `context` and returns the pinned nodes at
 /// `target.range.start()` if the persisted bounds cover the target and the root, computed with
 /// `inactivity_floor`, matches `target.root`. Returns `Ok(None)` when the persisted state
 /// cannot authenticate the target.

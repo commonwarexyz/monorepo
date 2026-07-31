@@ -10,7 +10,7 @@
 //!
 //! The witness journal holds a complete snapshot of every published commit, so [`Db::rewind`] can
 //! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind restore the db's in-memory state from an entry: the Merkle is rebuilt from the
+//! and rewind restore the db's in-memory state from an entry. The Merkle is rebuilt from the
 //! stored pinned nodes and operation, and the commit fields are decoded from the operation. An
 //! entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is also what lets
 //! compact nodes serve compact sync without retaining historical operations.
@@ -273,13 +273,11 @@ where
             .to_vec()
     }
 
-    /// Build a compact db handle from state fetched by the sync engine.
+    /// Build a compact db from state fetched by the sync engine.
     ///
-    /// The engine has already verified the commit operation and the pinned nodes against the target
-    /// root, so the rebuilt Merkle deterministically reproduces that root. The import lives
-    /// only in memory until the first [`Self::commit`], [`Self::sync`], or [`Self::start_sync`],
-    /// which replaces the journal's contents with it. Until then, dropping the handle leaves the
-    /// previous on-disk state untouched, and rewind/prune are rejected.
+    /// The witness lives only in memory until the first [`Self::commit`], [`Self::sync`], or
+    /// [`Self::start_sync`]. Until then, dropping the handle leaves the previous on-disk state
+    /// untouched, and rewind/prune are rejected.
     pub(crate) fn init_from_sync(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
@@ -1283,7 +1281,7 @@ mod tests {
             let db = db.sync().await.unwrap();
             drop(db);
 
-            // Corrupt the entry structurally. An extra pin cannot rebuild the Merkle.
+            // Corrupt the entry structurally. An extra pinned node cannot rebuild the Merkle.
             let journal = open_witness_journal(context.child("tamper"), partition).await;
             let (op_bytes, size, mut pinned_nodes) = witness::tests::tip(&journal).await;
             pinned_nodes.push(Sha256::fill(0xff));
@@ -1455,7 +1453,7 @@ mod tests {
             let tampered_target = db.target();
             drop(db);
 
-            // Flip one pin digest. There is no stored proof to cross-check against, so the
+            // Flip one pinned-node digest. There is no stored proof to cross-check against, so the
             // rebuild succeeds and yields a different root, the same way a bit-flipped replay
             // journal reopens with a different root.
             let journal = open_witness_journal(context.child("tamper"), partition).await;

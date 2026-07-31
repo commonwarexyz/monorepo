@@ -2,13 +2,13 @@ use commonware_runtime::telemetry::metrics::{Gauge, GaugeExt, MetricsExt};
 
 /// Progress gauges updated by a sync flow.
 ///
-/// Progress is expressed as the number of operations synced against the size
+/// Progress is expressed as the synced size against the size
 /// of the current sync target. The gauges match once the flow has synced the
 /// latest target.
 pub struct Metrics {
     /// Size of the current sync target.
     target_size: Gauge,
-    /// Operations synced so far.
+    /// Database size reached by sync.
     size: Gauge,
 }
 
@@ -19,7 +19,7 @@ impl Metrics {
             target_size: context.gauge("target_size", "Size of the current sync target"),
             size: context.gauge(
                 "size",
-                "Operations synced so far, equal to target_size when sync completes",
+                "Database size reached by sync, equal to target_size when sync completes",
             ),
         }
     }
@@ -29,7 +29,7 @@ impl Metrics {
         let _ = self.target_size.try_set(size);
     }
 
-    /// Record the number of operations synced so far.
+    /// Record the database size reached by sync so far.
     pub fn record_synced(&self, size: u64) {
         let _ = self.size.try_set(size);
     }

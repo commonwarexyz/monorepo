@@ -9,7 +9,6 @@ use crate::{
             error::EngineError,
             requests::{Id as RequestId, Requests},
             source::{Request, Response, Source, ValidityTx},
-            target::validate_update,
         },
     },
 };
@@ -157,7 +156,7 @@ where
 
     /// Historical roots from superseded sync targets, keyed by database size
     /// (target.range.end()). Keys strictly increase across target updates
-    /// (enforced by validate_update), so each size maps to a unique
+    /// (non-advancing updates are discarded), so each size maps to a unique
     /// root and the smallest key is the oldest. Eviction drops it first.
     /// When a retained request completes, its requested size selects the
     /// historical root to verify against.
@@ -255,12 +254,12 @@ where
         let journal_size = journal.size();
 
         // The sync journal is the source of truth for resume. If it already
-        // reaches the target, try to recover boundary pinned nodes from local Merkle
-        // state before asking peers for them. Partial journals resume without
+        // reaches the target, try to recover the target's pinned nodes from local
+        // Merkle state before asking peers for them. Partial journals resume without
         // probing completed database state.
         let pinned_nodes = if journal_size == *config.target.range.end() {
             DB::local_pinned_nodes(
-                config.context.child("local_boundary"),
+                config.context.child("local_pinned_nodes"),
                 &config.db_config,
                 &config.target,
                 &journal,
@@ -280,7 +279,8 @@ where
             target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.fetch_batch_size,
-            apply_batch_size: config.apply_batch_size,
+            // A zero batch size would make database construction spin without progress.
+            apply_batch_size: config.apply_batch_size.max(1),
             journal,
             source: Arc::new(config.source),
             hasher: qmdb::hasher::<DB::Hasher>(),
@@ -312,10 +312,10 @@ where
     fn schedule_requests(&mut self) -> Result<(), Error<DB, S>> {
         let target_size = self.target.range.end();
 
-        // Schedule a boundary request at the lower sync bound if we don't have boundary
-        // state yet and one isn't already in flight. The pinned nodes it returns are what let us
-        // rebuild the pruned prefix.
-        if !self.has_boundary_state()
+        // Schedule a boundary request at the lower sync bound if pinned nodes are still
+        // needed and one isn't already in flight. The pinned nodes it returns are what let
+        // us rebuild the pruned prefix.
+        if !self.pinned_nodes_ready()
             && !self
                 .outstanding_requests
                 .contains(&self.target.range.start())
@@ -515,7 +515,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub fn is_at_target(&self) -> Result<bool, Error<DB, S>> {
+    fn is_at_target(&self) -> Result<bool, Error<DB, S>> {
         let journal_size = self.journal.size();
         let target_journal_size = self.target.range.end();
 
@@ -532,18 +532,18 @@ where
     }
 
     /// Returns whether this target needs pinned nodes to reconstruct pruned state.
-    fn needs_pins(&self) -> bool {
+    fn needs_pinned_nodes(&self) -> bool {
         self.target.range.start() > Location::new(0)
     }
 
-    /// Returns whether the current target has the boundary state needed for completion.
-    fn has_boundary_state(&self) -> bool {
-        !self.needs_pins() || self.pinned_nodes.is_some()
+    /// Returns whether pinned nodes are present or not needed by this target.
+    fn pinned_nodes_ready(&self) -> bool {
+        !self.needs_pinned_nodes() || self.pinned_nodes.is_some()
     }
 
-    /// Returns whether the journal and boundary state are both ready for completion.
+    /// Returns whether the journal and pinned nodes are both ready for completion.
     fn is_ready_to_complete(&self) -> Result<bool, Error<DB, S>> {
-        Ok(self.is_at_target()? && self.has_boundary_state())
+        Ok(self.is_at_target()? && self.pinned_nodes_ready())
     }
 
     /// Handle a response that failed validation.
@@ -633,7 +633,7 @@ where
                 };
                 if !valid {
                     if need_pinned {
-                        tracing::warn!("boundary proof or pinned nodes failed verification");
+                        tracing::warn!("boundary response failed verification");
                     }
                     return Self::reject_response(validity);
                 }
@@ -651,10 +651,7 @@ where
         Ok(())
     }
 
-    /// The root to verify a response against, either the current target's root or the
-    /// retained historical root for a request issued against a superseded target. `None` means the
-    /// historical root was evicted or never retained. The caller drops the result
-    /// without penalizing the source.
+    /// The root to verify a response against at a given size.
     fn verification_root(&self, size: Location<DB::Family>) -> Option<&DB::Digest> {
         if size == self.target.range.end() {
             Some(&self.target.root)
@@ -670,7 +667,15 @@ where
     ) -> Result<NextStep<Self, DB>, Error<DB, S>> {
         match event {
             Event::TargetUpdate(new_target) => {
-                validate_update(&self.target, &new_target)?;
+                // A non-advancing update is discarded.
+                if !new_target.advances(&self.target) {
+                    return Ok(NextStep::Continue(self));
+                }
+                // A same-root update that advances is impossible for an append-only log and
+                // indicates a caller bug.
+                if new_target.root == self.target.root {
+                    return Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged));
+                }
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
                 updated_self.record_progress();
@@ -822,7 +827,7 @@ mod tests {
     #[derive(Clone)]
     struct TestConfig {
         journal_size: u64,
-        boundary_probes: Arc<AtomicUsize>,
+        pinned_node_probes: Arc<AtomicUsize>,
     }
 
     impl crate::qmdb::sync::DatabaseConfig for TestConfig {
@@ -898,7 +903,7 @@ mod tests {
             _target: &Target<Self::Family, Self::Digest>,
             _journal: &Self::Journal,
         ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<Self::Family>> {
-            config.boundary_probes.fetch_add(1, Ordering::SeqCst);
+            config.pinned_node_probes.fetch_add(1, Ordering::SeqCst);
             Ok(Some(vec![]))
         }
 
@@ -938,7 +943,7 @@ mod tests {
     fn test_engine_config(
         context: deterministic::Context,
         journal_size: u64,
-        boundary_probes: Arc<AtomicUsize>,
+        pinned_node_probes: Arc<AtomicUsize>,
     ) -> Config<TestDb, TestSource> {
         Config {
             context,
@@ -952,7 +957,7 @@ mod tests {
             apply_batch_size: 1,
             db_config: TestConfig {
                 journal_size,
-                boundary_probes,
+                pinned_node_probes,
             },
             update_rx: None,
             finish_rx: None,
@@ -962,26 +967,26 @@ mod tests {
     }
 
     #[test]
-    fn new_probes_local_boundary_when_journal_reaches_target() {
+    fn new_probes_local_pinned_nodes_when_journal_reaches_target() {
         deterministic::Runner::default().start(|context| async move {
-            let boundary_probes = Arc::new(AtomicUsize::new(0));
-            Engine::new(test_engine_config(context, 10, boundary_probes.clone()))
+            let pinned_node_probes = Arc::new(AtomicUsize::new(0));
+            Engine::new(test_engine_config(context, 10, pinned_node_probes.clone()))
                 .await
                 .unwrap();
 
-            assert_eq!(boundary_probes.load(Ordering::SeqCst), 1);
+            assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 1);
         });
     }
 
     #[test]
-    fn new_skips_local_boundary_when_journal_is_partial() {
+    fn new_skips_local_pinned_nodes_when_journal_is_partial() {
         deterministic::Runner::default().start(|context| async move {
-            let boundary_probes = Arc::new(AtomicUsize::new(0));
-            Engine::new(test_engine_config(context, 7, boundary_probes.clone()))
+            let pinned_node_probes = Arc::new(AtomicUsize::new(0));
+            Engine::new(test_engine_config(context, 7, pinned_node_probes.clone()))
                 .await
                 .unwrap();
 
-            assert_eq!(boundary_probes.load(Ordering::SeqCst), 0);
+            assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 0);
         });
     }
 
