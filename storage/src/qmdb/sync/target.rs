@@ -25,8 +25,8 @@ impl<F: Family, D: Digest> Target<F, D> {
         Self { root, range }
     }
 
-    /// Whether this target advances `from`: its end is in domain and strictly beyond, and
-    /// its start has not moved backward.
+    /// Whether this target advances `from`. Its end must be in domain and strictly beyond,
+    /// and its start must not move backward.
     pub fn advances(&self, from: &Self) -> bool {
         self.range.end().is_valid()
             && self.range.end() > from.range.end()

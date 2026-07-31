@@ -1461,7 +1461,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
-/// Run a standard replay sync: the shared body of every full database's
+/// Run a standard replay sync. This is the shared body of every full database's
 /// [`StateSyncDb::sync_db`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_standard_db<E, DB, R>(
@@ -1495,7 +1495,7 @@ where
     .await
 }
 
-/// Run engine sync for a compact database: the sync range is the one operation ending at the
+/// Run engine sync for a compact database. The sync range is the one operation ending at the
 /// target, and the target-update and reached channels are translated between the compact
 /// target and the engine's ranged target.
 #[allow(clippy::too_many_arguments)]
@@ -1544,7 +1544,7 @@ where
     let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
     context.child("compact_updates").spawn(move |_| async move {
         while let Some(update) = tip_updates.recv().await {
-            // A malformed update cannot supersede anything; skip it like a stale one.
+            // A malformed update cannot supersede anything, so skip it like a stale one.
             let Ok(update) = engine_target(&update) else {
                 continue;
             };

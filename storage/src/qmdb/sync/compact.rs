@@ -1,16 +1,16 @@
 //! Compact sync for compact-storage qmdbs.
 //!
-//! Compact sync is ordinary [`crate::qmdb::sync::sync`] over a one-operation range: to reach
+//! Compact sync is ordinary [`crate::qmdb::sync::sync`] over a one-operation range. To reach
 //! [`Target`] `{ root, leaf_count: N }`, the client syncs the range `[N - 1, N)`. The engine's
 //! boundary request fetches the final commit operation, proven at `N`, plus the pins one
 //! operation below it, and verifies all of it against `root` before construction. A full
-//! database answers that request from its operation log like any other request; a compact
+//! database answers that request from its operation log like any other request. A compact
 //! database answers from its witness, refusing requests outside the single state it retains.
 //!
 //! # What compact dbs store
 //!
 //! A compact db's only persistent state is its witness journal (`qmdb::compact::witness`),
-//! whose entries each snapshot one committed state: the commit operation, the committed leaf
+//! whose entries each snapshot one committed state as the commit operation, the committed leaf
 //! count, and the pins one operation below it. The in-memory compact Merkle
 //! ([`crate::merkle::compact`]) is rebuilt from the journal tip on reopen. Without the witness,
 //! a compact db could recover its root and continue appending, but it could not serve compact
@@ -18,9 +18,9 @@
 //!
 //! # When compact state changes
 //!
-//! The servable compact state advances only on durable persistence: db-local commits append
+//! The servable compact state advances only on durable persistence. A db-local commit appends
 //! one witness entry during `sync`, and `rewind` restores the witness from the target journal
-//! entry. Unsynced in-memory mutations are therefore intentionally not servable: `target()`
+//! entry. Unsynced in-memory mutations are therefore intentionally not servable. `target()`
 //! and served responses lag behind `apply_batch()` until the db's next sync.
 
 use crate::merkle::{Family, Location};

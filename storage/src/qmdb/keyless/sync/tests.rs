@@ -119,7 +119,7 @@ where
     });
 }
 
-/// Each invalid-response arm of `handle_fetch_result`: a feedback-accepting source is
+/// Exercises each invalid-response arm of `handle_fetch_result`. A feedback-accepting source is
 /// retried, and a source that accepts no feedback fails terminally with
 /// [`sync::EngineError::InvalidResponse`].
 pub(crate) fn test_engine_rejects_invalid_responses<H: SyncTestHarness>()
@@ -1243,7 +1243,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     });
 }
 
-/// Engine configuration for a compact sync: the one-operation range ending at the target.
+/// Engine configuration for a compact sync over the one-operation range ending at the target.
 fn compact_engine_config<DB, S>(
     context: DB::Context,
     source: S,
@@ -1374,7 +1374,7 @@ mod compact_variable_mmr {
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
 
-            // A second commit declaring the floor at its own location: everything before it is
+            // A second commit declares the floor at its own location. Everything before it is
             // inactive, so pruning retains exactly that one operation.
             let metadata = vec![7, 7];
             let floor = source.bounds().end;
@@ -1850,7 +1850,7 @@ mod compact_variable_mmr {
                     .await
                     .unwrap(),
             );
-            // target2 names a divergent history: the regrown source reaches the same leaf
+            // target2 names a divergent history. The regrown source reaches the same leaf
             // count under a different root, so it serves state the client can never verify.
             // With no feedback channel, the engine fails instead of retrying.
             let divergent_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
@@ -1865,7 +1865,7 @@ mod compact_variable_mmr {
                 Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
             ));
 
-            // A target below the retained tip is refused outright: the witness prunes
+            // A target below the retained tip is refused outright because the witness prunes
             // everything before its latest commit.
             let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("stale_client"),
@@ -2566,7 +2566,7 @@ mod compact_variable_mmb {
                     .unwrap(),
             );
             assert_eq!(source.target(), target3);
-            // target2 names a divergent history: the regrown source reaches the same leaf
+            // target2 names a divergent history. The regrown source reaches the same leaf
             // count under a different root, so it serves state the client can never verify.
             // With no feedback channel, the engine fails instead of retrying.
             let divergent_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
@@ -2581,7 +2581,7 @@ mod compact_variable_mmb {
                 Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
             ));
 
-            // A target below the retained tip is refused outright: the witness prunes
+            // A target below the retained tip is refused outright because the witness prunes
             // everything before its latest commit.
             let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("stale_client"),

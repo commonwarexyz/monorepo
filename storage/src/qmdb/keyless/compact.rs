@@ -10,7 +10,7 @@
 //!
 //! The witness journal holds a complete snapshot of every synced commit, so [`Db::rewind`] can
 //! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind rebuild the Merkle from the stored pins and operation; a snapshot that cannot
+//! and rewind rebuild the Merkle from the stored pins and operation. A snapshot that cannot
 //! rebuild surfaces as [`Error::DataCorrupted`]. The witness is also what lets compact nodes
 //! serve compact sync without retaining historical operations.
 //!
@@ -632,7 +632,7 @@ mod tests {
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
-    /// The witness serves only the request matching its single committed state; each mismatch
+    /// The witness serves only the request matching its single committed state. Each mismatch
     /// reports the same error a pruned operation log would.
     #[test_traced("INFO")]
     fn test_serve_refuses_requests_outside_witness() {
@@ -1191,7 +1191,7 @@ mod tests {
             let db = db.sync().await.unwrap();
             drop(db);
 
-            // Corrupt the entry structurally: an extra pin cannot rebuild the Merkle.
+            // Corrupt the entry structurally. An extra pin cannot rebuild the Merkle.
             let journal = open_witness_journal(context.child("tamper"), partition).await;
             let (op_bytes, leaf_count, mut pinned_nodes) = witness::tests::tip(&journal).await;
             pinned_nodes.push(Sha256::fill(0xff));

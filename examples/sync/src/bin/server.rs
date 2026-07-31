@@ -2,7 +2,7 @@
 //!
 //! In `full` mode this serves `any`, `current`, `immutable`, or `keyless` databases. In
 //! `compact` mode it additionally announces a compact sync target for `immutable` / `keyless`
-//! families, backed by either full or compact-storage sources; the state itself is served
+//! families, backed by either full or compact-storage sources. The state itself is served
 //! through the same operations requests as `full` mode.
 
 use clap::{Arg, Command};

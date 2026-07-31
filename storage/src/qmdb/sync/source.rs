@@ -69,8 +69,7 @@ impl<F: Family> Request<F> {
 }
 
 impl<F: Family> Request<F> {
-    /// Total-order key for map lookups: (size, start, max_ops, is-boundary). The final
-    /// component separates the variants.
+    /// Total-order key for map lookups. The final component separates the variants.
     fn order_key(&self) -> (u64, u64, u64, bool) {
         (
             *self.size(),
@@ -232,7 +231,7 @@ impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
 /// One authenticated response, shaped like the [`Request`] it answers.
 ///
 /// In a [`Response::Boundary`], the proof, the operation, and the pins are verified as a
-/// unit: the pins are only believable because the proof folds them into digests it already
+/// unit. The pins are only believable because the proof folds them into digests it already
 /// commits to.
 pub enum Response<F: Family, Op, D: Digest> {
     /// Answer to a [`Request::Operations`].
@@ -373,7 +372,7 @@ where
 }
 
 /// Where to report whether a fetched response verified, so a remote peer can be given feedback.
-/// `None` means the answer is final: an invalid response fails the sync instead of being
+/// `None` means the answer is final. An invalid response fails the sync instead of being
 /// retried, because a source that accepts no feedback cannot serve a different answer.
 pub type ValidityTx = Option<oneshot::Sender<bool>>;
 
@@ -628,8 +627,7 @@ pub(crate) mod tests {
     fn assert_serves<S: Source>() {}
 
     /// A validity slot whose receiver is dropped. It marks a response as feedback-accepting,
-    /// so the engine retries instead of failing. Use it when a scripted source serves bad
-    /// data and the test expects a retry.
+    /// so the engine retries instead of failing.
     pub fn feedback_validity() -> ValidityTx {
         let (tx, _rx) = oneshot::channel();
         Some(tx)

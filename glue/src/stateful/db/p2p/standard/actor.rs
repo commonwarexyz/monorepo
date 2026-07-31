@@ -287,10 +287,9 @@ where
         };
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
 
-        // Decode bounds the response by the local key's `max_ops`. Decode cannot know
-        // which shape the key asked for, so check that here. The engine independently
-        // rejects mismatched shapes; this check spares the fan-out and keeps the pending
-        // entry so the resolver retries the same key.
+        // Decode cannot know which shape the key asked for, so check that here. The
+        // engine would reject a mismatch too. Checking first spares the fan-out and
+        // keeps the pending entry so the resolver retries the same key.
         let cfg = (key.max_ops().get() as usize, ());
         let response = match Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &cfg) {
             Ok(response)

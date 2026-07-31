@@ -1,16 +1,16 @@
 //! Shared machinery for the compact-db witness journal.
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
-//! [`Witness`] is a complete snapshot of one synced commit: the encoded commit operation, the
+//! [`Witness`] is a complete snapshot of one synced commit, storing the encoded commit operation, the
 //! committed leaf count, and the pins one operation below it. The commit's inclusion proof is
-//! not stored; it is derived from the pins and the operation when an entry is loaded. On open
+//! not stored. It is derived from the pins and the operation when an entry is loaded. On open
 //! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pins,
 //! and a structurally invalid entry fails with [`Error::DataCorrupted`].
 //!
 //! Entries are strictly increasing in committed leaf count, so a leaf count uniquely identifies
 //! a rewind or prune target. The journal `commit` or `sync` after an append is the commit
-//! point: a crash before it drops the unsynced tail on reopen, recovering the previous commit.
-//! [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip entry is never
+//! point. A crash before it drops the unsynced tail on reopen, recovering the previous commit.
+//! [`Store::prune`] bounds how far back [`Store::rewind`] can reach. The tip entry is never
 //! pruned.
 
 use crate::{
@@ -31,13 +31,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A single durably persisted witness: a complete snapshot of one synced commit.
 ///
-/// Neither the root nor the commit's inclusion proof is stored: the Merkle is rebuilt by
+/// Neither the root nor the commit's inclusion proof is stored. The Merkle is rebuilt by
 /// appending the commit operation to the pins, and the root and proof are computed from it.
 #[derive(Clone)]
 pub(crate) struct Witness<F: Family, D: Digest> {
     /// The encoded last-commit operation.
     pub(crate) op_bytes: Vec<u8>,
-    /// Total leaves in the committed Merkle; the commit operation sits at `leaf_count - 1`.
+    /// Total leaves in the committed Merkle. The commit operation sits at `leaf_count - 1`.
     pub(crate) leaf_count: Location<F>,
     /// Pins one operation below the commit, in the order returned by
     /// [`Family::nodes_to_pin`] at `leaf_count - 1`.
@@ -174,7 +174,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Serve `request` from the single committed state this witness retains.
     ///
     /// The witness holds exactly the final commit operation and the pins one operation
-    /// below it; anything else is refused with the same errors a pruned operation log
+    /// below it. Anything else is refused with the same errors a pruned operation log
     /// reports.
     #[allow(clippy::type_complexity)]
     pub(crate) fn compact_state<Op: Read>(
@@ -182,8 +182,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         cfg: &Op::Cfg,
         request: Request<F>,
     ) -> Result<Response<F, Op, D>, Error<F>> {
-        // Hold the witness lock only long enough to check the request and snapshot the entry;
-        // decode outside it so concurrent readers do not contend.
+        // Hold the witness lock only long enough to check the request and snapshot the
+        // entry. Decode outside it so concurrent readers do not contend.
         let (entry, proof) = self.with(|w| -> Result<(Witness<F, D>, Proof<F, D>), Error<F>> {
             let current = w.leaf_count();
             let last_commit_loc = Location::new(*current - 1);

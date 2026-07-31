@@ -27,7 +27,7 @@ pub enum EngineError<F: Family, D: Digest> {
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch { expected: D, actual: D },
     /// The source served a response that cannot satisfy the target and is not accepting
-    /// feedback; retrying cannot yield a different answer.
+    /// feedback. Retrying cannot yield a different answer.
     #[error("response failed validation and the source accepts no feedback")]
     InvalidResponse,
     /// Invalid target parameters

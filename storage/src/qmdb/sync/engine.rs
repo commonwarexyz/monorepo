@@ -53,13 +53,13 @@ enum Event<F: Family, Op, D: Digest, E> {
     FinishChannelClosed,
 }
 
-/// The finish lifecycle: whether the engine completes as soon as it reaches its target.
+/// The finish lifecycle.
 enum Finish {
-    /// No finish channel was configured; complete as soon as the target is reached.
+    /// No finish channel was configured. Complete as soon as the target is reached.
     Disabled,
     /// Hold at the target and keep taking updates until the caller requests completion.
     Waiting(mpsc::Receiver<()>),
-    /// The caller requested completion; ignore further updates and finish.
+    /// The caller requested completion. Ignore further updates and finish.
     Requested,
 }
 
@@ -349,8 +349,7 @@ where
 
         let log_size = self.journal.size();
 
-        // Convert fetched operations to operation counts for shared gap detection.
-        // Fetched coverage does not change while scheduling; outstanding spans do.
+        // Fetched coverage does not change while scheduling. Outstanding spans do.
         let operation_counts: BTreeMap<Location<DB::Family>, u64> = self
             .fetched_operations
             .iter()
@@ -583,8 +582,8 @@ where
         &mut self,
         fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, S::Error>,
     ) -> Result<(), Error<DB, S>> {
-        // Defensive: removal aborts a request's future, so a result for an
-        // untracked ID should be unreachable.
+        // Removal aborts a request's future, so a result for an untracked ID should
+        // be unreachable.
         let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
             return Ok(());
         };
@@ -658,10 +657,10 @@ where
         Ok(())
     }
 
-    /// The root to verify a response against: the current target's root, or the retained
-    /// historical root for a request issued against a superseded target. `None` means the
-    /// historical root was evicted (or `max_retained_roots` is 0); the caller drops the
-    /// result without penalizing the source -- the data may be valid.
+    /// The root to verify a response against, either the current target's root or the
+    /// retained historical root for a request issued against a superseded target. `None` means the
+    /// historical root was evicted or never retained. The caller drops the result
+    /// without penalizing the source.
     fn verification_root(&self, size: Location<DB::Family>) -> Option<&DB::Digest> {
         if size == self.target.range.end() {
             Some(&self.target.root)
@@ -769,7 +768,7 @@ where
     }
 
     /// Build the final database from the completed sync and verify its root against the
-    /// target. The irreversible tail of [`Self::step`]: there is no path back to the loop.
+    /// target.
     async fn complete(mut self) -> Result<DB, Error<DB, S>> {
         self.journal = self.journal.sync().await?;
 
@@ -997,7 +996,7 @@ mod tests {
             let (update_tx, update_rx) = mpsc::channel(2);
             let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
             config.update_rx = Some(update_rx);
-            // Queue a stale update and an advancing one: the stale one is discarded and
+            // Queue a stale update and an advancing one. The stale one is discarded and
             // the advancing one retargets the engine instead of completing.
             let stale = Target {
                 root: sha256::Digest::from([2u8; 32]),
