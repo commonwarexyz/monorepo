@@ -289,6 +289,7 @@ pub(super) fn fuzz_backend<B: Backend>(
 }
 
 /// Compares field operations at the loosest input allowed by [`FVec`].
+#[cfg(target_arch = "x86_64")]
 pub(super) fn check_backend_at_bounds<R: Backend, B: Backend>(reference: R, backend: B) {
     let max = FVec {
         limbs: [[MASK_52; LANES]; 5],
@@ -322,6 +323,7 @@ pub(super) fn check_backend_at_bounds<R: Backend, B: Backend>(reference: R, back
 }
 
 /// Compares a backend's field and group operations with a reference backend.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn fuzz_backend_against<R: Backend, B: Backend>(
     u: &mut Unstructured<'_>,
     reference: R,
