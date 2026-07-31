@@ -2,17 +2,15 @@
 
 mod error;
 mod msm;
-mod point;
 mod scalar;
 
-use crate::simplified::{Backend, LANES, WithBackend, with_backend};
+use crate::simplified::{Backend, GAffine, GAffineVec, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::{Sequential, Strategy};
 use core::sync::atomic::{AtomicBool, Ordering};
 pub use error::Error;
 use msm::Term;
-use point::{EdwardsPoint, MixedPoint};
 use rand_core::CryptoRng;
 use scalar::Scalar;
 use sha2::{Digest, Sha512};
@@ -31,7 +29,7 @@ commonware_macros::stability_scope!(ALPHA {
     #[derive(Copy, Clone, Debug)]
     pub struct VerifyingKey {
         bytes: [u8; 32],
-        point: EdwardsPoint,
+        point: GAffine,
     }
 
     impl VerifyingKey {
@@ -71,17 +69,20 @@ commonware_macros::stability_scope!(ALPHA {
             signature: &Signature,
         ) -> Result<(), Error> {
             let s = Scalar::from_canonical_bytes(&signature.s).ok_or(Error::NonCanonicalScalar)?;
-            let r = EdwardsPoint::decompress(backend, &signature.r).ok_or(Error::InvalidSignature)?;
+            let r = GAffine::decompress(backend, &signature.r).ok_or(Error::InvalidSignature)?;
 
             let digest = sha512(&[&signature.r, &self.bytes, message]);
             let k = Scalar::from_bytes_mod_order_wide(&digest);
 
-            let sb = EdwardsPoint::basepoint().scalar_mul(backend, &s);
-            let ka = self.point.scalar_mul(backend, &k);
-            let check = sb
-                .add(backend, &ka.negate(backend))
-                .add(backend, &r.negate(backend));
-            if check.mul_by_cofactor(backend).is_identity() {
+            let sb = GAffineVec::splat(GAffine::BASEPOINT)
+                .to_extended(backend)
+                .scalar_mul(backend, s.bits_be());
+            let ka = GAffineVec::splat(self.point)
+                .to_extended(backend)
+                .scalar_mul(backend, k.bits_be());
+            let r = GAffineVec::splat(r).to_extended(backend);
+            let check = backend.g_add(sb, backend.g_add(ka, r).negate(backend));
+            if check.mul_by_cofactor(backend).to_lanes()[0].is_identity() {
                 Ok(())
             } else {
                 Err(Error::VerificationFailed)
@@ -93,10 +94,10 @@ commonware_macros::stability_scope!(ALPHA {
 struct DecompressPoint([u8; 32]);
 
 impl WithBackend for DecompressPoint {
-    type Output = Option<EdwardsPoint>;
+    type Output = Option<GAffine>;
 
     fn call<B: Backend>(self, backend: B) -> Self::Output {
-        EdwardsPoint::decompress(backend, &self.0)
+        GAffine::decompress(backend, &self.0)
     }
 }
 
@@ -282,7 +283,7 @@ const fn parallel_min_items(parallelism: usize, per_item_ns: usize) -> usize {
 /// The decompression phase: turns a flat worklist of `count` point encodings (resolved by index
 /// via `resolve`, which returns an encoding and its already-final MSM scalar) into MSM terms, in
 /// one parallel pass over [`LANES`]-sized units -- the finest split that keeps the sqrt kernel
-/// running 8-wide (see [`EdwardsPoint::decompress_batch`]), so the pool's demand-driven
+/// running 8-wide (see [`GAffine::decompress_batch`]), so the pool's demand-driven
 /// splitting balances the pass at ~7us granularity and a late-waking worker simply takes fewer
 /// units. Units collect into `Vec<[Term; LANES]>`, which is contiguous in memory: the caller
 /// views it as the flat term slice the MSM reads via `as_flattened`, with no per-chunk
@@ -318,16 +319,14 @@ where
         let base = unit * LANES;
         let resolved: [([u8; 32], Scalar); LANES] = core::array::from_fn(|k| resolve(base + k));
         let bytes = resolved.map(|(bytes, _)| bytes);
-        let points = EdwardsPoint::decompress_batch(backend, &bytes);
-        let compact = points.map(|point| point.unwrap_or(EdwardsPoint::IDENTITY));
-        let mixed = MixedPoint::from_lanes(backend, &compact);
+        let points = GAffine::decompress_batch(backend, &bytes);
         core::array::from_fn(|k| {
             points[k].map_or_else(
                 || {
                     failed.store(true, Ordering::Relaxed);
-                    Term::new(MixedPoint::IDENTITY, &Scalar::ZERO, width)
+                    Term::new(GAffine::IDENTITY, &Scalar::ZERO, width)
                 },
-                |_| Term::new(mixed[k], &resolved[k].1, width),
+                |point| Term::new(point, &resolved[k].1, width),
             )
         })
     };
@@ -347,8 +346,8 @@ where
     let mut tail = Vec::with_capacity(count - units * LANES);
     for i in units * LANES..count {
         let (bytes, scalar) = resolve(i);
-        let point = EdwardsPoint::decompress(backend, &bytes)?;
-        tail.push(Term::new(MixedPoint::new(backend, &point), &scalar, width));
+        let point = GAffine::decompress(backend, &bytes)?;
+        tail.push(Term::new(point, &scalar, width));
     }
     Some((full, tail))
 }
@@ -374,7 +373,7 @@ fn verify_batch_inner<B: Backend>(
     backend: B,
     rng: &mut impl CryptoRng,
     items: &[(&[u8; 32], &Signature, &[u8])],
-    a_points: Option<&[&EdwardsPoint]>,
+    a_points: Option<&[&GAffine]>,
     strategy: &impl Strategy,
 ) -> bool {
     let n = items.len();
@@ -436,31 +435,19 @@ fn verify_batch_inner<B: Backend>(
         (sig.r, zr(i))
     };
 
-    // The coalesced basepoint term: `sum(z*s)·B` moved to the equation's other side as
-    // `sum(z*s)·(-B)`, one more ordinary MSM term.
-    let basepoint = [Term::new(
-        MixedPoint::new(
-            backend,
-            &EdwardsPoint::basepoint().negate(backend),
-        ),
-        &s_sum,
-        width,
-    )];
+    // The coalesced basepoint term: `sum(z*s)·B` moved to the equation's other side by negating
+    // its scalar, one more ordinary MSM term.
+    let basepoint = [Term::new(GAffine::BASEPOINT, &s_sum.neg_mod_l(), width)];
 
     let result = if let Some(points) = a_points {
         let Some((full, tail)) = decompress_phase(backend, n, resolve_r, width, strategy) else {
             return false;
         };
-        // `A` needs no decompression here, so its coalesced terms are built directly -- a term
-        // is one `2d*T` multiply plus digit recoding, ~300ns (EPYC 9354P), gated like the other
-        // phases.
+        // `A` needs no decompression here, so its coalesced terms are built directly and gated
+        // like the other phases.
         let a_body = |&(start, end): &(u32, u32)| {
             let point = points[order[start as usize].1 as usize];
-            Term::new(
-                MixedPoint::new(backend, point),
-                &group_scalar((start, end)),
-                width,
-            )
+            Term::new(*point, &group_scalar((start, end)), width)
         };
         let a_terms: Vec<Term> = if groups.len() < parallel_min_items(strategy.parallelism(), 300) {
             Sequential.map_collect_vec(groups.iter(), a_body)
@@ -494,13 +481,16 @@ fn verify_batch_inner<B: Backend>(
             strategy,
         )
     };
-    result.mul_by_cofactor(backend).is_identity()
+    crate::simplified::GVec::splat(result)
+        .mul_by_cofactor(backend)
+        .to_lanes()[0]
+        .is_identity()
 }
 
 struct VerifyBatchCall<'a, 'b, R, S> {
     rng: &'a mut R,
     items: &'a [(&'b [u8; 32], &'b Signature, &'b [u8])],
-    a_points: Option<&'a [&'b EdwardsPoint]>,
+    a_points: Option<&'a [&'b GAffine]>,
     strategy: &'a S,
 }
 
@@ -521,7 +511,7 @@ impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
 fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
     rng: &mut R,
     items: &[(&'a [u8; 32], &'a Signature, &'a [u8])],
-    a_points: Option<&[&'a EdwardsPoint]>,
+    a_points: Option<&[&'a GAffine]>,
     strategy: &S,
 ) -> bool {
     with_backend(VerifyBatchCall {
@@ -561,7 +551,7 @@ pub fn verify_batch<'a>(
         .iter()
         .map(|(vk, sig, msg)| (&vk.bytes, *sig, *msg))
         .collect();
-    let a_points: Vec<&EdwardsPoint> = items.iter().map(|(vk, _, _)| &vk.point).collect();
+    let a_points: Vec<&GAffine> = items.iter().map(|(vk, _, _)| &vk.point).collect();
     verify_batch_dispatch(rng, &byte_items, Some(&a_points), strategy)
 }
 

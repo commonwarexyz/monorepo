@@ -164,6 +164,15 @@ fn barrett_reduce(x: [u64; 8]) -> Scalar {
 impl Scalar {
     pub(crate) const ZERO: Self = Self([0, 0, 0, 0]);
 
+    /// Returns the additive inverse modulo `L`.
+    pub(crate) fn neg_mod_l(&self) -> Self {
+        if self.0 == Self::ZERO.0 {
+            *self
+        } else {
+            Self(limbs_sub(&L, &self.0))
+        }
+    }
+
     /// Interprets `bytes` as a little-endian integer and rejects it unless it is already the
     /// canonical representative (`< L`), as required for the `s` component of a signature.
     pub(crate) fn from_canonical_bytes(bytes: &[u8; 32]) -> Option<Self> {
@@ -220,8 +229,7 @@ impl Scalar {
     /// `[-2^(width-1), 2^(width-1) - 1]`), least-significant first. Used by the MSM's bucket
     /// method (see [`super::msm`]): a signed digit only ever needs a bucket for its *magnitude*
     /// (`1..=2^(width-1)`, half as many as the `1..2^width` an unsigned digit needs), at the cost
-    /// of negating the point (cheap; see [`super::point::EdwardsPoint::negate`]) when its digit is
-    /// negative.
+    /// of negating the affine point's X and T coordinates when its digit is negative.
     ///
     /// This is exactly the standard signed-digit recoding: process [`Scalar::window`]'s unsigned
     /// digits from least to most significant, and whenever one is `>= 2^(width-1)` (the upper half
@@ -288,14 +296,6 @@ mod tests {
     use super::{L, Scalar, limbs_lt, limbs_sub, test_support::rand_scalar};
     use commonware_utils::test_rng;
     use rand_core::Rng;
-
-    fn neg_mod_l(s: &Scalar) -> Scalar {
-        if s.0 == [0, 0, 0, 0] {
-            *s
-        } else {
-            Scalar(limbs_sub(&L, &s.0))
-        }
-    }
 
     /// Returns `(2*a + bit) mod 2^256`, the left-shift-by-one step of the bit-serial reduction
     /// [`reduce_wide_naive`] uses.
@@ -402,7 +402,11 @@ mod tests {
             for &digit in &digits {
                 let magnitude = Scalar::from_u128(digit.unsigned_abs() as u128);
                 let term = power.mul_mod_l(&magnitude);
-                let term = if digit < 0 { neg_mod_l(&term) } else { term };
+                let term = if digit < 0 {
+                    term.neg_mod_l()
+                } else {
+                    term
+                };
                 reconstructed = reconstructed.add_mod_l(&term);
                 power = power.mul_mod_l(&base);
             }
