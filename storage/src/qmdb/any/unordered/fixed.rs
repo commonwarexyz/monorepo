@@ -251,13 +251,13 @@ pub(crate) mod test {
         db
     }
 
-    /// A commit handle must not block database use while the backend sync is pending.
+    /// A sync handle must not block database use while the backend sync is pending.
     #[test_traced]
-    fn test_start_commit_overlaps_work() {
+    fn test_start_sync_overlaps_work() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&context, "delayed", "start_commit_overlap", &pending);
+            let open = open_delayed_db(&context, "delayed", "start_sync_overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -267,12 +267,8 @@ pub(crate) mod test {
             let entered_before = pending.entered();
             let completions_before = pending.completions();
             let handle;
-            (db, handle) = db.start_commit().await.unwrap();
-            assert_eq!(
-                pending.starts(),
-                starts_before + 1,
-                "start_commit began exactly one blob sync"
-            );
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
             assert_eq!(pending.completions(), completions_before);
 
             // Observe the sync while the database keeps working.
@@ -297,15 +293,15 @@ pub(crate) mod test {
             pending.unblock();
             waiter.await.unwrap();
 
-            // The mid-sync batch is durable after the next commit.
+            // The mid-sync batch is durable after the next sync.
             let handle;
-            (db, handle) = db.start_commit().await.unwrap();
+            (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
             let root = db.root();
             let size = db.bounds().end;
             drop(db);
 
-            let db = open_delayed_db(&context, "reopen", "start_commit_overlap", &pending)
+            let db = open_delayed_db(&context, "reopen", "start_sync_overlap", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -315,16 +311,16 @@ pub(crate) mod test {
         });
     }
 
-    /// A commit whose in-flight sync fails surfaces the error through both the returned handle
-    /// and the next durability operation.
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation.
     #[test_traced]
-    fn test_start_commit_failure_propagates() {
+    fn test_start_sync_failure_propagates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&context, "delayed", "start_commit_fail", &pending)
+            let mut db = open_delayed_db(&context, "delayed", "start_sync_fail", &pending)
                 .await
                 .unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -335,10 +331,10 @@ pub(crate) mod test {
             pending.arm_fail();
 
             let handle;
-            (db, handle) = db.start_commit().await.unwrap();
+            (db, handle) = db.start_sync().await.unwrap();
             assert!(
                 handle.await.is_err(),
-                "the commit handle surfaces the failure"
+                "the sync handle surfaces the failure"
             );
             let starts_before = pending.starts();
             // A failed mutable method consumes the database per the failures-are-fatal contract.
@@ -359,13 +355,13 @@ pub(crate) mod test {
         });
     }
 
-    /// Pruning drains the in-flight commit before mutating storage.
+    /// Pruning drains the in-flight sync before mutating storage.
     #[test_traced]
-    fn test_start_commit_prune_waits() {
+    fn test_start_sync_prune_waits() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&context, "delayed", "start_commit_prune", &pending);
+            let open = open_delayed_db(&context, "delayed", "start_sync_prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -373,12 +369,8 @@ pub(crate) mod test {
 
             let starts_before = pending.starts();
             let handle;
-            (db, handle) = db.start_commit().await.unwrap();
-            assert_eq!(
-                pending.starts(),
-                starts_before + 1,
-                "start_commit began exactly one blob sync"
-            );
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
 
             // A non-trivial prune: the floor advanced past the seed commit.
             let floor = db.inactivity_floor_loc();
@@ -1083,7 +1075,7 @@ pub(crate) mod test {
             assert_eq!(db.get(&k).await.unwrap(), Some(v));
             assert_eq!(db.get_many(&[&k]).await.unwrap(), vec![Some(v)]);
             let db = db.commit().await.unwrap();
-            let (db, handle) = db.start_commit().await.unwrap();
+            let (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
             let db = db.sync().await.unwrap();
             let _db = db.prune(Location::new(0)).await.unwrap();
@@ -1101,7 +1093,7 @@ pub(crate) mod test {
                 "db_apply_batch_calls_total 1",
                 "db_operations_applied_total 3",
                 "db_commit_calls_total 1",
-                "db_start_commit_calls_total 1",
+                "db_start_sync_calls_total 1",
                 "db_sync_calls_total 1",
                 "db_prune_calls_total 1",
                 "db_get_duration_count 1",

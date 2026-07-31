@@ -31,7 +31,7 @@ use std::{collections::VecDeque, io::IoSlice, mem::align_of, num::NonZeroUsize, 
 /// Returns the system page size.
 ///
 /// On Unix systems, queries the actual page size via `sysconf`.
-/// On other systems (Windows), defaults to 4KB.
+/// On WebAssembly, defaults to 4KB.
 #[allow(clippy::missing_const_for_fn)]
 pub fn page_size() -> usize {
     #[cfg(unix)]
@@ -2424,7 +2424,7 @@ mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, RangeCfg, types::lazy::Lazy};
-    use core::ops::{Range, RangeFrom, RangeInclusive, RangeToInclusive};
+    use commonware_utils::range::NonEmptyRange;
     use std::collections::{BTreeMap, HashMap};
 
     fn test_pool() -> BufferPool {
@@ -4818,19 +4818,10 @@ mod tests {
     }
 
     #[test]
-    fn test_range_encode_with_pool_matches_encode() {
-        let range: Range<Bytes> = Bytes::from(vec![0x10; 32])..Bytes::from(vec![0x20; 48]);
+    fn test_non_empty_range_encode_with_pool_matches_encode() {
+        let range =
+            NonEmptyRange::new(Bytes::from(vec![0x10; 32])..Bytes::from(vec![0x20; 48])).unwrap();
         assert_encode_with_pool_matches_encode(&range);
-
-        let inclusive: RangeInclusive<Bytes> =
-            Bytes::from(vec![0x30; 16])..=Bytes::from(vec![0x40; 24]);
-        assert_encode_with_pool_matches_encode(&inclusive);
-
-        let from: RangeFrom<IoBuf> = IoBuf::from(vec![0x50; 40])..;
-        assert_encode_with_pool_matches_encode(&from);
-
-        let to_inclusive: RangeToInclusive<IoBuf> = ..=IoBuf::from(vec![0x60; 56]);
-        assert_encode_with_pool_matches_encode(&to_inclusive);
     }
 
     #[cfg(feature = "arbitrary")]

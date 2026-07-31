@@ -192,6 +192,13 @@ fn main() {
         let (mut network, mut oracle) =
             authenticated::discovery::Network::new(context.child("network"), p2p_cfg);
 
+        // Configure channel capacity
+        //
+        // The rate is enforced independently for each peer. All peers share each channel's inbound
+        // mailbox, so size its backlog for one full burst from every peer.
+        let message_rate = Quota::per_second(NZU32!(10));
+        let message_backlog = authenticated::backlog(validators.len(), message_rate);
+
         // Provide authorized peers
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
@@ -200,23 +207,13 @@ fn main() {
 
         // Register consensus channels
         //
-        // If you want to maximize the number of views per second, increase the rate limit
-        // for this channel.
-        let (vote_sender, vote_receiver) = network.register(
-            0,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (certificate_sender, certificate_receiver) = network.register(
-            1,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (resolver_sender, resolver_receiver) = network.register(
-            2,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
+        // To support more views per second, increase the rate and retain enough backlog for every
+        // participant's full burst.
+        let (vote_sender, vote_receiver) = network.register(0, message_rate, message_backlog);
+        let (certificate_sender, certificate_receiver) =
+            network.register(1, message_rate, message_backlog);
+        let (resolver_sender, resolver_receiver) =
+            network.register(2, message_rate, message_backlog);
 
         // Initialize application
         let strategy = context.strategy(NZUsize!(2));

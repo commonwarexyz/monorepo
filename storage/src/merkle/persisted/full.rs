@@ -32,7 +32,7 @@ use crate::{
 use commonware_codec::{DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::CacheRef;
+use commonware_runtime::{Handle, buffer::paged::CacheRef};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::BTreeMap,
@@ -624,6 +624,20 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         Ok(self)
+    }
+
+    /// Flush all nodes cached in the in-memory structure to the journal and begin making them
+    /// durable, returning a completion handle.
+    ///
+    /// The handle covers only nodes flushed so far. A later [Self::sync] still performs a full
+    /// durable sync.
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        // `journal_dirty` is deliberately not cleared: the started sync covers only nodes
+        // flushed so far, and sync() remains the durability authority.
+        self = self.flush_internal().await?;
+        let (journal, handle) = self.journal.start_sync().await?;
+        self.journal = journal;
+        Ok((self, handle))
     }
 
     /// Append nodes cached in the in-memory structure that are missing from the journal, then

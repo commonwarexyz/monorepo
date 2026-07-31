@@ -818,6 +818,141 @@ impl PendingSyncs {
     }
 }
 
+/// Controls a [WriteFaultContext]: while armed, every `write_at`/`write_at_sync` fails with an
+/// injected error. Successful writes are counted.
+#[derive(Clone, Default)]
+pub struct WriteFaults {
+    state: Arc<Mutex<WriteFaultState>>,
+}
+
+#[derive(Default)]
+struct WriteFaultState {
+    fail: bool,
+    writes: u64,
+}
+
+impl WriteFaults {
+    /// Start failing writes.
+    pub fn arm(&self) {
+        self.state.lock().fail = true;
+    }
+
+    /// Stop failing writes.
+    pub fn disarm(&self) {
+        self.state.lock().fail = false;
+    }
+
+    /// The number of successful writes so far.
+    pub fn writes(&self) -> u64 {
+        self.state.lock().writes
+    }
+
+    fn check(&self) -> Result<(), Error> {
+        if self.state.lock().fail {
+            return Err(Error::Io(
+                std::io::Error::other("injected write failure").into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn note(&self) {
+        self.state.lock().writes += 1;
+    }
+}
+
+/// Context wrapper whose blobs fail `write_at`/`write_at_sync` while the shared [WriteFaults]
+/// is armed, counting successful writes. Unlike [DelayedSyncContext], this injects failures
+/// into inline writes issued before any blob sync starts.
+#[derive(Clone)]
+pub struct WriteFaultContext<E> {
+    pub inner: E,
+    pub faults: WriteFaults,
+}
+
+forward_context!(WriteFaultContext, faults);
+
+impl<E: Storage> Storage for WriteFaultContext<E> {
+    type Blob = WriteFaultBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            WriteFaultBlob {
+                inner,
+                faults: self.faults.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper that fails `write_at`/`write_at_sync` while its [WriteFaults] is armed.
+#[derive(Clone)]
+pub struct WriteFaultBlob<B> {
+    inner: B,
+    faults: WriteFaults,
+}
+
+impl<B: Blob> Blob for WriteFaultBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.write_at(offset, bufs).await?;
+        self.faults.note();
+        Ok(())
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.write_at_sync(offset, bufs).await?;
+        self.faults.note();
+        Ok(())
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
 /// Context wrapper whose blobs fail `sync` and `start_sync` for a single partition.
 #[derive(Clone)]
 pub struct SyncFaultContext<E> {

@@ -1,7 +1,7 @@
 //! Blob management for a contiguous journal.
 
 use crate::{
-    Context,
+    Context, SyncCompletion,
     journal::{Error, frame::FrameReader},
 };
 use commonware_formatting::hex;
@@ -12,13 +12,10 @@ use commonware_runtime::{
 };
 use futures::{
     FutureExt as _,
-    future::{self, BoxFuture, Shared, try_join_all},
+    future::{self, try_join_all},
 };
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
-
-/// Shared completion for an in-flight runtime sync.
-type SyncCompletion = Shared<BoxFuture<'static, Result<(), RError>>>;
 
 /// Metrics for a journal's blobs.
 struct Metrics {

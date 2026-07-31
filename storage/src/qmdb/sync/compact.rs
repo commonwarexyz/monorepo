@@ -19,16 +19,18 @@
 //!
 //! # When compact state changes
 //!
-//! The servable compact state advances only on durable persistence:
+//! The servable compact state advances only when a commit is persisted:
 //!
 //! - [`sync`] verifies the final commit proof and compact frontier before database construction.
 //! - [`Database::from_validated_state`] reconstructs the already-validated state without
 //!   persisting it.
-//! - Compact db-local commits append one witness entry during `sync`.
+//! - Compact db-local commits append one witness entry during `commit`, `sync`, or
+//!   `start_sync`. An entry appended by `start_sync` is servable when the call returns and is
+//!   proven durable only when its handle completes.
 //! - `rewind` restores the frontier and the witness from the target journal entry.
 //!
 //! Unsynced in-memory mutations are therefore intentionally not servable: `target()` and
-//! compact-state responses lag behind `apply_batch()` until the db's next sync.
+//! compact-state responses lag behind `apply_batch()` until the db's next persist.
 //!
 //! # Safety and invariants
 //!

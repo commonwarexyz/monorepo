@@ -45,7 +45,7 @@ use crate::{
     Blob, Error, Handle, IoBuf, IoBufMut, IoBufs, WriteOptions,
     buffer::{
         SyncState,
-        paged::{CHECKSUM_SIZE, CacheRef, Checksum, Slot},
+        paged::{ActiveChecksum, CHECKSUM_SIZE, CacheRef, Checksum, Slot},
         tip::Buffer,
     },
 };
@@ -102,9 +102,8 @@ pub struct Writer<B: Blob> {
     /// The page where the next appended byte will be written to.
     current_page: u64,
 
-    /// The state of the partial page in the blob. If it was written due to a sync call, then this
-    /// will contain its CRC record.
-    partial_page_state: Option<Checksum>,
+    /// The active checksum of the partial page in the blob, if any.
+    partial_page_state: Option<ActiveChecksum>,
 
     /// Durability state for plain writes, resizes, and range-sync writes.
     sync_state: SyncState,
@@ -206,7 +205,8 @@ impl<B: Blob> Writer<B> {
     /// A tuple of `(partial_page, page_count, invalid_data_found)`:
     ///
     /// - `partial_page`: If the last valid page is partial (contains fewer than `page_size` logical
-    ///   bytes), returns `Some((data, crc_record))` containing the logical data and its CRC record.
+    ///   bytes), returns `Some((data, checksum))` containing the logical data and its active
+    ///   checksum.
     ///   Returns `None` if the last valid page is full or if no valid pages exist.
     ///
     /// - `page_count`: The number of pages in the blob up to and including the last valid page
@@ -220,7 +220,7 @@ impl<B: Blob> Writer<B> {
         blob: &B,
         blob_size: u64,
         page_size: u64,
-    ) -> Result<(Option<(IoBuf, Checksum)>, u64, bool), Error> {
+    ) -> Result<(Option<(IoBuf, ActiveChecksum)>, u64, bool), Error> {
         let physical_page_size = page_size + CHECKSUM_SIZE;
         let partial_bytes = blob_size % physical_page_size;
         let mut last_page_end = blob_size - partial_bytes;
@@ -239,15 +239,14 @@ impl<B: Blob> Writer<B> {
                 .freeze();
 
             match Checksum::validate_page(buf.as_ref()) {
-                Some(crc_record) => {
+                Some(checksum) => {
                     // Found a valid page.
-                    let (len, _) = crc_record.get_crc();
-                    let len = len as u64;
+                    let len = checksum.len as u64;
                     if len != page_size {
                         // The page is partial (logical data doesn't fill the page).
                         let logical_bytes = buf.slice(..len as usize);
                         return Ok((
-                            Some((logical_bytes, crc_record)),
+                            Some((logical_bytes, checksum)),
                             last_page_end / physical_page_size,
                             invalid_data_found,
                         ));
@@ -564,15 +563,18 @@ impl<B: Blob> Writer<B> {
     ///
     /// * `buffer` - The buffer containing logical page data
     /// * `include_partial_page` - Whether to include a partial page if one exists
-    /// * `old_crc_record` - The CRC record from a previously committed partial page, if any.
-    ///   When present, the first page's CRC record will preserve the old CRC in its original slot
-    ///   and place the new CRC in the other slot.
+    /// * `old_checksum` - The active checksum from a previously committed partial page, if any.
+    ///   When present, the first page's CRC record will preserve it in its original slot and place
+    ///   the new checksum in the other slot.
+    ///
+    /// Returns the physical pages to write and, for any included partial page, the active
+    /// checksum future flushes must protect.
     fn to_physical_pages(
         &self,
         buffer: &Buffer,
         include_partial_page: bool,
-        old_crc_record: Option<&Checksum>,
-    ) -> (IoBufs, Option<Checksum>) {
+        old_checksum: Option<&ActiveChecksum>,
+    ) -> (IoBufs, Option<ActiveChecksum>) {
         let page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.len() / page_size;
@@ -582,7 +584,7 @@ impl<B: Blob> Writer<B> {
         if pages_to_write > 0 {
             self.append_full_pages(
                 &buffer.slice(..pages_to_write * page_size),
-                old_crc_record,
+                old_checksum,
                 &mut write_buffer,
             );
         }
@@ -600,23 +602,23 @@ impl<B: Blob> Writer<B> {
         // If there are no full pages and the partial page length matches what was already
         // written, there's nothing new to write.
         if pages_to_write == 0
-            && let Some(old_crc) = old_crc_record
+            && let Some(old_checksum) = old_checksum
+            && partial_page.len() == old_checksum.len as usize
         {
-            let (old_len, _) = old_crc.get_crc();
-            if partial_page.len() == old_len as usize {
-                return (write_buffer, None);
-            }
+            return (write_buffer, None);
         }
         let partial_len = partial_page.len();
         let crc = Crc32::checksum(partial_page);
 
         // For partial pages: if this is the first page and there's an old CRC, preserve it.
         // Otherwise just use the new CRC in slot 0.
-        let crc_record = if let (0, Some(old_crc)) = (pages_to_write, old_crc_record) {
-            Self::build_crc_record_preserving_old(partial_len as u16, crc, old_crc)
+        let old_checksum = if pages_to_write == 0 {
+            old_checksum
         } else {
-            Checksum::new(partial_len as u16, crc)
+            None
         };
+        let (crc_record, active_checksum) =
+            Self::build_crc_record(partial_len as u16, crc, old_checksum);
 
         // A persisted partial page still occupies one full physical page:
         // [partial logical bytes, zero padding, crc record].
@@ -629,20 +631,18 @@ impl<B: Blob> Writer<B> {
         padded.put_slice(&crc_record.to_bytes());
         write_buffer.append(padded.freeze());
 
-        // Return the CRC record that matches what we wrote to disk, so that future flushes
-        // preserve the correct slot.
-        (write_buffer, Some(crc_record))
+        (write_buffer, Some(active_checksum))
     }
 
     /// Appends each page of `data` to `write_buffer` in on-disk format: its payload (a zero-copy
     /// slice of `data`) followed by a CRC record.
     ///
-    /// `data.len()` must be a non-zero multiple of the page size. When `old_crc_record` is present,
-    /// the first page's record preserves the old CRC in its original slot.
+    /// `data.len()` must be a non-zero multiple of the page size. When `old_checksum` is present,
+    /// the first page's record preserves it in its original slot.
     fn append_full_pages(
         &self,
         data: &IoBuf,
-        old_crc_record: Option<&Checksum>,
+        old_checksum: Option<&ActiveChecksum>,
         write_buffer: &mut IoBufs,
     ) {
         let page_size = self.cache_ref.page_size() as usize;
@@ -664,11 +664,8 @@ impl<B: Blob> Writer<B> {
 
             // For the first page, if there's an old partial page CRC, construct the record
             // to preserve the old CRC in its original slot.
-            let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
-                Self::build_crc_record_preserving_old(page_size_u16, crc, old_crc)
-            } else {
-                Checksum::new(page_size_u16, crc)
-            };
+            let old_checksum = if page == 0 { old_checksum } else { None };
+            let (crc_record, _) = Self::build_crc_record(page_size_u16, crc, old_checksum);
             crcs.put_slice(&crc_record.to_bytes());
         }
         let crc_blob = crcs.freeze();
@@ -684,32 +681,39 @@ impl<B: Blob> Writer<B> {
         }
     }
 
-    /// Build a CRC record that preserves the old CRC in its original slot and places the new CRC
-    /// in the other slot.
+    /// Build a CRC record and identify its active checksum. If an old checksum is provided, it is
+    /// preserved in its original slot and the new checksum is placed in the other slot.
     ///
     /// The rewrite resubmits the preserved slot byte-identically, so an interrupted rewrite can
     /// recover either the old partial page or the new one.
-    const fn build_crc_record_preserving_old(
+    const fn build_crc_record(
         new_len: u16,
         new_crc: u32,
-        old_crc: &Checksum,
-    ) -> Checksum {
-        let (old_len, old_crc_val) = old_crc.get_crc();
-        // Keep the old CRC in its slot and place the new CRC in the free one.
-        match old_crc.authoritative() {
+        old_checksum: Option<&ActiveChecksum>,
+    ) -> (Checksum, ActiveChecksum) {
+        let Some(old_checksum) = old_checksum else {
+            return (
+                Checksum::new(new_len, new_crc),
+                ActiveChecksum::new(Slot::First, new_len, new_crc),
+            );
+        };
+
+        let new_slot = old_checksum.slot.other();
+        let record = match old_checksum.slot {
             Slot::First => Checksum {
-                len1: old_len,
-                crc1: old_crc_val,
+                len1: old_checksum.len,
+                crc1: old_checksum.crc,
                 len2: new_len,
                 crc2: new_crc,
             },
             Slot::Second => Checksum {
                 len1: new_len,
                 crc1: new_crc,
-                len2: old_len,
-                crc2: old_crc_val,
+                len2: old_checksum.len,
+                crc2: old_checksum.crc,
             },
-        }
+        };
+        (record, ActiveChecksum::new(new_slot, new_len, new_crc))
     }
 
     /// Durably rewrite a committed page to a shorter partial length.
@@ -719,8 +723,8 @@ impl<B: Blob> Writer<B> {
         page_size: u64,
         new_len: u16,
         new_crc: u32,
-        old_crc: &Checksum,
-    ) -> Result<Checksum, Error> {
+        old_checksum: &ActiveChecksum,
+    ) -> Result<ActiveChecksum, Error> {
         // Recovery chooses the valid slot with the larger length. While shrinking, the new
         // checksum must be made durable without becoming authoritative until the old longer slot
         // can be disabled. The sequence below therefore lets recovery observe either the old page
@@ -732,7 +736,7 @@ impl<B: Blob> Writer<B> {
             .checked_mul(physical_page_size)
             .and_then(|start| start.checked_add(page_size))
             .ok_or(Error::OffsetOverflow)?;
-        let old_slot = old_crc.authoritative();
+        let old_slot = old_checksum.slot;
         let new_slot = old_slot.other();
 
         // Stage the new slot with a 0 length and the shrunken page CRC. A crash here leaves the
@@ -759,7 +763,7 @@ impl<B: Blob> Writer<B> {
         self.write_at_sync(old_slot_offset, Checksum::slot_len_bytes(0).to_vec())
             .await?;
 
-        Ok(Checksum::in_slot(new_slot, new_len, new_crc))
+        Ok(ActiveChecksum::new(new_slot, new_len, new_crc))
     }
 
     /// Flushes any buffered data, then returns a [Replay] for the underlying blob.
@@ -789,10 +793,9 @@ impl<B: Blob> Writer<B> {
                 let logical = page_size * self.current_page;
                 (physical, logical)
             },
-            |crc_record| {
+            |checksum| {
                 // There's a partial page with a checksum.
-                let (partial_len, _) = crc_record.get_crc();
-                let partial_len = partial_len as u64;
+                let partial_len = checksum.len as u64;
                 // Physical: all pages including the partial one (which is padded to full size).
                 let physical = physical_page_size * (self.current_page + 1);
                 // Logical: full pages before this + partial page's actual data length.
@@ -993,7 +996,7 @@ impl<B: Blob> Writer<B> {
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;
 
-        let (page_data, old_crc) =
+        let (page_data, old_checksum) =
             super::get_page_with_checksum_from_blob(&self.blob, full_pages, page_size).await?;
 
         // Ensure the validated data covers what we need.
@@ -1012,7 +1015,7 @@ impl<B: Blob> Writer<B> {
                 page_size,
                 partial_bytes as u16,
                 Crc32::checksum(new_data),
-                &old_crc,
+                &old_checksum,
             )
             .await?;
         self.partial_page_state = Some(final_record);
@@ -3178,9 +3181,8 @@ mod tests {
             assert_eq!(physical_pages.chunk_count(), 5);
 
             // The returned partial-page CRC state must describe the exact trailing logical length.
-            let crc_record = partial_page_state.expect("partial page state must be returned");
-            let (len, _) = crc_record.get_crc();
-            assert_eq!(len as usize, partial_len);
+            let checksum = partial_page_state.expect("partial page state must be returned");
+            assert_eq!(checksum.len as usize, partial_len);
 
             // Coalesce for easier content inspection. The assembled bytes should still form three
             // full physical pages on disk.

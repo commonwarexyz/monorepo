@@ -31,6 +31,7 @@ use crate::{
     journal::Error,
     metadata::{Config as MetadataConfig, Metadata},
 };
+use commonware_runtime::Handle;
 use commonware_utils::sequence::VecU64;
 
 /// Key for the mid-blob pruning boundary. Absent when the boundary is blob-aligned (it is then
@@ -104,6 +105,24 @@ impl<E: Context> Checkpoint<E> {
         // Always sync, even if this call staged nothing: `lower_watermark` stages without syncing,
         // so skipping the sync when our own entries are unchanged could drop that pending change.
         self.sync().await
+    }
+
+    /// Begin raising the watermark to `watermark`, returning a completion handle. A `watermark`
+    /// at or below the current one is ignored, returning a resolved handle.
+    /// A started advance's failure leaves the raised value staged: later advances at or below
+    /// it are ignored, and the next checkpoint write observes the failure and fails.
+    /// Invariant: all items below `watermark` are durable.
+    pub(super) async fn start_watermark_sync(
+        mut self,
+        watermark: u64,
+    ) -> Result<(Self, Handle<()>), Error> {
+        if matches!(self.watermark(), Some(current) if current >= watermark) {
+            return Ok((self, Handle::ready(Ok(()))));
+        }
+        self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
+        let (metadata, handle) = self.metadata.start_sync().await?;
+        self.metadata = metadata;
+        Ok((self, handle))
     }
 
     /// Lower the watermark to at most `limit`, returning whether it changed. Called before

@@ -629,9 +629,7 @@ stability_scope!(BETA {
         /// Multiple instances of the same blob can be opened concurrently, however,
         /// writing to the same blob concurrently may lead to undefined behavior.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists). On
-        /// platforms without directory sync (e.g. Windows), the durability of the blob's
-        /// name is best-effort.
+        /// An Ok result indicates the blob is durably created (or already exists).
         ///
         /// # Versions
         ///

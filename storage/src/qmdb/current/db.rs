@@ -225,6 +225,15 @@ where
         self.any.bounds()
     }
 
+    /// Returns a read-only view of the activity bitmap.
+    ///
+    /// Pruning does not renumber the retained chunks. Only chunks at or after `pruned_chunks()`
+    /// that contain a bit below `len()` are readable. Calling `get_chunk()` or `get_bit()` for a
+    /// pruned or out-of-bounds location panics.
+    pub fn bitmap(&self) -> &impl bitmap::Readable<N> {
+        self.any.bitmap.as_ref()
+    }
+
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
@@ -250,10 +259,12 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Returns a virtual [grafting::Storage] over the grafted tree and ops tree. For positions at
-    /// or above the grafting height, returns the grafted node. For positions below the grafting
-    /// height, the ops tree is used.
-    fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
+    /// Returns a virtual [`crate::merkle::storage::Storage`] view over the grafted tree and ops
+    /// tree.
+    ///
+    /// Positions and `size()` use ops-tree coordinates. Positions at or above the grafting height
+    /// return bitmap-authenticated grafted nodes, while positions below it use the ops tree.
+    pub fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
@@ -598,7 +609,8 @@ where
     /// this database handle after any `Err` from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
+    /// completes.
     #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
@@ -794,17 +806,17 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
+    /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
-    /// bitmap metadata is not durably persisted, so recovery may be required on startup in the
-    /// event of a crash (use [Self::sync] for the stronger guarantee). A new commit waits for
-    /// the prior commit's sync before starting. Failures of the deferred durability work
-    /// surface on the returned handle and again on the next durability operation.
-    #[tracing::instrument(name = "qmdb.current.db.start_commit", level = "info", skip_all)]
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup.
+    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
+    /// the prior sync before starting. Failures surface as described on
+    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
     #[boxed]
-    pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        let (any, handle) = self.any.start_commit().await?;
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        let (any, handle) = self.any.start_sync().await?;
         self.any = any;
         Ok((self, handle))
     }
@@ -874,10 +886,11 @@ where
     /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
     /// more details).
     ///
-    /// This publishes the batch to the in-memory Current view and appends it to the journal,
-    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
-    /// durability.
+    /// This publishes the batch to the in-memory Current view and appends it to the journal, but
+    /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
+    /// returned by [`Db::start_sync`], to guarantee durability.
     #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
+    #[boxed]
     pub async fn apply_batch(
         mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
@@ -1473,15 +1486,15 @@ mod tests {
         db.commit().await.unwrap()
     }
 
-    /// State committed via an awaited start_commit handle is recovered on reopen, including the
+    /// State committed via an awaited start_sync handle is recovered on reopen, including the
     /// grafted bitmap contribution to the root.
     #[test_traced]
-    fn test_start_commit_recovery() {
+    fn test_start_sync_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("first"),
-                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+                fixed_config::<OneCap>("start-sync-recovery", &ctx),
             )
             .await
             .unwrap();
@@ -1494,14 +1507,14 @@ mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            let (db, handle) = db.start_commit().await.unwrap();
+            let (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
             let root = db.root();
             drop(db);
 
             let db = MmrDb::init(
                 ctx.child("second"),
-                fixed_config::<OneCap>("start-commit-recovery", &ctx),
+                fixed_config::<OneCap>("start-sync-recovery", &ctx),
             )
             .await
             .unwrap();

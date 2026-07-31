@@ -20,7 +20,6 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{
-    N3f1,
     channel::{
         fallible::AsyncFallibleExt,
         mpsc::{Receiver, Sender},
@@ -190,7 +189,7 @@ where
             Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut *self.context.lock(),
                     Subject::Notarize {
                         proposal: &notarization.proposal,
@@ -228,7 +227,7 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut *self.context.lock(),
                     Subject::Nullify {
                         round: nullification.round,
@@ -272,7 +271,7 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut *self.context.lock(),
                     Subject::Finalize {
                         proposal: &finalization.proposal,

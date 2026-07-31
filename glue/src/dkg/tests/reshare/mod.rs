@@ -405,12 +405,10 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
         .first(next_player_epoch)
         .expect("test epoch should be supported");
     let crash_window_start = state_sync_floor.get() + EPOCH_LENGTH.get() / 2;
-    // The application state sync follows the finalized tip, so the node's
-    // first processed height after sync is bounded only by the next epoch
-    // boundary (block production pauses there, letting sync converge). The
-    // crash window therefore extends to the next epoch's first block, and the
-    // processed hold parks the node at whatever height it lands on so the
-    // crash triggers deterministically instead of sampling a moving value.
+    // The node processes nothing until state sync finishes, and sync converges
+    // only when two fetch round trips fit inside one block interval. The fast
+    // link below guarantees that, so the processed hold, not sync timing, parks
+    // the node at `crash_window_start`.
     let crash_window_end = FixedEpocher::new(EPOCH_LENGTH)
         .first(next_player_epoch.next())
         .expect("test epoch should be supported");
@@ -427,6 +425,11 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary() {
         next_player_epoch.next(),
         BoundaryEpochInfos::new(4),
     )
+    .link(Link {
+        latency: Duration::from_millis(4),
+        jitter: Duration::from_millis(1),
+        success_rate: 1.0,
+    })
     .crash(Crash::ProcessedHeight {
         participant: delayed.clone(),
         heights: crash_window_start..=crash_window_end.get(),
