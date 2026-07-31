@@ -58,6 +58,7 @@ cfg_if::cfg_if! {
         mod fallback;
         mod heap;
         mod scheduler;
+        mod sync;
 
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {

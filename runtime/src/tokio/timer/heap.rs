@@ -1,6 +1,9 @@
 //! Indexed 4-ary min-heap for registered timers.
 
-use super::scheduler::{Deadline, Entry, EntryArc, NOT_IN_HEAP};
+use super::{
+    scheduler::{Deadline, Entry, NOT_IN_HEAP},
+    sync::EntryArc,
+};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::Ordering;
 #[cfg(not(feature = "loom"))]

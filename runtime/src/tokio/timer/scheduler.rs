@@ -1,14 +1,13 @@
 //! Native sharded timer scheduler and concurrency protocols.
 
-mod sync;
-
-pub(super) use self::sync::EntryArc;
-use self::sync::{AtomicWaker, Mutex};
-use super::heap::{Heap, HeapItem};
 #[cfg(target_os = "linux")]
 use super::linux::NativeAlarm;
 #[cfg(target_os = "macos")]
 use super::macos::NativeAlarm;
+use super::{
+    heap::{Heap, HeapItem},
+    sync::{AtomicWaker, EntryArc, Mutex},
+};
 use crate::utils::{Panicker, extract_panic_message, resume_reported_panic};
 use commonware_macros::select;
 use futures::FutureExt as _;
