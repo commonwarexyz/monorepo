@@ -152,10 +152,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
             self.failed_views.insert(view);
 
             // Request a nullification for this view (if not already covered).
-            // The views the failed notarization was fetched for are not
-            // re-requested: the actor answers their responses with the
-            // certification verdict, so the resolver engine retries those
-            // requests itself.
+            // Existing fetches remain active when the failed notarization did
+            // not satisfy their subscribers, so the resolver retries them.
             if self.needs_nullification(view) {
                 effects.push(Effect::Fetch {
                     view,

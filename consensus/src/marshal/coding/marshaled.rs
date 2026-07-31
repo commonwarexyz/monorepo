@@ -59,8 +59,9 @@
 //!
 //! In rare crash cases, it is possible for a notarization certificate to exist without a block being
 //! available to the honest parties (e.g., if the whole network crashed before receiving `f+1` shards
-//! and the proposer went permanently offline). In this case, `certify` will be unable to fetch the
-//! block before timeout and result in a nullification.
+//! and the proposer went permanently offline). In this case, `certify` may remain pending while it
+//! waits for the unavailable block. Simplex may time out and nullify the view, but that timeout does
+//! not resolve the certification request.
 //!
 //! For this reason, it should not be expected that every notarized payload will be certifiable due
 //! to the lack of an available block. However, if even one honest and online party has the block,
@@ -75,7 +76,7 @@
 //! │          B1         │◀──│          B2         │◀──│          B3         │XXX│          B4         │
 //! └─────────────────────┘   └─────────────────────┘   └──────────┬──────────┘   └─────────────────────┘
 //!                                                                │
-//!                                                          Failed Certify
+//!                                                         Pending Certify
 //! ```
 
 use crate::{

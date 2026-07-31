@@ -12,9 +12,10 @@
 //! fulfilled, delivering data to the `Consumer` for verification.
 //!
 //! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
-//! and returns `true` if valid, completing the fetch, or `false` to retry. Pruning a fetch with
-//! in-progress response validation aborts that validation. If the aborted validation would have
-//! returned `false`, the peer is not blocked for that response.
+//! and returns a [`crate::DeliveryOutcome`]. A complete response retires its delivered subscribers,
+//! an incomplete response retries without penalizing the peer, and an invalid response blocks the
+//! peer before retrying. Pruning a fetch with in-progress response validation aborts that
+//! validation; an invalid outcome produced after cancellation does not block the peer.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
@@ -49,10 +50,10 @@
 //! is in progress are delivered the same accepted response locally.
 //!
 //! While a response is being validated, its key remains in flight, so no further request is sent.
-//! New fetches for the key only attach subscribers or targets. Acceptance completes the fetch.
-//! Rejection blocks the serving peer and retries. A consumer that withholds its verdict stalls the
-//! fetch for that key. Consumers that wait on external input must guarantee that validation
-//! eventually concludes.
+//! New fetches for the key only attach subscribers or targets. A complete outcome retires the
+//! delivered subscribers, an incomplete outcome retries the key, and an invalid outcome blocks the
+//! serving peer before retrying. A consumer that cannot yet satisfy a subscriber should return an
+//! incomplete outcome instead of withholding the result when another response may make progress.
 //!
 //! # Peer Selection
 //!
@@ -101,7 +102,7 @@ mod tests {
         Config, Engine, Mailbox,
         mocks::{Consumer, Key, Producer},
     };
-    use crate::{Delivery, Fetch, Resolver, TargetedResolver};
+    use crate::{Delivery, DeliveryOutcome, Fetch, Resolver, TargetedResolver};
     use bytes::Bytes;
     use commonware_cryptography::{
         Signer,
@@ -333,7 +334,7 @@ mod tests {
         mailbox
     }
 
-    type DeliveryGate = (oneshot::Receiver<()>, bool);
+    type DeliveryGate = (oneshot::Receiver<()>, DeliveryOutcome);
     type DeliveryGates = Arc<Mutex<VecDeque<DeliveryGate>>>;
 
     #[derive(Clone)]
@@ -372,19 +373,22 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = ();
+        type Outcome = DeliveryOutcome;
 
         fn deliver(
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
+        ) -> oneshot::Receiver<Self::Outcome> {
             let key = delivery.key;
             self.started.send_lossy(key.clone());
-            let (gate, valid) = self
+            let (gate, outcome) = self
                 .gates
                 .lock()
                 .pop_front()
-                .map_or((None, true), |(gate, valid)| (Some(gate), valid));
+                .map_or((None, DeliveryOutcome::Complete), |(gate, outcome)| {
+                    (Some(gate), outcome)
+                });
             let (mut response, receiver) = oneshot::channel();
             let sender = self.sender.clone();
             self.context.child("delivery").spawn(move |_| async move {
@@ -393,16 +397,16 @@ mod tests {
                         _ = response.closed() => return,
                         result = gate => {
                             if result.is_err() {
-                                let _ = response.send(false);
+                                let _ = response.send(DeliveryOutcome::Invalid);
                                 return;
                             }
                         },
                     }
                 }
-                if valid {
+                if outcome == DeliveryOutcome::Complete {
                     sender.send_lossy((key, value));
                 }
-                let _ = response.send(valid);
+                let _ = response.send(outcome);
             });
             receiver
         }
@@ -449,18 +453,21 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = SubscriberTag;
+        type Outcome = DeliveryOutcome;
 
         fn deliver(
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
+        ) -> oneshot::Receiver<Self::Outcome> {
             self.started.send_lossy(delivery.clone());
-            let (gate, valid) = self
+            let (gate, outcome) = self
                 .gates
                 .lock()
                 .pop_front()
-                .map_or((None, true), |(gate, valid)| (Some(gate), valid));
+                .map_or((None, DeliveryOutcome::Complete), |(gate, outcome)| {
+                    (Some(gate), outcome)
+                });
             let (mut response, receiver) = oneshot::channel();
             let sender = self.sender.clone();
             self.context.child("delivery").spawn(move |_| async move {
@@ -469,16 +476,16 @@ mod tests {
                         _ = response.closed() => return,
                         result = gate => {
                             if result.is_err() {
-                                let _ = response.send(false);
+                                let _ = response.send(DeliveryOutcome::Invalid);
                                 return;
                             }
                         },
                     }
                 }
-                if valid {
+                if outcome == DeliveryOutcome::Complete {
                     sender.send_lossy((delivery, value));
                 }
-                let _ = response.send(valid);
+                let _ = response.send(outcome);
             });
             receiver
         }
@@ -500,6 +507,7 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = SubscriberTag;
+        type Outcome = bool;
 
         fn deliver(
             &mut self,
@@ -605,6 +613,7 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = ();
+        type Outcome = bool;
 
         fn deliver(
             &mut self,
@@ -704,7 +713,10 @@ mod tests {
             let (gate_sender2, gate_receiver2) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
-                vec![(gate_receiver1, true), (gate_receiver2, true)],
+                vec![
+                    (gate_receiver1, DeliveryOutcome::Complete),
+                    (gate_receiver2, DeliveryOutcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -784,7 +796,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, true), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, DeliveryOutcome::Complete),
+                    (second_gate_receiver, DeliveryOutcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -855,7 +870,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, DeliveryOutcome::Invalid),
+                    (second_gate_receiver, DeliveryOutcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -917,6 +935,89 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_incomplete_delivery_retries_without_blocking_peer() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), data.clone());
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![
+                    (first_gate_receiver, DeliveryOutcome::Incomplete),
+                    (second_gate_receiver, DeliveryOutcome::Complete),
+                ],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod3,
+            );
+
+            mailbox1.fetch_targeted(
+                key.clone(),
+                non_empty_vec![peers[1].clone(), peers[2].clone()],
+            );
+            assert_eq!(started.recv().await.unwrap(), key);
+            first_gate_sender.send(()).unwrap();
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            oracle
+                .remove_link(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(peers[1].clone(), peers[0].clone())
+                .await
+                .unwrap();
+
+            assert_eq!(started.recv().await.unwrap(), key);
+            second_gate_sender.send(()).unwrap();
+            assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
     async fn run_pending_invalid_delivery_race(
         context: &deterministic::Context,
         validation_first: bool,
@@ -931,8 +1032,10 @@ mod tests {
         prod2.insert(key.clone(), Bytes::from("data for key 1"));
 
         let (mut gate_sender, gate_receiver) = oneshot::channel();
-        let (cons1, mut cons_out1, mut started) =
-            BlockingConsumer::new(context.child("consumer"), vec![(gate_receiver, false)]);
+        let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+            context.child("consumer"),
+            vec![(gate_receiver, DeliveryOutcome::Invalid)],
+        );
 
         let scheme = schemes.remove(0);
         let mut mailbox1 = setup_and_spawn_actor(
@@ -2324,7 +2427,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, true), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, DeliveryOutcome::Complete),
+                    (second_gate_receiver, DeliveryOutcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -2417,7 +2523,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_late_targeted_subscriber_joins_retry_after_invalid_delivery() {
+    fn test_late_targeted_subscriber_joins_retry_after_incomplete_delivery() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2426,10 +2532,13 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let key = Key(5);
-            let invalid_response = Bytes::from("invalid data for key 5");
+            let incomplete_response = Bytes::from("incomplete data for key 5");
             let unexpected_refetch = Bytes::from("unexpected refetch for key 5");
             let mut prod2 = SequencedProducer::default();
-            prod2.insert(key.clone(), [invalid_response, unexpected_refetch.clone()]);
+            prod2.insert(
+                key.clone(),
+                [incomplete_response, unexpected_refetch.clone()],
+            );
             let prod2_observer = prod2.clone();
 
             let valid_response = Bytes::from("valid data for key 5");
@@ -2441,7 +2550,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, DeliveryOutcome::Incomplete),
+                    (second_gate_receiver, DeliveryOutcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -2515,9 +2627,18 @@ mod tests {
             );
             assert_eq!(prod3_observer.remaining(&key), vec![valid_response.clone()]);
 
-            // A terminal rejection retries unrestricted repair with both subscribers.
+            oracle
+                .remove_link(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            oracle
+                .remove_link(peers[1].clone(), peers[0].clone())
+                .await
+                .unwrap();
+
+            // Valid but incomplete data retries unrestricted repair with both
+            // subscribers and does not penalize the serving peer.
             first_gate_sender.send(()).unwrap();
-            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
             oracle.manager().track(
                 1,
                 Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
@@ -2526,7 +2647,7 @@ mod tests {
             let delivery = select! {
                 delivery = started.recv() => delivery.expect("retry delivery did not start"),
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("invalid response was not retried with the late subscriber");
+                    panic!("incomplete response was not retried with the late subscriber");
                 },
             };
             assert_eq!(
@@ -2555,6 +2676,7 @@ mod tests {
             assert_eq!(value, valid_response);
             assert_eq!(prod2_observer.remaining(&key), vec![unexpected_refetch]);
             assert!(prod3_observer.remaining(&key).is_empty());
+            assert!(oracle.blocked().await.unwrap().is_empty());
         });
     }
 
@@ -2583,7 +2705,10 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
-                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
+                vec![
+                    (first_gate_receiver, DeliveryOutcome::Invalid),
+                    (second_gate_receiver, DeliveryOutcome::Complete),
+                ],
             );
 
             let scheme = schemes.remove(0);
@@ -3543,8 +3668,10 @@ mod tests {
             prod2.insert(key.clone(), data);
 
             let (mut gate_sender, gate_receiver) = oneshot::channel();
-            let (cons1, mut cons_out1, mut started) =
-                BlockingConsumer::new(context.child("consumer"), vec![(gate_receiver, true)]);
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![(gate_receiver, DeliveryOutcome::Complete)],
+            );
 
             let actor_context = context.child("actor");
 

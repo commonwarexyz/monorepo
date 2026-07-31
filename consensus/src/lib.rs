@@ -162,10 +162,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
-        /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
-        /// certification as concluded and will not retry the same request. After a restart,
-        /// however, consensus may request certification for the same `(round, payload)` again
-        /// if the result was not durably recorded before shutdown.
+        /// `(round, payload)`. Once the returned channel produces a verdict or closes, consensus
+        /// will not retry the same request. A closed channel supplies no verdict, and consensus
+        /// does not infer one. After a restart, however, consensus may request certification for
+        /// the same `(round, payload)` again if the result was not durably recorded before shutdown.
         ///
         /// Consensus may drop the receiver before it resolves when protocol evidence establishes
         /// success. A notarization for a proposal that names this round as its parent proves that
@@ -177,19 +177,22 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// round. Temporary conditions such as waiting for more data should not conclude
         /// certification with `false`.
         ///
-        /// # Liveness Requirement
+        /// # Pending Requests and Liveness
         ///
-        /// Certification remains consensus-critical until the application returns a verdict, a
-        /// dependent notarization proves success, or finalization makes the request unnecessary. A
-        /// validator is live only if every request that remains relevant eventually produces `true`
-        /// or `false`. A request may remain pending for an arbitrarily long time, but not forever.
+        /// The interface permits a certification request to remain pending indefinitely; consensus
+        /// does not assume that every request eventually returns. Simplex continues processing
+        /// unrelated certification requests while one is pending.
+        ///
+        /// A pending request remains consensus-critical until the application returns a verdict, a
+        /// dependent notarization proves success, or finalization makes the request unnecessary.
+        /// While it remains relevant, the validator cannot notarize a later proposal whose ancestry
+        /// depends on it.
         ///
         /// If certification does not finish before the certification timeout expires, the
-        /// validator times out the current view and issues a nullify vote. The validator can enter
-        /// later views while the certification request remains pending. Until the request resolves,
-        /// the validator cannot notarize a later proposal whose ancestry depends on it. If enough
-        /// validators are blocked this way, later views also time out and consensus cannot finalize
-        /// new payloads.
+        /// validator times out the current view and issues a nullify vote. This begins timeout
+        /// recovery; it does not resolve or cancel the application request. A resulting
+        /// nullification certificate can move the validator to a later view while certification
+        /// remains pending.
         ///
         /// Elapsed time does not establish a certification verdict. `false` means permanently
         /// uncertifiable, so returning it because of a local timeout could make honest validators
@@ -197,9 +200,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// for shutdown or another condition that prevents the implementation from ever producing
         /// a verdict.
         ///
-        /// A validator whose relevant request remains unresolved forever cannot make progress in
-        /// any execution that depends on the verdict. It does not count as live for the consensus
-        /// liveness guarantee.
+        /// Consensus liveness requires enough validators to obtain each relevant verdict or
+        /// protocol evidence that makes it unnecessary. A validator blocked forever on a relevant
+        /// request is unavailable for executions that depend on it.
         ///
         /// # Determinism Requirement
         ///

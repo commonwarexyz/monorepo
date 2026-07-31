@@ -6,7 +6,7 @@
 //! while validation was in progress. This module owns that lifecycle without
 //! making assumptions about how data is fetched.
 
-use crate::{Consumer, Delivery};
+use crate::{Consumer, Delivery, DeliveryOutcome};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
 use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
@@ -20,8 +20,8 @@ pub struct Completion<K, S, Context = ()> {
     /// Key and subscribers that were passed to the consumer.
     pub delivery: Delivery<K, S>,
 
-    /// Whether the consumer accepted the response as valid for the key.
-    pub valid: bool,
+    /// Consumer disposition for the delivered response.
+    pub outcome: DeliveryOutcome,
 }
 
 // Cached response that can be redelivered after the consumer accepts it.
@@ -212,8 +212,8 @@ where
 
     /// Drop the cached response without removing the tracked key.
     ///
-    /// Use this after a consumer rejects a response and the resolver wants to
-    /// retry the same key with different bytes or metadata.
+    /// Use this when a response is invalid or does not satisfy every delivered
+    /// subscriber and the resolver wants to retry the key.
     pub fn discard_response(&mut self, key: &Con::Key) {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.response = None;
@@ -266,7 +266,10 @@ where
                 completion: Completion {
                     context,
                     delivery: completed,
-                    valid: receiver.await.unwrap_or(false),
+                    outcome: receiver
+                        .await
+                        .map(Into::into)
+                        .unwrap_or(DeliveryOutcome::Invalid),
                 },
             }
         });
@@ -334,6 +337,7 @@ mod tests {
         type Key = MockKey;
         type Value = Bytes;
         type Subscriber = ();
+        type Outcome = bool;
 
         fn deliver(
             &mut self,
@@ -381,7 +385,7 @@ mod tests {
                 .expect("delivery should complete");
             assert_eq!(completed.context, 9);
             assert_eq!(completed.delivery.key, key);
-            assert!(completed.valid);
+            assert_eq!(completed.outcome, DeliveryOutcome::Complete);
 
             let (delivered_key, delivered_value) = events.recv().await.unwrap();
             assert_eq!(delivered_key, key);
@@ -434,7 +438,7 @@ mod tests {
                 .expect("new delivery should complete");
             assert_eq!(completed.context, 2);
             assert_eq!(completed.delivery.key, key);
-            assert!(completed.valid);
+            assert_eq!(completed.outcome, DeliveryOutcome::Complete);
         });
     }
 
@@ -454,7 +458,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert!(completed.valid);
+            assert_eq!(completed.outcome, DeliveryOutcome::Complete);
             tracker.accept_response(&key);
             assert!(tracker.response_accepted(&key));
 
@@ -465,7 +469,7 @@ mod tests {
                 .expect("redelivery should complete");
             assert_eq!(redelivered.context, 3);
             assert_eq!(redelivered.delivery.key, key);
-            assert!(redelivered.valid);
+            assert_eq!(redelivered.outcome, DeliveryOutcome::Complete);
 
             let first = events.recv().await.unwrap();
             let second = events.recv().await.unwrap();
@@ -489,7 +493,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert!(completed.valid);
+            assert_eq!(completed.outcome, DeliveryOutcome::Complete);
 
             tracker.redeliver(delivery(key));
         });
@@ -510,7 +514,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("rejected delivery should complete");
-            assert!(!rejected.valid);
+            assert_eq!(rejected.outcome, DeliveryOutcome::Invalid);
 
             tracker.discard_response(&key);
             assert!(!tracker.response_accepted(&key));
@@ -521,7 +525,7 @@ mod tests {
                 .await
                 .expect("accepted delivery should complete");
             assert_eq!(accepted.context, 2);
-            assert!(accepted.valid);
+            assert_eq!(accepted.outcome, DeliveryOutcome::Complete);
         });
     }
 }

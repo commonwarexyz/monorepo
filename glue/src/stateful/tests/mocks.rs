@@ -105,6 +105,22 @@ impl TestBlock {
             digest: Sha256Digest::from([digest_byte; 32]),
         }
     }
+
+    pub(crate) fn child(parent: &Self, digest_byte: u8) -> Self {
+        let height = Height::new(parent.height.get() + 1);
+        Self {
+            context: SimplexContext {
+                round: commonware_consensus::types::Round::new(
+                    Epoch::zero(),
+                    View::new(height.get()),
+                ),
+                leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                parent: (parent.context.round.view(), parent.digest),
+            },
+            height,
+            digest: Sha256Digest::from([digest_byte; 32]),
+        }
+    }
 }
 
 impl Write for TestBlock {
@@ -153,7 +169,7 @@ impl Heightable for TestBlock {
 
 impl ConsensusBlock for TestBlock {
     fn parent(&self) -> Self::Digest {
-        Sha256Digest::EMPTY
+        self.context.parent.1
     }
 }
 

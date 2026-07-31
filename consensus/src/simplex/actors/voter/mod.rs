@@ -7733,10 +7733,10 @@ mod tests {
 
     /// Verify that a voter remains responsive when certification does not complete.
     ///
-    /// `Certifier::Pending` deliberately violates the live-automaton contract. This test verifies
-    /// that a pending application request does not block the voter from timing out the current view
-    /// and emitting a nullify vote. It does not assert that the consensus instance can continue
-    /// making progress indefinitely with a non-live application.
+    /// `Certifier::Pending` models an application that never supplies a verdict and keeps the
+    /// request open indefinitely. This test verifies that the request does not block the voter from
+    /// timing out the current view and emitting a nullify vote. It does not assert that consensus
+    /// can keep making progress if enough validators remain blocked on relevant requests.
     ///
     /// Unlike `Cancel` mode (where the certify receiver errors immediately), `Pending`
     /// mode holds the certify sender alive so the future never completes.

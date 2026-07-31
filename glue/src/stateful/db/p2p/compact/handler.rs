@@ -190,6 +190,7 @@ impl<F: Family, D: Digest> resolver::Consumer for Handler<F, D> {
     type Key = Request<F, D>;
     type Value = Bytes;
     type Subscriber = ();
+    type Outcome = bool;
 
     fn deliver(
         &mut self,

@@ -139,6 +139,15 @@ pub struct Input<Upstream, Provider> {
 /// wrapper handles persistence: storing merkleized batches as pending tips on
 /// the block tree and applying changesets to the underlying databases on
 /// finalization.
+///
+/// Stateful may keep multiple verification requests in flight so one request
+/// waiting for data does not block another. Each request uses a distinct clone
+/// of the application, and proposal work may run between polls of those
+/// requests. Clones must support this interleaving: proposal work must not
+/// invalidate in-flight execution, and [`verify`](Self::verify) and
+/// [`apply`](Self::apply) results must not depend on polling order. Clone-local
+/// mutations are not propagated to other executors; state that must survive a
+/// call must be shared by clones or stored externally.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -152,7 +161,7 @@ where
     /// epoch. Must be [`Epochable`] and [`Viewable`] so the wrapper can
     /// construct a [`Round`](commonware_consensus::types::Round) for
     /// pending-state pruning.
-    type Context: Epochable + Viewable + Send;
+    type Context: Clone + Epochable + Viewable + Send;
 
     /// The block type produced by the application.
     ///
@@ -245,9 +254,11 @@ where
     ///
     /// If the caller drops its response receiver, the wrapper retains the newest
     /// abandoned verification so its speculative state can still be cached. A
-    /// later actor request may cancel that work. Implementations should remain
-    /// cancellation-safe: dropping and retrying must not violate invariants or
-    /// lose durable progress.
+    /// later actor request may cancel that work. The wrapper also cancels and
+    /// restarts live verification attempts before finalization or pruning
+    /// mutates committed state; the original caller remains pending across the
+    /// restart. Implementations should remain cancellation-safe: dropping and
+    /// retrying must not violate invariants or lose durable progress.
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -267,10 +278,12 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// This future may be cancelled with its originating request. Verification
-    /// recovery for the newest abandoned request is retained until later actor
-    /// work arrives. Implementations should be cancellation-safe: dropping and
-    /// retrying must not violate invariants or lose durable progress.
+    /// This future may be cancelled with its originating request or before
+    /// finalization or pruning mutates committed state. Verification recovery
+    /// for a live request is restarted afterward; recovery for the newest
+    /// abandoned request is retained until later actor work arrives.
+    /// Implementations should be cancellation-safe: dropping and retrying must
+    /// not violate invariants or lose durable progress.
     ///
     /// # Panics
     ///

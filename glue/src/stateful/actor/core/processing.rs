@@ -1,7 +1,7 @@
 use crate::stateful::{
     Application, Input,
     actor::{
-        core::mailbox::Message,
+        core::mailbox::{Message, Verification},
         processor::{FinalizeStatus, Processor},
     },
 };
@@ -9,28 +9,71 @@ use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Heightable,
     marshal::{
-        ancestry::BlockProvider,
+        ancestry::{BlockProvider, BoxedAncestry},
         core::{Mailbox as MarshalMailbox, Variant},
     },
     types::Height,
 };
 use commonware_cryptography::certificate::Scheme;
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
+use commonware_utils::{
+    Acknowledgement,
+    channel::{fallible::OneshotExt, oneshot},
+    futures::Pool,
+};
 use futures::{
-    FutureExt,
     future::{Either, ready},
+    poll,
 };
 use rand_core::Rng;
-use std::sync::mpsc::TryRecvError;
-use tracing::{Instrument as _, debug, info_span};
+use std::{collections::BTreeMap, sync::mpsc::TryRecvError, task::Poll};
+use tracing::{Instrument as _, Span, debug, info_span};
+
+/// Verification work retained across actor state transitions.
+pub(super) struct VerificationRequest<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    pub(super) span: Span,
+    pub(super) context: (E, A::Context),
+    pub(super) ancestry: BoxedAncestry<A::Block>,
+    pub(super) verification: Verification,
+}
 
 /// A single unit of work for the processing loop: either a mailbox message to
 /// handle or a deferred prune to run while the mailbox is idle.
-enum Step<M, P> {
+enum Step<M, P, J> {
     Message(M),
     Prune(P),
+    Verification(J),
+}
+
+enum VerificationResult<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    Finished {
+        id: u64,
+    },
+    Invalidated {
+        id: u64,
+        request: VerificationRequest<E, A>,
+    },
+}
+
+impl<E, A> VerificationResult<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    const fn id(&self) -> u64 {
+        match self {
+            Self::Finished { id } | Self::Invalidated { id, .. } => *id,
+        }
+    }
 }
 
 pub(super) struct Processing<E, A, S, V>
@@ -55,6 +98,9 @@ where
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
+    /// Verify requests collected before the processor became available.
+    pub(super) initial_verifications: Vec<VerificationRequest<E, A>>,
+
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
     pub(super) skip_finalized_until: Option<Height>,
@@ -70,9 +116,32 @@ where
 {
     pub async fn start(mut self) {
         let mut pending_prune = None;
+        let mut verifications = Pool::default();
+        let mut invalidations = BTreeMap::new();
+        let mut next_verification_id = 0u64;
+        for request in std::mem::take(&mut self.initial_verifications) {
+            self.schedule_verification(
+                &mut verifications,
+                &mut invalidations,
+                &mut next_verification_id,
+                request,
+            );
+        }
         select_loop! {
             self.context,
             on_start => {
+                while let Poll::Ready(result) = poll!(verifications.next_completed()) {
+                    invalidations.remove(&result.id());
+                    if let VerificationResult::Invalidated { request, .. } = result {
+                        self.schedule_verification(
+                            &mut verifications,
+                            &mut invalidations,
+                            &mut next_verification_id,
+                            request,
+                        );
+                    }
+                }
+
                 // Pruning is non-critical work. We only run it when the mailbox is idle, and
                 // it is never raced against the mailbox due to its internal lock acquisition.
                 // If a message is ready, it is always processed immediately.
@@ -83,7 +152,16 @@ where
                         // No message, but a prune is queued: run it.
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
                         // No message and nothing to prune: wait on the mailbox as normal.
-                        None => Either::Right(self.mailbox.recv().map(|m| m.map(Step::Message))),
+                        None => {
+                            let mailbox = &mut self.mailbox;
+                            let verifications = &mut verifications;
+                            Either::Right(async move {
+                                select! {
+                                    message = mailbox.recv() => message.map(Step::Message),
+                                    result = verifications.next_completed() => Some(Step::Verification(result)),
+                                }
+                            })
+                        },
                     },
                     Err(TryRecvError::Disconnected) => {
                         debug!("mailbox closed, stopping processing");
@@ -128,23 +206,28 @@ where
                     ancestry,
                     verification,
                 }) => {
-                    let process = info_span!(parent: &span, "stateful.actor.verify");
-                    self.processor
-                        .verify(
-                            self.context.as_present(),
-                            self.marshal.clone(),
+                    self.schedule_verification(
+                        &mut verifications,
+                        &mut invalidations,
+                        &mut next_verification_id,
+                        VerificationRequest {
+                            span,
                             context,
                             ancestry,
                             verification,
-                        )
-                        .instrument(process)
-                        .await;
+                        },
+                    );
                 }
                 Step::Message(Message::Finalized {
                     span,
                     block,
                     acknowledgement,
                 }) => {
+                    let retry = Self::quiesce_verifications(
+                        &mut verifications,
+                        &mut invalidations,
+                    )
+                    .await;
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     let prune = async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
@@ -167,17 +250,114 @@ where
                     if let Some(prune) = prune {
                         pending_prune = Some(prune);
                     }
+                    for request in retry {
+                        self.schedule_verification(
+                            &mut verifications,
+                            &mut invalidations,
+                            &mut next_verification_id,
+                            request,
+                        );
+                    }
                 }
                 Step::Message(Message::SubscribeDatabases { response }) => {
                     response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
+                    let retry = Self::quiesce_verifications(
+                        &mut verifications,
+                        &mut invalidations,
+                    )
+                    .await;
                     prune
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;
+                    for request in retry {
+                        self.schedule_verification(
+                            &mut verifications,
+                            &mut invalidations,
+                            &mut next_verification_id,
+                            request,
+                        );
+                    }
+                }
+                Step::Verification(result) => {
+                    invalidations.remove(&result.id());
+                    if let VerificationResult::Invalidated { request, .. } = result {
+                        self.schedule_verification(
+                            &mut verifications,
+                            &mut invalidations,
+                            &mut next_verification_id,
+                            request,
+                        );
+                    }
                 }
             },
         }
+    }
+
+    fn schedule_verification(
+        &self,
+        verifications: &mut Pool<VerificationResult<E, A>>,
+        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+        next_id: &mut u64,
+        mut request: VerificationRequest<E, A>,
+    ) {
+        let id = *next_id;
+        *next_id = next_id
+            .checked_add(1)
+            .expect("verification request ID overflowed");
+        let (invalidate, invalidated) = oneshot::channel();
+        assert!(invalidations.insert(id, invalidate).is_none());
+
+        let process = info_span!(parent: &request.span, "stateful.actor.verify");
+        let mut verifier = self.processor.verifier();
+        let actor_context = self.context.as_present().child("verify");
+        let marshal = self.marshal.clone();
+        verifications.push(
+            async move {
+                let ancestry = request.ancestry.clone();
+                let attempt_context = (
+                    request.context.0.child("verify_attempt"),
+                    request.context.1.clone(),
+                );
+                let result = select! {
+                    _ = invalidated => None,
+                    result = verifier.verify(
+                        &actor_context,
+                        marshal,
+                        attempt_context,
+                        ancestry,
+                        &mut request.verification,
+                    ) => Some(result),
+                };
+                match result {
+                    Some(Some(valid)) => {
+                        request.verification.respond(valid);
+                        VerificationResult::Finished { id }
+                    }
+                    Some(None) => VerificationResult::Finished { id },
+                    None => VerificationResult::Invalidated { id, request },
+                }
+            }
+            .instrument(process),
+        );
+    }
+
+    async fn quiesce_verifications(
+        verifications: &mut Pool<VerificationResult<E, A>>,
+        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+    ) -> Vec<VerificationRequest<E, A>> {
+        invalidations.clear();
+        let mut retry = Vec::with_capacity(verifications.len());
+        while !verifications.is_empty() {
+            if let VerificationResult::Invalidated { request, .. } =
+                verifications.next_completed().await
+                && !request.verification.is_cancelled()
+            {
+                retry.push(request);
+            }
+        }
+        retry
     }
 }
 

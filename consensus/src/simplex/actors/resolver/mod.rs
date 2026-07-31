@@ -50,14 +50,17 @@
 //! notarization is cryptographically valid before application certification completes, but it
 //! cannot yet raise the local floor. Completing the fetch would incorrectly claim that the ancestry
 //! gap was repaired. Rejecting the response would incorrectly fault a peer that supplied valid
-//! evidence. The resolver therefore keeps the delivery pending until the voter supplies a terminal
-//! verdict, either from the application or from a verified dependent notarization.
+//! evidence. The consumer therefore holds that delivery for at most the configured certification
+//! timeout while unrelated deliveries continue independently. If certification still cannot
+//! satisfy the attached purposes at the deadline, the consumer reports the response as valid but
+//! incomplete. The resolver then releases the delivery and retries the key without faulting the
+//! peer.
 //!
-//! Fetching from another peer is not a general termination mechanism. A covering nullification may
-//! not exist, and another honest peer may return the same or a higher valid notarization whose
-//! certification remains unresolved. Success raises the floor, failure retries certificate repair,
-//! and finalization makes the request obsolete. Later proposal demand attaches to the same parked
-//! fetch and does not bypass the certification wait.
+//! Retrying allows another peer to provide a covering nullification while certification remains
+//! pending indefinitely. The original notarization still proceeds through voter certification:
+//! success raises the floor, failure requests nullification repair, and finalization makes the key
+//! obsolete. A dependent notarization can also let the voter infer an exact parent's certification;
+//! that terminal result retires the parent demand independently of the incomplete delivery.
 //! See the certification section of [the Simplex overview](crate::simplex).
 //!
 //! Local fetch purposes govern retention. They do not affect response validity. A nullification
@@ -139,6 +142,7 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
     pub mailbox_size: NonZeroUsize,
     pub fetch_concurrent: NonZeroUsize,
     pub fetch_timeout: Duration,
+    pub certification_timeout: Duration,
     pub term_length: TermLength,
 }
 

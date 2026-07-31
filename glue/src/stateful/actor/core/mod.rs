@@ -286,6 +286,7 @@ where
             provider: self.provider,
             marshal: self.marshal,
             processor,
+            initial_verifications: Vec::new(),
             skip_finalized_until,
         }
         .start()
@@ -305,13 +306,16 @@ mod tests {
             TestUnmerkleized, TestVariant, anchor, test_databases,
         },
     };
-    use commonware_actor::mailbox as actor_mailbox;
+    use commonware_actor::{Feedback, mailbox as actor_mailbox};
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Heightable as _,
+        Application as _, CertifiableAutomaton as _, CertifiableBlock as _, Heightable as _,
+        Reporter,
         marshal::{
             self,
             ancestry::{self, Ancestry},
             core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+            resolver::handler,
+            standard::Deferred,
         },
         simplex::{
             mocks::scheme as scheme_mocks,
@@ -320,22 +324,34 @@ mod tests {
         types::{Epoch, FixedEpocher, Round, View, ViewDelta},
     };
     use commonware_cryptography::{
+        Digestible as _,
         certificate::{ConstantProvider, mocks::Fixture},
+        ed25519,
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::select;
     use commonware_parallel::Sequential;
+    use commonware_resolver::{Fetch, Resolver as MarshalResolver, TargetedResolver};
     use commonware_runtime::{
         Clock as _, ContextCell, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize,
+        Acknowledgement as _, NZU16, NZU64, NZUsize,
+        acknowledgement::Exact,
         channel::{mpsc, oneshot},
         sync::Mutex,
+        vec::NonEmptyVec,
     };
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use futures::StreamExt as _;
+    use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum ApplicationCall {
+        Verify(Sha256Digest),
+        Apply(Sha256Digest),
+    }
 
     struct VerifyGate {
         started: oneshot::Sender<()>,
@@ -344,7 +360,25 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct GatedApp(Arc<Mutex<Option<VerifyGate>>>);
+    struct GatedApp {
+        gates: Arc<Mutex<VecDeque<VerifyGate>>>,
+        calls: Arc<Mutex<Vec<ApplicationCall>>>,
+    }
+
+    impl GatedApp {
+        fn new(
+            gates: impl IntoIterator<Item = VerifyGate>,
+        ) -> (Self, Arc<Mutex<Vec<ApplicationCall>>>) {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    gates: Arc::new(Mutex::new(gates.into_iter().collect())),
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
 
     impl Application<deterministic::Context> for GatedApp {
         type SigningScheme = TestScheme;
@@ -375,10 +409,19 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
-            let mut gate = self.0.lock().take().expect("unexpected second execution");
+            let mut ancestry = Box::pin(ancestry);
+            let block = ancestry.next().await?;
+            self.calls
+                .lock()
+                .push(ApplicationCall::Verify(block.digest()));
+            let mut gate = self
+                .gates
+                .lock()
+                .pop_front()
+                .expect("unexpected verification");
             gate.started.send(()).expect("test must await execution");
             let _ = (&mut gate.release).await;
             gate.finished.send(()).expect("test must await completion");
@@ -388,11 +431,35 @@ mod tests {
         async fn apply(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _block: &Self::Block,
+            block: &Self::Block,
             _batches: TestUnmerkleized,
         ) -> TestMerkleized {
+            self.calls
+                .lock()
+                .push(ApplicationCall::Apply(block.digest()));
             TestMerkleized
         }
+    }
+
+    fn verify_gate() -> (
+        VerifyGate,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+    ) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let (finished, finished_rx) = oneshot::channel();
+        (
+            VerifyGate {
+                started,
+                release: release_rx,
+                finished,
+            },
+            started_rx,
+            release,
+            finished_rx,
+        )
     }
 
     #[derive(Clone)]
@@ -416,6 +483,71 @@ mod tests {
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopMarshalReporter;
+
+    impl Reporter for NoopMarshalReporter {
+        type Activity = marshal::Update<TestBlock>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            if let marshal::Update::Block(_, acknowledgement) = activity {
+                acknowledgement.acknowledge();
+            }
+            Feedback::Ok
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopMarshalResolver;
+
+    impl MarshalResolver for NoopMarshalResolver {
+        type Key = handler::Key<Sha256Digest>;
+        type Subscriber = handler::Annotation;
+
+        fn fetch<F>(&mut self, _fetch: F) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+
+        fn fetch_all<F>(&mut self, _fetches: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for NoopMarshalResolver {
+        type PublicKey = ed25519::PublicKey;
+
+        fn fetch_targeted(
+            &mut self,
+            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            _fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            Feedback::Ok
         }
     }
 
@@ -443,7 +575,11 @@ mod tests {
 
     async fn init_marshal_mailbox(
         mut context: deterministic::Context,
-    ) -> MarshalMailbox<TestScheme, TestVariant> {
+    ) -> (
+        MarshalMailbox<TestScheme, TestVariant>,
+        commonware_runtime::Handle<()>,
+        handler::Handler<Sha256Digest>,
+    ) {
         let fixture = scheme_mocks::fixture(&mut context, b"retained-verify", 1);
         let provider = ConstantProvider::new(fixture.schemes[0].clone());
         let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
@@ -460,7 +596,7 @@ mod tests {
         .await
         .expect("failed to initialize blocks archive");
 
-        let (_actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+        let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
             context.child("marshal_actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -483,7 +619,57 @@ mod tests {
             },
         )
         .await;
-        mailbox
+        let (resolver_receiver, resolver_handler) =
+            handler::init(context.child("resolver_handler"), NZUsize!(8));
+        let actor = actor.start_unbuffered(
+            NoopMarshalReporter,
+            (resolver_receiver, NoopMarshalResolver),
+        );
+        (mailbox, actor, resolver_handler)
+    }
+
+    fn start_processing(
+        context: &deterministic::Context,
+        app: GatedApp,
+        marshal: MarshalMailbox<TestScheme, TestVariant>,
+    ) -> (
+        Mailbox<deterministic::Context, GatedApp>,
+        commonware_runtime::Handle<()>,
+    ) {
+        let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let mailbox = Mailbox::new(sender);
+        let processing = Processing {
+            context: ContextCell::new(context.child("processor")),
+            mailbox: receiver,
+            provider: (),
+            marshal,
+            processor: Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(context),
+                None,
+            ),
+            initial_verifications: Vec::new(),
+            skip_finalized_until: None,
+        };
+        let actor = context.child("actor").spawn(move |_| processing.start());
+        (mailbox, actor)
+    }
+
+    async fn seed_chain(
+        marshal: &MarshalMailbox<TestScheme, TestVariant>,
+    ) -> (TestBlock, TestBlock) {
+        let genesis = TestBlock::new(0, 0);
+        let parent = TestBlock::child(&genesis, 1);
+        let child = TestBlock::child(&parent, 2);
+        assert!(
+            marshal
+                .verified(parent.context().round, parent.clone())
+                .await
+        );
+        assert!(marshal.verified(child.context().round, child.clone()).await);
+        (parent, child)
     }
 
     fn build_finalization(
@@ -595,32 +781,11 @@ mod tests {
     #[test]
     fn dropped_verify_finishes_and_caches_state() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (started_tx, started_rx) = oneshot::channel();
-            let (mut release_tx, release_rx) = oneshot::channel();
-            let (finished_tx, finished_rx) = oneshot::channel();
-            let app = GatedApp(Arc::new(Mutex::new(Some(VerifyGate {
-                started: started_tx,
-                release: release_rx,
-                finished: finished_tx,
-            }))));
-            let marshal = init_marshal_mailbox(context.child("marshal")).await;
-            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::<deterministic::Context, GatedApp>::new(sender);
-            let processing = Processing {
-                context: ContextCell::new(context.child("processor")),
-                mailbox: receiver,
-                provider: (),
-                marshal,
-                processor: Processor::new(
-                    app,
-                    test_databases(),
-                    anchor(0, 0),
-                    StatefulMetrics::new(&context),
-                    None,
-                ),
-                skip_finalized_until: None,
-            };
-            let actor = context.child("actor").spawn(move |_| processing.start());
+            let (gate, started_rx, mut release_tx, finished_rx) = verify_gate();
+            let (app, _calls) = GatedApp::new([gate]);
+            let (marshal, marshal_actor, _resolver_handler) =
+                init_marshal_mailbox(context.child("marshal")).await;
+            let (mut mailbox, actor) = start_processing(&context, app, marshal);
 
             let block = TestBlock::new(1, 1);
             let genesis = TestBlock::new(0, 0);
@@ -667,7 +832,299 @@ mod tests {
             );
 
             actor.abort();
+            marshal_actor.abort();
             let _ = actor.await;
+            let _ = marshal_actor.await;
+        });
+    }
+
+    #[test]
+    fn finalization_restarts_live_verification_without_dropping_caller() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (gate, started, mut release, finished) = verify_gate();
+            let (app, calls) = GatedApp::new([gate]);
+            let (marshal, marshal_actor, _resolver_handler) =
+                init_marshal_mailbox(context.child("marshal")).await;
+            let (mut mailbox, stateful_actor) = start_processing(&context, app, marshal);
+
+            let block = TestBlock::new(1, 1);
+            let genesis = TestBlock::new(0, 0);
+            let verify_block = block.clone();
+            let mut verify_mailbox = mailbox.clone();
+            let verification = context.child("verify").spawn(move |task_context| {
+                let consensus_context = verify_block.context();
+                async move {
+                    verify_mailbox
+                        .verify(
+                            (task_context, consensus_context),
+                            ancestry::from_iter([Arc::new(verify_block), Arc::new(genesis)]),
+                        )
+                        .await
+                }
+            });
+            started.await.expect("verification should start");
+
+            let (acknowledgement, acknowledged) = Exact::handle();
+            assert_eq!(
+                mailbox.report(marshal::Update::Block(
+                    Arc::new(block.clone()),
+                    acknowledgement,
+                )),
+                Feedback::Ok,
+            );
+            acknowledged
+                .await
+                .expect("finalization should be acknowledged");
+            release.closed().await;
+            assert!(
+                finished.await.is_err(),
+                "the old application attempt should be dropped before finalization",
+            );
+            assert!(
+                verification
+                    .await
+                    .expect("verification task should complete"),
+                "the live request should be retried against finalized state",
+            );
+            assert_eq!(
+                *calls.lock(),
+                vec![
+                    ApplicationCall::Verify(block.digest()),
+                    ApplicationCall::Apply(block.digest()),
+                ],
+            );
+
+            stateful_actor.abort();
+            marshal_actor.abort();
+            let _ = stateful_actor.await;
+            let _ = marshal_actor.await;
+        });
+    }
+
+    #[test]
+    fn child_certification_rebuilds_parent_before_parent_certification() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (child_gate, child_started, child_release, child_finished) = verify_gate();
+            let (app, calls) = GatedApp::new([child_gate]);
+            let (marshal, marshal_actor, _resolver_handler) =
+                init_marshal_mailbox(context.child("marshal")).await;
+            let (mailbox, stateful_actor) = start_processing(&context, app, marshal.clone());
+            let (parent, child) = seed_chain(&marshal).await;
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                mailbox,
+                marshal,
+                FixedEpocher::new(NZU64!(u64::MAX)),
+            );
+
+            let child_certification = marshaled
+                .certify(child.context().round, child.digest())
+                .await;
+            child_started
+                .await
+                .expect("child verification should start");
+            assert_eq!(
+                *calls.lock(),
+                vec![
+                    ApplicationCall::Apply(parent.digest()),
+                    ApplicationCall::Verify(child.digest()),
+                ],
+            );
+            child_release
+                .send(())
+                .expect("child verification should still be running");
+            child_finished
+                .await
+                .expect("child verification should finish");
+            assert!(
+                child_certification
+                    .await
+                    .expect("child certification result missing")
+            );
+
+            let parent_certification = marshaled
+                .certify(parent.context().round, parent.digest())
+                .await;
+            assert!(
+                parent_certification
+                    .await
+                    .expect("parent certification result missing")
+            );
+            assert_eq!(
+                *calls.lock(),
+                vec![
+                    ApplicationCall::Apply(parent.digest()),
+                    ApplicationCall::Verify(child.digest()),
+                ],
+                "parent certification should reuse the state rebuilt for its child",
+            );
+
+            stateful_actor.abort();
+            marshal_actor.abort();
+            let _ = stateful_actor.await;
+            let _ = marshal_actor.await;
+        });
+    }
+
+    #[test]
+    fn child_certification_supersedes_abandoned_parent_certification() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (parent_gate, parent_started, mut parent_release, parent_finished) = verify_gate();
+            let (child_gate, child_started, child_release, child_finished) = verify_gate();
+            let (app, calls) = GatedApp::new([parent_gate, child_gate]);
+            let (marshal, marshal_actor, _resolver_handler) =
+                init_marshal_mailbox(context.child("marshal")).await;
+            let (mailbox, stateful_actor) = start_processing(&context, app, marshal.clone());
+            let (parent, child) = seed_chain(&marshal).await;
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                mailbox,
+                marshal,
+                FixedEpocher::new(NZU64!(u64::MAX)),
+            );
+
+            let parent_certification = marshaled
+                .certify(parent.context().round, parent.digest())
+                .await;
+            parent_started
+                .await
+                .expect("parent verification should start");
+            drop(parent_certification);
+
+            let child_certification = marshaled
+                .certify(child.context().round, child.digest())
+                .await;
+            parent_release.closed().await;
+            assert!(
+                parent_finished.await.is_err(),
+                "abandoned parent verification should be cancelled"
+            );
+            child_started
+                .await
+                .expect("child verification should start after parent cancellation");
+            assert_eq!(
+                *calls.lock(),
+                vec![
+                    ApplicationCall::Verify(parent.digest()),
+                    ApplicationCall::Apply(parent.digest()),
+                    ApplicationCall::Verify(child.digest()),
+                ],
+            );
+            child_release
+                .send(())
+                .expect("child verification should still be running");
+            child_finished
+                .await
+                .expect("child verification should finish");
+            assert!(
+                child_certification
+                    .await
+                    .expect("child certification result missing")
+            );
+
+            let parent_certification = marshaled
+                .certify(parent.context().round, parent.digest())
+                .await;
+            assert!(
+                parent_certification
+                    .await
+                    .expect("parent certification result missing")
+            );
+            assert_eq!(
+                *calls.lock(),
+                vec![
+                    ApplicationCall::Verify(parent.digest()),
+                    ApplicationCall::Apply(parent.digest()),
+                    ApplicationCall::Verify(child.digest()),
+                ],
+                "retried parent certification should reuse rebuilt state",
+            );
+
+            stateful_actor.abort();
+            marshal_actor.abort();
+            let _ = stateful_actor.await;
+            let _ = marshal_actor.await;
+        });
+    }
+
+    #[test]
+    fn child_certification_completes_while_parent_certification_is_pending() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (parent_gate, parent_started, parent_release, parent_finished) = verify_gate();
+            let (child_gate, child_started, child_release, child_finished) = verify_gate();
+            let (app, calls) = GatedApp::new([parent_gate, child_gate]);
+            let (marshal, marshal_actor, _resolver_handler) =
+                init_marshal_mailbox(context.child("marshal")).await;
+            let (mailbox, stateful_actor) = start_processing(&context, app, marshal.clone());
+            let (parent, child) = seed_chain(&marshal).await;
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                mailbox,
+                marshal,
+                FixedEpocher::new(NZU64!(u64::MAX)),
+            );
+
+            let mut parent_certification = marshaled
+                .certify(parent.context().round, parent.digest())
+                .await;
+            parent_started
+                .await
+                .expect("parent verification should start");
+
+            let child_certification = marshaled
+                .certify(child.context().round, child.digest())
+                .await;
+            select! {
+                result = child_started => {
+                    result.expect("child verification should start while its parent remains pending");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("pending parent certification blocked child certification");
+                },
+            }
+            assert_eq!(
+                *calls.lock(),
+                vec![
+                    ApplicationCall::Verify(parent.digest()),
+                    ApplicationCall::Apply(parent.digest()),
+                    ApplicationCall::Verify(child.digest()),
+                ],
+            );
+
+            child_release
+                .send(())
+                .expect("child verification should still be running");
+            child_finished
+                .await
+                .expect("child verification should finish");
+            assert!(
+                child_certification
+                    .await
+                    .expect("child certification result missing")
+            );
+            select! {
+                result = &mut parent_certification => {
+                    panic!("parent certification completed before release: {result:?}");
+                },
+                _ = context.sleep(Duration::from_millis(1)) => {},
+            }
+
+            parent_release
+                .send(())
+                .expect("parent verification should still be running");
+            parent_finished
+                .await
+                .expect("parent verification should finish");
+            assert!(
+                parent_certification
+                    .await
+                    .expect("parent certification result missing")
+            );
+
+            stateful_actor.abort();
+            marshal_actor.abort();
+            let _ = stateful_actor.await;
+            let _ = marshal_actor.await;
         });
     }
 }

@@ -770,9 +770,9 @@ impl<
         round: Rnd,
         certified: Result<bool, oneshot::error::RecvError>,
     ) -> (Self, bool, Option<(bool, Notarization<S, D>)>) {
-        // Unlike propose/verify (where failing to act will lead to a timeout
-        // and subsequent nullification), failing to certify can lead to a halt
-        // because we'll never exit the view without a notarization + certification.
+        // A closed receiver supplies no certification verdict, so do not infer
+        // failure. Protocol evidence may make the request unnecessary; otherwise,
+        // this validator remains unable to vote on ancestry that depends on it.
         //
         // We do not assume failure here because we recover on restart: a synced
         // certification result is replayed from the journal and a missing one

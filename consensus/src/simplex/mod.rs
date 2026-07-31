@@ -106,15 +106,17 @@
 //! proposal or notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
-//! Simplex keeps a certification request open until the application returns a verdict, a verified
-//! later notarization names the proposal as its parent, or a finalization at or above that view
-//! makes the request obsolete. A timeout or nullification does not establish that the payload is
-//! uncertifiable, so application work continues. If dependent evidence arrives first, Simplex still
-//! invokes `certify` for application side effects but does not wait for its result.
+//! Simplex does not assume every certification request returns. It keeps each response receiver open
+//! until the application returns a verdict, a verified later notarization names the proposal as its
+//! parent, or a finalization at or above that view makes the request obsolete. If none occurs, the
+//! request may remain pending indefinitely. A timeout or nullification does not establish a verdict
+//! or cancel the application request. If dependent evidence arrives first, Simplex still invokes
+//! `certify` for application side effects but does not wait for its result.
 //!
-//! A live application must return a deterministic verdict when protocol evidence does not resolve
-//! the request. An unresolved request prevents the validator from voting on dependent proposals.
-//! If enough validators are blocked this way, no quorum can form.
+//! One pending request does not prevent Simplex from processing unrelated certification requests.
+//! Any verdict that does return must be deterministic. While a request remains relevant, it prevents
+//! that validator from voting on dependent proposals; liveness requires enough validators not to be
+//! blocked this way.
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -323,11 +325,15 @@
 //! responder's current ancestry preference. The voter requests each missing view once per proposal
 //! and votes only if the resulting ancestry is valid.
 //!
-//! A notarization response remains parked while its certification is pending. Success supplies the
-//! parent. Failure rejects the response and resumes background nullification repair. A covering
-//! nullification retires matching nullification demand, but not demand for a certified parent.
-//! Finalization retires all demand at or below its view. Raising the certified floor alone does not
-//! prove that the ancestry exposed by a proposal is locally available.
+//! A valid notarization response may wait up to
+//! [`Config::certification_timeout`](config::Config::certification_timeout) for local certification
+//! when that verdict could satisfy its fetch purposes. If certification is still pending at the
+//! deadline, the resolver treats the response as valid but incomplete and retries without faulting
+//! its peer. This does not resolve or cancel application certification. Success can raise the floor;
+//! failure resumes background nullification repair. A covering nullification retires matching
+//! nullification demand, but not demand for a certified parent. Finalization retires all demand at
+//! or below its view. Raising the certified floor alone does not prove that the ancestry exposed by
+//! a proposal is locally available.
 //!
 //! Targeted repair limits fanout. Same-view recovery succeeds only if fetching and verification
 //! beat the timeout, but outstanding demand can still help a later proposal. While finalization

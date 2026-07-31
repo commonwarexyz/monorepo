@@ -44,8 +44,8 @@
 //! # Notarization and Data Availability
 //!
 //! In rare crash cases, it is possible for a notarization certificate to exist without a block being
-//! available to the honest parties if [`CertifiableAutomaton::certify`] fails after a notarization is
-//! formed.
+//! available to the honest parties. [`CertifiableAutomaton::certify`] may then remain pending while
+//! it waits for the block. Simplex may time out and nullify the view without resolving that request.
 //!
 //! For this reason, it should not be expected that every notarized payload will be certifiable due
 //! to the lack of an available block. However, if even one honest and online party has the block,
@@ -58,7 +58,7 @@
 //! │          B1         │◀──│          B2         │◀──│          B3         │XXX│          B4         │
 //! └─────────────────────┘   └─────────────────────┘   └──────────┬──────────┘   └─────────────────────┘
 //!                                                                │
-//!                                                          Failed Certify
+//!                                                         Pending Certify
 //! ```
 //!
 //! # Future Work

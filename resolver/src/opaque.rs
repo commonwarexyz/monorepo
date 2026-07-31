@@ -11,7 +11,7 @@
 //! fetchers do not have peer-specific routing.
 
 use crate::{
-    Consumer, Delivery, Fetch, TargetedResolver,
+    Consumer, Delivery, DeliveryOutcome, Fetch, TargetedResolver,
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
     ingress::{self, FetchKey, Message},
     subscribers,
@@ -389,7 +389,7 @@ where
         let DeliveryCompletion {
             context: id,
             delivery,
-            valid,
+            outcome,
         } = completion;
         let Delivery {
             key,
@@ -399,7 +399,7 @@ where
         if !self.current_delivery(&key, id) {
             return;
         }
-        self.handle_delivered(key, delivered, valid);
+        self.handle_delivered(key, delivered, outcome);
     }
 
     /// Return whether a fetch completion matches the current attempt id.
@@ -494,48 +494,54 @@ where
         &mut self,
         key: F::Key,
         delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
-        valid: bool,
+        outcome: DeliveryOutcome,
     ) {
         let accepted = self.deliveries.response_accepted(&key);
 
-        if valid {
-            let remaining = self
-                .subscribers
-                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+        match outcome {
+            DeliveryOutcome::Complete => {
+                let remaining = self
+                    .subscribers
+                    .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
 
-            // The first accepted response is reused for subscribers that joined
-            // while validation was pending, avoiding a duplicate source fetch
-            // for the same key.
-            if let Some(subscribers) = remaining {
-                if !accepted {
-                    self.deliveries.accept_response(&key);
+                // The first accepted response is reused for subscribers that joined
+                // while validation was pending, avoiding a duplicate source fetch
+                // for the same key.
+                if let Some(subscribers) = remaining {
+                    if !accepted {
+                        self.deliveries.accept_response(&key);
+                    }
+                    self.redeliver(key, subscribers);
+                } else {
+                    self.requests.remove(&key);
+                    self.subscribers.remove(&key);
+                    self.deliveries.remove(&key);
                 }
-                self.redeliver(key, subscribers);
-            } else {
-                self.requests.remove(&key);
-                self.subscribers.remove(&key);
-                self.deliveries.remove(&key);
             }
-            return;
-        }
+            DeliveryOutcome::Incomplete => {
+                self.deliveries.discard_response(&key);
+                self.schedule_retry(key);
+            }
+            DeliveryOutcome::Invalid => {
+                // A cached response already satisfied at least one subscriber. Treat a
+                // later rejection during redelivery as stale application feedback rather
+                // than re-fetching data that was accepted once.
+                if accepted {
+                    warn!(
+                        ?key,
+                        "previously accepted resolver response rejected during opaque redelivery"
+                    );
+                    self.requests.remove(&key);
+                    self.subscribers.remove(&key);
+                    self.deliveries.remove(&key);
+                    return;
+                }
 
-        // A cached response already satisfied at least one subscriber. Treat a
-        // later rejection during redelivery as stale application feedback rather
-        // than re-fetching data that was accepted once.
-        if accepted {
-            warn!(
-                ?key,
-                "previously accepted resolver response rejected during opaque redelivery"
-            );
-            self.requests.remove(&key);
-            self.subscribers.remove(&key);
-            self.deliveries.remove(&key);
-            return;
+                warn!(?key, "consumer rejected opaque resolver delivery");
+                self.deliveries.discard_response(&key);
+                self.schedule_retry(key);
+            }
         }
-
-        warn!(?key, "consumer rejected opaque resolver delivery");
-        self.deliveries.discard_response(&key);
-        self.schedule_retry(key);
     }
 
     /// Schedule the next fetch attempt for `key`.
@@ -700,6 +706,7 @@ mod tests {
         type Key = u8;
         type Value = Bytes;
         type Subscriber = u16;
+        type Outcome = bool;
 
         fn deliver(
             &mut self,

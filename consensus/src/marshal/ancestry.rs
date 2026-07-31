@@ -17,6 +17,9 @@ use std::{
 };
 
 /// A stream of blocks used by application propose and verify calls.
+///
+/// Cloning preserves the current cursor and produces an independently
+/// consumable stream. Polling one clone must not advance another.
 pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'static {
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.

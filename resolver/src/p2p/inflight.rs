@@ -1,5 +1,5 @@
 use crate::{
-    Consumer, Delivery,
+    Consumer, Delivery, DeliveryOutcome,
     delivery::{Completion, Tracker},
 };
 use commonware_cryptography::PublicKey;
@@ -106,18 +106,17 @@ where
         self.deliveries.discard_response(key);
     }
 
-    /// Returns the next completed delivery as `(peer, delivery, valid)`, or [Aborted] if the
-    /// delivery was canceled. Clears the entry's delivery aborter so the slot is available
-    /// for a retry.
+    /// Returns the next completed delivery, or [Aborted] if it was canceled.
+    /// Clears the entry's delivery aborter so the slot is available for a retry.
     pub(super) async fn next_delivery(
         &mut self,
-    ) -> Result<(P, Delivery<Con::Key, Con::Subscriber>, bool), Aborted> {
+    ) -> Result<(P, Delivery<Con::Key, Con::Subscriber>, DeliveryOutcome), Aborted> {
         let Completion {
             context,
             delivery,
-            valid,
+            outcome,
         } = self.deliveries.next_completion().await?;
-        Ok((context, delivery, valid))
+        Ok((context, delivery, outcome))
     }
 }
 
@@ -273,11 +272,11 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(delivery(key.clone()), peer.clone(), value.clone());
 
-            let (delivered_peer, delivered, valid) =
+            let (delivered_peer, delivered, outcome) =
                 inflight.next_delivery().await.expect("delivery aborted");
             assert_eq!(delivered.key, key);
             assert_eq!(delivered_peer, peer);
-            assert!(valid);
+            assert_eq!(outcome, DeliveryOutcome::Complete);
 
             // The consumer was actually invoked.
             let (k, v) = events.recv().await.unwrap();
@@ -320,9 +319,10 @@ mod tests {
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(delivery(key.clone()), peer, Bytes::from("v"));
 
-            let (_, delivered, valid) = inflight.next_delivery().await.expect("delivery completed");
+            let (_, delivered, outcome) =
+                inflight.next_delivery().await.expect("delivery completed");
             assert_eq!(delivered.key, key);
-            assert!(valid);
+            assert_eq!(outcome, DeliveryOutcome::Complete);
             inflight.complete(&context, &key);
 
             // Late cancel finds no entry; must not panic.

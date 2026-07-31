@@ -26,7 +26,8 @@ impl Purpose {
     /// Returns whether `resolved` makes this fetch unnecessary.
     ///
     /// This controls only local retention. The wire key remains kindless, and
-    /// any certificate valid for that key completes its delivery.
+    /// the consumer determines whether a valid certificate satisfies each
+    /// attached purpose.
     pub const fn is_retired_by(self, resolved: Self) -> bool {
         matches!(
             (self, resolved),

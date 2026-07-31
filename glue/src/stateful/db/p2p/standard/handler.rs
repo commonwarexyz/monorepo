@@ -277,6 +277,7 @@ impl<F: Family> resolver::Consumer for Handler<F> {
     type Key = Request<F>;
     type Value = Bytes;
     type Subscriber = ();
+    type Outcome = bool;
 
     fn deliver(
         &mut self,
