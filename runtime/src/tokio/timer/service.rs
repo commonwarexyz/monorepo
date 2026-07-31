@@ -28,7 +28,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tokio::{runtime::Builder, task::JoinHandle};
+use tokio::{
+    runtime::{Builder as TokioBuilder, Runtime},
+    task::JoinHandle,
+};
 
 /// Maximum difference covered by an already armed slightly later alarm.
 const REARM_TOLERANCE: Duration = Duration::from_nanos(50);
@@ -165,31 +168,42 @@ pub(super) trait Alarm: Send + Sync + Sized + 'static {
     fn wait(&self) -> impl Future<Output = io::Result<()>> + Send;
 }
 
-/// Configures worker shard affinity before the Tokio runtime is built.
-pub(crate) struct Setup {
+/// Bridges timer configuration before and after the Tokio runtime is built.
+pub(crate) struct Builder {
     /// Shared allocator used by callbacks and the eventual service.
     affinity: Arc<Affinity>,
 }
 
-impl Setup {
-    /// Allocates a distinct runtime identity and its shard allocators.
-    pub(crate) fn new(worker_threads: usize) -> Self {
+impl Builder {
+    /// Allocates shard affinity and installs its worker callback before runtime startup.
+    pub(crate) fn install(runtime_builder: &mut TokioBuilder, worker_threads: usize) -> Self {
         let runtime_id = allocate_runtime_id();
-        Self {
-            affinity: Arc::new(Affinity {
-                runtime_id,
-                lifetime: Arc::new(()),
-                worker_threads,
-                next_worker: AtomicUsize::new(0),
-                next_fallback: AtomicUsize::new(0),
-            }),
-        }
+        let affinity = Arc::new(Affinity {
+            runtime_id,
+            lifetime: Arc::new(()),
+            worker_threads,
+            next_worker: AtomicUsize::new(0),
+            next_fallback: AtomicUsize::new(0),
+        });
+        let callback_affinity = Arc::clone(&affinity);
+        runtime_builder.on_thread_park(move || callback_affinity.assign_worker());
+        Self { affinity }
     }
 
-    /// Installs the worker-only callback that assigns stable shard indices.
-    pub(crate) fn configure(&self, builder: &mut Builder) {
-        let affinity = Arc::clone(&self.affinity);
-        builder.on_thread_park(move || affinity.assign_worker());
+    /// Enters the built runtime, validates every shard, and starts its drivers.
+    pub(crate) fn build(self, runtime: &Runtime, panicker: Panicker) -> Result<Timer, InitError> {
+        // AsyncFd registration requires the reactor selected by this builder.
+        let _guard = runtime.enter();
+        let shards = initialize_shards(self.affinity.worker_threads, panicker, NativeAlarm::new)?;
+        let drivers = shards
+            .iter()
+            .map(|shard| runtime.spawn(run_driver(Arc::clone(shard))))
+            .collect();
+        Ok(Timer {
+            shards,
+            drivers,
+            affinity: self.affinity,
+        })
     }
 }
 
@@ -240,22 +254,6 @@ where
 }
 
 impl Timer {
-    /// Synchronously validates shards and then starts their drivers.
-    pub(crate) fn new(setup: Setup, panicker: Panicker) -> Result<Self, InitError> {
-        let worker_threads = setup.affinity.worker_threads;
-        let shards = initialize_shards(worker_threads, panicker, NativeAlarm::new)?;
-
-        let drivers = shards
-            .iter()
-            .map(|shard| tokio::spawn(run_driver(Arc::clone(shard))))
-            .collect();
-        Ok(Self {
-            shards,
-            drivers,
-            affinity: setup.affinity,
-        })
-    }
-
     /// Eagerly registers a sleep measured from this method call.
     pub(crate) fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         if duration.is_zero() {

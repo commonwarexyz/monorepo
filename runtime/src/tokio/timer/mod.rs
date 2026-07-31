@@ -35,9 +35,9 @@
 //! kernel latency and arbitrary waker code from blocking producers. Sharding
 //! by worker keeps unrelated registration and cancellation paths independent.
 //! Each sleep retains its construction-time shard, while the future and that
-//! shard share the entry until one terminal transition wins.
-//! Expiry commits `FIRED` while removing an entry, then invokes or releases its
-//! waker from reusable driver scratch storage after unlocking the shard.
+//! shard share the entry until one terminal transition wins. Expiry commits
+//! `FIRED` while removing an entry, then invokes or releases its waker from
+//! reusable driver scratch storage after unlocking the shard.
 //!
 //! Wall-clock deadlines are converted once to a fixed monotonic deadline.
 //! Later wall-clock changes do not move a registered sleep. A 50 nanosecond
@@ -69,10 +69,10 @@ cfg_if::cfg_if! {
 
         #[cfg(test)]
         pub(crate) use service::AssignmentKind;
-        pub(super) use service::{Setup, Timer};
+        pub(super) use service::{Builder, Timer};
     } else {
         mod fallback;
 
-        pub(super) use fallback::{Setup, Timer};
+        pub(super) use fallback::{Builder, Timer};
     }
 }

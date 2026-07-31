@@ -932,8 +932,7 @@ mod tests {
                     .expect("current time should be after the Unix epoch"),
             );
 
-            // `now_or_never` performs exactly one poll. These assertions pin parity
-            // between deterministic time and the production Tokio clock.
+            // `now_or_never` performs exactly one poll.
             assert!(zero.now_or_never().is_some());
             assert!(past.now_or_never().is_some());
         });

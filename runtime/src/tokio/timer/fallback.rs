@@ -6,33 +6,27 @@ use std::{
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
-use tokio::runtime::Builder;
+use tokio::runtime::{Builder as TokioBuilder, Runtime};
 
-/// No-op builder setup on targets that use Tokio timers.
-pub(crate) struct Setup;
+/// Descriptor-free timer builder for targets that use Tokio timers.
+pub(crate) struct Builder;
 
-impl Setup {
-    /// Creates fallback setup without worker affinity state.
-    pub(crate) const fn new(_worker_threads: usize) -> Self {
+impl Builder {
+    /// Leaves the Tokio builder unchanged and retains no affinity state.
+    pub(crate) fn install(_runtime_builder: &mut TokioBuilder, _worker_threads: usize) -> Self {
         Self
     }
 
-    /// Leaves the Tokio builder unchanged.
-    pub(crate) const fn configure(&self, _builder: &mut Builder) {}
+    /// Creates the descriptor-free fallback timer facade.
+    pub(crate) fn build(self, _runtime: &Runtime, _panicker: Panicker) -> Result<Timer, InitError> {
+        Ok(Timer)
+    }
 }
 
 /// Tokio-backed timer facade for unsupported native targets.
 pub(crate) struct Timer;
 
 impl Timer {
-    /// Creates a fallback service without descriptors or driver tasks.
-    pub(crate) fn new(setup: Setup, _panicker: Panicker) -> Result<Self, InitError> {
-        // Consuming setup keeps the facade identical to native targets without
-        // retaining runtime affinity state on fallback targets.
-        let _ = setup;
-        Ok(Self)
-    }
-
     /// Eagerly constructs a Tokio sleep for nonzero durations.
     pub(crate) fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         // Construct outside the async block so Tokio fixes the monotonic
@@ -85,14 +79,19 @@ mod tests {
 
     /// Creates the descriptor-free fallback timer facade.
     fn timer() -> Timer {
-        // Exercise the same builder configuration sequence as runtime startup.
-        let setup = Setup::new(1);
-        let mut builder = Builder::new_current_thread();
-        setup.configure(&mut builder);
+        Timer
+    }
 
-        // Fallback initialization consumes setup without creating driver state.
+    #[test]
+    fn builder_constructs_descriptor_free_timer() {
+        // Exercise the same two-phase builder sequence as runtime startup.
+        let mut runtime_builder = TokioBuilder::new_current_thread();
+        let timer_builder = Builder::install(&mut runtime_builder, 1);
+        let runtime = runtime_builder.build().unwrap();
         let (panicker, _panicked) = Panicker::new(false);
-        Timer::new(setup, panicker).unwrap()
+
+        // Fallback construction requires no active reactor or driver state.
+        timer_builder.build(&runtime, panicker).unwrap();
     }
 
     /// Polls a fallback sleep exactly once without driving the executor.

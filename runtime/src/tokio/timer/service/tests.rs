@@ -1677,12 +1677,11 @@ mod ordinary {
 
         // Start a one-worker Tokio runtime and let its original worker
         // consume the sole unique affinity claim before any blocking handoff.
-        let setup = super::super::Setup::new(1);
-        let affinity = Arc::clone(&setup.affinity);
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(1).enable_all();
-        setup.configure(&mut builder);
-        let runtime = builder.build().expect("Tokio runtime must build");
+        let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+        runtime_builder.worker_threads(1).enable_all();
+        let timer_builder = super::super::Builder::install(&mut runtime_builder, 1);
+        let affinity = Arc::clone(&timer_builder.affinity);
+        let runtime = runtime_builder.build().expect("Tokio runtime must build");
         let claim_deadline = Instant::now() + Duration::from_secs(5);
         while affinity.next_worker.load(AtomicOrdering::Relaxed) != 1 {
             assert!(

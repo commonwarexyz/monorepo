@@ -1,4 +1,3 @@
-use super::timer;
 #[cfg(feature = "external")]
 use crate::Pacer;
 #[cfg(not(feature = "iouring-network"))]
@@ -19,6 +18,7 @@ use crate::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
         task::Label, validate_label,
     },
+    tokio::timer::{self, Timer},
     utils::{self, Panicker, signal::Stopper, supervision::Tree},
 };
 #[cfg(feature = "iouring-network")]
@@ -340,7 +340,7 @@ pub struct Executor {
     registry: Registry,
     metrics: Arc<Metrics>,
     // Timer teardown must begin while the Tokio reactor still exists.
-    timer: timer::Timer,
+    timer: Timer,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
@@ -379,32 +379,29 @@ impl crate::Runner for Runner {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(&mut runtime_registry));
-        // Allocate affinity state before building Tokio so its worker-only park
-        // callback is part of the runtime from the first worker lifecycle event.
-        let timer_setup = timer::Setup::new(self.cfg.worker_threads);
-        let mut builder = Builder::new_multi_thread();
-        builder
+        let mut runtime_builder = Builder::new_multi_thread();
+        runtime_builder
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
             .thread_stack_size(self.cfg.thread_stack_size)
             .enable_all();
-        timer_setup.configure(&mut builder);
         if let Some(global_queue_interval) = self.cfg.global_queue_interval {
-            builder.global_queue_interval(global_queue_interval);
+            runtime_builder.global_queue_interval(global_queue_interval);
         }
-        let runtime = builder.build().expect("failed to create Tokio runtime");
+        // Install timer affinity before building Tokio so the worker callback is
+        // present from the first lifecycle event.
+        let timer_builder = timer::Builder::install(&mut runtime_builder, self.cfg.worker_threads);
+        let runtime = runtime_builder
+            .build()
+            .expect("failed to create Tokio runtime");
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
 
-        // Initialize timer shards while the Tokio reactor is active.
-        let timer = {
-            // AsyncFd registration requires an entered reactor even though timer
-            // validation itself is synchronous and precedes the user closure.
-            let _guard = runtime.enter();
-            timer::Timer::new(timer_setup, panicker.clone())
-                .unwrap_or_else(|error| panic!("{error}"))
-        };
+        // Build timer shards against this runtime before invoking user code.
+        let timer = timer_builder
+            .build(&runtime, panicker.clone())
+            .unwrap_or_else(|error| panic!("{error}"));
 
         // Collect process metrics.
         //
