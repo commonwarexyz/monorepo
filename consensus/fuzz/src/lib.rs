@@ -2291,6 +2291,12 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             return (false, false);
         }
 
+        let omitted_reporter = notarize_omission.as_ref().and_then(|omission| {
+            let victim = &participants[omission.victim];
+            reporters
+                .iter()
+                .position(|(validator, _)| validator == victim)
+        });
         let reporter_only: Vec<_> = reporters
             .into_iter()
             .map(|(_, reporter)| reporter)
@@ -2318,6 +2324,9 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             &summary_reporters,
         );
         invariants::check::<P>(term_length, reporter_only.as_slice());
+        if let Some(index) = omitted_reporter {
+            invariants::check_notarization_unlocks_finalize_quorum(&reporter_only[index]);
+        }
         (true, rejected_certification_observed)
     })
 }

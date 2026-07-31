@@ -25,8 +25,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Message, Receiver, simulated::SplitTarget};
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
-use commonware_utils::sequence::U64;
-use commonware_utils::sync::Mutex;
+use commonware_utils::{sequence::U64, sync::Mutex};
 use rand::RngExt as _;
 use rand_core::CryptoRng;
 use std::{

@@ -19,7 +19,7 @@ use commonware_cryptography::{
     certificate::{self, Signers},
     sha256::Digest as Sha256Digest,
 };
-use commonware_utils::ordered::Quorum;
+use commonware_utils::{Participant, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
@@ -1149,8 +1149,6 @@ fn check_fuzz_invariants<E, S, L>(
     L: Elector<S>,
     L::Elector: Clone,
 {
-    check_notarization_unlocks_finalize_quorum(reporters);
-
     type ExactVotes = BTreeMap<(Round, Vec<u8>), BTreeSet<Proposal<Sha256Digest>>>;
     type ApplicationProposal = (Round, (View, Sha256Digest), Sha256Digest);
     type CertificateBacking = BTreeSet<(Proposal<Sha256Digest>, Option<Vec<Vec<u8>>>)>;
@@ -2117,107 +2115,80 @@ fn check_fuzz_invariants<E, S, L>(
 }
 
 /// A locally observed notarization makes its exact proposal authoritative for
-/// finalization recovery. If the same batcher incarnation also retains a
-/// quorum of valid finalize votes for that proposal, it must recover a
-/// finalization even when it never observed a proposal from the round's known
-/// leader.
+/// finalization recovery. If the node also retains a quorum of valid finalize
+/// votes for that proposal, it must recover a finalization even when it never
+/// observed a proposal from the round's leader.
 ///
-/// Only the current incarnation is checked because buffered votes do not
-/// survive a restart. A higher finalized floor exempts recovery because the
-/// batcher stops processing proposals below it.
-fn check_notarization_unlocks_finalize_quorum<E, S, L>(
-    reporters: &[RecordingReporter<E, S, L, Sha256Digest>],
+/// Scoped to the node whose inbound leader proposals and finalizations the
+/// harness omits: that omission is what rules out the benign reasons a correct
+/// node can hold votes it cannot use, so this must not run over every audited
+/// reporter. A higher finalized view exempts recovery because the batcher
+/// stops processing rounds below its floor. The leader is derived from the
+/// certificate-less elector of the single-epoch, four-correct-node target.
+pub fn check_notarization_unlocks_finalize_quorum<E, S, L>(
+    reporter: &RecordingReporter<E, S, L, Sha256Digest>,
 ) where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
     L::Elector: Clone,
 {
-    for reporter in reporters {
-        let audit = reporter.audit();
-        let generation = audit.generation();
-        let participants = &reporter.inner().participants;
-        let quorum = bounds::quorum(
-            u32::try_from(participants.len()).expect("participant count exceeds u32"),
-        ) as usize;
+    let audit = reporter.audit();
+    let quorum = bounds::quorum(
+        u32::try_from(reporter.inner().participants.len()).expect("participant count exceeds u32"),
+    ) as usize;
 
-        let recorded_leaders = reporter.inner().leaders.lock();
-        let mut leader_proposals = BTreeSet::new();
-        let mut notarizations = BTreeSet::new();
-        let mut finalize_votes: BTreeMap<Proposal<Sha256Digest>, BTreeSet<usize>> = BTreeMap::new();
-        let mut finalizations = BTreeSet::new();
-        let mut finalized_floor = BTreeMap::new();
+    let mut leader_notarizes = BTreeSet::new();
+    let mut notarizations = BTreeSet::new();
+    let mut finalize_signers: BTreeMap<Proposal<Sha256Digest>, BTreeSet<Participant>> =
+        BTreeMap::new();
+    let mut finalizations = BTreeSet::new();
+    let mut finalized_floor = View::new(0);
 
-        for recorded in audit.events() {
-            let Event::Activity {
-                valid: true,
-                activity,
-            } = recorded.event
-            else {
-                continue;
-            };
+    for recorded in audit.events() {
+        let Event::Activity {
+            valid: true,
+            activity,
+        } = recorded.event
+        else {
+            continue;
+        };
 
-            if let Activity::Finalization(certificate) = &activity {
-                let round = certificate.proposal.round;
-                finalizations.insert(certificate.proposal.clone());
-                finalized_floor
-                    .entry(round.epoch())
-                    .and_modify(|floor: &mut View| *floor = (*floor).max(round.view()))
-                    .or_insert(round.view());
-                continue;
-            }
-            if recorded.generation != generation {
-                continue;
-            }
-
-            match activity {
-                Activity::Notarize(vote) => {
-                    let round = vote.proposal.round;
-                    let leader = recorded_leaders
-                        .get(&round.view())
-                        .map(|leader| {
-                            participants
-                                .index(leader)
-                                .expect("recorded leader must be a participant")
-                        })
-                        .or_else(|| {
-                            (round.view() == View::new(1))
-                                .then(|| reporter.elector().elect(round, None))
-                        });
-                    if leader == Some(vote.signer()) {
-                        leader_proposals.insert(round);
-                    }
+        match activity {
+            Activity::Notarize(vote) => {
+                let round = vote.proposal.round;
+                if reporter.elector().elect(round, None) == vote.signer() {
+                    leader_notarizes.insert(round);
                 }
-                Activity::Notarization(certificate) => {
-                    notarizations.insert(certificate.proposal);
-                }
-                Activity::Finalize(vote) => {
-                    let signer = vote.signer();
-                    if participants.key(signer).is_some() {
-                        finalize_votes
-                            .entry(vote.proposal)
-                            .or_default()
-                            .insert(usize::from(signer));
-                    }
-                }
-                _ => {}
             }
+            Activity::Notarization(certificate) => {
+                notarizations.insert(certificate.proposal);
+            }
+            Activity::Finalize(vote) => {
+                let signer = vote.signer();
+                finalize_signers
+                    .entry(vote.proposal)
+                    .or_default()
+                    .insert(signer);
+            }
+            Activity::Finalization(certificate) => {
+                finalized_floor = finalized_floor.max(certificate.proposal.round.view());
+                finalizations.insert(certificate.proposal);
+            }
+            _ => {}
         }
+    }
 
-        for proposal in notarizations {
-            let signers = finalize_votes.get(&proposal).map_or(0, BTreeSet::len);
-            if leader_proposals.contains(&proposal.round) || signers < quorum {
-                continue;
-            }
-            let floor_advanced = finalized_floor
-                .get(&proposal.round.epoch())
-                .is_some_and(|floor| *floor > proposal.round.view());
-            assert!(
-                finalizations.contains(&proposal) || floor_advanced,
-                "Invariant violation: notarization plus finalize quorum without a leader proposal did not produce an exact finalization: observer {:?}, generation {generation}, proposal {proposal:?}, signers {signers}, required {quorum}",
-                audit.observer().as_ref(),
-            );
+    for proposal in notarizations {
+        let signers = finalize_signers.get(&proposal).map_or(0, BTreeSet::len);
+        if leader_notarizes.contains(&proposal.round) || signers < quorum {
+            continue;
         }
+        assert!(
+            finalizations.contains(&proposal) || finalized_floor > proposal.round.view(),
+            "Invariant violation: notarization plus finalize quorum without a leader proposal did not produce an exact finalization: observer {:?}, proposal {proposal:?}, signers {signers}, required {quorum}",
+            audit.observer().as_ref(),
+        );
     }
 }
 
@@ -3443,7 +3414,7 @@ mod tests {
             &schemes, 5, 4, 0xA,
         )));
 
-        check_notarization_unlocks_finalize_quorum(std::slice::from_ref(&reporter));
+        check_notarization_unlocks_finalize_quorum(&reporter);
     }
 
     #[test]
@@ -3460,22 +3431,7 @@ mod tests {
             &schemes, 5, 4, 0xA,
         )));
 
-        check_notarization_unlocks_finalize_quorum(std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn finalize_votes_from_a_prior_incarnation_do_not_arm_recovery() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(3, &participants, &schemes);
-        let proposal = proposal(5, 4, 0xA);
-
-        record_finalize_votes(&mut reporter, &schemes, &proposal, 0..Q);
-        reporter.report(Activity::Notarization(notarization_activity(
-            &schemes, 5, 4, 0xA,
-        )));
-        reporter.set_generation(1);
-
-        check_notarization_unlocks_finalize_quorum(std::slice::from_ref(&reporter));
+        check_notarization_unlocks_finalize_quorum(&reporter);
     }
 
     #[test]
@@ -3492,7 +3448,7 @@ mod tests {
             &schemes, 5, 4, 0xA,
         )));
 
-        check_notarization_unlocks_finalize_quorum(std::slice::from_ref(&reporter));
+        check_notarization_unlocks_finalize_quorum(&reporter);
     }
 
     #[test]
@@ -3501,10 +3457,6 @@ mod tests {
         let mut reporter = audit_reporter(3, &participants, &schemes);
         let proposal = proposal(5, 4, 0xA);
         let leader = reporter.elector().elect(proposal.round, None);
-        reporter.inner().leaders.lock().insert(
-            proposal.round.view(),
-            participants[usize::from(leader)].clone(),
-        );
 
         reporter.report(Activity::Notarize(
             Notarize::sign(&schemes[usize::from(leader)], proposal.clone()).unwrap(),
@@ -3514,7 +3466,7 @@ mod tests {
             &schemes, 5, 4, 0xA,
         )));
 
-        check_notarization_unlocks_finalize_quorum(std::slice::from_ref(&reporter));
+        check_notarization_unlocks_finalize_quorum(&reporter);
     }
 
     #[test]
