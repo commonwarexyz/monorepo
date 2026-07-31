@@ -138,7 +138,31 @@ where
     /// verified (see [`crate::simplex::types::Activity`]). Consider wrapping with
     /// [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter
     /// and verify activities based on scheme attributability.
+    ///
+    /// Locally constructed votes are exported only after their journal entries are
+    /// durable. Votes received from the network are not persisted and may be exported
+    /// again after a restart. If the sender equivocates, a vote exported after restart
+    /// may differ from the one exported before the crash.
     pub reporter: F,
+
+    /// Retain votes after certification to detect and report conflicting votes.
+    ///
+    /// This is disabled by default in provided configurations because retaining
+    /// full signed votes for every tracked view can consume substantial memory,
+    /// especially when certificates arrive far ahead of the current view. When
+    /// disabled, votes needed for certificate assembly are released as soon as
+    /// the corresponding certificate exists. Compact signer data is retained for
+    /// forwarding and duplicate suppression.
+    ///
+    /// Individual votes are still exported through `reporter`, so a downstream
+    /// application may independently observe conflicting activity. This option
+    /// controls the batcher's retention, comparison, and emission of explicit
+    /// conflict-evidence activities.
+    ///
+    /// Enabling this currently requires deterministic signatures: signing the
+    /// same subject twice must produce equal signature encodings (see
+    /// [`super::scheme::Scheme`]).
+    pub report_conflicting_votes: bool,
 
     /// Strategy for parallel operations.
     pub strategy: T,

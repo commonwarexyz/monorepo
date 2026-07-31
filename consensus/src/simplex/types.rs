@@ -104,23 +104,24 @@ pub trait Attributable {
 /// The key for each item is automatically inferred from [Attributable::signer()].
 /// Each signer can insert at most one item.
 pub struct AttributableMap<T: Attributable> {
+    participants: usize,
     data: Vec<Option<T>>,
     added: usize,
 }
 
 impl<T: Attributable> AttributableMap<T> {
     /// Creates a new [AttributableMap] with the given number of participants.
-    pub fn new(participants: usize) -> Self {
-        // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
-        let mut data = Vec::with_capacity(participants);
-        data.resize_with(participants, || None);
-
-        Self { data, added: 0 }
+    pub const fn new(participants: usize) -> Self {
+        Self {
+            participants,
+            data: Vec::new(),
+            added: 0,
+        }
     }
 
-    /// Clears all existing items from the [AttributableMap].
+    /// Clears all existing items and releases their storage.
     pub fn clear(&mut self) {
-        self.data.fill_with(|| None);
+        self.data = Vec::new();
         self.added = 0;
     }
 
@@ -131,8 +132,13 @@ impl<T: Attributable> AttributableMap<T> {
     /// signer already exists or if the signer index is out of bounds.
     pub fn insert(&mut self, item: T) -> bool {
         let index: usize = item.signer().into();
-        if index >= self.data.len() {
+        if index >= self.participants {
             return false;
+        }
+        if self.data.is_empty() {
+            // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
+            self.data.reserve_exact(self.participants);
+            self.data.resize_with(self.participants, || None);
         }
         if self.data[index].is_some() {
             return false;
@@ -166,10 +172,14 @@ impl<T: Attributable> AttributableMap<T> {
 
 /// Tracks notarize/nullify/finalize votes for a view.
 ///
-/// Each vote type is stored in its own [`AttributableMap`] so a validator can only
-/// contribute one vote per phase. The tracker is reused across rounds/views to keep
-/// allocations stable.
+/// Each vote type is stored in its own lazily allocated [`AttributableMap`] so a
+/// validator can only contribute one vote per phase. Full votes are released once
+/// their certificate exists. Compact signer state remains available for forwarding
+/// and duplicate suppression.
 pub struct VoteTracker<S: Scheme, D: Digest> {
+    participants: usize,
+    /// Per-phase signer and proposal-match flags retained after full votes are released.
+    compacted: Vec<u8>,
     /// Per-signer notarize votes keyed by validator index.
     notarizes: AttributableMap<Notarize<S, D>>,
     /// Per-signer nullify votes keyed by validator index.
@@ -182,13 +192,153 @@ pub struct VoteTracker<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
+    const NOTARIZE_SEEN: u8 = 1 << 0;
+    const NOTARIZE_MATCHING: u8 = 1 << 1;
+    const NULLIFY_SEEN: u8 = 1 << 2;
+    const FINALIZE_SEEN: u8 = 1 << 3;
+    const FINALIZE_MATCHING: u8 = 1 << 4;
+
     /// Creates a tracker sized for `participants` validators.
-    pub fn new(participants: usize) -> Self {
+    pub const fn new(participants: usize) -> Self {
         Self {
+            participants,
+            compacted: Vec::new(),
             notarizes: AttributableMap::new(participants),
             nullifies: AttributableMap::new(participants),
             finalizes: AttributableMap::new(participants),
         }
+    }
+
+    fn remember(&mut self, signer: Participant, seen: u8, matching: Option<u8>) -> bool {
+        let index = usize::from(signer);
+        if index >= self.participants {
+            return false;
+        }
+        if self.compacted.is_empty() {
+            self.compacted.resize(self.participants, 0);
+        }
+
+        let flags = &mut self.compacted[index];
+        let inserted = *flags & seen == 0;
+        *flags |= seen;
+        if let Some(matching) = matching {
+            *flags |= matching;
+        }
+        inserted
+    }
+
+    fn remembered(&self, signer: Participant, flag: u8) -> bool {
+        self.compacted
+            .get(usize::from(signer))
+            .is_some_and(|flags| flags & flag != 0)
+    }
+
+    fn release<T: Attributable>(
+        participants: usize,
+        compacted: &mut Vec<u8>,
+        votes: &mut AttributableMap<T>,
+        seen: u8,
+        matching: u8,
+        is_matching: impl Fn(&T) -> bool,
+    ) {
+        if !votes.is_empty() && compacted.is_empty() {
+            compacted.resize(participants, 0);
+        }
+        for vote in votes.iter() {
+            let flags = &mut compacted[usize::from(vote.signer())];
+            *flags |= seen;
+            if is_matching(vote) {
+                *flags |= matching;
+            }
+        }
+        votes.clear();
+    }
+
+    /// Remembers a notarize signer without retaining the full vote.
+    pub(crate) fn remember_notarize(&mut self, signer: Participant, matching: bool) -> bool {
+        self.remember(
+            signer,
+            Self::NOTARIZE_SEEN,
+            matching.then_some(Self::NOTARIZE_MATCHING),
+        )
+    }
+
+    /// Remembers a nullify signer without retaining the full vote.
+    pub(crate) fn remember_nullify(&mut self, signer: Participant) -> bool {
+        self.remember(signer, Self::NULLIFY_SEEN, None)
+    }
+
+    /// Remembers a finalize signer without retaining the full vote.
+    pub(crate) fn remember_finalize(&mut self, signer: Participant, matching: bool) -> bool {
+        self.remember(
+            signer,
+            Self::FINALIZE_SEEN,
+            matching.then_some(Self::FINALIZE_MATCHING),
+        )
+    }
+
+    /// Returns whether `signer` is known to have notarized `proposal`.
+    pub(crate) fn has_notarize_for(
+        &self,
+        signer: Participant,
+        proposal: &Proposal<D>,
+    ) -> bool {
+        self.remembered(signer, Self::NOTARIZE_MATCHING)
+            || self
+                .notarize(signer)
+                .is_some_and(|vote| &vote.proposal == proposal)
+    }
+
+    /// Returns whether `signer` is known to have finalized `proposal`.
+    pub(crate) fn has_finalize_for(
+        &self,
+        signer: Participant,
+        proposal: &Proposal<D>,
+    ) -> bool {
+        self.remembered(signer, Self::FINALIZE_MATCHING)
+            || self
+                .finalize(signer)
+                .is_some_and(|vote| &vote.proposal == proposal)
+    }
+
+    /// Releases notarize votes while retaining compact signer state.
+    pub(crate) fn release_notarizes(&mut self, proposal: &Proposal<D>) {
+        Self::release(
+            self.participants,
+            &mut self.compacted,
+            &mut self.notarizes,
+            Self::NOTARIZE_SEEN,
+            Self::NOTARIZE_MATCHING,
+            |vote: &Notarize<S, D>| {
+                &vote.proposal == proposal
+            },
+        );
+    }
+
+    /// Releases nullify votes while retaining compact signer state.
+    pub(crate) fn release_nullifies(&mut self) {
+        Self::release(
+            self.participants,
+            &mut self.compacted,
+            &mut self.nullifies,
+            Self::NULLIFY_SEEN,
+            0,
+            |_| false,
+        );
+    }
+
+    /// Releases finalize votes while retaining compact signer state.
+    pub(crate) fn release_finalizes(&mut self, proposal: &Proposal<D>) {
+        Self::release(
+            self.participants,
+            &mut self.compacted,
+            &mut self.finalizes,
+            Self::FINALIZE_SEEN,
+            Self::FINALIZE_MATCHING,
+            |vote: &Finalize<S, D>| {
+                &vote.proposal == proposal
+            },
+        );
     }
 
     /// Inserts a notarize vote if the signer has not already voted.
@@ -266,14 +416,28 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         self.finalizes.get(signer).is_some()
     }
 
-    /// Clears all notarize votes but keeps the allocations for reuse.
+    /// Clears all notarize votes and releases their storage.
     pub fn clear_notarizes(&mut self) {
         self.notarizes.clear();
+        for flags in &mut self.compacted {
+            *flags &= !(Self::NOTARIZE_SEEN | Self::NOTARIZE_MATCHING);
+        }
     }
 
-    /// Clears all finalize votes but keeps the allocations for reuse.
+    /// Clears all nullify votes and releases their storage.
+    pub fn clear_nullifies(&mut self) {
+        self.nullifies.clear();
+        for flags in &mut self.compacted {
+            *flags &= !Self::NULLIFY_SEEN;
+        }
+    }
+
+    /// Clears all finalize votes and releases their storage.
     pub fn clear_finalizes(&mut self) {
         self.finalizes.clear();
+        for flags in &mut self.compacted {
+            *flags &= !(Self::FINALIZE_SEEN | Self::FINALIZE_MATCHING);
+        }
     }
 }
 
@@ -3414,6 +3578,7 @@ mod tests {
         let mut map = AttributableMap::new(5);
         assert_eq!(map.len(), 0);
         assert!(map.is_empty());
+        assert_eq!(map.data.capacity(), 0, "empty maps should allocate lazily");
 
         // Test get on empty map
         for i in 0..5 {
@@ -3421,6 +3586,7 @@ mod tests {
         }
 
         assert!(map.insert(MockAttributable(Participant::new(3))));
+        assert!(map.data.capacity() >= 5);
         assert_eq!(map.len(), 1);
         assert!(!map.is_empty());
         let mut iter = map.iter();
@@ -3474,6 +3640,7 @@ mod tests {
         assert_eq!(map.len(), 0);
         assert!(map.is_empty());
         assert!(map.iter().next().is_none());
+        assert_eq!(map.data.capacity(), 0, "clear should release vote storage");
 
         // Verify can insert after clear
         assert!(map.insert(MockAttributable(Participant::new(2))));

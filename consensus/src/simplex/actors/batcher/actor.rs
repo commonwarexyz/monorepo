@@ -59,6 +59,7 @@ where
 
     blocker: B,
     reporter: Re,
+    report_conflicting_votes: bool,
     relay: Rl,
     strategy: T,
 
@@ -144,6 +145,7 @@ where
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
+                report_conflicting_votes: cfg.report_conflicting_votes,
                 relay: cfg.relay,
                 strategy: cfg.strategy,
 
@@ -174,6 +176,7 @@ where
             Arc::clone(&self.scheme),
             self.blocker.clone(),
             self.reporter.clone(),
+            self.report_conflicting_votes,
         )
     }
 

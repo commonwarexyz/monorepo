@@ -127,6 +127,12 @@ pub struct SimplexConfig<L> {
     /// Time a leader may remain inactive before triggering immediate nullification.
     pub skip_timeout: Duration,
 
+    /// Retain signed votes after certification and report conflicts.
+    ///
+    /// Enabling this increases per-view memory usage and requires deterministic
+    /// signatures from the epoch signing scheme.
+    pub report_conflicting_votes: bool,
+
     /// Policy for proactively forwarding certified blocks.
     pub forwarding: ForwardingPolicy,
 }
@@ -718,6 +724,7 @@ where
                 view_retention: self.simplex.view_retention,
                 skip_timeout: self.simplex.skip_timeout,
                 forwarding: self.simplex.forwarding,
+                report_conflicting_votes: self.simplex.report_conflicting_votes,
             },
         );
 

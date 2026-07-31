@@ -22,6 +22,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
     pub blocker: B,
     pub reporter: Re,
+    pub report_conflicting_votes: bool,
     pub relay: Rl,
 
     /// Strategy for parallel operations.
@@ -183,6 +184,7 @@ mod tests {
         skip_timeout: Duration,
         term_length: TermLength,
         forwarding: ForwardingPolicy,
+        report_conflicting_votes: bool,
         floor: View,
     }
 
@@ -193,6 +195,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
+                report_conflicting_votes: false,
                 floor: View::zero(),
             }
         }
@@ -212,6 +215,7 @@ mod tests {
             scheme,
             blocker,
             reporter,
+            report_conflicting_votes: options.report_conflicting_votes,
             relay,
             strategy: Sequential,
             view_retention: options.view_retention,
@@ -340,6 +344,25 @@ mod tests {
         }
     }
 
+    struct RecordingReporter<S: Scheme<Sha256Digest>>(
+        Arc<Mutex<Vec<Activity<S, Sha256Digest>>>>,
+    );
+
+    impl<S: Scheme<Sha256Digest>> Clone for RecordingReporter<S> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone())
+        }
+    }
+
+    impl<S: Scheme<Sha256Digest>> crate::Reporter for RecordingReporter<S> {
+        type Activity = Activity<S, Sha256Digest>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            self.0.lock().push(activity);
+            Feedback::Ok
+        }
+    }
+
     /// Drives a full quorum of network votes through a [Round]'s batch-verify and
     /// certificate-recovery offloads using `strategy`.
     async fn verify_and_construct<S, F>(mut fixture: F, strategy: impl Strategy)
@@ -360,6 +383,7 @@ mod tests {
             Arc::new(schemes[0].clone()),
             NoopBlocker,
             NoopReporter(PhantomData),
+            false,
         );
 
         // Route a quorum of notarizes through the round as network votes.
@@ -429,6 +453,7 @@ mod tests {
             Arc::new(schemes[1].clone()),
             NoopBlocker,
             NoopReporter(PhantomData),
+            false,
         );
 
         // The leader's notarize arrives before the leader is known
@@ -449,6 +474,173 @@ mod tests {
         );
     }
 
+    fn retains_certified_vote(report_conflicting_votes: bool) -> bool {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
+        let signer = Participant::from_usize(0);
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+            report_conflicting_votes,
+        );
+
+        let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+        assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
+        assert!(!round.is_missing_voter(&proposal, signer));
+
+        let notarization = build_notarization(&schemes, &proposal, quorum(5) as usize);
+        assert!(round.record_certificate(&Certificate::Notarization(notarization)));
+        round.has_notarize(signer)
+    }
+
+    #[test]
+    fn test_certificate_releases_votes_without_conflict_checking() {
+        assert!(!retains_certified_vote(false));
+    }
+
+    #[test]
+    fn test_certificate_retains_votes_for_conflict_checking() {
+        assert!(retains_certified_vote(true));
+    }
+
+    #[test]
+    fn test_conflicting_votes_not_reported_when_disabled() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let activities = Arc::new(Mutex::new(Vec::new()));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            RecordingReporter(activities.clone()),
+            false,
+        );
+        let first = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"first"]));
+        let second = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"second"]));
+
+        assert!(round.add_network(
+            participants[1].clone(),
+            Vote::Notarize(Notarize::sign(&schemes[1], first).unwrap()),
+        ));
+        assert!(!round.add_network(
+            participants[1].clone(),
+            Vote::Notarize(Notarize::sign(&schemes[1], second).unwrap()),
+        ));
+        assert!(
+            activities
+                .lock()
+                .iter()
+                .all(|activity| !matches!(activity, Activity::ConflictingNotarize(_)))
+        );
+    }
+
+    #[test]
+    fn test_constructed_votes_reported_after_existing_certificates() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
+        let activities = Arc::new(Mutex::new(Vec::new()));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            RecordingReporter(activities.clone()),
+            false,
+        );
+        let quorum = quorum(5) as usize;
+
+        round.record_certificate(&Certificate::Notarization(build_notarization(
+            &schemes, &proposal, quorum,
+        )));
+        round.add_constructed(Vote::Notarize(
+            Notarize::sign(&schemes[0], proposal.clone()).unwrap(),
+        ));
+
+        round.record_certificate(&Certificate::Nullification(build_nullification(
+            &schemes, round_id, quorum,
+        )));
+        round.add_constructed(Vote::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], round_id).unwrap(),
+        ));
+
+        round.record_certificate(&Certificate::Finalization(build_finalization(
+            &schemes, &proposal, quorum,
+        )));
+        round.add_constructed(Vote::Finalize(
+            Finalize::sign(&schemes[0], proposal).unwrap(),
+        ));
+
+        let activities = activities.lock();
+        assert_eq!(
+            activities
+                .iter()
+                .filter(|activity| matches!(activity, Activity::Notarize(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            activities
+                .iter()
+                .filter(|activity| matches!(activity, Activity::Nullify(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            activities
+                .iter()
+                .filter(|activity| matches!(activity, Activity::Finalize(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_nullify_retry_after_certificate_is_not_reported_twice() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let activities = Arc::new(Mutex::new(Vec::new()));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            RecordingReporter(activities.clone()),
+            false,
+        );
+        let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round_id).unwrap();
+
+        round.add_constructed(Vote::Nullify(nullify.clone()));
+        round.record_certificate(&Certificate::Nullification(build_nullification(
+            &schemes,
+            round_id,
+            quorum(5) as usize,
+        )));
+        round.add_constructed(Vote::Nullify(nullify));
+
+        assert_eq!(
+            activities
+                .lock()
+                .iter()
+                .filter(|activity| matches!(activity, Activity::Nullify(_)))
+                .count(),
+            1
+        );
+    }
+
     /// A finalization replaces a conflicting leader-selected proposal and
     /// makes its proposal authoritative.
     #[test]
@@ -465,6 +657,7 @@ mod tests {
             Arc::new(schemes[1].clone()),
             NoopBlocker,
             NoopReporter(PhantomData),
+            false,
         );
 
         // The leader's notarize arrives before the leader is known.
@@ -505,6 +698,7 @@ mod tests {
             Arc::new(schemes[0].clone()),
             NoopBlocker,
             NoopReporter(PhantomData),
+            false,
         );
 
         // The constructed finalize establishes the proposal without relying
@@ -535,6 +729,7 @@ mod tests {
             Arc::new(verifier),
             NoopBlocker,
             NoopReporter(PhantomData),
+            false,
         );
         let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"notarized"]));
 
@@ -590,6 +785,7 @@ mod tests {
             Arc::new(verifier),
             NoopBlocker,
             NoopReporter(PhantomData),
+            false,
         );
         let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"notarized"]));
 
@@ -647,6 +843,7 @@ mod tests {
             Arc::new(schemes[0].clone()),
             NoopBlocker,
             NoopReporter(PhantomData),
+            false,
         );
 
         // A quorum of notarizes and a nullify from every participant
@@ -5119,7 +5316,10 @@ mod tests {
                 reporter.clone(),
                 MockRelay::new(),
                 epoch,
-                BatcherOptions::default(),
+                BatcherOptions {
+                    report_conflicting_votes: true,
+                    ..Default::default()
+                },
             );
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 

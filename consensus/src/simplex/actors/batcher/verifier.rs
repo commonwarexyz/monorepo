@@ -59,14 +59,14 @@ enum State<V> {
 }
 
 impl<V> Certification<V> {
-    /// Creates an empty [State::Incomplete] with buffers sized for `quorum` votes.
-    fn new(quorum: usize, batchable: bool) -> Self {
+    /// Creates an empty [State::Incomplete] whose vote buffers allocate lazily.
+    const fn new(quorum: usize, batchable: bool) -> Self {
         Self {
             quorum,
             batchable,
             state: State::Incomplete {
-                pending: Vec::with_capacity(quorum),
-                verified: Vec::with_capacity(quorum),
+                pending: Vec::new(),
+                verified: Vec::new(),
             },
         }
     }
@@ -75,7 +75,11 @@ impl<V> Certification<V> {
     /// certificate recovery). Dropped once complete.
     fn add(&mut self, vote: V, is_verified: bool) {
         if let State::Incomplete { pending, verified } = &mut self.state {
-            if is_verified { verified } else { pending }.push(vote);
+            let votes = if is_verified { verified } else { pending };
+            if votes.capacity() == 0 {
+                votes.reserve_exact(self.quorum);
+            }
+            votes.push(vote);
         }
     }
 
@@ -674,6 +678,29 @@ mod tests {
                 State::Complete => &[],
             }
         }
+
+        fn capacities(&self) -> (usize, usize) {
+            match &self.state {
+                State::Incomplete { pending, verified } => {
+                    (pending.capacity(), verified.capacity())
+                }
+                State::Complete => (0, 0),
+            }
+        }
+    }
+
+    #[test]
+    fn test_certification_allocates_vote_buffers_lazily() {
+        let mut certification = Certification::new(4, true);
+        assert_eq!(certification.capacities(), (0, 0));
+
+        certification.add(1u8, false);
+        let (pending, verified) = certification.capacities();
+        assert!(pending >= 4);
+        assert_eq!(verified, 0);
+
+        certification.complete();
+        assert_eq!(certification.capacities(), (0, 0));
     }
 
     // Helper function to create a sample digest

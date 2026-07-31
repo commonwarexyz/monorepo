@@ -405,7 +405,6 @@ impl<
     #[allow(clippy::type_complexity)]
     async fn timeout(
         mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
         reason: TimeoutReason,
     ) -> (Self, Option<(Nullify<S>, Option<Certificate<S, D>>)>) {
         // Construct a nullify vote for the current view
@@ -413,11 +412,6 @@ impl<
         let Some((retry, nullify)) = self.state.construct_nullify(view, reason) else {
             return (self, None);
         };
-
-        // Inform the batcher on every attempt (it ignores duplicate nullifies):
-        // after a restart, the first attempt for a replayed nullify is a retry,
-        // and the batcher (whose state is not persisted) has not seen the vote yet.
-        batcher.constructed(Vote::Nullify(nullify.clone()));
 
         // Persist the nullify if it is a first attempt
         if !retry {
@@ -512,7 +506,6 @@ impl<
     /// Builds and records a notarize vote when this view is ready.
     async fn prepare_notarize(
         mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
         view: View,
     ) -> (Self, Option<Notarize<S, D>>) {
         // Construct a notarize vote
@@ -520,8 +513,6 @@ impl<
             return (self, None);
         };
 
-        // Inform the batcher so it can aggregate our vote with others.
-        batcher.constructed(Vote::Notarize(notarize.clone()));
         // Record the vote locally before sharing it.
         self = self.handle_notarize(notarize.clone()).await;
         (self, Some(notarize))
@@ -590,7 +581,6 @@ impl<
     /// Builds and records a finalize vote if the round provides a candidate.
     async fn prepare_finalize(
         mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
         view: View,
     ) -> (Self, Option<Finalize<S, D>>) {
         // Construct the finalize vote.
@@ -598,8 +588,6 @@ impl<
             return (self, None);
         };
 
-        // Provide the vote to the batcher pipeline.
-        batcher.constructed(Vote::Finalize(finalize.clone()));
         // Record the vote locally before sharing it.
         self = self.handle_finalize(finalize.clone()).await;
         (self, Some(finalize))
@@ -815,7 +803,7 @@ impl<
     /// Builds and records any votes or certificates that became available for `view`.
     ///
     /// Everything returned must be synced to the journal (via [Self::sync_journal])
-    /// before it is broadcast (via [Self::notify]).
+    /// before it reaches the batcher, reporter, or network (via [Self::notify]).
     ///
     /// We don't need to iterate over all views to check for new actions because messages we receive
     /// only affect a single view. In particular, healing the same-term finalize gate does not
@@ -824,16 +812,15 @@ impl<
     /// same-term vote safety for the consequences when none arrives).
     async fn construct(
         mut self,
-        batcher: &mut batcher::Mailbox<S, D>,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         resolved: Resolved,
     ) -> (Self, Staged<S, D>) {
         let (notarize, notarization, nullification, finalize, finalization);
-        (self, notarize) = self.prepare_notarize(batcher, view).await;
+        (self, notarize) = self.prepare_notarize(view).await;
         (self, notarization) = self.prepare_notarization(resolver, view, resolved).await;
         (self, nullification) = self.prepare_nullification(resolver, view, resolved).await;
-        (self, finalize) = self.prepare_finalize(batcher, view).await;
+        (self, finalize) = self.prepare_finalize(view).await;
         (self, finalization) = self.prepare_finalization(resolver, view, resolved).await;
         (
             self,
@@ -847,13 +834,14 @@ impl<
         )
     }
 
-    /// Broadcasts everything constructed this iteration and reports it to the application.
+    /// Publishes everything constructed this iteration to the batcher and network.
     ///
     /// Callers must sync pending journal appends first (via [Self::sync_journal])
-    /// so no vote or certificate reaches the network before it is durable.
-    #[allow(clippy::type_complexity)]
+    /// so no locally constructed vote is reported or broadcast before it is durable.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
         resolver: &mut resolver::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
@@ -875,6 +863,9 @@ impl<
         }
 
         if let Some((nullify, entry)) = nullify {
+            // The batcher reports locally constructed votes, so do not hand
+            // one over until the journal sync above has made it durable.
+            batcher.constructed(Vote::Nullify(nullify.clone()));
             debug!(round=?nullify.round(), "broadcasting nullify");
             self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
 
@@ -884,6 +875,7 @@ impl<
             }
         }
         if let Some(notarize) = staged.notarize {
+            batcher.constructed(Vote::Notarize(notarize.clone()));
             debug!(proposal=?notarize.proposal, "broadcasting notarize");
             self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
         }
@@ -908,6 +900,7 @@ impl<
             self.reporter.report(Activity::Nullification(nullification));
         }
         if let Some(finalize) = staged.finalize {
+            batcher.constructed(Vote::Finalize(finalize.clone()));
             debug!(proposal=?finalize.proposal, "broadcasting finalize");
             self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
         }
@@ -1167,7 +1160,7 @@ impl<
                     view = current_view.traced(),
                     reason = reason.as_str()
                 );
-                (self, nullify) = self.timeout(&mut batcher, reason).instrument(span).await;
+                (self, nullify) = self.timeout(reason).instrument(span).await;
                 view = self.state.current_view();
             },
             (context, span, proposed) = propose_wait => {
@@ -1238,7 +1231,7 @@ impl<
                     // Build and record everything that became available for `view`.
                     let staged;
                     (self, staged) = self
-                        .construct(&mut batcher, &mut resolver, view, resolved)
+                        .construct(&mut resolver, view, resolved)
                         .await;
 
                     // Sync everything appended this iteration (during message
@@ -1250,6 +1243,7 @@ impl<
 
                     // Broadcast everything we built (and report it to the application).
                     self.notify(
+                        &mut batcher,
                         &mut resolver,
                         &mut vote_sender,
                         &mut certificate_sender,
