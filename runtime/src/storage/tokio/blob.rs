@@ -13,8 +13,8 @@ use std::{
 };
 use tokio::task;
 
-// Cap iovec batches at the kernel's IOV_MAX (1024): larger submissions fail with
-// EINVAL. Larger batches reduce syscall count with no measurable per-iovec penalty.
+// Cap vectored I/O batches at Linux IOV_MAX. Larger batches reduce syscall count without adding
+// measurable per-iovec overhead.
 const IOVEC_BATCH_SIZE: usize = 1024;
 
 /// Page-cache policy for one write request.
@@ -26,9 +26,10 @@ enum Cache {
 }
 
 impl Cache {
-    /// Return whether the next submission should request cache bypass.
+    /// Return whether the next Linux submission should request cache bypass.
     fn is_disabled(&self) -> bool {
-        matches!(self, Self::Disabled(supported) if supported.load(Ordering::Relaxed))
+        cfg!(target_os = "linux")
+            && matches!(self, Self::Disabled(supported) if supported.load(Ordering::Relaxed))
     }
 
     /// Record that cache bypass is unsupported and use normal caching when retried.
@@ -73,10 +74,9 @@ impl Blob {
     }
 
     fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
-        // Data durability is the contract (see [crate::Blob::sync]): fdatasync covers the
-        // data and the metadata needed to retrieve it (including size), skipping
-        // timestamp-only journal commits. Non-Linux platforms keep the stronger sync_all
-        // for its platform-specific durability semantics.
+        // Data durability is the contract. `sync_data` covers the bytes and metadata required to
+        // retrieve them, including file size, while avoiding timestamp-only journal commits.
+        // Other platforms retain `sync_all` for their platform-specific guarantees.
         cfg_if! {
             if #[cfg(target_os = "linux")] {
                 let result = file.sync_data();
@@ -94,10 +94,9 @@ impl Blob {
 
     /// Write `bufs` at `offset`, batching up to [IOVEC_BATCH_SIZE] iovecs per submission.
     ///
-    /// `flags` apply to every submission, so callers must only pass durability flags for
-    /// writes that fit a single submission (see [WriteOptions::SYNC]). Hinted submissions
-    /// carry `RWF_DONTCACHE` on Linux while the backend may support it. An EOPNOTSUPP clears
-    /// that capability and retries the submission without the hint.
+    /// `flags` apply to every submission, so callers must only pass durability flags when the
+    /// write fits one submission. Hinted submissions carry `RWF_DONTCACHE` on Linux while the
+    /// backend may support it. An EOPNOTSUPP disables the hint and retries normally.
     fn write_vectored_at(
         file: &File,
         mut offset: u64,
@@ -158,12 +157,12 @@ impl Blob {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                if err.raw_os_error() == Some(libc::EOPNOTSUPP) && attempted_dont_cache {
-                    // The kernel or filesystem does not support RWF_DONTCACHE: fall back
-                    // to cached writes for this and future hinted writes.
-                    if cache.fallback() {
-                        continue;
-                    }
+                // Retry normally and stop requesting an unsupported cache-bypass hint.
+                if err.raw_os_error() == Some(libc::EOPNOTSUPP)
+                    && attempted_dont_cache
+                    && cache.fallback()
+                {
+                    continue;
                 }
                 return Err(err.into());
             }
@@ -215,10 +214,9 @@ impl Blob {
 
             cfg_if! {
                 if #[cfg(target_os = "linux")] {
-                    // Fuse durability into the write only when it fits one submission:
-                    // fusing every batch would serialize the batches behind per-call
-                    // durability waits, while plain batches keep the device pipelined
-                    // and pay a single fdatasync at the end.
+                    // Fuse durability only when the write fits one submission. Fusing every batch
+                    // would serialize the batches behind per-call durability waits. Plain batches
+                    // stay pipelined and finish with one data sync.
                     let fused = sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE;
                     Self::write_vectored_at(
                         &file,
@@ -336,5 +334,16 @@ impl crate::Blob for Blob {
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_bypass_is_ignored_off_linux() {
+        let cache = Cache::Disabled(Arc::new(AtomicBool::new(true)));
+        assert!(!cache.is_disabled());
     }
 }

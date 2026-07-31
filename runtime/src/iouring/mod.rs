@@ -425,12 +425,11 @@ impl Handle {
         })
     }
 
-    /// Submit a logical positioned write request with the requested cache and durability behavior.
+    /// Submit a positioned write with the requested cache and durability behavior.
     ///
     /// Durability is fused into the write (`RWF_DSYNC`) only when the whole write fits one
-    /// submission: fusing every submission would serialize the submissions behind per-SQE
-    /// durability waits. A larger durable write is submitted plain and followed by one fsync,
-    /// which keeps the device pipelined and pays a single wait at the end.
+    /// submission. Fusing every submission would serialize the batches behind per-SQE durability
+    /// waits. A larger durable write is submitted plain and followed by one data sync.
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub(crate) async fn write_at(
         &self,

@@ -273,10 +273,8 @@ impl ActiveChecksum {
 
 /// Describes a CRC record stored at the end of a page.
 ///
-/// The CRC accompanied by the larger length is the one that should be treated as authoritative for
-/// the page. Two checksums are stored so that rewriting a partial page never changes the durable
-/// bytes of the checksum covering its previously committed contents. The new checksum lands in
-/// the other slot and the protected slot is resubmitted byte-identically.
+/// The CRC with the larger length is authoritative. Two slots let a partial-page rewrite preserve
+/// the checksum covering the previously committed bytes while writing the new checksum elsewhere.
 struct Checksum {
     len1: u16,
     crc1: u32,

@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_empty_write_semantics_survive_option_unification() {
+    async fn test_empty_write_semantics() {
         let storage = Storage::new(test_pool());
 
         let (plain, _) = storage.open("partition", b"plain").await.unwrap();

@@ -80,28 +80,6 @@ pub struct Blob<B: crate::Blob> {
     inner: B,
 }
 
-impl<B: crate::Blob> Blob<B> {
-    async fn write_at_inner(
-        &self,
-        offset: u64,
-        bufs: IoBufs,
-        options: WriteOptions,
-    ) -> Result<(), Error> {
-        let operation: &[u8] = if options.contains(WriteOptions::SYNC) {
-            b"write_at_sync"
-        } else {
-            b"write_at"
-        };
-        self.auditor.event(operation, |hasher| {
-            hasher.update(self.partition.as_bytes());
-            hasher.update(&self.name);
-            hasher.update(offset.to_be_bytes());
-            hasher.update_bufs(&bufs);
-        });
-        self.inner.write_at_with(offset, bufs, options).await
-    }
-}
-
 impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
         self.auditor.event(b"read_at", |hasher| {
@@ -135,7 +113,19 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), options).await
+        let bufs = bufs.into();
+        let operation: &[u8] = if options.contains(WriteOptions::SYNC) {
+            b"write_at_sync"
+        } else {
+            b"write_at"
+        };
+        self.auditor.event(operation, |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(offset.to_be_bytes());
+            hasher.update_bufs(&bufs);
+        });
+        self.inner.write_at_with(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

@@ -18,10 +18,8 @@ use std::{
     time::Instant,
 };
 
-/// Cap iovec batches at the kernel's IOV_MAX (1024): larger submissions fail with
-/// EINVAL. Storage writes span hundreds of chunks (two per page) and want maximal
-/// batches, which measure faster with no per-iovec penalty. Network sends never
-/// approach the cap (messages are a few chunks), so they share it.
+/// Cap vectored I/O batches at Linux IOV_MAX. Storage writes can span many chunks, and larger
+/// batches reduce submissions without adding measurable per-iovec overhead.
 pub(super) const IOVEC_BATCH_SIZE: usize = 1024;
 
 /// Normalized write buffer for [SendRequest] and [WriteAtRequest].
@@ -520,12 +518,10 @@ pub(crate) enum Cache {
     Disabled(Arc<AtomicBool>),
 }
 
-// These methods are only const without `iouring-storage`; the storage path reads and updates
-// shared backend support state through atomics.
 #[allow(clippy::missing_const_for_fn)]
 impl Cache {
-    /// Return the write flag for this request, falling back to normal caching
-    /// when another request has already found the hint unsupported.
+    /// Return the flag for this request, falling back to normal caching if another request has
+    /// already found the hint unsupported.
     fn rw_flag(&mut self) -> i32 {
         match self {
             #[cfg(feature = "iouring-storage")]
@@ -573,9 +569,7 @@ pub(super) struct WriteAtRequest {
 }
 
 impl WriteAtRequest {
-    /// Return the flags for this write request: `RWF_DSYNC` when `sync` is set (data
-    /// durability is the contract, so timestamp-only commits are skipped), plus the
-    /// request-local `RWF_DONTCACHE` hint.
+    /// Use `RWF_DSYNC` because the contract does not require timestamp-only metadata.
     fn rw_flags(&mut self) -> i32 {
         let sync = if self.sync { libc::RWF_DSYNC } else { 0 };
         sync | self.cache.rw_flag()

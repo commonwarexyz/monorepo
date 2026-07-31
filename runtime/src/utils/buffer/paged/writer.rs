@@ -129,8 +129,8 @@ impl<B: Blob> Writer<B> {
 
     /// Write bytes to the underlying blob and make them durable.
     ///
-    /// Uses [`Blob::write_at_with`] with [`WriteOptions::SYNC`] when there are no earlier unsynced
-    /// mutations. Otherwise, writes the bytes and then syncs the blob.
+    /// Uses [`Blob::write_at_with`] with [`WriteOptions::SYNC`] when no earlier mutation is pending.
+    /// Otherwise, it writes the bytes and then syncs the blob.
     async fn write_at_durable(
         &mut self,
         offset: u64,
@@ -388,13 +388,11 @@ impl<B: Blob> Writer<B> {
     /// If `write_partial_page` is true, the partial page will be written to the blob as well along
     /// with a CRC record.
     ///
-    /// A flush emits one write covering whole physical pages. A previously committed partial
-    /// page is rewritten in full, resubmitting its committed prefix and protected CRC slot
-    /// byte-identically (see the module docs on checksum slots).
+    /// A flush emits one write covering whole physical pages. A previously committed partial page
+    /// is rewritten in full, preserving its committed bytes and protected checksum slot.
     ///
-    /// If `sync` is true, that write is made durable immediately: with [`Blob::write_at_with`] and
-    /// [`WriteOptions::SYNC`] when there are no earlier unsynced mutations, or by writing it and
-    /// syncing the blob when there are.
+    /// If `sync` is true, the emitted write is made durable immediately. When an earlier mutation
+    /// is pending, the write is followed by a blob sync instead of relying on per-write durability.
     ///
     /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
     async fn flush_internal(
@@ -463,9 +461,8 @@ impl<B: Blob> Writer<B> {
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         assert_eq!(self.current_page * self.cache_ref.page_size(), new_offset);
 
-        // Write the physical pages to the blob. A previously committed partial page is rewritten
-        // in full: its committed prefix and protected CRC slot are resubmitted byte-identically,
-        // so a torn write cannot change their durable bytes.
+        // Rewriting a physical page resubmits its committed bytes and protected checksum
+        // unchanged, so a torn write leaves the previous state recoverable.
         if sync {
             self.write_at_durable(write_at_offset, physical_pages)
                 .await?;
@@ -682,11 +679,8 @@ impl<B: Blob> Writer<B> {
         }
     }
 
-    /// Build a CRC record and identify its active checksum. If an old checksum is provided, it is
-    /// preserved in its original slot and the new checksum is placed in the other slot.
-    ///
-    /// The rewrite resubmits the preserved slot byte-identically, so an interrupted rewrite can
-    /// recover either the old partial page or the new one.
+    /// Build a CRC record and identify its active checksum. An old checksum remains in its original
+    /// slot while the new checksum is placed in the other slot.
     const fn build_crc_record(
         new_len: u16,
         new_crc: u32,
@@ -830,9 +824,8 @@ impl<B: Blob> Writer<B> {
 
     /// Flushes buffered data and makes all pending mutations durable.
     ///
-    /// The flush's write can be persisted with [`Blob::write_at_with`] and
-    /// [`WriteOptions::SYNC`]. If there are earlier unsynced mutations, durability is completed
-    /// with [`Blob::sync`].
+    /// A newly flushed write can carry [`WriteOptions::SYNC`] when no earlier mutation is pending.
+    /// Otherwise, [`Blob::sync`] provides the barrier for all pending mutations.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Flush any buffered data, including any partial page. A flush that writes to the blob
         // makes that write durable itself and returns true.
