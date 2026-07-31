@@ -82,7 +82,7 @@ RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 
 ## Platform Compatibility
 
-The Commonware Library supports Linux and macOS. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
+The Commonware Library supports Linux and macOS, although only Linux is recommended for production use. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 
