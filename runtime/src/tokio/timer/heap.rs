@@ -13,16 +13,16 @@ use std::sync::atomic::Ordering;
 const ARITY: usize = 4;
 
 /// A timer and its ordering metadata.
-pub(super) struct HeapItem {
+struct Item {
     /// Fixed monotonic deadline for the timer.
-    pub(super) deadline: Deadline,
+    deadline: Deadline,
     /// Sequence used to order timers with the same deadline.
-    pub(super) sequence: u64,
+    sequence: u64,
     /// Shared timer state.
-    pub(super) entry: EntryArc<Entry>,
+    entry: EntryArc<Entry>,
 }
 
-impl HeapItem {
+impl Item {
     /// Return whether this item belongs before another item.
     fn precedes(&self, other: &Self) -> bool {
         self.deadline < other.deadline
@@ -34,7 +34,7 @@ impl HeapItem {
 #[derive(Default)]
 pub(super) struct Heap {
     /// Heap items in breadth-first order.
-    items: Vec<HeapItem>,
+    items: Vec<Item>,
 }
 
 impl Heap {
@@ -43,27 +43,31 @@ impl Heap {
         self.items.len()
     }
 
-    /// Return the earliest timer without removing it.
-    pub(super) fn peek(&self) -> Option<&HeapItem> {
-        self.items.first()
+    /// Return the earliest deadline without removing its timer.
+    pub(super) fn peek(&self) -> Option<Deadline> {
+        self.items.first().map(|item| item.deadline)
     }
 
-    /// Insert a timer in logarithmic time.
+    /// Insert a timer.
     ///
     /// # Panics
     ///
     /// Panics if the timer entry is already resident in a heap.
-    pub(super) fn push(&mut self, item: HeapItem) {
+    pub(super) fn push(&mut self, deadline: Deadline, sequence: u64, entry: EntryArc<Entry>) {
         // Every heap-index access occurs while the owning shard mutex is held.
         // Relaxed ordering is sufficient because the mutex publishes mutations.
         assert_eq!(
-            item.entry.heap_index.load(Ordering::Relaxed),
+            entry.heap_index.load(Ordering::Relaxed),
             NOT_IN_HEAP,
             "timer entry is already in a heap"
         );
 
         let index = self.items.len();
-        self.items.push(item);
+        self.items.push(Item {
+            deadline,
+            sequence,
+            entry,
+        });
         self.items[index]
             .entry
             .heap_index
@@ -71,27 +75,30 @@ impl Heap {
         self.sift_up(index);
     }
 
-    /// Remove and return the earliest timer in logarithmic time.
-    pub(super) fn pop(&mut self) -> Option<HeapItem> {
-        self.remove_at(0)
+    /// Remove and return the earliest timer entry.
+    pub(super) fn pop(&mut self) -> Option<EntryArc<Entry>> {
+        self.remove_at(0).map(|item| item.entry)
     }
 
     /// Remove the timer at `index` if it contains `expected`.
     ///
-    /// Pointer identity prevents a stale index from removing a different timer.
-    pub(super) fn remove(&mut self, index: usize, expected: &EntryArc<Entry>) -> Option<HeapItem> {
-        if !self
-            .items
-            .get(index)
-            .is_some_and(|item| EntryArc::ptr_eq(&item.entry, expected))
-        {
-            return None;
+    /// Return true if the expected entry was removed and false otherwise.
+    pub(super) fn remove(&mut self, index: usize, expected: &EntryArc<Entry>) -> bool {
+        if !self.items.get(index).is_some_and(|item| {
+            // Pointer identity prevents a stale index from removing a different timer.
+            EntryArc::ptr_eq(&item.entry, expected)
+        }) {
+            return false;
         }
+
         self.remove_at(index)
+            .expect("validated timer heap index disappeared");
+
+        true
     }
 
     /// Remove and return an item by index without checking its identity.
-    fn remove_at(&mut self, index: usize) -> Option<HeapItem> {
+    fn remove_at(&mut self, index: usize) -> Option<Item> {
         if index >= self.items.len() {
             return None;
         }
@@ -104,6 +111,7 @@ impl Heap {
                 .entry
                 .heap_index
                 .store(index, Ordering::Relaxed);
+
             if parent_index(index)
                 .is_some_and(|parent| self.items[index].precedes(&self.items[parent]))
             {
@@ -112,10 +120,12 @@ impl Heap {
                 self.sift_down(index);
             }
         }
+
         removed
             .entry
             .heap_index
             .store(NOT_IN_HEAP, Ordering::Relaxed);
+
         Some(removed)
     }
 
@@ -156,6 +166,7 @@ impl Heap {
     /// Swap two items and publish both resulting indices.
     fn swap(&mut self, first: usize, second: usize) {
         self.items.swap(first, second);
+
         // The owning shard mutex orders these relaxed stores with cancellation.
         self.items[first]
             .entry
@@ -187,16 +198,15 @@ const fn child_index(index: usize, offset: usize) -> Option<usize> {
     base.checked_add(offset + 1)
 }
 
-/// Unit tests for heap ordering and indexed removal.
 #[cfg(all(test, not(feature = "loom")))]
 mod tests {
     use super::*;
-    use commonware_utils::TestRng;
+    use commonware_utils::test_rng;
     use rand::RngExt;
     use std::{sync::Arc, time::Duration};
 
     /// A timer retained by the reference model.
-    struct LiveTimer {
+    struct ModelItem {
         /// Deadline expressed as nanoseconds for convenient comparison.
         deadline: u64,
         /// Sequence used by the heap tie breaker.
@@ -210,19 +220,15 @@ mod tests {
         Deadline::from_duration(Duration::from_nanos(nanos))
     }
 
-    /// Create a fresh heap item and return its shared entry.
-    fn item(deadline_nanos: u64, sequence: u64) -> (Arc<Entry>, HeapItem) {
+    /// Insert a fresh entry and return its shared identity.
+    fn insert(heap: &mut Heap, deadline_nanos: u64, sequence: u64) -> Arc<Entry> {
         let entry = Arc::new(Entry::new());
-        let item = HeapItem {
-            deadline: deadline(deadline_nanos),
-            sequence,
-            entry: Arc::clone(&entry),
-        };
-        (entry, item)
+        heap.push(deadline(deadline_nanos), sequence, Arc::clone(&entry));
+        entry
     }
 
     /// Return the comparable key of a heap item.
-    const fn key(item: &HeapItem) -> (Duration, u64) {
+    const fn key(item: &Item) -> (Duration, u64) {
         (item.deadline.as_duration(), item.sequence)
     }
 
@@ -243,7 +249,7 @@ mod tests {
     }
 
     /// Pops and verifies the minimum retained by the reference model.
-    fn assert_pop_matches_model(heap: &mut Heap, model: &mut Vec<LiveTimer>) {
+    fn assert_pop_matches_model(heap: &mut Heap, model: &mut Vec<ModelItem>) {
         let expected_index = model
             .iter()
             .enumerate()
@@ -252,7 +258,7 @@ mod tests {
             .expect("reference model is not empty");
         let expected = model.swap_remove(expected_index);
         let popped = heap.pop().expect("heap matches reference length");
-        assert!(Arc::ptr_eq(&popped.entry, &expected.entry));
+        assert!(Arc::ptr_eq(&popped, &expected.entry));
         assert_eq!(
             expected.entry.heap_index.load(Ordering::Relaxed),
             NOT_IN_HEAP
@@ -262,11 +268,7 @@ mod tests {
     /// Remove the entry at `index` and verify its identity and resulting state.
     fn assert_remove_at(heap: &mut Heap, index: usize) {
         let expected_entry = Arc::clone(&heap.items[index].entry);
-        let expected_key = key(&heap.items[index]);
-        let removed = heap.remove(index, &expected_entry).expect("resident entry");
-
-        assert!(Arc::ptr_eq(&removed.entry, &expected_entry));
-        assert_eq!(key(&removed), expected_key);
+        assert!(heap.remove(index, &expected_entry));
         assert_eq!(
             expected_entry.heap_index.load(Ordering::Relaxed),
             NOT_IN_HEAP
@@ -281,14 +283,17 @@ mod tests {
 
         let mut heap = Heap::default();
         for &(deadline, sequence) in keys {
-            heap.push(item(deadline, sequence).1);
+            insert(&mut heap, deadline, sequence);
             assert_invariants(&heap);
         }
 
         for expected in expected {
+            assert_eq!(
+                heap.items.first().map(key),
+                Some((Duration::from_nanos(expected.0), expected.1))
+            );
             let popped = heap.pop().expect("expected a timer");
-            assert_eq!(key(&popped), (Duration::from_nanos(expected.0), expected.1));
-            assert_eq!(popped.entry.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
+            assert_eq!(popped.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
             assert_invariants(&heap);
         }
         assert_eq!(heap.len(), 0);
@@ -303,30 +308,28 @@ mod tests {
         assert_eq!(heap.len(), 0);
         assert!(heap.peek().is_none());
         assert!(heap.pop().is_none());
-        assert!(heap.remove(0, &missing).is_none());
+        assert!(!heap.remove(0, &missing));
         assert_eq!(missing.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
 
         // Push and pop a singleton, checking its key, identity, and index.
-        let (entry, singleton) = item(7, 11);
-        heap.push(singleton);
-        let head = heap.peek().expect("expected a head");
-        assert!(Arc::ptr_eq(&head.entry, &entry));
-        assert_eq!(key(head), (Duration::from_nanos(7), 11));
+        let entry = insert(&mut heap, 7, 11);
+        assert_eq!(heap.peek(), Some(deadline(7)));
+        assert!(Arc::ptr_eq(&heap.items[0].entry, &entry));
+        assert_eq!(key(&heap.items[0]), (Duration::from_nanos(7), 11));
         assert_eq!(entry.heap_index.load(Ordering::Relaxed), 0);
         assert_invariants(&heap);
 
         let popped = heap.pop().expect("expected a timer");
-        assert!(Arc::ptr_eq(&popped.entry, &entry));
-        assert_eq!(key(&popped), (Duration::from_nanos(7), 11));
+        assert!(Arc::ptr_eq(&popped, &entry));
         assert_eq!(entry.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
         assert_invariants(&heap);
 
         // Remove a singleton by index, then remove three positions from a larger heap.
-        heap.push(item(1, 0).1);
+        insert(&mut heap, 1, 0);
         assert_remove_at(&mut heap, 0);
         assert_eq!(heap.len(), 0);
         for value in (0..64).rev() {
-            heap.push(item(value, value).1);
+            insert(&mut heap, value, value);
         }
         assert_invariants(&heap);
 
@@ -377,7 +380,7 @@ mod tests {
         // later parent, forcing the replacement toward the root.
         let mut heap = Heap::default();
         for value in [0, 100, 1, 2, 3, 101, 102, 103, 104, 10] {
-            heap.push(item(value, value).1);
+            insert(&mut heap, value, value);
         }
         assert_invariants(&heap);
 
@@ -387,10 +390,7 @@ mod tests {
 
         // The replacement must settle at index one while all other indices and
         // parent ordering remain valid.
-        let removed = heap
-            .remove(5, &removed_entry)
-            .expect("expected arbitrary entry");
-        assert!(Arc::ptr_eq(&removed.entry, &removed_entry));
+        assert!(heap.remove(5, &removed_entry));
         assert_eq!(
             removed_entry.heap_index.load(Ordering::Relaxed),
             NOT_IN_HEAP
@@ -406,7 +406,7 @@ mod tests {
         // children, so root removal must move that replacement toward a leaf.
         let mut heap = Heap::default();
         for value in 0..10 {
-            heap.push(item(value, value).1);
+            insert(&mut heap, value, value);
         }
         assert_invariants(&heap);
 
@@ -416,8 +416,7 @@ mod tests {
 
         // Verify the removed sentinel and that the replacement no longer
         // occupies the root after sift-down.
-        let removed = heap.remove(0, &removed_entry).expect("expected root entry");
-        assert!(Arc::ptr_eq(&removed.entry, &removed_entry));
+        assert!(heap.remove(0, &removed_entry));
         assert_eq!(
             removed_entry.heap_index.load(Ordering::Relaxed),
             NOT_IN_HEAP
@@ -433,7 +432,7 @@ mod tests {
         // out-of-range and sentinel indices for the same resident entry.
         let mut heap = Heap::default();
         for value in 0..16 {
-            heap.push(item(value, value).1);
+            insert(&mut heap, value, value);
         }
         let original_len = heap.len();
         let victim = Arc::clone(&heap.items[5].entry);
@@ -441,17 +440,17 @@ mod tests {
         let mismatched = Arc::new(Entry::new());
 
         // Invalid removal requests must not change length, ordering, or indices.
-        assert!(heap.remove(stale_index, &mismatched).is_none());
-        assert!(heap.remove(heap.len(), &victim).is_none());
-        assert!(heap.remove(NOT_IN_HEAP, &victim).is_none());
+        assert!(!heap.remove(stale_index, &mismatched));
+        assert!(!heap.remove(heap.len(), &victim));
+        assert!(!heap.remove(NOT_IN_HEAP, &victim));
         assert_eq!(heap.len(), original_len);
         assert_invariants(&heap);
 
         // A valid identity removes once. Reusing its stale index cannot remove
         // whichever entry later occupies that array slot.
-        assert!(heap.remove(stale_index, &victim).is_some());
+        assert!(heap.remove(stale_index, &victim));
         assert_eq!(victim.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
-        assert!(heap.remove(stale_index, &victim).is_none());
+        assert!(!heap.remove(stale_index, &victim));
         assert_eq!(heap.len(), original_len - 1);
         assert_invariants(&heap);
     }
@@ -461,18 +460,17 @@ mod tests {
     fn randomized_operations_match_reference_model() {
         // Use deterministic randomness and begin near sequence wrap so the trace
         // combines insert, pop, indexed removal, and wrapping tie breakers.
-        let mut rng = TestRng::new(0xb3bd_c9d9);
+        let mut rng = test_rng();
         let mut heap = Heap::default();
-        let mut model = Vec::<LiveTimer>::new();
+        let mut model = Vec::<ModelItem>::new();
         let mut sequence = u64::MAX - 64;
 
         for _ in 0..20_000 {
-            let insert = model.is_empty() || (model.len() < 128 && rng.random_bool(0.55));
-            if insert {
+            let should_insert = model.is_empty() || (model.len() < 128 && rng.random_bool(0.55));
+            if should_insert {
                 let deadline = rng.random_range(0..257);
-                let (entry, item) = item(deadline, sequence);
-                heap.push(item);
-                model.push(LiveTimer {
+                let entry = insert(&mut heap, deadline, sequence);
+                model.push(ModelItem {
                     deadline,
                     sequence,
                     entry,
@@ -484,10 +482,7 @@ mod tests {
                 let model_index = rng.random_range(0..model.len());
                 let expected = model.swap_remove(model_index);
                 let heap_index = expected.entry.heap_index.load(Ordering::Relaxed);
-                let removed = heap
-                    .remove(heap_index, &expected.entry)
-                    .expect("reference entry is resident");
-                assert!(Arc::ptr_eq(&removed.entry, &expected.entry));
+                assert!(heap.remove(heap_index, &expected.entry));
                 assert_eq!(
                     expected.entry.heap_index.load(Ordering::Relaxed),
                     NOT_IN_HEAP
@@ -549,15 +544,7 @@ mod tests {
         // entry again under a different key.
         let mut heap = Heap::default();
         let entry = Arc::new(Entry::new());
-        heap.push(HeapItem {
-            deadline: deadline(1),
-            sequence: 0,
-            entry: Arc::clone(&entry),
-        });
-        heap.push(HeapItem {
-            deadline: deadline(2),
-            sequence: 1,
-            entry,
-        });
+        heap.push(deadline(1), 0, Arc::clone(&entry));
+        heap.push(deadline(2), 1, entry);
     }
 }

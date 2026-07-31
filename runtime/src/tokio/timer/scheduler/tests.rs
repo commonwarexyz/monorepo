@@ -2209,7 +2209,7 @@ mod loom_tests {
                 // The single production rearm call must converge to the update
                 // that raced its first native operation.
                 let state = shard.state.lock();
-                let desired = state.entries.peek().map(|item| item.deadline);
+                let desired = state.entries.peek();
                 match update {
                     RearmUpdate::Disarm => {
                         assert_eq!(desired, None);

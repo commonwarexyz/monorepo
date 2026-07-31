@@ -5,7 +5,7 @@ use super::linux::NativeAlarm;
 #[cfg(target_os = "macos")]
 use super::macos::NativeAlarm;
 use super::{
-    heap::{Heap, HeapItem},
+    heap::Heap,
     sync::{AtomicWaker, EntryArc, Mutex},
 };
 use crate::utils::{Panicker, extract_panic_message, resume_reported_panic};
@@ -494,15 +494,11 @@ impl<A: Alarm> Shard<A> {
                     false
                 }
                 ShardLifecycle::Running => {
-                    let previous = state.entries.peek().map(|item| item.deadline);
+                    let previous = state.entries.peek();
                     let sequence = state.sequence;
                     state.sequence = state.sequence.wrapping_add(1);
-                    state.entries.push(HeapItem {
-                        deadline,
-                        sequence,
-                        entry,
-                    });
-                    let desired = state.entries.peek().map(|item| item.deadline);
+                    state.entries.push(deadline, sequence, entry);
+                    let desired = state.entries.peek();
                     previous != desired && !arm_covers(state.armed_deadline, desired)
                 }
             }
@@ -521,12 +517,12 @@ impl<A: Alarm> Shard<A> {
             if index == NOT_IN_HEAP {
                 return;
             }
-            let previous = state.entries.peek().map(|item| item.deadline);
-            state
-                .entries
-                .remove(index, entry)
-                .expect("timer heap index does not reference its entry");
-            let desired = state.entries.peek().map(|item| item.deadline);
+            let previous = state.entries.peek();
+            assert!(
+                state.entries.remove(index, entry),
+                "timer heap index does not reference its entry"
+            );
+            let desired = state.entries.peek();
             previous != desired && !arm_covers(state.armed_deadline, desired)
         };
         if notify {
@@ -541,7 +537,7 @@ impl<A: Alarm> Shard<A> {
                 let state = self.state.lock();
                 (
                     state.armed_deadline,
-                    state.entries.peek().map(|item| item.deadline),
+                    state.entries.peek(),
                     state.lifecycle != ShardLifecycle::Running,
                 )
             };
@@ -568,7 +564,7 @@ impl<A: Alarm> Shard<A> {
                 return Ok(());
             }
             state.armed_deadline = desired;
-            let current = state.entries.peek().map(|item| item.deadline);
+            let current = state.entries.peek();
             if arm_covers(state.armed_deadline, current) {
                 return Ok(());
             }
@@ -593,19 +589,19 @@ impl<A: Alarm> Shard<A> {
             && state
                 .entries
                 .peek()
-                .is_some_and(|item| item.deadline <= now)
+                .is_some_and(|deadline| deadline <= now)
         {
-            let item = state.entries.pop().expect("timer heap minimum disappeared");
+            let entry = state.entries.pop().expect("timer heap minimum disappeared");
             // Commit expiry before teardown can observe the removed entry.
             // Cancellation may win the atomic transition, but not mutate the
             // heap concurrently. Callbacks and final release remain deferred.
-            let _ = item.entry.transition(ENTRY_FIRED);
-            batch.entries.push(item.entry);
+            let _ = entry.transition(ENTRY_FIRED);
+            batch.entries.push(entry);
         }
         Ok(state
             .entries
             .peek()
-            .is_some_and(|item| item.deadline <= now))
+            .is_some_and(|deadline| deadline <= now))
     }
 
     /// Marks orderly teardown and releases every queued sleep without waking it.
@@ -631,7 +627,7 @@ impl<A: Alarm> Shard<A> {
                 return;
             }
             let queued = state.entries.len();
-            let desired = state.entries.peek().map(|item| item.deadline);
+            let desired = state.entries.peek();
             let armed = state.armed_deadline;
             let notified = self.signal.is_notified();
             let message = format!(
@@ -1126,8 +1122,8 @@ fn arm_covers(armed: Option<Deadline>, desired: Option<Deadline>) -> bool {
 /// Removes every heap item and returns its shared entry.
 fn drain_heap(heap: &mut Heap) -> Vec<EntryArc<Entry>> {
     let mut entries = Vec::with_capacity(heap.len());
-    while let Some(item) = heap.pop() {
-        entries.push(item.entry);
+    while let Some(entry) = heap.pop() {
+        entries.push(entry);
     }
     entries
 }
