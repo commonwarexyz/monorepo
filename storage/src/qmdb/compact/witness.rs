@@ -1,7 +1,7 @@
 //! Shared machinery for the compact-db witness journal.
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
-//! [`Witness`] is a complete snapshot of one synced commit, storing the encoded commit operation, the
+//! [`Witness`] is a complete snapshot of one synced commit: the encoded commit operation, the
 //! committed leaf count, and the pins one operation below it. The commit's inclusion proof is
 //! not stored. It is derived from the pins and the operation when an entry is loaded. On open
 //! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pins,
@@ -29,33 +29,28 @@ use commonware_parallel::Strategy;
 use commonware_utils::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// A single durably persisted witness: a complete snapshot of one synced commit.
-///
-/// Neither the root nor the commit's inclusion proof is stored. The Merkle is rebuilt by
-/// appending the commit operation to the pins, and the root and proof are computed from it.
+/// The state at a commit as persisted by the witness journal.
 #[derive(Clone)]
 pub(crate) struct Witness<F: Family, D: Digest> {
-    /// The encoded last-commit operation.
+    /// The encoded last commit operation at `size - 1`.
     pub(crate) op_bytes: Vec<u8>,
-    /// Total leaves in the committed Merkle. The commit operation sits at `leaf_count - 1`.
-    pub(crate) leaf_count: Location<F>,
-    /// Pins one operation below the commit, in the order returned by
-    /// [`Family::nodes_to_pin`] at `leaf_count - 1`.
+    /// The committed size of the Merkle.
+    pub(crate) size: Location<F>,
+    /// Pinned nodes at the commit operation, in the order returned by
+    /// [`Family::nodes_to_pin`].
     pub(crate) pinned_nodes: Vec<D>,
 }
 
 impl<F: Family, D: Digest> EncodeSize for Witness<F, D> {
     fn encode_size(&self) -> usize {
-        self.op_bytes.encode_size()
-            + self.leaf_count.encode_size()
-            + self.pinned_nodes.encode_size()
+        self.op_bytes.encode_size() + self.size.encode_size() + self.pinned_nodes.encode_size()
     }
 }
 
 impl<F: Family, D: Digest> Write for Witness<F, D> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.op_bytes.write(buf);
-        self.leaf_count.write(buf);
+        self.size.write(buf);
         self.pinned_nodes.write(buf);
     }
 }
@@ -65,11 +60,11 @@ impl<F: Family, D: Digest> Read for Witness<F, D> {
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let op_bytes = Vec::<u8>::read_cfg(buf, &((..).into(), ()))?;
-        let leaf_count = Location::<F>::read_cfg(buf, &())?;
+        let size = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
         Ok(Self {
             op_bytes,
-            leaf_count,
+            size,
             pinned_nodes,
         })
     }
@@ -83,27 +78,27 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             op_bytes: u.arbitrary()?,
-            leaf_count: Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?),
+            size: Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?),
             pinned_nodes: u.arbitrary()?,
         })
     }
 }
 
-/// A witness plus the root and commit inclusion proof derived from it.
+/// A witness with the root and commit proof derived from it.
 #[derive(Clone)]
-pub(crate) struct DerivedWitness<F: Family, D: Digest> {
+pub(crate) struct VerifiedWitness<F: Family, D: Digest> {
     pub(crate) witness: Witness<F, D>,
     /// Root committed by `witness`.
     pub(crate) root: D,
-    /// Inclusion proof for the commit at `leaf_count - 1` against `root`, derived from the
+    /// Inclusion proof for the commit at `size - 1` against `root`, derived from the
     /// witness when it was built or loaded.
     pub(crate) proof: Proof<F, D>,
 }
 
-impl<F: Family, D: Digest> DerivedWitness<F, D> {
+impl<F: Family, D: Digest> VerifiedWitness<F, D> {
     /// Total leaves in the committed Merkle, which also identifies the last commit's location.
     pub(crate) const fn leaf_count(&self) -> Location<F> {
-        self.witness.leaf_count
+        self.witness.size
     }
 
     /// The compact-sync target this witness can serve: its root and leaf count.
@@ -132,7 +127,7 @@ enum Durability {
 pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     journal: Journal<E, F, D>,
 
-    tip_witness: RwLock<DerivedWitness<F, D>>,
+    tip_witness: RwLock<VerifiedWitness<F, D>>,
 
     /// Whether the cached witness came from compact sync and has not been written to the
     /// journal yet. While set, the journal still holds the partition's previous contents; the
@@ -142,8 +137,8 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
 }
 
 impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
-    /// Wrap an opened journal and a derived witness into a store.
-    pub(crate) const fn new(journal: Journal<E, F, D>, witness: DerivedWitness<F, D>) -> Self {
+    /// Wrap an opened journal and a verified witness into a store.
+    pub(crate) const fn new(journal: Journal<E, F, D>, witness: VerifiedWitness<F, D>) -> Self {
         Self {
             journal,
             tip_witness: RwLock::new(witness),
@@ -157,7 +152,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// recovers it.
     pub(crate) const fn from_import(
         journal: Journal<E, F, D>,
-        witness: DerivedWitness<F, D>,
+        witness: VerifiedWitness<F, D>,
     ) -> Self {
         Self {
             journal,
@@ -167,7 +162,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     }
 
     /// Read the cached witness without exposing the underlying lock to db code.
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&DerivedWitness<F, D>) -> R) -> R {
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&VerifiedWitness<F, D>) -> R) -> R {
         f(&self.tip_witness.read())
     }
 
@@ -223,8 +218,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         })
     }
 
-    /// Replace the cached witness after the matching compact Merkle state is persisted or loaded.
-    pub(crate) fn replace(&self, witness: DerivedWitness<F, D>) {
+    /// Replace the cached witness after the matching compact Merkle state is staged or loaded.
+    pub(crate) fn replace(&self, witness: VerifiedWitness<F, D>) {
         *self.tip_witness.write() = witness;
     }
 
@@ -294,34 +289,34 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
-        let derived;
-        (self, derived) = self
+        let verified;
+        (self, verified) = self
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
-        let Some(derived) = derived else {
+        let Some(verified) = verified else {
             return Ok(self);
         };
-        (self.journal, _) = self.journal.append(&derived.witness).await?;
+        (self.journal, _) = self.journal.append(&verified.witness).await?;
         self.journal = match durability {
             Durability::Commit => self.journal.commit().await?,
             Durability::Sync => self.journal.sync().await?,
         };
         self.import_pending.store(false, Ordering::Relaxed);
         merkle.prune_to_frontier();
-        self.replace(derived);
+        self.replace(verified);
         Ok(self)
     }
 
     /// Decide what a persist must write, clearing the journal first when an import is pending.
     ///
-    /// Returns `None` if the durable tip already matches the in-memory Merkle and no import is
+    /// Returns `None` if the cached tip already matches the in-memory Merkle and no import is
     /// pending, otherwise the witness to append and install in the cache.
     async fn stage<H, S>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
         inactivity_floor_loc: Location<F>,
         last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
-    ) -> Result<(Self, Option<DerivedWitness<F, D>>), Error<F>>
+    ) -> Result<(Self, Option<VerifiedWitness<F, D>>), Error<F>>
     where
         H: Hasher<Digest = D>,
         S: Strategy,
@@ -331,7 +326,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         // is nothing to do. During a pending import the cached witness is not in the journal
         // yet, so it is exactly what must be persisted: replace the journal's contents with it.
         let cached_leaves = self.with(|w| w.leaf_count());
-        let derived = if cached_leaves == merkle.leaves() {
+        let verified = if cached_leaves == merkle.leaves() {
             if !self.import_pending.load(Ordering::Relaxed) {
                 return Ok((self, None));
             }
@@ -344,7 +339,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         if self.import_pending.load(Ordering::Relaxed) {
             self = self.clear_for_import().await?;
         }
-        Ok((self, Some(derived)))
+        Ok((self, Some(verified)))
     }
 
     /// Rewind the journal so the entry committing exactly `target` leaves becomes the tip, then
@@ -422,21 +417,21 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Ok(None);
         }
         let entry = self.journal.read(pos).await?;
-        Ok((entry.leaf_count == target).then_some((pos, entry)))
+        Ok((entry.size == target).then_some((pos, entry)))
     }
 
-    /// Binary search for the first retained position whose entry commits at least `leaf_count`
+    /// Binary search for the first retained position whose entry commits at least `size`
     /// leaves, or the end of the journal if none does.
     async fn first_at_or_above(
         reader: &impl Contiguous<Item = Witness<F, D>>,
-        leaf_count: Location<F>,
+        size: Location<F>,
     ) -> Result<u64, Error<F>> {
         let bounds = reader.bounds();
         let (mut lo, mut hi) = (bounds.start, bounds.end);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if reader.read(mid).await?.leaf_count < leaf_count {
-                // The entry at `mid` is below `leaf_count`, so the answer is after it.
+            if reader.read(mid).await?.size < size {
+                // The entry at `mid` is below `size`, so the answer is after it.
                 lo = mid + 1;
             } else {
                 // The entry at `mid` qualifies, so the answer is `mid` or before it.
@@ -471,7 +466,7 @@ pub(crate) fn build_witness<F, H, S>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     inactivity_floor_loc: Location<F>,
     last_commit_op_bytes: Vec<u8>,
-) -> Result<DerivedWitness<F, H::Digest>, Error<F>>
+) -> Result<VerifiedWitness<F, H::Digest>, Error<F>>
 where
     F: Family,
     H: Hasher,
@@ -479,19 +474,18 @@ where
 {
     let hasher = qmdb::hasher::<H>();
     merkle.with_mem(|mem| {
-        let leaf_count = mem.leaves();
-        let last_commit_loc = Location::new(*leaf_count - 1);
-        let inactive_peaks =
-            F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
+        let size = mem.leaves();
+        let last_commit_loc = Location::new(*size - 1);
+        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), inactivity_floor_loc);
         let root = mem.root(&hasher, inactive_peaks)?;
         let pinned_nodes = F::nodes_to_pin(last_commit_loc)
             .map(|pos| *mem.get_node_unchecked(pos))
             .collect::<Vec<_>>();
         let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
-        Ok(DerivedWitness {
+        Ok(VerifiedWitness {
             witness: Witness {
                 op_bytes: last_commit_op_bytes,
-                leaf_count,
+                size,
                 pinned_nodes,
             },
             root,
@@ -520,7 +514,7 @@ async fn load_tip<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
     merkle: &compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
-) -> Result<(DerivedWitness<F, H::Digest>, Op), Error<F>>
+) -> Result<(VerifiedWitness<F, H::Digest>, Op), Error<F>>
 where
     E: Context,
     F: Family,
@@ -545,7 +539,7 @@ fn rebuild<F, D, H, S, Op>(
     witness: Witness<F, D>,
     merkle: &compact::Merkle<F, D, S>,
     commit_codec_config: &Op::Cfg,
-) -> Result<(DerivedWitness<F, D>, Op), Error<F>>
+) -> Result<(VerifiedWitness<F, D>, Op), Error<F>>
 where
     F: Family,
     D: Digest,
@@ -553,14 +547,14 @@ where
     S: Strategy,
     Op: Read + Floored<F>,
 {
-    let leaf_count = witness.leaf_count;
-    if leaf_count == 0 {
+    let size = witness.size;
+    if size == 0 {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
 
     // Decode the commit op to get the inactivity floor, which determines the inactive peak
     // boundary used for root computation.
-    let last_commit_loc = Location::new(*leaf_count - 1);
+    let last_commit_loc = Location::new(*size - 1);
     let last_commit_op = Op::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let inactivity_floor_loc = last_commit_op
@@ -575,8 +569,7 @@ where
     merkle
         .append_leaf(&hasher, &witness.op_bytes)
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
-    let inactive_peaks =
-        F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
+    let inactive_peaks = F::inactive_peaks(F::location_to_position(size), inactivity_floor_loc);
     let root = merkle
         .root(&hasher, inactive_peaks)
         .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
@@ -585,7 +578,7 @@ where
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
     merkle.prune_to_frontier();
     Ok((
-        DerivedWitness {
+        VerifiedWitness {
             witness,
             root,
             proof,
@@ -641,8 +634,8 @@ where
     merkle.apply_batch(&batch)?;
 
     // The initial commit has one leaf and an inactivity floor of 0.
-    let derived = build_witness::<F, H, S>(merkle, Location::new(0), last_commit_op_bytes)?;
-    let (journal, _) = journal.append(&derived.witness).await?;
+    let verified = build_witness::<F, H, S>(merkle, Location::new(0), last_commit_op_bytes)?;
+    let (journal, _) = journal.append(&verified.witness).await?;
     let journal = journal.sync().await?;
     Ok(journal)
 }
@@ -698,14 +691,14 @@ pub(crate) mod tests {
     {
         let size = journal.size();
         let entry = journal.read(size - 1).await.unwrap();
-        (entry.op_bytes, entry.leaf_count, entry.pinned_nodes)
+        (entry.op_bytes, entry.size, entry.pinned_nodes)
     }
 
     /// Append a witness entry without syncing it.
     pub(crate) async fn append_unsynced<E, F, D>(
         journal: Journal<E, F, D>,
         op_bytes: Vec<u8>,
-        leaf_count: Location<F>,
+        size: Location<F>,
         pinned_nodes: Vec<D>,
     ) -> Journal<E, F, D>
     where
@@ -716,7 +709,7 @@ pub(crate) mod tests {
         let (journal, _) = journal
             .append(&Witness {
                 op_bytes,
-                leaf_count,
+                size,
                 pinned_nodes,
             })
             .await
@@ -728,7 +721,7 @@ pub(crate) mod tests {
     pub(crate) async fn overwrite_tip<E, F, D>(
         journal: Journal<E, F, D>,
         op_bytes: Vec<u8>,
-        leaf_count: Location<F>,
+        size: Location<F>,
         pinned_nodes: Vec<D>,
     ) -> Journal<E, F, D>
     where
@@ -736,12 +729,12 @@ pub(crate) mod tests {
         F: Family,
         D: Digest,
     {
-        let size = journal.size();
-        let journal = journal.rewind(size - 1).await.unwrap();
+        let entries = journal.size();
+        let journal = journal.rewind(entries - 1).await.unwrap();
         let (journal, _) = journal
             .append(&Witness {
                 op_bytes,
-                leaf_count,
+                size,
                 pinned_nodes,
             })
             .await
