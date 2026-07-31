@@ -25,7 +25,7 @@ use thiserror::Error;
 /// # Panics
 ///
 /// Panics if the aggregate burst does not fit in a `usize`.
-pub const fn burst_backlog(peers: usize, rate: Quota) -> usize {
+pub const fn backlog(peers: usize, rate: Quota) -> usize {
     peers
         .checked_mul(rate.burst_size().get() as usize)
         .expect("message backlog overflow")
@@ -222,17 +222,17 @@ mod tests {
     use commonware_utils::NZU32;
 
     #[test]
-    fn burst_backlog_aggregates_peers() {
+    fn backlog_aggregates_peers() {
         let rate = Quota::per_second(NZU32!(128));
 
-        assert_eq!(burst_backlog(7, rate), 896);
+        assert_eq!(backlog(7, rate), 896);
     }
 
     #[test]
     #[should_panic(expected = "message backlog overflow")]
-    fn burst_backlog_panics_on_overflow() {
+    fn backlog_panics_on_overflow() {
         let rate = Quota::per_second(NZU32!(2));
 
-        burst_backlog(usize::MAX, rate);
+        backlog(usize::MAX, rate);
     }
 }

@@ -172,7 +172,7 @@ fn main() {
         // The rate is enforced independently for each peer. All peers share each channel's inbound
         // mailbox, so size its backlog for one full burst from every peer.
         let message_rate = Quota::per_second(NZU32!(10));
-        let message_backlog = authenticated::burst_backlog(validators.len(), message_rate);
+        let message_backlog = authenticated::backlog(validators.len(), message_rate);
 
         // Provide authorized peers
         //

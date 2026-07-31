@@ -57,7 +57,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     //
     // The rate is enforced independently for each peer. All peers share each channel's inbound
     // mailbox, so size its backlog for one full burst from every peer.
-    let message_backlog = authenticated::burst_backlog(network.participants.len(), MESSAGE_RATE);
+    let message_backlog = authenticated::backlog(network.participants.len(), MESSAGE_RATE);
 
     let vote = p2p.register(VOTE_CHANNEL, MESSAGE_RATE, message_backlog);
     let certificate = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE, message_backlog);
