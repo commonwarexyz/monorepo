@@ -1,8 +1,7 @@
 //! Manages outstanding fetch requests with monotonically increasing request IDs.
 //!
 //! Each request is assigned a unique ID and keeps the request it was issued for, letting
-//! the engine check replies against what was asked and credit the gap scan with each
-//! request's true span. Removing a request aborts its future.
+//! the engine check replies against what was asked. Removing a request aborts its future.
 
 use crate::{
     merkle::{Family, Location},

@@ -6,17 +6,11 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 
-/// Errors a [`Source`](crate::qmdb::sync::source::Source) returns instead of a response.
-///
-/// Serving reads local storage, so these describe the source's own state, not a bad request from
-/// a peer. A peer that sends something unusable is given feedback through
-/// [`ValidityTx`](crate::qmdb::sync::source::ValidityTx) instead.
+/// Errors from a [`Source`](crate::qmdb::sync::source::Source) when serving a request.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError<F: Family> {
-    /// The source database failed while building the response.
     #[error("source database error: {0}")]
     Database(#[from] qmdb::Error<F>),
-    /// The wrapper holding this source has no database attached right now.
     #[error("source missing")]
     MissingSource,
 }

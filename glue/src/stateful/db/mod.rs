@@ -1460,20 +1460,20 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
 /// Run a standard replay sync. This is the shared body of every full database's
 /// [`StateSyncDb::sync_db`].
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn sync_standard_db<E, DB, R>(
+pub(crate) async fn sync_standard_db<E, DB, S>(
     context: E,
     config: DB::Config,
-    source: R,
+    source: S,
     target: sync::Target<DB::Family, DB::Digest>,
     tip_updates: mpsc::Receiver<sync::Target<DB::Family, DB::Digest>>,
     finish: Option<mpsc::Receiver<()>>,
     reached_target: Option<mpsc::Sender<sync::Target<DB::Family, DB::Digest>>>,
     sync_config: SyncEngineConfig,
-) -> Result<DB, sync::Error<DB::Family, R::Error, DB::Digest>>
+) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: sync::Database<Context = E>,
     DB::Op: Encode,
-    R: sync::SourceFor<DB>,
+    S: sync::SourceFor<DB>,
 {
     sync::sync(sync::engine::Config {
         context,
@@ -1495,21 +1495,21 @@ where
 /// target, and the target-update and reached channels are translated between the compact
 /// target and the engine's ranged target.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn sync_compact_db<E, DB, R>(
+pub(crate) async fn sync_compact_db<E, DB, S>(
     context: E,
     config: DB::Config,
-    source: R,
+    source: S,
     target: sync::CompactTarget<DB::Family, DB::Digest>,
     mut tip_updates: mpsc::Receiver<sync::CompactTarget<DB::Family, DB::Digest>>,
     finish: Option<mpsc::Receiver<()>>,
     reached_target: Option<mpsc::Sender<sync::CompactTarget<DB::Family, DB::Digest>>>,
     sync_config: SyncEngineConfig,
-) -> Result<DB, sync::Error<DB::Family, R::Error, DB::Digest>>
+) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     E: Metrics + Spawner,
     DB: sync::Database<Context = E>,
     DB::Op: Encode,
-    R: sync::SourceFor<DB>,
+    S: sync::SourceFor<DB>,
 {
     let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
     // Start at the newest target already queued, so a caller that queued an update before

@@ -389,9 +389,8 @@ where
     }
 }
 
-/// Where to report whether a fetched response verified, so a remote peer can be given feedback.
-/// `None` means the answer is final. An invalid response fails the sync instead of being
-/// retried, because a source that accepts no feedback cannot serve a different answer.
+/// Where to report whether a response was valid.
+/// This allows the sync engine to provide feedback to the [Source] that served the response.
 pub type ValidityTx = Option<oneshot::Sender<bool>>;
 
 /// A source for proofs and operations.
@@ -408,7 +407,7 @@ pub trait Source: Send + Sync {
     /// Why this source could not answer.
     type Error: std::error::Error + Send + 'static;
 
-    /// Answer one request.
+    /// Serve a request.
     #[allow(clippy::type_complexity)]
     fn serve<'a>(
         &'a self,

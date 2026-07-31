@@ -39,17 +39,7 @@ impl<J: Clone, S: Strategy> Config for crate::qmdb::keyless::Config<J, S> {
     }
 }
 
-impl<C: Clone + Send + Sync + 'static, S: Strategy> Config
-    for crate::qmdb::keyless::CompactConfig<C, S>
-{
-    type JournalConfig = ();
-
-    fn journal_config(&self) -> Self::JournalConfig {}
-}
-
-impl<C: Clone + Send + Sync + 'static, S: Strategy> Config
-    for crate::qmdb::immutable::CompactConfig<C, S>
-{
+impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::compact::Config<C, S> {
     type JournalConfig = ();
 
     fn journal_config(&self) -> Self::JournalConfig {}

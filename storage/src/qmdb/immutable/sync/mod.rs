@@ -196,24 +196,15 @@ where
         range: NonEmptyRange<Location<F>>,
         _apply_batch_size: usize,
     ) -> Result<Self, Error<F>> {
-        let last_commit_loc = range.start();
-        let op = log.into_single_op(range)?;
-
-        let journal: crate::qmdb::compact::witness::Journal<E, F, H::Digest> =
-            crate::journal::contiguous::variable::Journal::init(
-                context.child("witness"),
-                config.witness,
-            )
-            .await?;
-        let db = Self::init_from_sync(
-            config.strategy,
-            journal,
-            config.commit_codec_config,
-            last_commit_loc,
-            // None only happens at the genesis boundary, where nothing is pinned.
-            pinned_nodes.unwrap_or_default(),
-            op,
-        )?;
+        let db = crate::qmdb::compact::from_sync_result(
+            context,
+            config,
+            log,
+            pinned_nodes,
+            range,
+            Self::init_from_sync,
+        )
+        .await?;
         // The engine verified the operation and pinned nodes against the target root before handing
         // them over, so the rebuilt state is already authenticated and safe to persist.
         db.sync().await

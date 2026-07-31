@@ -23,6 +23,7 @@
 //! historical in-memory state is discarded whenever a witness is published.
 
 use super::operation::Operation;
+pub use crate::qmdb::compact::Config;
 use crate::{
     Context,
     journal::contiguous::variable::{self, Config as JournalConfig},
@@ -49,19 +50,6 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
 };
-
-/// Configuration for a compact immutable authenticated db.
-#[derive(Clone)]
-pub struct Config<C, S: Strategy> {
-    /// Strategy used to parallelize merkleization.
-    pub strategy: S,
-
-    /// Configuration for the journal that persists the witness.
-    pub witness: JournalConfig<()>,
-
-    /// Codec config used to decode the persisted last commit operation on reopen.
-    pub commit_codec_config: C,
-}
 
 /// An immutable authenticated db that discards historical operations, retaining only a witness
 /// for each published commit.

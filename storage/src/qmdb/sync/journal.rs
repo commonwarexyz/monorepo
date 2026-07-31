@@ -34,8 +34,7 @@ pub trait Journal<F: Family>: Sized + Send {
     /// Discard all operations before the given location.
     ///
     /// If current `size() <= start`, initialize as empty at the given location.
-    /// Otherwise prune data before the given location. `start` must not move backward
-    /// because the engine only resizes forward.
+    /// Otherwise prune data before the given location.
     fn resize(self, start: Location<F>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Persist the journal.
@@ -158,10 +157,7 @@ where
     }
 }
 
-/// An in-memory operation journal for databases without a persistent operation log.
-///
-/// Durability is only an optimization for sync journals. Losing the contents just restarts
-/// the sync, which costs nothing at compact sync's one operation.
+/// An in-memory operation journal.
 pub struct Memory<F: Family, E, Op> {
     start: Location<F>,
     ops: Vec<Op>,
@@ -169,22 +165,9 @@ pub struct Memory<F: Family, E, Op> {
 }
 
 impl<F: Family, E, Op> Memory<F, E, Op> {
-    /// Consume the journal, returning the single operation covering exactly `range`.
-    ///
-    /// A compact db retains exactly its final commit, so its sync range is one operation.
-    /// Any other content is [`Error::UnexpectedData`](crate::qmdb::Error::UnexpectedData).
-    pub(crate) fn into_single_op(
-        self,
-        range: commonware_utils::range::NonEmptyRange<Location<F>>,
-    ) -> Result<Op, crate::qmdb::Error<F>> {
-        let last_commit_loc = range.start();
-        if *range.end() - *last_commit_loc != 1
-            || self.start != last_commit_loc
-            || self.ops.len() != 1
-        {
-            return Err(crate::qmdb::Error::UnexpectedData(last_commit_loc));
-        }
-        Ok(self.ops.into_iter().next().expect("checked length"))
+    /// Consume the journal, returning its start location and operations.
+    pub(crate) fn into_parts(self) -> (Location<F>, Vec<Op>) {
+        (self.start, self.ops)
     }
 }
 
