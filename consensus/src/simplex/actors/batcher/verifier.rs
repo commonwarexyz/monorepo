@@ -74,10 +74,16 @@ impl<V> Certification<V> {
     /// Buffers a vote for verification (or, if already verified, for
     /// certificate recovery). Dropped once complete.
     fn add(&mut self, vote: V, is_verified: bool) {
+        let initial_capacity = if is_verified || self.batchable {
+            self.quorum
+        } else {
+            // Eager verification consumes pending storage after every vote.
+            1
+        };
         if let State::Incomplete { pending, verified } = &mut self.state {
             let votes = if is_verified { verified } else { pending };
             if votes.capacity() == 0 {
-                votes.reserve_exact(self.quorum);
+                votes.reserve_exact(initial_capacity);
             }
             votes.push(vote);
         }
@@ -701,6 +707,27 @@ mod tests {
 
         certification.complete();
         assert_eq!(certification.capacities(), (0, 0));
+    }
+
+    #[test_async]
+    async fn test_non_batchable_certification_avoids_repeated_quorum_reservations() {
+        let quorum = 64;
+        let mut certification = Certification::new(quorum, false);
+        certification.add(1u8, false);
+        certification
+            .try_verify(|pending, mut verified| async move {
+                verified.extend(pending);
+                (verified, Vec::new())
+            })
+            .await
+            .expect("non-batchable pending votes must verify eagerly");
+
+        certification.add(2u8, false);
+        let (pending, _) = certification.capacities();
+        assert!(
+            pending < quorum,
+            "a single eagerly verified vote should not reserve a quorum-sized buffer"
+        );
     }
 
     // Helper function to create a sample digest

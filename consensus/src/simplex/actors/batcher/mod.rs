@@ -770,6 +770,64 @@ mod tests {
         );
     }
 
+    /// A durable local finalize preserves certificate-backed proposal authority
+    /// after the batcher has already compacted the finalize phase.
+    #[test_async]
+    async fn test_constructed_finalize_after_local_finalization_preserves_authority() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            verifier,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let quorum_size = quorum(5) as usize;
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"finalized"]));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(verifier),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+            false,
+        );
+
+        // Learn the proposal only from the leader, then locally recover a
+        // finalization without using a constructed vote.
+        let leader = Participant::from_usize(0);
+        let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+        assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
+        round.set_leader(leader);
+        for i in 0..quorum_size {
+            let finalize = Finalize::sign(&schemes[i], proposal.clone()).unwrap();
+            assert!(round.add_network(participants[i].clone(), Vote::Finalize(finalize)));
+        }
+        let (batch, invalid) = round
+            .try_verify(&mut rng, &Sequential)
+            .await
+            .expect("finalize quorum must be ready");
+        assert_eq!(batch, quorum_size);
+        assert!(invalid.is_empty());
+        assert!(matches!(
+            round.try_construct_certificate(&Sequential).await,
+            Some(Certificate::Finalization(finalization)) if finalization.proposal == proposal
+        ));
+
+        // The voter's durable finalize may arrive after certificate recovery.
+        let finalize = Finalize::sign(&schemes[quorum_size], proposal.clone()).unwrap();
+        round.add_constructed(Vote::Finalize(finalize));
+
+        // Certificate-backed proposal state is immutable even if conflicting
+        // certificate evidence is presented later.
+        let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
+        let notarization = build_notarization(&schemes, &conflicting, quorum_size);
+        assert!(!round.record_certificate(&Certificate::Notarization(notarization)));
+        assert_eq!(
+            round.try_forward_proposal(Participant::from_usize(1)),
+            Some(proposal)
+        );
+    }
+
     /// A constructed finalize is added as verified while restoring only
     /// matching network votes after replacing a conflicting leader proposal.
     #[test_async]

@@ -156,10 +156,7 @@ impl<
     fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> bool {
         let retain_full = self.votes.retains_full(&message);
 
-        if retain_full
-            && constructed
-            && let Vote::Finalize(finalize) = &message
-        {
+        if constructed && let Vote::Finalize(finalize) = &message {
             // The voter only constructs a finalize after independently
             // authenticating the proposal.
             self.set_authoritative_proposal(&finalize.proposal);
