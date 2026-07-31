@@ -1,6 +1,9 @@
 use crate::{
     Buf, Error, Handle, IoBufs, IoBufsMut, WriteOptions,
-    telemetry::metrics::{Counter, Gauge, Register, raw},
+    telemetry::{
+        metrics::{Counter, Gauge, Register, raw},
+        traces::TracedExt as _,
+    },
 };
 use std::{
     ops::{Deref, RangeInclusive},
@@ -174,7 +177,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         fields(
             partition = %self.partition,
             bytes = Empty,
-            options = ?options,
+            options = options.0.traced(),
         )
     )]
     async fn write_at_with(

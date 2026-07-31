@@ -1069,6 +1069,22 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_resize_grow_flushes_buffered_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"resize_grow").await.unwrap();
+            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(10));
+
+            writer.write_at(0, b"hello").await.unwrap();
+            writer.resize(10).await.unwrap();
+            writer.sync().await.unwrap();
+
+            let read = writer.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+        });
+    }
+
+    #[test_traced]
     fn test_write_read_at_on_writer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

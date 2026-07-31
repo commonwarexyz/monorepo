@@ -337,13 +337,26 @@ impl crate::Blob for Blob {
     }
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn test_cache_bypass_is_ignored_off_linux() {
         let cache = Cache::Disabled(Arc::new(AtomicBool::new(true)));
         assert!(!cache.is_disabled());
+    }
+
+    #[test]
+    fn test_cache_bypass_fallback_disables_shared_support() {
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut cache = Cache::Disabled(supported.clone());
+        let sibling = Cache::Disabled(supported.clone());
+
+        assert!(cache.fallback());
+        assert!(!supported.load(Ordering::Relaxed));
+        assert!(!sibling.is_disabled());
+        assert!(!cache.fallback());
     }
 }

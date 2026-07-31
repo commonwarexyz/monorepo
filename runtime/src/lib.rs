@@ -913,8 +913,11 @@ mod tests {
     #[test]
     fn test_write_options_compose() {
         let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
+        let mut assigned = WriteOptions::SYNC;
+        assigned |= WriteOptions::DONT_CACHE;
         assert!(options.contains(WriteOptions::SYNC));
         assert!(options.contains(WriteOptions::DONT_CACHE));
+        assert_eq!(assigned, options);
         assert_eq!(
             options.without(WriteOptions::SYNC),
             WriteOptions::DONT_CACHE

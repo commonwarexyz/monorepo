@@ -1379,7 +1379,9 @@ mod tests {
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
+        request.cache = Cache::Disabled(dont_cache_supported);
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
+        assert!(!request.cache.fallback());
     }
 
     #[test]
