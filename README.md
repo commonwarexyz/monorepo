@@ -29,6 +29,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.
 * [stream](./stream/README.md): Exchange messages over arbitrary transport.
+* [upgrades](./upgrades/README.md): Coordinate upgrades at synchronized boundaries.
 
 ## Examples
 

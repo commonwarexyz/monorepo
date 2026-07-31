@@ -1,0 +1,23 @@
+[package]
+name = "commonware-upgrades"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Coordinate upgrades at synchronized boundaries."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/upgrades"
+documentation = "https://docs.rs/commonware-upgrades"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-macros = { workspace = true, default-features = false }
+rapidhash = { workspace = true, default-features = false }
+strum = { workspace = true, default-features = false, features = ["derive"] }
+thiserror = { workspace = true, default-features = false }
+
+[lib]
+bench = false

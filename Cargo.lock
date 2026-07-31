@@ -2033,6 +2033,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-upgrades"
+version = "2026.7.0"
+dependencies = [
+ "commonware-macros",
+ "rapidhash",
+ "strum",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "commonware-utils"
 version = "2026.7.0"
 dependencies = [
