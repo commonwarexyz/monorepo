@@ -14,6 +14,7 @@ pub(crate) struct Builder;
 
 impl Builder {
     /// Leaves the Tokio builder unchanged and retains no affinity state.
+    #[allow(clippy::missing_const_for_fn)]
     pub(crate) fn install(_runtime_builder: &mut TokioBuilder, _worker_threads: usize) -> Self {
         Self
     }
