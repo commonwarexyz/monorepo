@@ -8,10 +8,6 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/commonwarexyz/monorepo)
 [![X Follow](https://img.shields.io/twitter/follow/commonwarexyz?style=social)](https://x.com/commonwarexyz)
 
-## Platform Compatibility
-
-Commonware supports Linux and macOS. Windows is not supported. The `io_uring` storage and network backends are Linux-only. Selected crates are also checked for `wasm32-unknown-unknown` and `no_std`. Compatibility outside the supported native platforms varies by crate.
-
 ## Primitives
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
@@ -83,6 +79,12 @@ RUSTFLAGS="--cfg commonware_stability_BETA" RUSTDOCFLAGS="--cfg commonware_stabi
 # Check if your application only uses commonware APIs with stability >= BETA
 RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ```
+
+## Platform Compatibility
+
+The Commonware Library supports Linux and macOS. Selected crates also support `wasm32-unknown-unknown` and `no_std`.
+
+_Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 
 ## Licensing
 
