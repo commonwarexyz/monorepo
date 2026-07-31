@@ -993,12 +993,12 @@ async fn wait_for_reached_progress<F: merkle::Family>(
     context: deterministic::Context,
     target: &Target<F, Digest>,
 ) {
-    let target_leaves = *target.range.end();
-    let leaf_count = format!("client_leaf_count {target_leaves}");
-    let target_leaf_count = format!("client_target_leaf_count {target_leaves}");
+    let target_size = *target.range.end();
+    let size = format!("client_sync_size {target_size}");
+    let target_size = format!("client_sync_target_size {target_size}");
     loop {
         let metrics = context.encode();
-        if metrics.contains(&leaf_count) && metrics.contains(&target_leaf_count) {
+        if metrics.contains(&size) && metrics.contains(&target_size) {
             return;
         }
         context.sleep(Duration::from_millis(1)).await;
