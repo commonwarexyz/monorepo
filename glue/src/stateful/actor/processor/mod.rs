@@ -18,13 +18,13 @@
 //!   committed databases, then prune all pending entries at or below the
 //!   finalized round.
 //!
-//! All propose/verify paths are cancellation-aware: if the caller drops the
-//! response channel, in-progress work stops at the next await point via
-//! [`await_or_cancel`].
+//! Proposals stop when their caller drops the response channel. The newest
+//! abandoned verification is retained for reuse until newer actor work arrives.
+//! Both paths stop at the next await point via [`await_or_cancel`].
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
-    actor::metrics::Metrics as StatefulMetrics,
+    actor::{core::Verification, metrics::Metrics as StatefulMetrics},
     db::{Anchor, DatabaseSet},
 };
 use commonware_consensus::{
@@ -77,8 +77,25 @@ pub(super) enum PrepareBatchesError {
     Invalid,
     /// Parent ancestry ended before validity could be proven.
     Incomplete,
-    /// Caller dropped the response while waiting.
+    /// The request was cancelled while waiting.
     Cancelled,
+}
+
+/// Provides a cancellation signal for speculative actor work.
+pub(super) trait Cancellation {
+    fn cancelled(&mut self) -> impl Future<Output = ()> + Send;
+}
+
+impl<T: Send> Cancellation for oneshot::Sender<T> {
+    async fn cancelled(&mut self) {
+        self.closed().await;
+    }
+}
+
+impl Cancellation for Verification {
+    async fn cancelled(&mut self) {
+        self.wait_for_cancellation().await;
+    }
 }
 
 /// Finalization result for a finalized block report.
@@ -340,7 +357,7 @@ where
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
         mut ancestry: impl Ancestry<A::Block>,
-        mut response: oneshot::Sender<bool>,
+        mut verification: Verification,
     ) where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -348,11 +365,11 @@ where
     {
         let timer = self.metrics.verify_duration.timer(context);
 
-        let block = match fetch_ancestor(&mut response, &mut ancestry).await {
+        let block = match fetch_ancestor(&mut verification, &mut ancestry).await {
             Some(Some(block)) => block,
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
-                response.closed().await;
+                verification.cancelled().await;
                 return;
             }
             None => {
@@ -365,7 +382,7 @@ where
         // If the block has already been executed, don't execute again.
         if self.pending.contains_key(&block_digest) {
             timer.observe(context);
-            response.send_lossy(true);
+            verification.respond(true);
             return;
         }
 
@@ -383,18 +400,18 @@ where
             self.last_processed,
             marshal.clone(),
             block.as_ref(),
-            &mut response,
+            &mut verification,
         )
         .await
         {
             Ok(true) => {
                 timer.observe(context);
-                response.send_lossy(true);
+                verification.respond(true);
                 return;
             }
             Ok(false) => {
                 if block.height() <= self.last_processed.height {
-                    response.send_lossy(false);
+                    verification.respond(false);
                     return;
                 }
             }
@@ -410,7 +427,7 @@ where
                     ?block_digest,
                     "verification request waiting on incomplete processed-block ancestry"
                 );
-                response.closed().await;
+                verification.cancelled().await;
                 return;
             }
             Err(PrepareBatchesError::Invalid) => {
@@ -419,14 +436,14 @@ where
         }
 
         let round = consensus_context.round();
-        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
+        let parent = match fetch_ancestor(&mut verification, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 debug!(
                     ?block_digest,
                     "verification request waiting on incomplete parent ancestry"
                 );
-                response.closed().await;
+                verification.cancelled().await;
                 return;
             }
             None => {
@@ -439,7 +456,7 @@ where
         };
         let parent_digest = parent.digest();
         let batches = match self
-            .prepare_batches(context, marshal, parent.clone(), &mut response)
+            .prepare_batches(context, marshal, parent.clone(), &mut verification)
             .await
         {
             Ok(batches) => batches,
@@ -451,7 +468,7 @@ where
                     last_processed = ?self.last_processed.digest,
                     "verification rejected: prepare_batches returned Invalid"
                 );
-                response.send_lossy(false);
+                verification.respond(false);
                 return;
             }
             Err(PrepareBatchesError::Incomplete) => {
@@ -460,7 +477,7 @@ where
                     ?block_digest,
                     "verification request waiting on incomplete ancestry during prepare_batches"
                 );
-                response.closed().await;
+                verification.cancelled().await;
                 return;
             }
             Err(PrepareBatchesError::Cancelled) => {
@@ -474,7 +491,7 @@ where
 
         let ancestry = marshal_ancestry::with_prefix([block.clone(), parent], ancestry);
         let verified = match await_or_cancel(
-            &mut response,
+            &mut verification,
             self.app
                 .verify((runtime_context, consensus_context), ancestry, batches),
         )
@@ -496,7 +513,7 @@ where
                 ?block_digest,
                 "verification rejected: app.verify returned None"
             );
-            response.send_lossy(false);
+            verification.respond(false);
             return;
         };
         let tail = info_span!(
@@ -511,7 +528,7 @@ where
                 ?block_digest,
                 "verification rejected: verified state must match block commitments"
             );
-            response.send_lossy(false);
+            verification.respond(false);
             return;
         }
         self.cache_pending(block_digest, parent_digest, round, merkleized);
@@ -519,7 +536,7 @@ where
         drop(block);
         drop(tail);
         timer.observe(context);
-        response.send_lossy(true);
+        verification.respond(true);
     }
 
     /// Ensure parent state exists, then prepare unmerkleized batches for execution.
@@ -529,28 +546,29 @@ where
         skip_all,
         fields(parent = %parent.digest())
     )]
-    pub(super) async fn prepare_batches<S, V, Response>(
+    pub(super) async fn prepare_batches<S, V, C>(
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
         parent: Arc<A::Block>,
-        response: &mut oneshot::Sender<Response>,
+        cancellation: &mut C,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+        C: Cancellation,
     {
         let parent_digest = parent.digest();
         // Rebuild pending state if no pending state exists for the parent and the
         // parent is not the processed tip.
         if self.last_processed.digest != parent_digest && !self.pending.contains_key(&parent_digest)
         {
-            self.rebuild_pending(context, marshal, parent, response)
+            self.rebuild_pending(context, marshal, parent, cancellation)
                 .await?;
         }
 
-        await_or_cancel(response, self.fork_batches(&parent_digest))
+        await_or_cancel(cancellation, self.fork_batches(&parent_digest))
             .await
             .unwrap_or(Err(PrepareBatchesError::Cancelled))
     }
@@ -572,15 +590,16 @@ where
     }
 
     /// Rebuild missing pending ancestry up to `target` lazily from a block provider.
-    pub(super) async fn rebuild_pending<P, Response>(
+    pub(super) async fn rebuild_pending<P, C>(
         &mut self,
         context: &E,
         provider: P,
         target: Arc<A::Block>,
-        response: &mut oneshot::Sender<Response>,
+        cancellation: &mut C,
     ) -> Result<(), PrepareBatchesError>
     where
         P: BlockProvider<Block = A::Block> + Clone,
+        C: Cancellation,
     {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
         let target_digest = target.digest();
@@ -592,7 +611,7 @@ where
             && !self.pending.contains_key(&cursor.digest())
         {
             let Some(parent) =
-                await_or_cancel(response, provider.clone().subscribe_parent(&cursor)).await
+                await_or_cancel(cancellation, provider.clone().subscribe_parent(&cursor)).await
             else {
                 return Err(PrepareBatchesError::Cancelled);
             };
@@ -657,14 +676,15 @@ where
             let consensus_context = block.context();
             let round = consensus_context.round();
 
-            let Some(batches) = await_or_cancel(response, self.fork_batches(&parent_digest)).await
+            let Some(batches) =
+                await_or_cancel(cancellation, self.fork_batches(&parent_digest)).await
             else {
                 return Err(PrepareBatchesError::Cancelled);
             };
             let batches = batches.expect("rebuild replay parent must be available");
 
             let Some(merkleized) = await_or_cancel(
-                response,
+                cancellation,
                 self.app.apply(
                     (context.child("rebuild_pending_apply"), consensus_context),
                     &block,
@@ -850,16 +870,17 @@ where
     skip_all,
     fields(height = block.height().traced(), digest = %block.digest())
 )]
-async fn is_already_processed<S, V, Response>(
+async fn is_already_processed<S, V, C>(
     last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
     marshal: MarshalMailbox<S, V>,
     block: &V::ApplicationBlock,
-    response: &mut oneshot::Sender<Response>,
+    cancellation: &mut C,
 ) -> Result<bool, PrepareBatchesError>
 where
     S: Scheme,
     V: MarshalVariant,
     V::ApplicationBlock: Block + Clone,
+    C: Cancellation,
 {
     let target_height = block.height();
     if target_height > last_processed.height {
@@ -870,7 +891,7 @@ where
     }
 
     let Some(canonical) = await_or_cancel(
-        response,
+        cancellation,
         marshal.get_block(Identifier::Height(target_height)),
     )
     .await
@@ -889,28 +910,30 @@ where
     Ok(canonical.digest() == block.digest())
 }
 
-/// Read the next ancestry item unless the response receiver is dropped.
+/// Read the next ancestry item unless the request is cancelled.
 #[tracing::instrument(name = "stateful.processor.fetch_ancestor", level = "info", skip_all)]
-pub(super) async fn fetch_ancestor<R, T, S>(
-    response: &mut oneshot::Sender<R>,
+pub(super) async fn fetch_ancestor<C, T, S>(
+    cancellation: &mut C,
     stream: &mut S,
 ) -> Option<Option<T>>
 where
     S: Stream<Item = T> + Unpin,
+    C: Cancellation,
 {
-    await_or_cancel(response, stream.next()).await
+    await_or_cancel(cancellation, stream.next()).await
 }
 
-/// Wait for `future` unless the response receiver is dropped.
-pub(super) async fn await_or_cancel<R, T, F>(
-    response: &mut oneshot::Sender<R>,
+/// Wait for `future` unless the request is cancelled.
+pub(super) async fn await_or_cancel<C, T, F>(
+    cancellation: &mut C,
     future: F,
 ) -> Option<T>
 where
     F: Future<Output = T>,
+    C: Cancellation,
 {
     select! {
-        _ = response.closed() => None,
+        _ = cancellation.cancelled() => None,
         output = future => Some(output),
     }
 }

@@ -243,9 +243,11 @@ where
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
     ///
-    /// This future may be cancelled by consensus if the caller drops its
-    /// response receiver. Implementations should be cancellation-safe: dropping
-    /// and retrying must not violate invariants or lose durable progress.
+    /// If the caller drops its response receiver, the wrapper retains the newest
+    /// abandoned verification so its speculative state can still be cached. A
+    /// later actor request may cancel that work. Implementations should remain
+    /// cancellation-safe: dropping and retrying must not violate invariants or
+    /// lose durable progress.
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -265,8 +267,9 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// This future may be cancelled if the originating propose/verify request
-    /// is dropped. Implementations should be cancellation-safe: dropping and
+    /// This future may be cancelled with its originating request. Verification
+    /// recovery for the newest abandoned request is retained until later actor
+    /// work arrives. Implementations should be cancellation-safe: dropping and
     /// retrying must not violate invariants or lose durable progress.
     ///
     /// # Panics

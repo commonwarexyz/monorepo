@@ -126,7 +126,7 @@ where
                     span,
                     context,
                     ancestry,
-                    response,
+                    verification,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.verify");
                     self.processor
@@ -135,7 +135,7 @@ where
                             self.marshal.clone(),
                             context,
                             ancestry,
-                            response,
+                            verification,
                         )
                         .instrument(process)
                         .await;

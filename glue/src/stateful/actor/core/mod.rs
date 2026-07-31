@@ -32,6 +32,7 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
+pub(super) use mailbox::Verification;
 
 mod processing;
 mod syncing;
@@ -294,15 +295,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Stateful};
+    use super::{Config, Mailbox, Stateful, processing::Processing};
     use crate::stateful::{
-        actor::syncer::SyncPlan,
+        Application, Input, Proposed,
+        actor::{metrics::Metrics as StatefulMetrics, processor::Processor, syncer::SyncPlan},
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
-        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
+        tests::mocks::{
+            TestApp, TestBlock, TestDatabases, TestDb, TestMerkleized, TestScheme, TestVariant,
+            TestUnmerkleized, anchor, test_databases,
+        },
     };
+    use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _,
-        marshal::{self, ancestry, core::Actor as MarshalActor},
+        Application as _, CertifiableBlock as _, Heightable as _,
+        marshal::{
+            self,
+            ancestry::{self, Ancestry},
+            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+        },
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Finalization, Finalize, Proposal},
@@ -316,11 +326,76 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock as _, ContextCell, Runner as _, Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc};
-    use std::{convert::Infallible, time::Duration};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize,
+        channel::{mpsc, oneshot},
+        sync::Mutex,
+    };
+    use std::{convert::Infallible, sync::Arc, time::Duration};
+
+    struct VerifyGate {
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+        finished: oneshot::Sender<()>,
+    }
+
+    #[derive(Clone)]
+    struct GatedApp(Arc<Mutex<Option<VerifyGate>>>);
+
+    impl Application<deterministic::Context> for GatedApp {
+        type SigningScheme = TestScheme;
+        type Context = <TestApp as Application<deterministic::Context>>::Context;
+        type Block = TestBlock;
+        type Databases = TestDatabases;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(0, 0)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+        ) -> Option<TestMerkleized> {
+            let mut gate = self.0.lock().take().expect("unexpected second execution");
+            gate.started.send(()).expect("test must await execution");
+            let _ = (&mut gate.release).await;
+            gate.finished
+                .send(())
+                .expect("test must await completion");
+            Some(TestMerkleized)
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: TestUnmerkleized,
+        ) -> TestMerkleized {
+            TestMerkleized
+        }
+    }
 
     #[derive(Clone)]
     struct NoopResolver;
@@ -366,6 +441,52 @@ mod tests {
             freezer_value_write_buffer: NZUsize!(64),
             ordinal_write_buffer: NZUsize!(64),
         }
+    }
+
+    async fn init_marshal_mailbox(
+        mut context: deterministic::Context,
+    ) -> MarshalMailbox<TestScheme, TestVariant> {
+        let fixture = scheme_mocks::fixture(&mut context, b"retained-verify", 1);
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(page_cache.clone(), "retained-verify-finalizations"),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(page_cache.clone(), "retained-verify-blocks"),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+
+        let (_actor, mailbox, _height) =
+            MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+                context.child("marshal_actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                    start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+                    partition_prefix: "retained-verify-marshal".to_string(),
+                    mailbox_size: NZUsize!(8),
+                    view_retention: ViewDelta::new(1),
+                    prunable_items_per_section: NZU64!(4),
+                    page_cache,
+                    replay_buffer: NZUsize!(64),
+                    key_write_buffer: NZUsize!(64),
+                    value_write_buffer: NZUsize!(64),
+                    block_codec_config: (),
+                    max_repair: NZUsize!(1),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+        mailbox
     }
 
     fn build_finalization(
@@ -471,6 +592,90 @@ mod tests {
             }
 
             handle.abort();
+        });
+    }
+
+    #[test]
+    fn dropped_verify_finishes_and_caches_state() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (mut release_tx, release_rx) = oneshot::channel();
+            let (finished_tx, finished_rx) = oneshot::channel();
+            let app = GatedApp(Arc::new(Mutex::new(Some(VerifyGate {
+                started: started_tx,
+                release: release_rx,
+                finished: finished_tx,
+            }))));
+            let marshal = init_marshal_mailbox(context.child("marshal")).await;
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::<deterministic::Context, GatedApp>::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processor")),
+                mailbox: receiver,
+                provider: (),
+                marshal,
+                processor: Processor::new(
+                    app,
+                    test_databases(),
+                    anchor(0, 0),
+                    StatefulMetrics::new(&context),
+                    None,
+                ),
+                skip_finalized_until: None,
+            };
+            let actor = context
+                .child("actor")
+                .spawn(move |_| processing.start());
+
+            let block = TestBlock::new(1, 1);
+            let genesis = TestBlock::new(0, 0);
+            let first_block = block.clone();
+            let first_genesis = genesis.clone();
+            let mut first_mailbox = mailbox.clone();
+            let first = context.child("first_verify").spawn(move |task_context| {
+                let consensus_context = first_block.context();
+                async move {
+                    first_mailbox
+                        .verify(
+                            (task_context, consensus_context),
+                            ancestry::from_iter([
+                                Arc::new(first_block),
+                                Arc::new(first_genesis),
+                            ]),
+                        )
+                        .await
+                }
+            });
+
+            started_rx.await.expect("verification should start");
+            first.abort();
+            let _ = first.await;
+            select! {
+                _ = release_tx.closed() => {
+                    panic!("dropped latest verification should keep executing");
+                },
+                _ = context.sleep(Duration::from_millis(1)) => {},
+            }
+
+            release_tx
+                .send(())
+                .expect("retained verification should still be running");
+            finished_rx
+                .await
+                .expect("retained verification should finish");
+
+            assert!(
+                mailbox
+                    .verify(
+                        (context.child("cached_verify"), block.context()),
+                        ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+                    )
+                    .await,
+                "completed verification state should be cached",
+            );
+
+            actor.abort();
+            let _ = actor.await;
         });
     }
 }

@@ -1,7 +1,7 @@
 use crate::stateful::{
     Application, PruneConfig,
     actor::{
-        core::{mailbox::Message, processing::Processing},
+        core::{Verification, mailbox::Message, processing::Processing},
         metrics::Metrics as StatefulMetrics,
         processor::{FinalizeStatus, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
@@ -34,7 +34,7 @@ pub(super) struct HeldVerify<C, B: Block> {
     span: Span,
     context: C,
     ancestry: BoxedAncestry<B>,
-    response: oneshot::Sender<bool>,
+    verification: Verification,
 }
 
 type HeldVerifyRequest<E, A> =
@@ -111,7 +111,7 @@ where
             self.context,
             on_start => {
                 self.held_verify_requests
-                    .retain(|request| !request.response.is_closed());
+                    .retain(|request| !request.verification.is_cancelled());
                 self.database_subscribers
                     .retain(|subscriber| !subscriber.is_closed());
             },
@@ -145,16 +145,16 @@ where
                     span,
                     context,
                     ancestry,
-                    response,
+                    verification,
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.hold_verify");
                     self.held_verify_requests
-                        .retain(|request| !request.response.is_closed());
+                        .retain(|request| !request.verification.is_cancelled());
                     self.held_verify_requests.push(HeldVerify {
                         span,
                         context,
                         ancestry,
-                        response,
+                        verification,
                     });
                     process.in_scope(|| {
                         debug!(
@@ -296,7 +296,7 @@ where
                     self.marshal.clone(),
                     request.context,
                     request.ancestry,
-                    request.response,
+                    request.verification,
                 )
                 .instrument(process)
                 .await;
