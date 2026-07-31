@@ -26,7 +26,7 @@ use std::{cmp::Ordering, future::Future, num::NonZeroU64, sync::Arc};
 pub enum Request<F: Family> {
     /// Fetch the operations in `[start, start + max_ops)`.
     Operations {
-        /// Prove against the root the merkle structure had at this many operations.
+        /// Prove against the root the database had at this size.
         size: Location<F>,
         /// First operation to return.
         start: Location<F>,
@@ -37,7 +37,7 @@ pub enum Request<F: Family> {
     /// location the client will retain. The proof in the response authenticates the pinned nodes,
     /// so there is no way to request them on their own.
     Boundary {
-        /// Prove against the root the merkle structure had at this many operations.
+        /// Prove against the root the database had at this size.
         size: Location<F>,
         /// The operation to return, which is also the pinned-node boundary.
         start: Location<F>,
@@ -700,8 +700,8 @@ pub(crate) mod tests {
     ) -> Result<(Response<R::Family, R::Op, R::Digest>, ValidityTx), R::Error> {
         source
             .serve(Request::Boundary {
-                size: target.leaf_count,
-                start: Location::new(*target.leaf_count - 1),
+                size: target.size,
+                start: Location::new(*target.size - 1),
             })
             .await
     }

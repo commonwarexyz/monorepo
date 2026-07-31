@@ -234,7 +234,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -243,7 +243,7 @@ where
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        Self::prune(self, target.leaf_count).await
+        Self::prune(self, target.size).await
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
@@ -251,7 +251,7 @@ where
     }
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.leaf_count).await?;
+        let db = self.rewind(target.size).await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -301,7 +301,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -310,7 +310,7 @@ where
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        Self::prune(self, target.leaf_count).await
+        Self::prune(self, target.size).await
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
@@ -318,7 +318,7 @@ where
     }
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.leaf_count).await?;
+        let db = self.rewind(target.size).await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -519,7 +519,7 @@ mod tests {
             ),
             Self::Error,
         > {
-            if request.size() == self.stale_target.leaf_count {
+            if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
@@ -571,7 +571,7 @@ mod tests {
 
             let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
             assert_eq!(target.root, guard.root());
-            assert_eq!(target.leaf_count, mmr::Location::new(3));
+            assert_eq!(target.size, mmr::Location::new(3));
         });
     }
 
@@ -629,14 +629,14 @@ mod tests {
             let source = source.sync().await.unwrap();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
 
             // A larger target the source never serves. Its sync attempt
             // hangs so the test can observe the gauges while they diverge.
             let unservable_target = sync::CompactTarget {
                 root: Sha256::hash(&[&[0xFF]]),
-                leaf_count: Location::new(*target.leaf_count + 1),
+                size: Location::new(*target.size + 1),
             };
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
             let superseding_source = SupersedingCompactSource {
@@ -667,14 +667,14 @@ mod tests {
                 reached = reached_rx.recv() => assert_eq!(reached, Some(target.clone())),
             }
 
-            let synced_leaves = *target.leaf_count;
+            let synced_size = *target.size;
             let encoded = context.encode();
             assert!(
-                encoded.contains(&format!("\nclient_target_leaf_count {synced_leaves}")),
+                encoded.contains(&format!("\nclient_sync_target_size {synced_size}")),
                 "missing compact sync target gauge: {encoded}"
             );
             assert!(
-                encoded.contains(&format!("\nclient_leaf_count {synced_leaves}")),
+                encoded.contains(&format!("\nclient_sync_size {synced_size}")),
                 "missing compact sync progress gauge: {encoded}"
             );
 
@@ -687,14 +687,14 @@ mod tests {
                 request = stale_request_rx.recv() => assert_eq!(request, Some(())),
             }
 
-            let target_leaves = *unservable_target.leaf_count;
+            let target_size_val = *unservable_target.size;
             let encoded = context.encode();
             assert!(
-                encoded.contains(&format!("\nclient_target_leaf_count {target_leaves}")),
+                encoded.contains(&format!("\nclient_sync_target_size {target_size_val}")),
                 "target gauge should advance to the superseding target: {encoded}"
             );
             assert!(
-                encoded.contains(&format!("\nclient_leaf_count {synced_leaves}")),
+                encoded.contains(&format!("\nclient_sync_size {synced_size}")),
                 "synced gauge should still report the reached target: {encoded}"
             );
         });
@@ -720,7 +720,7 @@ mod tests {
             let source = source.sync().await.unwrap();
             let stale_target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
 
             let floor = source.inactivity_floor_loc();
@@ -733,7 +733,7 @@ mod tests {
             let source = source.sync().await.unwrap();
             let latest_target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
 
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
@@ -852,7 +852,7 @@ mod tests {
                 .unwrap();
             assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), targets[1]);
             assert!(matches!(
-                db.rewind(targets[0].leaf_count).await,
+                db.rewind(targets[0].size).await,
                 Err(Error::Merkle(
                     commonware_storage::merkle::Error::RewindBeyondHistory
                 ))

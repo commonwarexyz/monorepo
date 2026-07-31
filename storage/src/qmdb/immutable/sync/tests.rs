@@ -1225,7 +1225,7 @@ where
         fetch_batch_size: NZU64!(1),
         target: sync::Target {
             root: target.root,
-            range: non_empty_range!(Location::new(*target.leaf_count - 1), target.leaf_count),
+            range: non_empty_range!(Location::new(*target.size - 1), target.size),
         },
         source,
         apply_batch_size: 1024,
@@ -1319,7 +1319,7 @@ mod compact_variable_mmr {
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
             let target = sync::CompactTarget {
                 root: sha256::Digest::from([0; 32]),
-                leaf_count: Location::new(1),
+                size: Location::new(1),
             };
 
             assert!(matches!(
@@ -1352,7 +1352,7 @@ mod compact_variable_mmr {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix, &context);
@@ -1401,7 +1401,7 @@ mod compact_variable_mmr {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
@@ -1453,7 +1453,7 @@ mod compact_variable_mmr {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
@@ -1511,7 +1511,7 @@ mod compact_variable_mmr {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
@@ -1553,7 +1553,7 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_sync_recovers_after_leaf_count_mismatch() {
+    fn test_compact_sync_recovers_after_size_mismatch() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-leaf-count-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
@@ -1570,7 +1570,7 @@ mod compact_variable_mmr {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
@@ -1618,7 +1618,7 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
             let stale_target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
 
             let batch2 = source
@@ -1630,7 +1630,7 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
             let current_target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
             assert_ne!(stale_target, current_target);
 
@@ -1706,7 +1706,7 @@ mod compact_variable_mmr {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            let source = source.rewind(target1.leaf_count).await.unwrap();
+            let source = source.rewind(target1.size).await.unwrap();
             assert_eq!(source.target(), target1);
 
             let served2: ClientDb = sync::sync(compact_engine_config(
@@ -1843,7 +1843,7 @@ mod compact_variable_mmr {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
 
             let synced: ClientDb = sync::sync(compact_engine_config(
@@ -1902,7 +1902,7 @@ mod compact_variable_mmr {
             let bounds = source.bounds();
             let target_b = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             assert_ne!(target_b, target_a);
             let source = Arc::new(source);
@@ -1925,7 +1925,7 @@ mod compact_variable_mmr {
                 client_cfg.strategy.clone(),
                 journal,
                 client_cfg.commit_codec_config,
-                Location::new(*target_b.leaf_count - 1),
+                Location::new(*target_b.size - 1),
                 pinned_nodes,
                 op,
             )
@@ -1934,7 +1934,7 @@ mod compact_variable_mmr {
 
             // Rewind is rejected until the import is persisted, even to the imported leaf
             // count itself: the fast path must not report unpersisted state as durable.
-            assert!(imported.rewind(target_b.leaf_count).await.is_err());
+            assert!(imported.rewind(target_b.size).await.is_err());
 
             // Prune is likewise rejected while the import is pending; rebuild the import.
             let (response, _) = fetch_compact_state(&source, target_b.clone())
@@ -1956,12 +1956,12 @@ mod compact_variable_mmr {
                 client_cfg.strategy.clone(),
                 journal,
                 client_cfg.commit_codec_config,
-                Location::new(*target_b.leaf_count - 1),
+                Location::new(*target_b.size - 1),
                 pinned_nodes,
                 op,
             )
             .unwrap();
-            assert!(imported.prune(target_b.leaf_count).await.is_err());
+            assert!(imported.prune(target_b.size).await.is_err());
 
             // The dropped imports never touched the journal: state A is still there.
             let reopened = ClientDb::init(context.child("reopen"), client_cfg)
@@ -2055,7 +2055,7 @@ mod compact_variable_mmb {
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
             let target = sync::CompactTarget {
                 root: sha256::Digest::from([0; 32]),
-                leaf_count: Location::new(1),
+                size: Location::new(1),
             };
 
             assert!(matches!(
@@ -2088,7 +2088,7 @@ mod compact_variable_mmb {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix, &context);
@@ -2137,7 +2137,7 @@ mod compact_variable_mmb {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
@@ -2189,7 +2189,7 @@ mod compact_variable_mmb {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
@@ -2250,7 +2250,7 @@ mod compact_variable_mmb {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
@@ -2292,7 +2292,7 @@ mod compact_variable_mmb {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_sync_recovers_after_leaf_count_mismatch() {
+    fn test_compact_sync_recovers_after_size_mismatch() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!(
                 "compact-immutable-mmb-bad-leaf-count-{}",
@@ -2312,7 +2312,7 @@ mod compact_variable_mmb {
             let bounds = source.bounds();
             let target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: bounds.end,
+                size: bounds.end,
             };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
@@ -2360,7 +2360,7 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
             let stale_target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
 
             let batch2 = source
@@ -2372,7 +2372,7 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
             let current_target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
             assert_ne!(stale_target, current_target);
 
@@ -2448,7 +2448,7 @@ mod compact_variable_mmb {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            let source = source.rewind(target1.leaf_count).await.unwrap();
+            let source = source.rewind(target1.size).await.unwrap();
             assert_eq!(source.target(), target1);
 
             let served2: ClientDb = sync::sync(compact_engine_config(

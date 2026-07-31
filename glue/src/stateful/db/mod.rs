@@ -1542,7 +1542,7 @@ where
             while let Some(reached_engine_target) = rx.recv().await {
                 let target = sync::CompactTarget {
                     root: reached_engine_target.root,
-                    leaf_count: reached_engine_target.range.end(),
+                    size: reached_engine_target.range.end(),
                 };
                 if reached.send(target).await.is_err() {
                     break;

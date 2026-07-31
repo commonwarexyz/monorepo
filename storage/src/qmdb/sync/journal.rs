@@ -40,7 +40,7 @@ pub trait Journal<F: Family>: Sized + Send {
     /// Persist the journal.
     fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Get the number of operations in the journal
+    /// The size of the journal (number of operations it has seen)
     fn size(&self) -> u64;
 
     /// Append a non-empty batch of operations.

@@ -3,7 +3,7 @@
 //! # What compact dbs store
 //!
 //! A compact db's only persistent state is its witness journal ([`witness`]), whose entries
-//! each snapshot one committed state as the commit operation, the committed leaf count, and
+//! each snapshot one committed state as the commit operation, the committed size, and
 //! the pinned nodes one operation below it. The in-memory compact Merkle
 //! ([`crate::merkle::compact`]) is rebuilt from the journal tip on reopen. Without the
 //! witness, a compact db could recover its root and continue appending, but it could not

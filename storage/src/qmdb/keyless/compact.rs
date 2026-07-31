@@ -328,7 +328,7 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = Location::new(*witness.with(|w| w.leaf_count()) - 1);
+        let last_commit_loc = Location::new(*witness.with(|w| w.size()) - 1);
 
         Ok(Self {
             merkle,
@@ -527,7 +527,7 @@ where
         // Fast path: already at `target` with no uncommitted state. Wait for any pipelined sync
         // to prove the tip durable before returning.
         if self.size() == target
-            && self.witness.with(|w| w.leaf_count()) == target
+            && self.witness.with(|w| w.size()) == target
             && !self.witness.import_pending()
         {
             self.witness.wait_for_sync().await?;
@@ -667,7 +667,7 @@ mod tests {
                 .await;
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
-            let n = db.target().leaf_count;
+            let n = db.target().size;
             let boundary = |size: Location<mmr::Family>, start: Location<mmr::Family>| {
                 Request::Boundary { size, start }
             };
@@ -1245,7 +1245,7 @@ mod tests {
                 let journal = open_witness_journal(context.child("src_tip"), src).await;
                 witness::tests::tip(&journal).await
             };
-            assert_eq!(size_b, target_b.leaf_count);
+            assert_eq!(size_b, target_b.size);
 
             // Seed the destination partition with a different committed state A.
             {
@@ -1712,8 +1712,8 @@ mod tests {
                 let target = source.target();
                 let (response, _) = source
                     .serve(Request::Boundary {
-                        size: target.leaf_count,
-                        start: Location::new(*target.leaf_count - 1),
+                        size: target.size,
+                        start: Location::new(*target.size - 1),
                     })
                     .await
                     .unwrap();
@@ -1743,7 +1743,7 @@ mod tests {
                     Sequential,
                     journal,
                     (),
-                    Location::new(*target_b.leaf_count - 1),
+                    Location::new(*target_b.size - 1),
                     pinned_b,
                     Operation::Commit(Some(meta_b.clone()), Location::new(0)),
                 )
@@ -1806,7 +1806,7 @@ mod tests {
                 .await;
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
-            let rewind_target = db.target().leaf_count;
+            let rewind_target = db.target().size;
             let batch = db
                 .new_batch()
                 .append(U64::new(2))

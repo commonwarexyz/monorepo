@@ -155,9 +155,9 @@ where
     /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
-    /// Historical roots from superseded sync targets, keyed by merkle structure size
+    /// Historical roots from superseded sync targets, keyed by database size
     /// (target.range.end()). Keys strictly increase across target updates
-    /// (enforced by validate_update), so each merkle structure size maps to a unique
+    /// (enforced by validate_update), so each size maps to a unique
     /// root and the smallest key is the oldest. Eviction drops it first.
     /// When a retained request completes, its requested size selects the
     /// historical root to verify against.
@@ -270,7 +270,7 @@ where
             None
         };
 
-        let metrics = Metrics::new(&config.context);
+        let metrics = Metrics::new(&config.context.child("sync"));
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
@@ -387,7 +387,7 @@ where
         self.fetched_operations.clear();
         self.pinned_nodes = None;
 
-        // Save the current root keyed by its merkle structure size for verifying
+        // Save the current root keyed by its database size for verifying
         // retained requests that were issued against this target.
         if self.max_retained_roots > 0 {
             self.retained_roots

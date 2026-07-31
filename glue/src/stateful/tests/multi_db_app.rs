@@ -322,7 +322,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
             Target::new(block.root_a, block.range_a.clone()),
             CompactTarget {
                 root: block.root_b,
-                leaf_count: block.range_b.end(),
+                size: block.range_b.end(),
             },
         )
     }
@@ -529,7 +529,7 @@ impl EngineDefinition for MultiDbEngine {
             initial_a.root,
             initial_a.range,
             initial_b.root,
-            non_empty_range!(Location::new(0), initial_b.leaf_count),
+            non_empty_range!(Location::new(0), initial_b.size),
         );
 
         let stateful_startup_context = context.child("stateful_startup");

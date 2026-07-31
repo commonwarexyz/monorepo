@@ -2,12 +2,12 @@
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
 //! [`Witness`] is a complete snapshot of one published commit: the encoded commit operation, the
-//! committed leaf count, and the pinned nodes one operation below it. The commit's inclusion proof is
+//! committed size, and the pinned nodes one operation below it. The commit's inclusion proof is
 //! not stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open
 //! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pinned nodes,
 //! and a structurally invalid entry fails with [`Error::DataCorrupted`].
 //!
-//! Entries are strictly increasing in committed leaf count, so a leaf count uniquely identifies
+//! Entries are strictly increasing in committed size, so a size uniquely identifies
 //! a rewind or prune target. An appended entry becomes durable when the journal `commit` or
 //! `sync` completes. For [`Store::start_sync`] it becomes durable when the returned handle
 //! completes. Before that point, the entry is not guaranteed durable and recovery may fall back
@@ -99,16 +99,16 @@ pub(crate) struct VerifiedWitness<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> VerifiedWitness<F, D> {
-    /// Total leaves in the committed Merkle, which also identifies the last commit's location.
-    pub(crate) const fn leaf_count(&self) -> Location<F> {
+    /// The committed size, which also identifies the last commit's location.
+    pub(crate) const fn size(&self) -> Location<F> {
         self.witness.size
     }
 
-    /// The compact-sync target this witness can serve: its root and leaf count.
+    /// The compact-sync target this witness can serve: its root and size.
     pub(crate) const fn target(&self) -> CompactTarget<F, D> {
         CompactTarget {
             root: self.root,
-            leaf_count: self.leaf_count(),
+            size: self.size(),
         }
     }
 }
@@ -189,7 +189,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         // Hold the witness lock only long enough to check the request and snapshot the
         // entry. Decode outside it so concurrent readers do not contend.
         let (entry, proof) = self.with(|w| -> Result<(Witness<F, D>, Proof<F, D>), Error<F>> {
-            let current = w.leaf_count();
+            let current = w.size();
             let last_commit_loc = Location::new(*current - 1);
             if request.size() > current || request.size() == 0 {
                 return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
@@ -406,12 +406,12 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
-        // An equal leaf count means no commit has been applied since the cache was set.
+        // An equal size means no commit has been applied since the cache was set.
         // Normally the cache mirrors the journal tip, so there is no witness to append. A
         // start_sync may still be proving that tip durable, which pending_sync tracks separately.
         // During a pending import the cached witness is not in the journal yet, so it is exactly
         // what must be persisted. Replace the journal's contents with it.
-        let cached_leaves = self.with(|w| w.leaf_count());
+        let cached_leaves = self.with(|w| w.size());
         let verified = if cached_leaves == merkle.leaves() {
             if !self.import_pending.load(Ordering::Relaxed) {
                 return Ok((self, None));
@@ -432,7 +432,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// rebuild and re-verify the Merkle and cache from it. Returns the decoded commit operation
     /// of the restored tip.
     ///
-    /// Rewinding to a pruned leaf count, or one no entry commits, returns
+    /// Rewinding to a pruned size, or one no entry commits, returns
     /// [`merkle::Error::RewindBeyondHistory`]. The target entry is derived before the journal
     /// is truncated, so a corrupt entry fails the rewind with the journal intact. The rewind is
     /// made durable before returning.

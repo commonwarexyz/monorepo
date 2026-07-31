@@ -342,7 +342,7 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = Location::new(*witness.with(|w| w.leaf_count()) - 1);
+        let last_commit_loc = Location::new(*witness.with(|w| w.size()) - 1);
 
         Ok(Self {
             merkle,
@@ -551,7 +551,7 @@ where
         // Fast path: already at `target` with no uncommitted state. Wait for any pipelined sync
         // to prove the tip durable before returning.
         if self.size() == target
-            && self.witness.with(|w| w.leaf_count()) == target
+            && self.witness.with(|w| w.size()) == target
             && !self.witness.import_pending()
         {
             self.witness.wait_for_sync().await?;
@@ -1312,7 +1312,7 @@ mod tests {
                 .await;
             let (db, _) = db.apply_batch(batch).unwrap();
             let db = db.sync().await.unwrap();
-            let rewind_target = db.target().leaf_count;
+            let rewind_target = db.target().size;
             let batch = db
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
