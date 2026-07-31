@@ -74,12 +74,15 @@ impl<V> Certification<V> {
     /// Buffers a vote for verification (or, if already verified, for
     /// certificate recovery). Dropped once complete.
     fn add(&mut self, vote: V, is_verified: bool) {
+        // Verified votes and pending votes for batchable schemes may accumulate to
+        // quorum. A non-batchable pending buffer is consumed after each vote.
         let initial_capacity = if is_verified || self.batchable {
             self.quorum
         } else {
-            // Eager verification consumes pending storage after every vote.
             1
         };
+
+        // Completed certifications drop subsequent votes without allocating.
         if let State::Incomplete { pending, verified } = &mut self.state {
             let votes = if is_verified { verified } else { pending };
             if votes.capacity() == 0 {
@@ -685,6 +688,7 @@ mod tests {
             }
         }
 
+        /// Returns the capacities of the pending and verified vote buffers.
         fn capacities(&self) -> (usize, usize) {
             match &self.state {
                 State::Incomplete { pending, verified } => {

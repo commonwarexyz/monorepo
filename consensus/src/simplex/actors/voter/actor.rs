@@ -857,8 +857,6 @@ impl<
         }
 
         if let Some((nullify, entry)) = nullify {
-            // The batcher reports locally constructed votes, so do not hand
-            // one over until the journal sync above has made it durable.
             batcher.constructed(Vote::Nullify(nullify.clone()));
             debug!(round=?nullify.round(), "broadcasting nullify");
             self.broadcast_vote(vote_sender, Vote::Nullify(nullify));

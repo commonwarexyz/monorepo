@@ -2115,7 +2115,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     fetch_concurrent: NZUsize!(3),
                     forwarding: ForwardingPolicy::Disabled,
-                    retain_votes_after_certification: false,
+                    extended_conflict_reporting: false,
                 },
             );
             let _engine = engine.start(vote_network, certificate_network, resolver_network);

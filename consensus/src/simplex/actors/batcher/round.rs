@@ -150,31 +150,29 @@ impl<
     /// Accepts and reports a vote after sender and conflict checks.
     ///
     /// Full votes are forwarded to the verifier and retained while needed for
-    /// certification. When post-certification retention is disabled, compact
+    /// certification. When extended conflict reporting is disabled, compact
     /// state preserves duplicate suppression and proposal forwarding without
     /// reallocating the released vote map.
-    fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> bool {
-        let retain_full = self.votes.retains_full(&message);
-
+    pub(super) fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> bool {
         if constructed && let Vote::Finalize(finalize) = &message {
             // The voter only constructs a finalize after independently
             // authenticating the proposal.
             self.set_authoritative_proposal(&finalize.proposal);
         }
 
-        let inserted = self.votes.record(&message, self.verifier.proposal());
-        if !inserted {
-            if retain_full && constructed {
-                match message {
-                    Vote::Notarize(_) => panic!("duplicate notarize"),
-                    Vote::Nullify(_) => {}
-                    Vote::Finalize(_) => panic!("duplicate finalize"),
-                }
+        let record = self.votes.record(&message, self.verifier.proposal());
+        if !record.inserted && record.retained && constructed {
+            match &message {
+                Vote::Notarize(_) => panic!("duplicate notarize"),
+                Vote::Nullify(_) => {}
+                Vote::Finalize(_) => panic!("duplicate finalize"),
             }
+        }
+        if !record.inserted {
             return false;
         }
 
-        let verifier_message = retain_full.then(|| message.clone());
+        let verifier_message = record.retained.then(|| message.clone());
         let activity = match message {
             Vote::Notarize(notarize) => Activity::Notarize(notarize),
             Vote::Nullify(nullify) => Activity::Nullify(nullify),
@@ -251,9 +249,11 @@ impl<
                 }
 
                 // Check if finalized
-                if let Some(previous) = self.votes.finalize(index) {
-                    let activity = NullifyFinalize::new(nullify, previous.clone());
-                    self.reporter.report(Activity::NullifyFinalize(activity));
+                if self.votes.saw_finalize(index) {
+                    if let Some(previous) = self.votes.finalize(index) {
+                        let activity = NullifyFinalize::new(nullify, previous.clone());
+                        self.reporter.report(Activity::NullifyFinalize(activity));
+                    }
                     commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
                     return false;
                 }
@@ -277,9 +277,11 @@ impl<
                 }
 
                 // Check if nullified
-                if let Some(previous) = self.votes.nullify(index) {
-                    let activity = NullifyFinalize::new(previous.clone(), finalize);
-                    self.reporter.report(Activity::NullifyFinalize(activity));
+                if self.votes.saw_nullify(index) {
+                    if let Some(previous) = self.votes.nullify(index) {
+                        let activity = NullifyFinalize::new(previous.clone(), finalize);
+                        self.reporter.report(Activity::NullifyFinalize(activity));
+                    }
                     commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
                     return false;
                 }
@@ -301,18 +303,6 @@ impl<
                 }
             }
         }
-    }
-
-    /// Adds a durable locally constructed vote to the verifier and reporter.
-    ///
-    /// Duplicate nullifies are ignored (the voter re-sends its nullify vote on
-    /// every timeout retry).
-    ///
-    /// # Panics
-    ///
-    /// Panics if a notarize or finalize vote is added more than once.
-    pub fn add_constructed(&mut self, message: Vote<S, D>) {
-        self.accept_vote(message, true);
     }
 
     /// Sets the leader for this view. If the leader's notarize has already

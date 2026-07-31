@@ -173,96 +173,106 @@ impl<T: Attributable> AttributableMap<T> {
 /// Tracks notarize/nullify/finalize votes for a view.
 ///
 /// Each vote type is stored in its own lazily allocated [`AttributableMap`] so a
-/// validator can only contribute one vote per phase. Unless configured for retention,
-/// full votes are released once their certificate exists. Compact signer state remains
-/// available for forwarding and duplicate suppression.
+/// validator can only contribute one vote per phase. Unless extended conflict reporting
+/// is enabled, full votes are released once their certificate exists. Compact signer
+/// state remains available for forwarding and duplicate suppression.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct VoteTracker<S: Scheme, D: Digest> {
-    /// Whether full votes remain available after their phase is certified.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    participants: usize,
     retain_votes_after_certification: bool,
-    /// Vote phases that have transitioned to compact storage.
-    compacted_phases: u8,
-    /// Per-phase signer and proposal-match flags retained after full votes are released.
+    /// Compact state records whether a signer voted and whether the vote carried the
+    /// authoritative proposal. The former suppresses duplicates and cross-phase
+    /// conflicts; the latter avoids forwarding blocks to validators that already have them.
     compacted: Vec<u8>,
-    /// Per-signer notarize votes keyed by validator index.
-    notarizes: AttributableMap<Notarize<S, D>>,
-    /// Per-signer nullify votes keyed by validator index.
-    nullifies: AttributableMap<Nullify<S>>,
-    /// Per-signer finalize votes keyed by validator index.
+    /// Per-signer notarize votes, or `None` after compaction.
+    notarizes: Option<AttributableMap<Notarize<S, D>>>,
+    /// Per-signer nullify votes, or `None` after compaction.
+    nullifies: Option<AttributableMap<Nullify<S>>>,
+    /// Per-signer finalize votes, or `None` after compaction.
     ///
     /// Finalize votes include the proposal digest so the entire certificate can be
     /// reconstructed once the quorum threshold is hit.
-    finalizes: AttributableMap<Finalize<S, D>>,
+    finalizes: Option<AttributableMap<Finalize<S, D>>>,
 }
 
-impl<S: Scheme, D: Digest> VoteTracker<S, D> {
-    const NOTARIZATION_COMPACTED: u8 = 1 << 0;
-    const NULLIFICATION_COMPACTED: u8 = 1 << 1;
-    const FINALIZATION_COMPACTED: u8 = 1 << 2;
-
-    const NOTARIZE_SEEN: u8 = 1 << 0;
-    const NOTARIZE_MATCHING: u8 = 1 << 1;
-    const NULLIFY_SEEN: u8 = 1 << 2;
-    const FINALIZE_SEEN: u8 = 1 << 3;
-    const FINALIZE_MATCHING: u8 = 1 << 4;
-
-    /// Creates a tracker sized for `participants` validators.
-    ///
-    /// When `retain_votes_after_certification` is `false`, each phase transitions to
-    /// compact storage once its certificate is recorded.
-    pub const fn new(participants: usize, retain_votes_after_certification: bool) -> Self {
-        Self {
-            retain_votes_after_certification,
-            compacted_phases: 0,
-            compacted: Vec::new(),
-            notarizes: AttributableMap::new(participants),
-            nullifies: AttributableMap::new(participants),
-            finalizes: AttributableMap::new(participants),
-        }
-    }
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct VoteRecord {
+    pub inserted: bool,
+    pub retained: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
-    const fn compacted_phase(vote: &Vote<S, D>) -> u8 {
-        match vote {
-            Vote::Notarize(_) => Self::NOTARIZATION_COMPACTED,
-            Vote::Nullify(_) => Self::NULLIFICATION_COMPACTED,
-            Vote::Finalize(_) => Self::FINALIZATION_COMPACTED,
+    const NOTARIZE_SEEN: u8 = 1 << 0;
+    const NOTARIZE_HAS_PROPOSAL: u8 = 1 << 1;
+    const NULLIFY_SEEN: u8 = 1 << 2;
+    const FINALIZE_SEEN: u8 = 1 << 3;
+    const FINALIZE_HAS_PROPOSAL: u8 = 1 << 4;
+
+    /// Creates a tracker sized for `participants` validators.
+    ///
+    /// Unless `retain_votes_after_certification` is enabled, each vote map transitions
+    /// to compact storage once its certificate is recorded.
+    pub const fn new(participants: usize, retain_votes_after_certification: bool) -> Self {
+        Self {
+            participants,
+            retain_votes_after_certification,
+            compacted: Vec::new(),
+            notarizes: Some(AttributableMap::new(participants)),
+            nullifies: Some(AttributableMap::new(participants)),
+            finalizes: Some(AttributableMap::new(participants)),
         }
     }
 
-    /// Returns whether the full vote will be retained.
-    pub(crate) const fn retains_full(&self, vote: &Vote<S, D>) -> bool {
-        self.retain_votes_after_certification
-            || self.compacted_phases & Self::compacted_phase(vote) == 0
-    }
-
-    const fn compact_phase(&mut self, phase: u8) -> bool {
-        if self.retain_votes_after_certification {
-            return false;
-        }
-        self.compacted_phases |= phase;
-        true
-    }
-
-    fn remember(&mut self, signer: Participant, seen: u8, matching: Option<u8>) -> bool {
+    fn remember(
+        participants: usize,
+        compacted: &mut Vec<u8>,
+        signer: Participant,
+        seen: u8,
+        has_proposal: Option<u8>,
+    ) -> bool {
         let index = usize::from(signer);
-        let participants = self.notarizes.participants;
         if index >= participants {
             return false;
         }
-        if self.compacted.is_empty() {
-            self.compacted.resize(participants, 0);
+        if compacted.is_empty() {
+            compacted.resize(participants, 0);
         }
 
-        let flags = &mut self.compacted[index];
+        let flags = &mut compacted[index];
         let inserted = *flags & seen == 0;
         *flags |= seen;
-        if let Some(matching) = matching {
-            *flags |= matching;
+        if let Some(has_proposal) = has_proposal {
+            *flags |= has_proposal;
         }
         inserted
+    }
+
+    fn record_phase<T: Attributable>(
+        participants: usize,
+        compacted: &mut Vec<u8>,
+        votes: &mut Option<AttributableMap<T>>,
+        vote: T,
+        seen: u8,
+        has_proposal: Option<u8>,
+    ) -> VoteRecord {
+        let Some(votes) = votes else {
+            return VoteRecord {
+                inserted: Self::remember(
+                    participants,
+                    compacted,
+                    vote.signer(),
+                    seen,
+                    has_proposal,
+                ),
+                retained: false,
+            };
+        };
+
+        VoteRecord {
+            inserted: votes.insert(vote),
+            retained: true,
+        }
     }
 
     fn remembered(&self, signer: Participant, flag: u8) -> bool {
@@ -275,77 +285,116 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     ///
     /// `proposal` is the authoritative proposal, when known, and preserves
     /// proposal-match state when the full vote is not retained.
-    pub(crate) fn record(&mut self, vote: &Vote<S, D>, proposal: Option<&Proposal<D>>) -> bool {
-        let retain_full = self.retains_full(vote);
+    pub(crate) fn record(
+        &mut self,
+        vote: &Vote<S, D>,
+        proposal: Option<&Proposal<D>>,
+    ) -> VoteRecord {
         match vote {
-            Vote::Notarize(notarize) if retain_full => self.insert_notarize(notarize.clone()),
-            Vote::Notarize(notarize) => {
-                self.remember_notarize(notarize.signer(), proposal == Some(&notarize.proposal))
-            }
-            Vote::Nullify(nullify) if retain_full => self.insert_nullify(nullify.clone()),
-            Vote::Nullify(nullify) => self.remember_nullify(nullify.signer()),
-            Vote::Finalize(finalize) if retain_full => self.insert_finalize(finalize.clone()),
-            Vote::Finalize(finalize) => {
-                self.remember_finalize(finalize.signer(), proposal == Some(&finalize.proposal))
-            }
+            Vote::Notarize(notarize) => Self::record_phase(
+                self.participants,
+                &mut self.compacted,
+                &mut self.notarizes,
+                notarize.clone(),
+                Self::NOTARIZE_SEEN,
+                (proposal == Some(&notarize.proposal)).then_some(Self::NOTARIZE_HAS_PROPOSAL),
+            ),
+            Vote::Nullify(nullify) => Self::record_phase(
+                self.participants,
+                &mut self.compacted,
+                &mut self.nullifies,
+                nullify.clone(),
+                Self::NULLIFY_SEEN,
+                None,
+            ),
+            Vote::Finalize(finalize) => Self::record_phase(
+                self.participants,
+                &mut self.compacted,
+                &mut self.finalizes,
+                finalize.clone(),
+                Self::FINALIZE_SEEN,
+                (proposal == Some(&finalize.proposal)).then_some(Self::FINALIZE_HAS_PROPOSAL),
+            ),
         }
     }
 
     fn release<T: Attributable>(
         participants: usize,
         compacted: &mut Vec<u8>,
-        votes: &mut AttributableMap<T>,
+        votes: &mut Option<AttributableMap<T>>,
         seen: u8,
-        matching: u8,
-        is_matching: impl Fn(&T) -> bool,
+        has_proposal: u8,
+        carries_proposal: impl Fn(&T) -> bool,
     ) {
+        let Some(votes) = votes.take() else {
+            return;
+        };
         if !votes.is_empty() && compacted.is_empty() {
             compacted.resize(participants, 0);
         }
         for vote in votes.iter() {
             let flags = &mut compacted[usize::from(vote.signer())];
             *flags |= seen;
-            if is_matching(vote) {
-                *flags |= matching;
+            if carries_proposal(vote) {
+                *flags |= has_proposal;
             }
         }
-        votes.clear();
     }
 
-    /// Remembers a notarize signer without retaining the full vote.
-    pub(crate) fn remember_notarize(&mut self, signer: Participant, matching: bool) -> bool {
-        self.remember(
+    #[cfg(test)]
+    fn remember_notarize(&mut self, signer: Participant, has_proposal: bool) -> bool {
+        Self::remember(
+            self.participants,
+            &mut self.compacted,
             signer,
             Self::NOTARIZE_SEEN,
-            matching.then_some(Self::NOTARIZE_MATCHING),
+            has_proposal.then_some(Self::NOTARIZE_HAS_PROPOSAL),
         )
     }
 
-    /// Remembers a nullify signer without retaining the full vote.
-    pub(crate) fn remember_nullify(&mut self, signer: Participant) -> bool {
-        self.remember(signer, Self::NULLIFY_SEEN, None)
+    #[cfg(test)]
+    fn remember_nullify(&mut self, signer: Participant) -> bool {
+        Self::remember(
+            self.participants,
+            &mut self.compacted,
+            signer,
+            Self::NULLIFY_SEEN,
+            None,
+        )
     }
 
-    /// Remembers a finalize signer without retaining the full vote.
-    pub(crate) fn remember_finalize(&mut self, signer: Participant, matching: bool) -> bool {
-        self.remember(
+    #[cfg(test)]
+    fn remember_finalize(&mut self, signer: Participant, has_proposal: bool) -> bool {
+        Self::remember(
+            self.participants,
+            &mut self.compacted,
             signer,
             Self::FINALIZE_SEEN,
-            matching.then_some(Self::FINALIZE_MATCHING),
+            has_proposal.then_some(Self::FINALIZE_HAS_PROPOSAL),
         )
     }
 
-    /// Returns whether `signer` is known to have notarized `proposal`.
+    /// Returns whether `signer` previously nullified, including compact state.
+    pub(crate) fn saw_nullify(&self, signer: Participant) -> bool {
+        self.nullify(signer).is_some() || self.remembered(signer, Self::NULLIFY_SEEN)
+    }
+
+    /// Returns whether `signer` previously finalized, including compact state.
+    pub(crate) fn saw_finalize(&self, signer: Participant) -> bool {
+        self.finalize(signer).is_some() || self.remembered(signer, Self::FINALIZE_SEEN)
+    }
+
+    /// Returns whether `signer` is known to have the authoritative proposal from notarizing it.
     pub(crate) fn has_notarize_for(&self, signer: Participant, proposal: &Proposal<D>) -> bool {
-        self.remembered(signer, Self::NOTARIZE_MATCHING)
+        self.remembered(signer, Self::NOTARIZE_HAS_PROPOSAL)
             || self
                 .notarize(signer)
                 .is_some_and(|vote| &vote.proposal == proposal)
     }
 
-    /// Returns whether `signer` is known to have finalized `proposal`.
+    /// Returns whether `signer` is known to have the authoritative proposal from finalizing it.
     pub(crate) fn has_finalize_for(&self, signer: Participant, proposal: &Proposal<D>) -> bool {
-        self.remembered(signer, Self::FINALIZE_MATCHING)
+        self.remembered(signer, Self::FINALIZE_HAS_PROPOSAL)
             || self
                 .finalize(signer)
                 .is_some_and(|vote| &vote.proposal == proposal)
@@ -353,28 +402,26 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Releases notarize votes while retaining compact signer state.
     pub(crate) fn release_notarizes(&mut self, proposal: &Proposal<D>) {
-        if !self.compact_phase(Self::NOTARIZATION_COMPACTED) {
+        if self.retain_votes_after_certification {
             return;
         }
-        let participants = self.notarizes.participants;
         Self::release(
-            participants,
+            self.participants,
             &mut self.compacted,
             &mut self.notarizes,
             Self::NOTARIZE_SEEN,
-            Self::NOTARIZE_MATCHING,
+            Self::NOTARIZE_HAS_PROPOSAL,
             |vote: &Notarize<S, D>| &vote.proposal == proposal,
         );
     }
 
     /// Releases nullify votes while retaining compact signer state.
     pub(crate) fn release_nullifies(&mut self) {
-        if !self.compact_phase(Self::NULLIFICATION_COMPACTED) {
+        if self.retain_votes_after_certification {
             return;
         }
-        let participants = self.nullifies.participants;
         Self::release(
-            participants,
+            self.participants,
             &mut self.compacted,
             &mut self.nullifies,
             Self::NULLIFY_SEEN,
@@ -385,122 +432,125 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Releases finalize votes while retaining compact signer state.
     pub(crate) fn release_finalizes(&mut self, proposal: &Proposal<D>) {
-        if !self.compact_phase(Self::FINALIZATION_COMPACTED) {
+        if self.retain_votes_after_certification {
             return;
         }
-        let participants = self.finalizes.participants;
         Self::release(
-            participants,
+            self.participants,
             &mut self.compacted,
             &mut self.finalizes,
             Self::FINALIZE_SEEN,
-            Self::FINALIZE_MATCHING,
+            Self::FINALIZE_HAS_PROPOSAL,
             |vote: &Finalize<S, D>| &vote.proposal == proposal,
         );
     }
-}
 
-impl<S: Scheme, D: Digest> VoteTracker<S, D> {
-    fn clear_compacted(&mut self, phases: u8) {
+    fn clear_compacted(&mut self, cleared: u8) {
         for flags in &mut self.compacted {
-            *flags &= !phases;
+            *flags &= !cleared;
         }
     }
 
     /// Inserts a notarize vote if the signer has not already voted.
     pub fn insert_notarize(&mut self, vote: Notarize<S, D>) -> bool {
-        self.notarizes.insert(vote)
+        self.notarizes
+            .as_mut()
+            .is_some_and(|votes| votes.insert(vote))
     }
 
     /// Inserts a nullify vote if the signer has not already voted.
     pub fn insert_nullify(&mut self, vote: Nullify<S>) -> bool {
-        self.nullifies.insert(vote)
+        self.nullifies
+            .as_mut()
+            .is_some_and(|votes| votes.insert(vote))
     }
 
     /// Inserts a finalize vote if the signer has not already voted.
     pub fn insert_finalize(&mut self, vote: Finalize<S, D>) -> bool {
-        self.finalizes.insert(vote)
+        self.finalizes
+            .as_mut()
+            .is_some_and(|votes| votes.insert(vote))
     }
 
     /// Returns the notarize vote for `signer`, if present.
     pub fn notarize(&self, signer: Participant) -> Option<&Notarize<S, D>> {
-        self.notarizes.get(signer)
+        self.notarizes.as_ref()?.get(signer)
     }
 
     /// Returns the nullify vote for `signer`, if present.
     pub fn nullify(&self, signer: Participant) -> Option<&Nullify<S>> {
-        self.nullifies.get(signer)
+        self.nullifies.as_ref()?.get(signer)
     }
 
     /// Returns the finalize vote for `signer`, if present.
     pub fn finalize(&self, signer: Participant) -> Option<&Finalize<S, D>> {
-        self.finalizes.get(signer)
+        self.finalizes.as_ref()?.get(signer)
     }
 
     /// Iterates over notarize votes in signer order.
     pub fn iter_notarizes(&self) -> impl Iterator<Item = &Notarize<S, D>> {
-        self.notarizes.iter()
+        self.notarizes.iter().flat_map(|votes| votes.iter())
     }
 
     /// Iterates over nullify votes in signer order.
     pub fn iter_nullifies(&self) -> impl Iterator<Item = &Nullify<S>> {
-        self.nullifies.iter()
+        self.nullifies.iter().flat_map(|votes| votes.iter())
     }
 
     /// Iterates over finalize votes in signer order.
     pub fn iter_finalizes(&self) -> impl Iterator<Item = &Finalize<S, D>> {
-        self.finalizes.iter()
+        self.finalizes.iter().flat_map(|votes| votes.iter())
     }
 
     /// Returns how many notarize votes have been recorded.
     pub fn len_notarizes(&self) -> u32 {
-        u32::try_from(self.notarizes.len()).expect("too many notarize votes")
+        let len = self.notarizes.as_ref().map_or(0, AttributableMap::len);
+        u32::try_from(len).expect("too many notarize votes")
     }
 
     /// Returns how many nullify votes have been recorded.
     pub fn len_nullifies(&self) -> u32 {
-        u32::try_from(self.nullifies.len()).expect("too many nullify votes")
+        let len = self.nullifies.as_ref().map_or(0, AttributableMap::len);
+        u32::try_from(len).expect("too many nullify votes")
     }
 
     /// Returns how many finalize votes have been recorded.
     pub fn len_finalizes(&self) -> u32 {
-        u32::try_from(self.finalizes.len()).expect("too many finalize votes")
+        let len = self.finalizes.as_ref().map_or(0, AttributableMap::len);
+        u32::try_from(len).expect("too many finalize votes")
     }
 
     /// Returns `true` if the given signer has a notarize vote recorded.
     pub fn has_notarize(&self, signer: Participant) -> bool {
-        self.notarizes.get(signer).is_some()
+        self.notarize(signer).is_some()
     }
 
     /// Returns `true` if a nullify vote has been recorded for `signer`.
     pub fn has_nullify(&self, signer: Participant) -> bool {
-        self.nullifies.get(signer).is_some()
+        self.nullify(signer).is_some()
     }
 
     /// Returns `true` if a finalize vote has been recorded for `signer`.
     pub fn has_finalize(&self, signer: Participant) -> bool {
-        self.finalizes.get(signer).is_some()
+        self.finalize(signer).is_some()
     }
 
     /// Clears all notarize votes and releases their storage.
     pub fn clear_notarizes(&mut self) {
-        self.notarizes.clear();
-        self.compacted_phases &= !Self::NOTARIZATION_COMPACTED;
-        self.clear_compacted(Self::NOTARIZE_SEEN | Self::NOTARIZE_MATCHING);
+        self.notarizes = Some(AttributableMap::new(self.participants));
+        self.clear_compacted(Self::NOTARIZE_SEEN | Self::NOTARIZE_HAS_PROPOSAL);
     }
 
     /// Clears all nullify votes and releases their storage.
     pub fn clear_nullifies(&mut self) {
-        self.nullifies.clear();
-        self.compacted_phases &= !Self::NULLIFICATION_COMPACTED;
+        self.nullifies = Some(AttributableMap::new(self.participants));
         self.clear_compacted(Self::NULLIFY_SEEN);
     }
 
     /// Clears all finalize votes and releases their storage.
     pub fn clear_finalizes(&mut self) {
-        self.finalizes.clear();
-        self.compacted_phases &= !Self::FINALIZATION_COMPACTED;
-        self.clear_compacted(Self::FINALIZE_SEEN | Self::FINALIZE_MATCHING);
+        self.finalizes = Some(AttributableMap::new(self.participants));
+        self.clear_compacted(Self::FINALIZE_SEEN | Self::FINALIZE_HAS_PROPOSAL);
     }
 }
 
@@ -3713,6 +3763,7 @@ mod tests {
         assert!(iter.next().is_none());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_vote_tracker_clears_compacted_state() {
         let mut tracker = VoteTracker::<ed25519::Scheme, Sha256>::new(2, false);
@@ -3741,6 +3792,7 @@ mod tests {
         assert!(!tracker.has_finalize_for(signer, &proposal));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_vote_tracker_retention_policy() {
         let mut rng = test_rng();
@@ -3755,28 +3807,36 @@ mod tests {
         let vote = Vote::Notarize(notarize);
 
         let mut releasing = VoteTracker::new(2, false);
-        assert!(releasing.record(&vote, Some(&proposal)));
-        assert!(releasing.notarizes.data.capacity() >= 2);
+        let record = releasing.record(&vote, Some(&proposal));
+        assert!(record.inserted);
+        assert!(record.retained);
+        assert!(releasing.notarizes.as_ref().unwrap().data.capacity() >= 2);
         releasing.release_notarizes(&proposal);
-        assert_eq!(releasing.notarizes.data.capacity(), 0);
-        assert!(!releasing.retains_full(&vote));
-        assert!(!releasing.record(&vote, Some(&proposal)));
+        assert!(releasing.notarizes.is_none());
+        let record = releasing.record(&vote, Some(&proposal));
+        assert!(!record.inserted);
+        assert!(!record.retained);
 
         // A certificate can arrive before any individual votes. Subsequent votes
         // must use compact storage instead of recreating the released full map.
         let mut certificate_first = VoteTracker::new(2, false);
         certificate_first.release_notarizes(&proposal);
-        assert!(!certificate_first.retains_full(&vote));
-        assert!(certificate_first.record(&vote, Some(&proposal)));
-        assert_eq!(certificate_first.notarizes.data.capacity(), 0);
-        assert!(!certificate_first.record(&vote, Some(&proposal)));
+        let record = certificate_first.record(&vote, Some(&proposal));
+        assert!(record.inserted);
+        assert!(!record.retained);
+        assert!(certificate_first.notarizes.is_none());
+        assert!(!certificate_first.record(&vote, Some(&proposal)).inserted);
 
         let mut retaining = VoteTracker::new(2, true);
-        assert!(retaining.record(&vote, Some(&proposal)));
-        let retained_capacity = retaining.notarizes.data.capacity();
+        let record = retaining.record(&vote, Some(&proposal));
+        assert!(record.inserted);
+        assert!(record.retained);
+        let retained_capacity = retaining.notarizes.as_ref().unwrap().data.capacity();
         retaining.release_notarizes(&proposal);
-        assert!(retaining.retains_full(&vote));
-        assert_eq!(retaining.notarizes.data.capacity(), retained_capacity);
+        assert_eq!(
+            retaining.notarizes.as_ref().unwrap().data.capacity(),
+            retained_capacity
+        );
         assert!(retaining.notarize(signer).is_some());
     }
 

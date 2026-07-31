@@ -502,7 +502,7 @@ where
                 fetch_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
                 forwarding: ForwardingPolicy::Disabled,
-                retain_votes_after_certification: false,
+                extended_conflict_reporting: false,
             },
         );
 

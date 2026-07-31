@@ -428,7 +428,7 @@ where
                         let round = work.entry(view).or_insert_with(|| self.new_round(view));
                         let process = process_span(round.span());
                         let _guard = process.entered();
-                        round.add_constructed(message);
+                        round.accept_vote(message, true);
                         self.added.inc();
                         updated_view = view;
                     }

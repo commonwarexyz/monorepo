@@ -109,6 +109,10 @@ where
     /// responsible for reusing the exact participant ordering carried by `participants` so that signer indices
     /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
     /// the wrong validator.
+    ///
+    /// Simplex compares complete signed votes when checking duplicates and
+    /// conflicts. Signing the same subject more than once for the same participant
+    /// must therefore produce the same signature encoding.
     pub scheme: S,
 
     /// Leader election configuration.
@@ -145,18 +149,17 @@ where
     /// may differ from the one exported before the crash.
     pub reporter: F,
 
-    /// Retain full votes after their corresponding certificate is recovered.
+    /// Extend conflict reporting beyond certification.
     ///
-    /// The batcher detects and reports conflicts while the required full votes
-    /// remain in memory. When this is disabled, those votes are released once
-    /// certified, so conflict evidence that requires a released vote can no longer
-    /// be constructed. Compact signer data remains available for forwarding and
-    /// duplicate suppression.
+    /// Enabling this retains full votes after their corresponding certificate is
+    /// recovered. Otherwise, conflict evidence that requires a released vote can
+    /// no longer be constructed. Compact signer data remains available for
+    /// forwarding and duplicate suppression.
     ///
     /// This is disabled by default in provided configurations because retaining
     /// full signed votes for every tracked view can consume substantial memory,
     /// especially when certificates arrive far ahead of the current view.
-    pub retain_votes_after_certification: bool,
+    pub extended_conflict_reporting: bool,
 
     /// Strategy for parallel operations.
     pub strategy: T,

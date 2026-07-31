@@ -607,6 +607,60 @@ mod tests {
     }
 
     #[test]
+    fn test_compacted_votes_still_block_nullify_finalize_conflicts() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
+
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+            false,
+        );
+        assert!(round.add_network(
+            participants[1].clone(),
+            Vote::Nullify(Nullify::sign::<Sha256Digest>(&schemes[1], round_id).unwrap()),
+        ));
+        round.record_certificate(&Certificate::Nullification(build_nullification(
+            &schemes,
+            round_id,
+            quorum(5) as usize,
+        )));
+        assert!(!round.add_network(
+            participants[1].clone(),
+            Vote::Finalize(Finalize::sign(&schemes[1], proposal.clone()).unwrap()),
+        ));
+
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+            false,
+        );
+        assert!(round.add_network(
+            participants[2].clone(),
+            Vote::Finalize(Finalize::sign(&schemes[2], proposal.clone()).unwrap()),
+        ));
+        round.record_certificate(&Certificate::Finalization(build_finalization(
+            &schemes,
+            &proposal,
+            quorum(5) as usize,
+        )));
+        assert!(!round.add_network(
+            participants[2].clone(),
+            Vote::Nullify(Nullify::sign::<Sha256Digest>(&schemes[2], round_id).unwrap()),
+        ));
+    }
+
+    #[test]
     fn test_constructed_votes_reported_after_existing_certificates() {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"batcher_test", 5);
@@ -625,23 +679,26 @@ mod tests {
         round.record_certificate(&Certificate::Notarization(build_notarization(
             &schemes, &proposal, quorum,
         )));
-        round.add_constructed(Vote::Notarize(
-            Notarize::sign(&schemes[0], proposal.clone()).unwrap(),
-        ));
+        round.accept_vote(
+            Vote::Notarize(Notarize::sign(&schemes[0], proposal.clone()).unwrap()),
+            true,
+        );
 
         round.record_certificate(&Certificate::Nullification(build_nullification(
             &schemes, round_id, quorum,
         )));
-        round.add_constructed(Vote::Nullify(
-            Nullify::sign::<Sha256Digest>(&schemes[0], round_id).unwrap(),
-        ));
+        round.accept_vote(
+            Vote::Nullify(Nullify::sign::<Sha256Digest>(&schemes[0], round_id).unwrap()),
+            true,
+        );
 
         round.record_certificate(&Certificate::Finalization(build_finalization(
             &schemes, &proposal, quorum,
         )));
-        round.add_constructed(Vote::Finalize(
-            Finalize::sign(&schemes[0], proposal).unwrap(),
-        ));
+        round.accept_vote(
+            Vote::Finalize(Finalize::sign(&schemes[0], proposal).unwrap()),
+            true,
+        );
 
         let activities = activities.lock();
         assert_eq!(
@@ -682,13 +739,13 @@ mod tests {
         );
         let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round_id).unwrap();
 
-        round.add_constructed(Vote::Nullify(nullify.clone()));
+        round.accept_vote(Vote::Nullify(nullify.clone()), true);
         round.record_certificate(&Certificate::Nullification(build_nullification(
             &schemes,
             round_id,
             quorum(5) as usize,
         )));
-        round.add_constructed(Vote::Nullify(nullify));
+        round.accept_vote(Vote::Nullify(nullify), true);
 
         assert_eq!(
             activities
@@ -763,7 +820,7 @@ mod tests {
         // The constructed finalize establishes the proposal without relying
         // on a leader vote.
         let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
-        round.add_constructed(Vote::Finalize(finalize));
+        round.accept_vote(Vote::Finalize(finalize), true);
         assert_eq!(
             round.try_forward_proposal(Participant::from_usize(0)),
             Some(proposal)
@@ -815,7 +872,7 @@ mod tests {
 
         // The voter's durable finalize may arrive after certificate recovery.
         let finalize = Finalize::sign(&schemes[quorum_size], proposal.clone()).unwrap();
-        round.add_constructed(Vote::Finalize(finalize));
+        round.accept_vote(Vote::Finalize(finalize), true);
 
         // Certificate-backed proposal state is immutable even if conflicting
         // certificate evidence is presented later.
@@ -866,7 +923,7 @@ mod tests {
         // The constructed finalize replaces the proposal and restores the
         // matching network votes before it enters the tracker itself.
         let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
-        round.add_constructed(Vote::Finalize(finalize));
+        round.accept_vote(Vote::Finalize(finalize), true);
 
         // Only the network votes require verification.
         let (batch, invalid) = round

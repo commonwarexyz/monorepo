@@ -130,7 +130,7 @@ pub struct SimplexConfig<L> {
     /// Retain signed votes after certification to extend conflict reporting.
     ///
     /// Enabling this increases per-view memory usage.
-    pub retain_votes_after_certification: bool,
+    pub extended_conflict_reporting: bool,
 
     /// Policy for proactively forwarding certified blocks.
     pub forwarding: ForwardingPolicy,
@@ -723,7 +723,7 @@ where
                 view_retention: self.simplex.view_retention,
                 skip_timeout: self.simplex.skip_timeout,
                 forwarding: self.simplex.forwarding,
-                retain_votes_after_certification: self.simplex.retain_votes_after_certification,
+                extended_conflict_reporting: self.simplex.extended_conflict_reporting,
             },
         );
 

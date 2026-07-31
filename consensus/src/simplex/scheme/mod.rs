@@ -135,12 +135,6 @@ impl<D: Digest, S> CertificateVerifier<D> for S where
 /// This trait binds a [`CertificateScheme`] to the [`Subject`] subject type and
 /// [`N3f1`] fault model used by the simplex protocol. It is automatically
 /// implemented for any compatible scheme.
-///
-/// # Deterministic Signatures
-///
-/// Conflict checking currently compares complete signed votes. Schemes must
-/// produce equal signature encodings whenever the same participant signs the
-/// same [`Subject`] more than once.
 pub trait Scheme<D: Digest>:
     CertificateVerifier<D> + for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
 {
