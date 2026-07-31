@@ -27,7 +27,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
-    futures::{AbortablePool, Aborter},
+    futures::Pool,
     ordered::Quorum,
     sequence::U64,
     vec::NonEmptyVec,
@@ -48,7 +48,6 @@ struct PendingDelivery {
     certification: View,
     purposes: NonEmptyVec<Purpose>,
     response: oneshot::Sender<DeliveryOutcome>,
-    _timeout: Aborter,
 }
 
 /// Requests are made concurrently to multiple peers.
@@ -90,7 +89,10 @@ pub struct Actor<
     /// `certification_timeout`, so one unresolved application request cannot
     /// block unrelated resolver work.
     pending_deliveries: Vec<PendingDelivery>,
-    pending_delivery_timeouts: AbortablePool<u64>,
+    /// Timeout futures run to completion after a delivery resolves because
+    /// some clocks retain registered alarms until their deadline. Expiration
+    /// is a no-op when the delivery ID is no longer pending.
+    pending_delivery_timeouts: Pool<u64>,
     next_pending_delivery: u64,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
@@ -123,7 +125,7 @@ impl<
                 known_nullifications: BTreeSet::new(),
                 certification_outcomes: BTreeMap::new(),
                 pending_deliveries: Vec::new(),
-                pending_delivery_timeouts: AbortablePool::default(),
+                pending_delivery_timeouts: Pool::default(),
                 next_pending_delivery: 0,
 
                 mailbox_receiver: receiver,
@@ -184,7 +186,7 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
-            Ok(delivery) = self.pending_delivery_timeouts.next_completed() else continue => {
+            delivery = self.pending_delivery_timeouts.next_completed() => {
                 self.expire_pending_delivery(delivery);
             },
             Some(message) = self.mailbox_receiver.recv() else break => {
@@ -307,7 +309,7 @@ impl<
             .expect("pending delivery ID overflow");
         let deadline = self.context.current() + self.certification_timeout;
         let timeout = self.context.sleep_until(deadline);
-        let aborter = self.pending_delivery_timeouts.push(async move {
+        self.pending_delivery_timeouts.push(async move {
             timeout.await;
             id
         });
@@ -317,7 +319,6 @@ impl<
             certification,
             purposes,
             response,
-            _timeout: aborter,
         });
     }
 
@@ -1667,10 +1668,59 @@ mod tests {
             let id = actor
                 .pending_delivery_timeouts
                 .next_completed()
-                .await
-                .expect("delivery timeout should remain active");
+                .await;
             actor.expire_pending_delivery(id);
             assert_eq!(receiver.await.unwrap(), DeliveryOutcome::Incomplete);
+        });
+    }
+
+    #[test_async]
+    async fn completed_delivery_timeout_keeps_runtime_live() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone());
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(6);
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view,
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(
+                        build_notarization(&schemes, &verifier, EPOCH, view),
+                    )
+                    .encode(),
+                    purposes: non_empty_vec![Purpose::Backfill],
+                    targeted: false,
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            // Poll the timeout once so it is registered with the runtime.
+            let mut pending_timeout = actor.pending_delivery_timeouts.next_completed();
+            select! {
+                result = &mut pending_timeout => {
+                    panic!("delivery timed out early: {result:?}");
+                },
+                _ = context.sleep(Duration::from_millis(1)) => {},
+            }
+            drop(pending_timeout);
+
+            actor.certified(&mut resolver, view, true);
+            assert_eq!(receiver.await.unwrap(), DeliveryOutcome::Complete);
+
+            // Drive the timeout pool once more, then cross the original
+            // deadline. Cleanup must not strand the deterministic clock.
+            let _ = actor.pending_delivery_timeouts.next_completed().await;
+            context.sleep(Duration::from_secs(2)).await;
         });
     }
 
