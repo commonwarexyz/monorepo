@@ -9238,11 +9238,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &voter_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
             let (resolver_sender, _resolver_receiver) =
@@ -9281,10 +9277,7 @@ mod tests {
 
             // Gate the first-attempt nullify's journal sync.
             pending_syncs.arm();
-            mailbox.timeout(
-                Round::new(epoch, target_view),
-                TimeoutReason::LeaderTimeout,
-            );
+            mailbox.timeout(Round::new(epoch, target_view), TimeoutReason::LeaderTimeout);
             while pending_syncs.lock().is_empty() {
                 reschedule().await;
             }

@@ -504,10 +504,7 @@ impl<
     }
 
     /// Builds and records a notarize vote when this view is ready.
-    async fn prepare_notarize(
-        mut self,
-        view: View,
-    ) -> (Self, Option<Notarize<S, D>>) {
+    async fn prepare_notarize(mut self, view: View) -> (Self, Option<Notarize<S, D>>) {
         // Construct a notarize vote
         let Some(notarize) = self.state.construct_notarize(view) else {
             return (self, None);
@@ -579,10 +576,7 @@ impl<
     }
 
     /// Builds and records a finalize vote if the round provides a candidate.
-    async fn prepare_finalize(
-        mut self,
-        view: View,
-    ) -> (Self, Option<Finalize<S, D>>) {
+    async fn prepare_finalize(mut self, view: View) -> (Self, Option<Finalize<S, D>>) {
         // Construct the finalize vote.
         let Some(finalize) = self.state.construct_finalize(view) else {
             return (self, None);

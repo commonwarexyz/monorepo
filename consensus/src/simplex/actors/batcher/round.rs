@@ -196,9 +196,7 @@ impl<
 
                 // Once certified, the vote is useful only for activity and
                 // proposal-forwarding hints unless conflict checking is enabled.
-                if !self.report_conflicting_votes
-                    && self.has_certificate(Kind::Notarization)
-                {
+                if !self.report_conflicting_votes && self.has_certificate(Kind::Notarization) {
                     let matching = self.verifier.proposal() == Some(&notarize.proposal);
                     if !self.votes.remember_notarize(index, matching) {
                         return false;
@@ -208,10 +206,7 @@ impl<
                 }
 
                 // Try to reserve
-                match (
-                    self.report_conflicting_votes,
-                    self.votes.notarize(index),
-                ) {
+                match (self.report_conflicting_votes, self.votes.notarize(index)) {
                     (true, Some(previous)) if previous.proposal != notarize.proposal => {
                         let activity = ConflictingNotarize::new(previous.clone(), notarize);
                         self.reporter
@@ -239,9 +234,7 @@ impl<
                     return false;
                 }
 
-                if !self.report_conflicting_votes
-                    && self.has_certificate(Kind::Nullification)
-                {
+                if !self.report_conflicting_votes && self.has_certificate(Kind::Nullification) {
                     if !self.votes.remember_nullify(index) {
                         return false;
                     }
@@ -281,9 +274,7 @@ impl<
                     return false;
                 }
 
-                if !self.report_conflicting_votes
-                    && self.has_certificate(Kind::Finalization)
-                {
+                if !self.report_conflicting_votes && self.has_certificate(Kind::Finalization) {
                     let matching = self.verifier.proposal() == Some(&finalize.proposal);
                     if !self.votes.remember_finalize(index, matching) {
                         return false;
@@ -303,10 +294,7 @@ impl<
                 }
 
                 // Try to reserve
-                match (
-                    self.report_conflicting_votes,
-                    self.votes.finalize(index),
-                ) {
+                match (self.report_conflicting_votes, self.votes.finalize(index)) {
                     (true, Some(previous)) if previous.proposal != finalize.proposal => {
                         let activity = ConflictingFinalize::new(previous.clone(), finalize);
                         self.reporter
@@ -341,9 +329,7 @@ impl<
     pub fn add_constructed(&mut self, message: Vote<S, D>) {
         match &message {
             Vote::Notarize(notarize) => {
-                if !self.report_conflicting_votes
-                    && self.has_certificate(Kind::Notarization)
-                {
+                if !self.report_conflicting_votes && self.has_certificate(Kind::Notarization) {
                     let matching = self.verifier.proposal() == Some(&notarize.proposal);
                     if !self.votes.remember_notarize(notarize.signer(), matching) {
                         return;
@@ -362,9 +348,7 @@ impl<
                 self.reporter.report(Activity::Notarize(notarize.clone()));
             }
             Vote::Nullify(nullify) => {
-                if !self.report_conflicting_votes
-                    && self.has_certificate(Kind::Nullification)
-                {
+                if !self.report_conflicting_votes && self.has_certificate(Kind::Nullification) {
                     if !self.votes.remember_nullify(nullify.signer()) {
                         return;
                     }
@@ -383,9 +367,7 @@ impl<
                 self.reporter.report(Activity::Nullify(nullify.clone()));
             }
             Vote::Finalize(finalize) => {
-                if !self.report_conflicting_votes
-                    && self.has_certificate(Kind::Finalization)
-                {
+                if !self.report_conflicting_votes && self.has_certificate(Kind::Finalization) {
                     let matching = self.verifier.proposal() == Some(&finalize.proposal);
                     if !self.votes.remember_finalize(finalize.signer(), matching) {
                         return;

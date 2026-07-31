@@ -177,7 +177,6 @@ impl<T: Attributable> AttributableMap<T> {
 /// their certificate exists. Compact signer state remains available for forwarding
 /// and duplicate suppression.
 pub struct VoteTracker<S: Scheme, D: Digest> {
-    participants: usize,
     /// Per-phase signer and proposal-match flags retained after full votes are released.
     compacted: Vec<u8>,
     /// Per-signer notarize votes keyed by validator index.
@@ -201,21 +200,24 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Creates a tracker sized for `participants` validators.
     pub const fn new(participants: usize) -> Self {
         Self {
-            participants,
             compacted: Vec::new(),
             notarizes: AttributableMap::new(participants),
             nullifies: AttributableMap::new(participants),
             finalizes: AttributableMap::new(participants),
         }
     }
+}
 
+#[cfg(not(target_arch = "wasm32"))]
+impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     fn remember(&mut self, signer: Participant, seen: u8, matching: Option<u8>) -> bool {
         let index = usize::from(signer);
-        if index >= self.participants {
+        let participants = self.notarizes.participants;
+        if index >= participants {
             return false;
         }
         if self.compacted.is_empty() {
-            self.compacted.resize(self.participants, 0);
+            self.compacted.resize(participants, 0);
         }
 
         let flags = &mut self.compacted[index];
@@ -278,11 +280,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 
     /// Returns whether `signer` is known to have notarized `proposal`.
-    pub(crate) fn has_notarize_for(
-        &self,
-        signer: Participant,
-        proposal: &Proposal<D>,
-    ) -> bool {
+    pub(crate) fn has_notarize_for(&self, signer: Participant, proposal: &Proposal<D>) -> bool {
         self.remembered(signer, Self::NOTARIZE_MATCHING)
             || self
                 .notarize(signer)
@@ -290,11 +288,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 
     /// Returns whether `signer` is known to have finalized `proposal`.
-    pub(crate) fn has_finalize_for(
-        &self,
-        signer: Participant,
-        proposal: &Proposal<D>,
-    ) -> bool {
+    pub(crate) fn has_finalize_for(&self, signer: Participant, proposal: &Proposal<D>) -> bool {
         self.remembered(signer, Self::FINALIZE_MATCHING)
             || self
                 .finalize(signer)
@@ -303,22 +297,22 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Releases notarize votes while retaining compact signer state.
     pub(crate) fn release_notarizes(&mut self, proposal: &Proposal<D>) {
+        let participants = self.notarizes.participants;
         Self::release(
-            self.participants,
+            participants,
             &mut self.compacted,
             &mut self.notarizes,
             Self::NOTARIZE_SEEN,
             Self::NOTARIZE_MATCHING,
-            |vote: &Notarize<S, D>| {
-                &vote.proposal == proposal
-            },
+            |vote: &Notarize<S, D>| &vote.proposal == proposal,
         );
     }
 
     /// Releases nullify votes while retaining compact signer state.
     pub(crate) fn release_nullifies(&mut self) {
+        let participants = self.nullifies.participants;
         Self::release(
-            self.participants,
+            participants,
             &mut self.compacted,
             &mut self.nullifies,
             Self::NULLIFY_SEEN,
@@ -329,16 +323,23 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Releases finalize votes while retaining compact signer state.
     pub(crate) fn release_finalizes(&mut self, proposal: &Proposal<D>) {
+        let participants = self.finalizes.participants;
         Self::release(
-            self.participants,
+            participants,
             &mut self.compacted,
             &mut self.finalizes,
             Self::FINALIZE_SEEN,
             Self::FINALIZE_MATCHING,
-            |vote: &Finalize<S, D>| {
-                &vote.proposal == proposal
-            },
+            |vote: &Finalize<S, D>| &vote.proposal == proposal,
         );
+    }
+}
+
+impl<S: Scheme, D: Digest> VoteTracker<S, D> {
+    fn clear_compacted(&mut self, phases: u8) {
+        for flags in &mut self.compacted {
+            *flags &= !phases;
+        }
     }
 
     /// Inserts a notarize vote if the signer has not already voted.
@@ -419,25 +420,19 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Clears all notarize votes and releases their storage.
     pub fn clear_notarizes(&mut self) {
         self.notarizes.clear();
-        for flags in &mut self.compacted {
-            *flags &= !(Self::NOTARIZE_SEEN | Self::NOTARIZE_MATCHING);
-        }
+        self.clear_compacted(Self::NOTARIZE_SEEN | Self::NOTARIZE_MATCHING);
     }
 
     /// Clears all nullify votes and releases their storage.
     pub fn clear_nullifies(&mut self) {
         self.nullifies.clear();
-        for flags in &mut self.compacted {
-            *flags &= !Self::NULLIFY_SEEN;
-        }
+        self.clear_compacted(Self::NULLIFY_SEEN);
     }
 
     /// Clears all finalize votes and releases their storage.
     pub fn clear_finalizes(&mut self) {
         self.finalizes.clear();
-        for flags in &mut self.compacted {
-            *flags &= !(Self::FINALIZE_SEEN | Self::FINALIZE_MATCHING);
-        }
+        self.clear_compacted(Self::FINALIZE_SEEN | Self::FINALIZE_MATCHING);
     }
 }
 
@@ -3648,6 +3643,34 @@ mod tests {
         let mut iter = map.iter();
         assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(2)));
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_vote_tracker_clears_compacted_state() {
+        let mut tracker = VoteTracker::<ed25519::Scheme, Sha256>::new(2);
+        let signer = Participant::new(1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(1)),
+            View::zero(),
+            sample_digest(1),
+        );
+
+        assert!(tracker.remember_notarize(signer, true));
+        assert!(tracker.remember_nullify(signer));
+        assert!(tracker.remember_finalize(signer, true));
+        assert!(!tracker.remember_notarize(Participant::new(2), true));
+        assert!(tracker.has_notarize_for(signer, &proposal));
+        assert!(tracker.has_finalize_for(signer, &proposal));
+
+        tracker.clear_notarizes();
+        assert!(!tracker.has_notarize_for(signer, &proposal));
+
+        assert!(!tracker.remember_nullify(signer));
+        tracker.clear_nullifies();
+        assert!(tracker.remember_nullify(signer));
+
+        tracker.clear_finalizes();
+        assert!(!tracker.has_finalize_for(signer, &proposal));
     }
 
     #[test]

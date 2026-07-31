@@ -344,15 +344,8 @@ mod tests {
         }
     }
 
-    struct RecordingReporter<S: Scheme<Sha256Digest>>(
-        Arc<Mutex<Vec<Activity<S, Sha256Digest>>>>,
-    );
-
-    impl<S: Scheme<Sha256Digest>> Clone for RecordingReporter<S> {
-        fn clone(&self) -> Self {
-            Self(self.0.clone())
-        }
-    }
+    #[derive(Clone)]
+    struct RecordingReporter<S: Scheme<Sha256Digest>>(Arc<Mutex<Vec<Activity<S, Sha256Digest>>>>);
 
     impl<S: Scheme<Sha256Digest>> crate::Reporter for RecordingReporter<S> {
         type Activity = Activity<S, Sha256Digest>;
@@ -544,6 +537,53 @@ mod tests {
                 .lock()
                 .iter()
                 .all(|activity| !matches!(activity, Activity::ConflictingNotarize(_)))
+        );
+    }
+
+    #[test]
+    fn test_nullify_finalize_conflicts_reported_when_enabled() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
+        let activities = Arc::new(Mutex::new(Vec::new()));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            RecordingReporter(activities.clone()),
+            true,
+        );
+
+        assert!(round.add_network(
+            participants[1].clone(),
+            Vote::Finalize(Finalize::sign(&schemes[1], proposal.clone()).unwrap()),
+        ));
+        assert!(!round.add_network(
+            participants[1].clone(),
+            Vote::Nullify(Nullify::sign::<Sha256Digest>(&schemes[1], round_id).unwrap()),
+        ));
+
+        assert!(round.add_network(
+            participants[2].clone(),
+            Vote::Nullify(Nullify::sign::<Sha256Digest>(&schemes[2], round_id).unwrap()),
+        ));
+        assert!(!round.add_network(
+            participants[2].clone(),
+            Vote::Finalize(Finalize::sign(&schemes[2], proposal).unwrap()),
+        ));
+
+        assert_eq!(
+            activities
+                .lock()
+                .iter()
+                .filter(|activity| matches!(activity, Activity::NullifyFinalize(_)))
+                .count(),
+            2
         );
     }
 
