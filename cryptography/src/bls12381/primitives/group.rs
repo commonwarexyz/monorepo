@@ -287,7 +287,11 @@ pub struct SmallScalar {
 impl SmallScalar {
     /// Generates a random non-zero 128-bit scalar.
     pub fn random(mut rng: impl CryptoRng) -> Self {
+        // blst_scalar is 32 bytes.
         let mut bytes = [0u8; SCALAR_LENGTH];
+        // Fill the last 16 bytes (128 bits) with entropy.
+        // In big-endian, bytes[16..32] are the least significant.
+        // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
         let random_bytes = &mut bytes[(SCALAR_LENGTH - SMALL_SCALAR_LENGTH)..];
         while bool::from(all_zero(random_bytes)) {
             rng.fill_bytes(random_bytes);
