@@ -31,7 +31,7 @@ use commonware_glue::{
     stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Buf, BufMut, buffer::paged::CacheRef};
+use commonware_runtime::{Buf, BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
@@ -42,7 +42,8 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU64, NZUsize, ordered::Set, range::NonEmptyRange, sequence::U64, sync::Mutex,
+    Acknowledgement, NZU32, NZU64, NZUsize, ordered::Set, range::NonEmptyRange, sequence::U64,
+    sync::Mutex,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
@@ -94,8 +95,8 @@ pub const DKG_CHANNEL: u64 = 6;
 pub const DKG_PROBE_CHANNEL: u64 = 7;
 /// Mailbox capacity for every actor.
 pub const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(100);
-/// Maximum queued messages per P2P channel.
-pub const MESSAGE_BACKLOG: usize = 128;
+/// Per-peer message quota for every P2P channel.
+pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 /// Maximum P2P message size in bytes.
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
