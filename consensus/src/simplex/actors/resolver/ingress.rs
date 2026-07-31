@@ -51,8 +51,6 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
         match self {
             Self::Certificate { certificate, .. } => certificate.view(),
             Self::Certified { round, .. } => round.view(),
-            // Finalization of the requested ancestry, rather than of the
-            // proposal that exposed it, makes this work obsolete.
             Self::Resolve { view, .. } => *view,
         }
     }

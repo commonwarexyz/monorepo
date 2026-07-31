@@ -24,7 +24,7 @@ impl CertificateSource {
         known_to_resolver: false,
         rebroadcast: true,
     };
-    const RESOLVER: Self = Self {
+    const BACKGROUND_RESOLVER: Self = Self {
         known_to_resolver: true,
         rebroadcast: true,
     };
@@ -308,7 +308,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                 certificate = %certificate.kind()
             ),
             certificate,
-            source: CertificateSource::RESOLVER,
+            source: CertificateSource::BACKGROUND_RESOLVER,
         });
     }
 
@@ -410,7 +410,7 @@ mod tests {
         verified_msg_from(
             certificate,
             if from_resolver {
-                CertificateSource::RESOLVER
+                CertificateSource::BACKGROUND_RESOLVER
             } else {
                 CertificateSource::BATCHER
             },
@@ -475,7 +475,7 @@ mod tests {
             let Some(Message::Verified { source, .. }) = receiver.recv().await else {
                 panic!("expected background resolver certificate");
             };
-            assert_eq!(source, CertificateSource::RESOLVER);
+            assert_eq!(source, CertificateSource::BACKGROUND_RESOLVER);
             assert!(source.is_resolver());
             assert!(source.rebroadcast());
         });
@@ -515,7 +515,10 @@ mod tests {
     #[test]
     fn duplicate_certificate_combines_sources() {
         for (certificate, background) in [
-            (nullification(View::new(5)), CertificateSource::RESOLVER),
+            (
+                nullification(View::new(5)),
+                CertificateSource::BACKGROUND_RESOLVER,
+            ),
             (finalization(View::new(5)), CertificateSource::BATCHER),
         ] {
             let source = retained_duplicate_source(

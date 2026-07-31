@@ -74,9 +74,7 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalization: bool,
     reported_finalization: bool,
     certify: CertifyState,
-    // Last ancestry view requested from this round's leader. For a fixed
-    // proposal, each view is either skipped or the named parent, never both.
-    requested: Option<View>,
+    last_ancestry_request: Option<View>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -106,7 +104,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             broadcast_finalization: false,
             reported_finalization: false,
             certify: CertifyState::Ready,
-            requested: None,
+            last_ancestry_request: None,
         }
     }
 
@@ -157,12 +155,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Records an ancestry view requested from the leader. Returns `false`
-    /// when the same view was already requested.
+    /// when it matches the most recent request. For a fixed proposal, a view
+    /// cannot be both skipped and its named parent.
     pub fn request(&mut self, view: View) -> bool {
-        if self.requested == Some(view) {
+        if self.last_ancestry_request == Some(view) {
             return false;
         }
-        self.requested = Some(view);
+        self.last_ancestry_request = Some(view);
         true
     }
 
