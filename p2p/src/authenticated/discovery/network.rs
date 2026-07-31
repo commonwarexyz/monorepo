@@ -108,8 +108,26 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// # Parameters
     ///
     /// * `channel` - Unique identifier for the channel.
-    /// * `rate` - Rate at which messages can be received over the channel.
-    /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
+    /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
+    ///   is paced independently. The returned sender applies the same quota independently to each
+    ///   recipient.
+    /// * `backlog` - Capacity of the channel's single bounded inbound mailbox.
+    ///
+    /// # Backpressure
+    ///
+    /// All peer connections share the inbound mailbox. Enqueueing never waits for capacity. When
+    /// the mailbox is full, the arriving message is dropped and queued messages remain. There is no
+    /// per-peer reservation or fairness.
+    ///
+    /// A synchronized burst can contribute up to `rate.burst_size()` messages per connected peer.
+    /// To absorb one full burst from every peer, use
+    /// [`burst_backlog`](crate::authenticated::burst_backlog) with the maximum number of connected
+    /// peers. This sizing includes honest traffic since protocol events can synchronize honest
+    /// senders. Also account for expected receiver stalls and ensure its drain rate can sustain
+    /// aggregate ingress. No finite backlog can absorb sustained ingress above the drain rate.
+    ///
+    /// The queued payloads can consume roughly `backlog * max_message_size` bytes, in addition to
+    /// queue and allocator overhead.
     ///
     /// # Returns
     ///

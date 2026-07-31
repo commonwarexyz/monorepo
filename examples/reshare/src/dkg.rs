@@ -5,7 +5,7 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
-        MESSAGE_BACKLOG, NAMESPACE, Participants, RESOLVER_CHANNEL, SHARING_MODE, VOTE_CHANNEL,
+        MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, SHARING_MODE, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -15,9 +15,9 @@ use commonware_glue::dkg::{
     bootstrap,
     types::{EpochInfo, EpochOutcome},
 };
-use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{Quota, Strategizer, Supervisor as _, tokio};
-use commonware_utils::{NZU32, NZUsize};
+use commonware_p2p::authenticated::{self, discovery};
+use commonware_runtime::{Strategizer, Supervisor as _, tokio};
+use commonware_utils::NZUsize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -53,32 +53,18 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
-    let vote = p2p.register(
-        VOTE_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let certificate = p2p.register(
-        CERTIFICATE_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let resolver = p2p.register(
-        RESOLVER_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let backfill = p2p.register(
-        BACKFILL_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let broadcast = p2p.register(
-        BROADCAST_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let dkg = p2p.register(DKG_CHANNEL, Quota::per_second(NZU32!(128)), MESSAGE_BACKLOG);
+    // Configure channel capacity
+    //
+    // The rate is enforced independently for each peer. All peers share each channel's inbound
+    // mailbox, so size its backlog for one full burst from every peer.
+    let message_backlog = authenticated::burst_backlog(network.participants.len(), MESSAGE_RATE);
+
+    let vote = p2p.register(VOTE_CHANNEL, MESSAGE_RATE, message_backlog);
+    let certificate = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE, message_backlog);
+    let resolver = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE, message_backlog);
+    let backfill = p2p.register(BACKFILL_CHANNEL, MESSAGE_RATE, message_backlog);
+    let broadcast = p2p.register(BROADCAST_CHANNEL, MESSAGE_RATE, message_backlog);
+    let dkg = p2p.register(DKG_CHANNEL, MESSAGE_RATE, message_backlog);
 
     let strategy = context.strategy(NZUsize!(2));
     let store = FileSecretStore::load(args.node_dir.join("secrets.json"))

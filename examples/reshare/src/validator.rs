@@ -7,7 +7,7 @@ use crate::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
         LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
-        MESSAGE_BACKLOG, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
+        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
         RESOLVER_CHANNEL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
     },
 };
@@ -35,11 +35,11 @@ use commonware_glue::{
     },
 };
 use commonware_macros::boxed;
-use commonware_p2p::authenticated::discovery;
+use commonware_p2p::authenticated::{self, discovery};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Quota, Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZDuration, NZU32, NZU64, NZUsize};
+use commonware_utils::{NZDuration, NZU64, NZUsize};
 use futures::future::try_join_all;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
@@ -79,42 +79,20 @@ pub async fn run(context: tokio::Context, args: Validator) {
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
-    let vote_network = p2p.register(
-        VOTE_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let certificate_network = p2p.register(
-        CERTIFICATE_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let resolver_network = p2p.register(
-        RESOLVER_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let backfill_network = p2p.register(
-        BACKFILL_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let broadcast_network = p2p.register(
-        BROADCAST_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let qmdb_network = p2p.register(
-        QMDB_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let dkg_network = p2p.register(DKG_CHANNEL, Quota::per_second(NZU32!(128)), MESSAGE_BACKLOG);
-    let dkg_probe_network = p2p.register(
-        DKG_PROBE_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
+    // Configure channel capacity
+    //
+    // The rate is enforced independently for each peer. All peers share each channel's inbound
+    // mailbox, so size its backlog for one full burst from every peer.
+    let message_backlog = authenticated::burst_backlog(network.participants.len(), MESSAGE_RATE);
+
+    let vote_network = p2p.register(VOTE_CHANNEL, MESSAGE_RATE, message_backlog);
+    let certificate_network = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE, message_backlog);
+    let resolver_network = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE, message_backlog);
+    let backfill_network = p2p.register(BACKFILL_CHANNEL, MESSAGE_RATE, message_backlog);
+    let broadcast_network = p2p.register(BROADCAST_CHANNEL, MESSAGE_RATE, message_backlog);
+    let qmdb_network = p2p.register(QMDB_CHANNEL, MESSAGE_RATE, message_backlog);
+    let dkg_network = p2p.register(DKG_CHANNEL, MESSAGE_RATE, message_backlog);
+    let dkg_probe_network = p2p.register(DKG_PROBE_CHANNEL, MESSAGE_RATE, message_backlog);
     let p2p_handle = p2p.start();
 
     let provider = DynamicProvider::default();

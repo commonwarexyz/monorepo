@@ -17,6 +17,20 @@ use std::{
 };
 use thiserror::Error;
 
+/// Returns the backlog required to hold one quota burst from every peer.
+///
+/// This covers a synchronized burst, including from honest peers, but does not account for
+/// receiver stalls or sustained ingress above the receiver's drain rate.
+///
+/// # Panics
+///
+/// Panics if the aggregate burst does not fit in a `usize`.
+pub const fn burst_backlog(peers: usize, rate: Quota) -> usize {
+    peers
+        .checked_mul(rate.burst_size().get() as usize)
+        .expect("message backlog overflow")
+}
+
 /// Errors that can occur when interacting with the network.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -66,7 +80,9 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     }
 }
 
-/// Sender is the mechanism used to send arbitrary bytes to a set of recipients over a pre-defined channel.
+/// Sends arbitrary bytes over one registered channel.
+///
+/// The channel's quota is shared across clones and enforced independently for each recipient.
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
 }
@@ -116,7 +132,12 @@ where
     }
 }
 
-/// Channel to asynchronously receive messages from a channel.
+/// Lossy receiver for one registered channel.
+///
+/// Every peer connection feeds the same bounded inbound mailbox after independent per-peer rate
+/// limiting. If the mailbox is full, the arriving message is dropped and queued messages remain.
+/// Configure its capacity through `Network::register` using the aggregate peer burst, expected
+/// receiver stalls, and memory budget.
 pub struct Receiver<P: PublicKey> {
     receiver: mailbox::UnreliableReceiver<Inbound<P>>,
 }
@@ -192,5 +213,26 @@ impl<P: PublicKey> Channels<P> {
 
     pub fn collect(self) -> BTreeMap<u64, (Quota, mailbox::UnreliableSender<Inbound<P>>)> {
         self.receivers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::NZU32;
+
+    #[test]
+    fn burst_backlog_aggregates_peers() {
+        let rate = Quota::per_second(NZU32!(128));
+
+        assert_eq!(burst_backlog(7, rate), 896);
+    }
+
+    #[test]
+    #[should_panic(expected = "message backlog overflow")]
+    fn burst_backlog_panics_on_overflow() {
+        let rate = Quota::per_second(NZU32!(2));
+
+        burst_backlog(usize::MAX, rate);
     }
 }

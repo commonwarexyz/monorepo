@@ -8,6 +8,7 @@
 //! and that they can be looked up by their identifiers.
 
 mod channels;
+pub use channels::burst_backlog;
 mod data;
 pub(crate) mod dialing;
 pub mod discovery;
