@@ -36,11 +36,8 @@
 //!    ([`fold_window_partials`]): `width` doublings plus one addition per window. This is the
 //!    only sequential stage, and it is `O(windows * width)` regardless of batch size.
 
-use super::{
-    point::{EdwardsPoint, MixedPoint},
-    scalar::Scalar,
-};
-use crate::simplified::{Backend, GVec, LANES};
+use super::scalar::Scalar;
+use crate::simplified::{Backend, G, GAffine, GAffineVec, GVec, LANES};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_parallel::Strategy;
@@ -95,14 +92,14 @@ pub(super) fn width_for(terms: usize, parallelism: usize) -> u32 {
 /// keep the per-term footprint, and therefore each pass's memory traffic, small; entries above
 /// the chosen width's window count stay zero.
 pub(super) struct Term {
-    point: MixedPoint,
+    point: GAffine,
     digits: [i16; MAX_WINDOWS],
 }
 
 impl Term {
     /// Recodes `scalar` at `width` (the batch-wide value from [`width_for`]; every term of one
     /// MSM must use the same width).
-    pub(super) fn new(point: MixedPoint, scalar: &Scalar, width: u32) -> Self {
+    pub(super) fn new(point: GAffine, scalar: &Scalar, width: u32) -> Self {
         let digits: [i32; MAX_WINDOWS] = scalar.signed_digits(width);
         Self {
             point,
@@ -152,7 +149,7 @@ fn used_buckets(chunks: &[&[Term]], start: usize, end: usize, window: usize) -> 
 }
 
 mod transposed {
-    use super::{Backend, EdwardsPoint, GVec, LANES, MixedPoint, Term};
+    use super::{Backend, G, GAffine, GAffineVec, GVec, LANES, Term};
     #[cfg(not(feature = "std"))]
     use alloc::{vec, vec::Vec};
 
@@ -161,8 +158,8 @@ mod transposed {
     /// `l mod LANES`, plus this private bucket stripe, so the wave loop below can update `LANES`
     /// buckets with one vectorized addition and no two lanes ever collide on a bucket.
     /// Heap-allocated because the width (and so the array size) is a per-batch runtime value.
-    fn identity_buckets(nb: usize) -> Vec<EdwardsPoint> {
-        vec![EdwardsPoint::IDENTITY; LANES * nb]
+    fn identity_buckets(nb: usize) -> Vec<G> {
+        vec![G::IDENTITY; LANES * nb]
     }
 
     /// Adds one contiguous run of terms into one window's bucket stripes via vectorized "wave"
@@ -181,16 +178,16 @@ mod transposed {
     #[allow(clippy::needless_range_loop)]
     fn fill_buckets<B: Backend>(
         backend: B,
-        buckets: &mut [EdwardsPoint],
+        buckets: &mut [G],
         nb: usize,
         terms: &[Term],
         window: usize,
     ) {
-        let identity_point = MixedPoint::IDENTITY;
+        let identity_point = GAffine::IDENTITY;
         for wave in terms.chunks(LANES) {
             let mut incoming = [identity_point; LANES];
             let mut negative = [false; LANES];
-            let mut current = [EdwardsPoint::IDENTITY; LANES];
+            let mut current = [G::IDENTITY; LANES];
             let mut bucket_index = [None::<usize>; LANES];
             let mut any = false;
             for (lane, term) in wave.iter().enumerate() {
@@ -211,12 +208,12 @@ mod transposed {
             if !any {
                 continue;
             }
-            let updated = EdwardsPoint::unpack(
-                backend.g_add_mixed(
-                    EdwardsPoint::pack(&current),
-                    MixedPoint::pack_signed(backend, &incoming, &negative),
-                ),
-            );
+            let updated = backend
+                .g_add_mixed(
+                    GVec::from_lanes(&current),
+                    GAffineVec::from_signed_lanes(backend, &incoming, &negative),
+                )
+                .to_lanes();
             for lane in 0..LANES {
                 if let Some(i) = bucket_index[lane] {
                     buckets[lane * nb + i] = updated[lane];
@@ -231,16 +228,16 @@ mod transposed {
     fn fold_buckets<B: Backend>(
         backend: B,
         result: GVec,
-        buckets: &[EdwardsPoint],
+        buckets: &[G],
         nb: usize,
         used: usize,
     ) -> GVec {
-        let mut sum = EdwardsPoint::identity_vec();
-        let mut window_sum = EdwardsPoint::identity_vec();
+        let mut sum = GVec::identity();
+        let mut window_sum = GVec::identity();
         for d in (0..used).rev() {
-            let bucket_group: [EdwardsPoint; LANES] =
+            let bucket_group: [G; LANES] =
                 core::array::from_fn(|lane| buckets[lane * nb + d]);
-            sum = backend.g_add(sum, EdwardsPoint::pack(&bucket_group));
+            sum = backend.g_add(sum, GVec::from_lanes(&bucket_group));
             window_sum = backend.g_add(window_sum, sum);
         }
         backend.g_add(result, window_sum)
@@ -257,17 +254,14 @@ mod transposed {
         end: usize,
         window: usize,
         width: u32,
-    ) -> EdwardsPoint {
+    ) -> G {
         let nb = super::num_buckets(width);
         let used = super::used_buckets(chunks, start, end, window);
         let mut buckets = identity_buckets(nb);
         for piece in super::pieces(chunks, start, end) {
             fill_buckets(backend, &mut buckets, nb, piece, window);
         }
-        EdwardsPoint::sum_lanes(
-            backend,
-            fold_buckets(backend, EdwardsPoint::identity_vec(), &buckets, nb, used),
-        )
+        fold_buckets(backend, GVec::identity(), &buckets, nb, used).sum_lanes(backend)
     }
 
     /// Computes the full MSM over `chunks` via the lane-transposed Pippenger bucket method,
@@ -279,10 +273,10 @@ mod transposed {
         backend: B,
         chunks: &[&[Term]],
         width: u32,
-    ) -> EdwardsPoint {
+    ) -> G {
         let nb = super::num_buckets(width);
         let total = super::total_terms(chunks);
-        let mut result = EdwardsPoint::identity_vec();
+        let mut result = GVec::identity();
         let mut buckets = identity_buckets(nb);
         for window in (0..super::num_windows(width)).rev() {
             for _ in 0..width {
@@ -293,10 +287,10 @@ mod transposed {
                 fill_buckets(backend, &mut buckets, nb, piece, window);
             }
             result = fold_buckets(backend, result, &buckets, nb, used);
-            buckets.fill(EdwardsPoint::IDENTITY);
+            buckets.fill(G::IDENTITY);
         }
 
-        EdwardsPoint::sum_lanes(backend, result)
+        result.sum_lanes(backend)
     }
 }
 
@@ -305,7 +299,7 @@ fn multiscalar_mul_terms<B: Backend>(
     backend: B,
     chunks: &[&[Term]],
     width: u32,
-) -> EdwardsPoint {
+) -> G {
     transposed::multiscalar_mul(backend, chunks, width)
 }
 
@@ -316,10 +310,10 @@ fn multiscalar_mul_terms<B: Backend>(
 #[cfg(test)]
 fn multiscalar_mul<B: Backend>(
     backend: B,
-    points: &[MixedPoint],
+    points: &[GAffine],
     scalars: &[Scalar],
     width: u32,
-) -> EdwardsPoint {
+) -> G {
     debug_assert_eq!(points.len(), scalars.len());
     let terms: Vec<Term> = points
         .iter()
@@ -334,17 +328,17 @@ fn multiscalar_mul<B: Backend>(
 /// partial joins.
 fn fold_window_partials<B: Backend>(
     backend: B,
-    windows: &[EdwardsPoint],
+    windows: &[G],
     width: u32,
-) -> EdwardsPoint {
-    let mut result = EdwardsPoint::IDENTITY;
+) -> G {
+    let mut result = GVec::identity();
     for window in windows.iter().rev() {
         for _ in 0..width {
-            result = result.double(backend);
+            result = backend.g_double(result);
         }
-        result = result.add(backend, window);
+        result = backend.g_add(result, GVec::splat(*window));
     }
-    result
+    result.to_lanes()[0]
 }
 
 /// Floor on terms per parallel MSM: below this, the whole bucket phase is a few thousand point
@@ -388,7 +382,7 @@ pub(super) fn multiscalar_mul_terms_parallel<B: Backend>(
     chunks: &[&[Term]],
     width: u32,
     strategy: &impl Strategy,
-) -> EdwardsPoint {
+) -> G {
     let total = total_terms(chunks);
     if total < MIN_PARALLEL_TERMS || strategy.manual().parallelism() <= 1 {
         return multiscalar_mul_terms(backend, chunks, width);
@@ -402,16 +396,21 @@ pub(super) fn multiscalar_mul_terms_parallel<B: Backend>(
         (window, partial)
     });
 
-    let mut windows = vec![EdwardsPoint::IDENTITY; nw];
+    let mut windows = vec![GVec::identity(); nw];
     for (window, partial) in partials {
-        windows[window] = windows[window].add(backend, &partial);
+        windows[window] = backend.g_add(windows[window], GVec::splat(partial));
     }
+    let windows: Vec<G> = windows
+        .into_iter()
+        .map(|window| window.to_lanes()[0])
+        .collect();
     fold_window_partials(backend, &windows, width)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simplified::GBackend;
     use crate::signing::scalar::test_support::rand_scalar;
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
@@ -435,14 +434,11 @@ mod tests {
             .collect()
     }
 
-    /// Returns `n` distinct, `Z = 1` points, via [`valid_point_bytes`] and decompression --
-    /// every point this crate's MSM is ever fed in production is either freshly decompressed or
-    /// the hardcoded basepoint, so tests generate points the same way rather than via `scalar_mul`
-    /// (whose output generally has `Z != 1`, violating [`MixedPoint::new`]'s precondition).
-    fn rand_affine_points<B: Backend>(backend: B, n: usize) -> Vec<EdwardsPoint> {
+    /// Returns `n` distinct affine points via [`valid_point_bytes`] and decompression.
+    fn rand_affine_points<B: Backend>(backend: B, n: usize) -> Vec<GAffine> {
         valid_point_bytes(n)
             .iter()
-            .map(|b| EdwardsPoint::decompress(backend, b).unwrap())
+            .map(|b| GAffine::decompress(backend, b).unwrap())
             .collect()
     }
 
@@ -451,14 +447,24 @@ mod tests {
         let mut rng = test_rng();
         rand_affine_points(backend, n)
             .iter()
-            .map(|p| {
-                Term::new(
-                    MixedPoint::new(backend, p),
-                    &rand_scalar(&mut rng),
-                    width,
-                )
-            })
+            .map(|p| Term::new(*p, &rand_scalar(&mut rng), width))
             .collect()
+    }
+
+    fn add_points<B: Backend>(backend: B, left: G, right: G) -> G {
+        backend
+            .g_add(GVec::splat(left), GVec::splat(right))
+            .to_lanes()[0]
+    }
+
+    fn points_equal<B: Backend>(backend: B, actual: G, expected: G) -> bool {
+        backend
+            .g_add(
+                GVec::splat(actual),
+                GVec::splat(expected).negate(backend),
+            )
+            .to_lanes()[0]
+            .is_identity()
     }
 
     /// Splits `terms` into owned chunks of the given (deliberately uneven, `LANES`-unaligned)
@@ -515,24 +521,24 @@ mod tests {
         let mut rng = test_rng();
         for n in [0, 1, 2, 5, 8, 9, 32, 64, 100] {
             let points = rand_affine_points(backend, n);
-            let mixed: Vec<MixedPoint> = points
-                .iter()
-                .map(|point| MixedPoint::new(backend, point))
-                .collect();
             let scalars: Vec<Scalar> = (0..n).map(|_| rand_scalar(&mut rng)).collect();
 
             let expected = points
                 .iter()
                 .zip(&scalars)
-                .fold(EdwardsPoint::IDENTITY, |acc, (p, s)| {
-                    acc.add(backend, &p.scalar_mul(backend, s))
-                });
+                .fold(GVec::identity(), |acc, (point, scalar)| {
+                    backend.g_add(
+                        acc,
+                        GAffineVec::splat(*point)
+                            .to_extended(backend)
+                            .scalar_mul(backend, scalar.bits_be()),
+                    )
+                })
+                .to_lanes()[0];
             for width in TEST_WIDTHS {
-                let actual = multiscalar_mul(backend, &mixed, &scalars, width);
+                let actual = multiscalar_mul(backend, &points, &scalars, width);
                 assert!(
-                    actual
-                        .add(backend, &expected.negate(backend))
-                        .is_identity(),
+                    points_equal(backend, actual, expected),
                     "n={n} width={width}"
                 );
             }
@@ -553,11 +559,7 @@ mod tests {
 
             let expected = multiscalar_mul_terms(backend, &refs(&single), 7);
             let actual = multiscalar_mul_terms(backend, &refs(&chunks), 7);
-            assert!(
-                actual
-                    .add(backend, &expected.negate(backend))
-                    .is_identity()
-            );
+            assert!(points_equal(backend, actual, expected));
         }
     }
 
@@ -571,12 +573,7 @@ mod tests {
                 let expected = multiscalar_mul_terms(backend, &chunks, width);
                 let actual =
                     multiscalar_mul_terms_parallel(backend, &chunks, width, &Sequential);
-                assert!(
-                    actual
-                        .add(backend, &expected.negate(backend))
-                        .is_identity(),
-                    "n={n} width={width}"
-                );
+                assert!(points_equal(backend, actual, expected), "n={n} width={width}");
             }
         }
     }
@@ -599,12 +596,7 @@ mod tests {
                 let chunks = refs(&chunks);
                 let expected = multiscalar_mul_terms(backend, &chunks, width);
                 let actual = multiscalar_mul_terms_parallel(backend, &chunks, width, &strategy);
-                assert!(
-                    actual
-                        .add(backend, &expected.negate(backend))
-                        .is_identity(),
-                    "n={n} width={width}"
-                );
+                assert!(points_equal(backend, actual, expected), "n={n} width={width}");
             }
         }
     }
@@ -627,22 +619,20 @@ mod tests {
             let expected = multiscalar_mul_terms(backend, &chunks, WIDTH);
 
             let nw = num_windows(WIDTH);
-            let mut transposed_windows = vec![EdwardsPoint::IDENTITY; nw];
+            let mut transposed_windows = vec![G::IDENTITY; nw];
             for (window, partial) in transposed_windows.iter_mut().enumerate() {
-                *partial = transposed::window_partial(
-                    backend, &chunks, 0, mid, window, WIDTH,
-                )
-                .add(
+                *partial = add_points(
                     backend,
-                    &transposed::window_partial(backend, &chunks, mid, total, window, WIDTH),
+                    transposed::window_partial(backend, &chunks, 0, mid, window, WIDTH),
+                    transposed::window_partial(backend, &chunks, mid, total, window, WIDTH),
                 );
             }
 
-            assert!(
-                fold_window_partials(backend, &transposed_windows, WIDTH)
-                    .add(backend, &expected.negate(backend))
-                    .is_identity()
-            );
+            assert!(points_equal(
+                backend,
+                fold_window_partials(backend, &transposed_windows, WIDTH),
+                expected,
+            ));
         }
     }
 

@@ -236,6 +236,146 @@ pub(crate) trait FBackend: Copy {
     }
 }
 
+/// A compact point on the twisted Edwards curve in extended homogeneous coordinates.
+///
+/// Arithmetic stays in [`GVec`]; this type is only the array-of-structures representation used
+/// to store individual points between vector operations.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct G {
+    x: F,
+    y: F,
+    t: F,
+    z: F,
+}
+
+impl G {
+    /// The neutral element, `(0, 1)` in affine coordinates.
+    pub(crate) const IDENTITY: Self = Self {
+        x: F::ZERO,
+        y: F::ONE,
+        t: F::ZERO,
+        z: F::ONE,
+    };
+
+    /// Returns whether this point represents the identity.
+    pub(crate) fn is_identity(&self) -> bool {
+        self.x.is_zero() && self.y.eq(&self.z)
+    }
+}
+
+/// A compact affine point prepared for mixed addition.
+///
+/// Arithmetic stays in [`GAffineVec`] and [`GVec`]; this type stores individual affine points
+/// between vector operations.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GAffine {
+    x: F,
+    y: F,
+    t2d: F,
+}
+
+impl GAffine {
+    /// The neutral element, `(0, 1)`.
+    pub(crate) const IDENTITY: Self = Self {
+        x: F::ZERO,
+        y: F::ONE,
+        t2d: F::ZERO,
+    };
+
+    /// The standard Ed25519 base point, prepared for mixed addition.
+    pub(crate) const BASEPOINT: Self = Self {
+        x: F([
+            1738742601995546,
+            1146398526822698,
+            2070867633025821,
+            562264141797630,
+            587772402128613,
+        ]),
+        y: F([
+            1801439850948184,
+            1351079888211148,
+            450359962737049,
+            900719925474099,
+            1801439850948198,
+        ]),
+        t2d: F([
+            301289933810280,
+            1259582250014073,
+            1422107436869536,
+            796239922652654,
+            1953934009299142,
+        ]),
+    };
+
+    /// Decompresses a point encoding, accepting non-canonical `y` values per ZIP215.
+    pub(crate) fn decompress<B: FBackend>(backend: B, bytes: &[u8; 32]) -> Option<Self> {
+        Self::decompress_batch(backend, &[*bytes; LANES])[0]
+    }
+
+    /// Decompresses eight point encodings with the square-root calculation performed lane-wise by
+    /// the selected backend.
+    pub(crate) fn decompress_batch<B: FBackend>(
+        backend: B,
+        bytes: &[[u8; 32]; LANES],
+    ) -> [Option<Self>; LANES] {
+        let signs = bytes.map(|encoding| encoding[31] >> 7);
+        let ys = bytes.map(|encoding| F::from_bytes(&encoding));
+        let y = FVec::from_lanes(&ys);
+        let one = F::ONE.splat();
+
+        // Recover x from x^2 = u/v, where u = y^2 - 1 and v = d*y^2 + 1.
+        let y2 = backend.square(y);
+        let u = backend.sub(y2, one);
+        let v = backend.add(backend.mul(F::EDWARDS_D.splat(), y2), one);
+        let uv = backend.mul(u, v);
+        let candidate = backend.mul(u, pow_p58(backend, uv));
+        let vxx = backend.mul(v, backend.square(candidate));
+
+        let u_lanes = u.to_lanes();
+        let negative_u_lanes = backend.neg(u).to_lanes();
+        let vxx_lanes = vxx.to_lanes();
+        let factors = core::array::from_fn(|i| {
+            if vxx_lanes[i].eq(&u_lanes[i]) {
+                Some(F::ONE)
+            } else if vxx_lanes[i].eq(&negative_u_lanes[i]) {
+                Some(F::SQRT_M1)
+            } else {
+                None
+            }
+        });
+        let factor_lanes = factors.map(|factor| factor.unwrap_or(F::ONE));
+        let x = backend.mul(candidate, FVec::from_lanes(&factor_lanes));
+        let x_lanes = x.to_lanes();
+        let negative_x_lanes = backend.neg(x).to_lanes();
+
+        let final_x = core::array::from_fn(|i| {
+            if x_lanes[i].is_odd() == (signs[i] == 1) {
+                x_lanes[i]
+            } else {
+                negative_x_lanes[i]
+            }
+        });
+        let t2d_lanes = backend
+            .mul(
+                backend.mul(FVec::from_lanes(&final_x), y),
+                F::EDWARDS_D2.splat(),
+            )
+            .to_lanes();
+
+        core::array::from_fn(|i| {
+            factors[i]?;
+            if x_lanes[i].is_zero() && signs[i] == 1 {
+                return None;
+            }
+            Some(Self {
+                x: final_x[i],
+                y: ys[i],
+                t2d: t2d_lanes[i],
+            })
+        })
+    }
+}
+
 /// Points on the twisted Edwards curve `-x^2 + y^2 = 1 + d*x^2*y^2` in extended homogeneous
 /// coordinates `(X : Y : Z : T)`.
 ///
@@ -254,6 +394,113 @@ pub(crate) struct GVec {
     pub(crate) z: FVec,
 }
 
+impl GVec {
+    /// Packs compact points by transposing coordinates into backend lanes.
+    pub(crate) fn from_lanes(lanes: &[G; LANES]) -> Self {
+        Self {
+            x: FVec::from_lanes(&lanes.map(|point| point.x)),
+            y: FVec::from_lanes(&lanes.map(|point| point.y)),
+            t: FVec::from_lanes(&lanes.map(|point| point.t)),
+            z: FVec::from_lanes(&lanes.map(|point| point.z)),
+        }
+    }
+
+    /// Unpacks backend lanes into compact points.
+    pub(crate) fn to_lanes(self) -> [G; LANES] {
+        let x = self.x.to_lanes();
+        let y = self.y.to_lanes();
+        let t = self.t.to_lanes();
+        let z = self.z.to_lanes();
+        core::array::from_fn(|i| G {
+            x: x[i],
+            y: y[i],
+            t: t[i],
+            z: z[i],
+        })
+    }
+
+    /// Returns every lane set to `point`.
+    pub(crate) const fn splat(point: G) -> Self {
+        Self {
+            x: point.x.splat(),
+            y: point.y.splat(),
+            t: point.t.splat(),
+            z: point.z.splat(),
+        }
+    }
+
+    /// Returns the identity in every lane.
+    pub(crate) const fn identity() -> Self {
+        Self::splat(G::IDENTITY)
+    }
+
+    /// Negates every lane.
+    pub(crate) fn negate<B: FBackend>(self, backend: B) -> Self {
+        Self {
+            x: backend.neg(self.x),
+            y: self.y,
+            t: backend.neg(self.t),
+            z: self.z,
+        }
+    }
+
+    /// Multiplies every lane by the same scalar bit sequence using variable-time double-and-add.
+    pub(crate) fn scalar_mul<B, I>(self, backend: B, bits: I) -> Self
+    where
+        B: GBackend,
+        I: IntoIterator<Item = bool>,
+    {
+        let mut result = Self::identity();
+        for bit in bits {
+            result = backend.g_double(result);
+            if bit {
+                result = backend.g_add(result, self);
+            }
+        }
+        result
+    }
+
+    /// Multiplies every lane by the curve's cofactor (8).
+    pub(crate) fn mul_by_cofactor<B: GBackend>(mut self, backend: B) -> Self {
+        for _ in 0..3 {
+            self = backend.g_double(self);
+        }
+        self
+    }
+
+    /// Sums all eight lanes with a three-level vector addition tree.
+    pub(crate) fn sum_lanes<B: GBackend>(self, backend: B) -> G {
+        let lanes = self.to_lanes();
+        let mut left = [G::IDENTITY; LANES];
+        let mut right = [G::IDENTITY; LANES];
+        for i in 0..4 {
+            left[i] = lanes[2 * i];
+            right[i] = lanes[2 * i + 1];
+        }
+        let pairs = backend
+            .g_add(Self::from_lanes(&left), Self::from_lanes(&right))
+            .to_lanes();
+
+        left = [G::IDENTITY; LANES];
+        right = [G::IDENTITY; LANES];
+        left[0] = pairs[0];
+        right[0] = pairs[1];
+        left[1] = pairs[2];
+        right[1] = pairs[3];
+        let quarters = backend
+            .g_add(Self::from_lanes(&left), Self::from_lanes(&right))
+            .to_lanes();
+
+        left = [G::IDENTITY; LANES];
+        right = [G::IDENTITY; LANES];
+        left[0] = quarters[0];
+        right[0] = quarters[1];
+        backend
+            .g_add(Self::from_lanes(&left), Self::from_lanes(&right))
+            .to_lanes()[0]
+    }
+}
+
 /// Like `GVec`, but assuming that the point is in affine representation.
 ///
 /// When we deserialize a point from bytes, this is what we naturally get.
@@ -264,6 +511,96 @@ pub(crate) struct GAffineVec {
     pub(crate) x: FVec,
     pub(crate) y: FVec,
     pub(crate) t2d: FVec,
+}
+
+impl GAffineVec {
+    /// Packs compact affine points by transposing coordinates into backend lanes.
+    pub(crate) fn from_lanes(lanes: &[GAffine; LANES]) -> Self {
+        Self {
+            x: FVec::from_lanes(&lanes.map(|point| point.x)),
+            y: FVec::from_lanes(&lanes.map(|point| point.y)),
+            t2d: FVec::from_lanes(&lanes.map(|point| point.t2d)),
+        }
+    }
+
+    /// Returns every lane set to `point`.
+    pub(crate) const fn splat(point: GAffine) -> Self {
+        Self {
+            x: point.x.splat(),
+            y: point.y.splat(),
+            t2d: point.t2d.splat(),
+        }
+    }
+
+    /// Packs affine points, negating the selected lanes.
+    pub(crate) fn from_signed_lanes<B: FBackend>(
+        backend: B,
+        lanes: &[GAffine; LANES],
+        negative: &[bool; LANES],
+    ) -> Self {
+        let packed = Self::from_lanes(lanes);
+        if !negative.iter().any(|&value| value) {
+            return packed;
+        }
+
+        let x = packed.x.to_lanes();
+        let negative_x = backend.neg(packed.x).to_lanes();
+        let t2d = packed.t2d.to_lanes();
+        let negative_t2d = backend.neg(packed.t2d).to_lanes();
+        Self {
+            x: FVec::from_lanes(&core::array::from_fn(|i| {
+                if negative[i] { negative_x[i] } else { x[i] }
+            })),
+            y: packed.y,
+            t2d: FVec::from_lanes(&core::array::from_fn(|i| {
+                if negative[i] {
+                    negative_t2d[i]
+                } else {
+                    t2d[i]
+                }
+            })),
+        }
+    }
+
+    /// Converts affine lanes to extended homogeneous representation.
+    pub(crate) fn to_extended<B: FBackend>(self, backend: B) -> GVec {
+        GVec {
+            x: self.x,
+            y: self.y,
+            t: backend.mul(self.x, self.y),
+            z: F::ONE.splat(),
+        }
+    }
+}
+
+/// Squares `value` `k` times.
+fn pow2k<B: FBackend>(backend: B, mut value: FVec, k: u32) -> FVec {
+    for _ in 0..k {
+        value = backend.square(value);
+    }
+    value
+}
+
+/// Raises every lane to `2^250 - 1` using the standard addition chain.
+fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
+    let a = backend.square(value);
+    let a2 = backend.square(backend.square(a));
+    let b = backend.mul(value, a2);
+    let c = backend.mul(a, b);
+    let d = backend.square(c);
+    let e = backend.mul(b, d);
+    let f = backend.mul(pow2k(backend, e, 5), e);
+    let g = backend.mul(pow2k(backend, f, 10), f);
+    let h = backend.mul(pow2k(backend, g, 20), g);
+    let i = backend.mul(pow2k(backend, h, 10), f);
+    let j = backend.mul(pow2k(backend, i, 50), i);
+    let k = backend.mul(pow2k(backend, j, 100), j);
+    backend.mul(pow2k(backend, k, 50), i)
+}
+
+/// Raises every lane to `(p - 5) / 8 = 2^252 - 3` for point decompression.
+fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
+    backend.mul(value, pow2k(backend, pow_2_250_minus_1(backend, value), 2))
 }
 
 /// Abstracts over group operations.
