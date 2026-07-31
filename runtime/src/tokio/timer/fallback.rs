@@ -1,11 +1,12 @@
 //! Tokio-backed fallback timers for unsupported native targets.
 
 use crate::utils::Panicker;
+use futures::future::Either;
 use std::{
+    convert::Infallible,
     future::Future,
     time::{Duration, SystemTime},
 };
-use thiserror::Error;
 use tokio::runtime::{Builder as TokioBuilder, Runtime};
 
 /// Descriptor-free timer builder for targets that use Tokio timers.
@@ -18,7 +19,11 @@ impl Builder {
     }
 
     /// Creates the descriptor-free fallback timer facade.
-    pub(crate) fn build(self, _runtime: &Runtime, _panicker: Panicker) -> Result<Timer, InitError> {
+    pub(crate) fn build(
+        self,
+        _runtime: &Runtime,
+        _panicker: Panicker,
+    ) -> Result<Timer, Infallible> {
         Ok(Timer)
     }
 }
@@ -29,19 +34,10 @@ pub(crate) struct Timer;
 impl Timer {
     /// Eagerly constructs a Tokio sleep for nonzero durations.
     pub(crate) fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        // Construct outside the async block so Tokio fixes the monotonic
-        // deadline now, even when the returned future is polled later.
-        let sleep = if duration.is_zero() {
-            None
+        if duration.is_zero() {
+            Either::Left(tokio::task::coop::consume_budget())
         } else {
-            Some(tokio::time::sleep(duration))
-        };
-
-        async move {
-            match sleep {
-                Some(sleep) => sleep.await,
-                None => tokio::task::coop::consume_budget().await,
-            }
+            Either::Right(tokio::time::sleep(duration))
         }
     }
 
@@ -50,8 +46,6 @@ impl Timer {
         &self,
         deadline: SystemTime,
     ) -> impl Future<Output = ()> + Send + 'static {
-        // Wall time is read once, so later clock adjustments cannot move the
-        // monotonic deadline retained by Tokio's sleep.
         let remaining = deadline
             .duration_since(SystemTime::now())
             .unwrap_or_default();
@@ -59,22 +53,13 @@ impl Timer {
     }
 }
 
-/// Infallible fallback initialization error.
-#[derive(Debug, Error)]
-pub(crate) enum InitError {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::task::noop_waker;
-    use std::{
-        future::Future,
-        pin::Pin,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        task::{Context, Poll},
+    use futures::FutureExt;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     /// Creates the descriptor-free fallback timer facade.
@@ -94,16 +79,6 @@ mod tests {
         timer_builder.build(&runtime, panicker).unwrap();
     }
 
-    /// Polls a fallback sleep exactly once without driving the executor.
-    fn poll_once<F: Future<Output = ()>>(sleep: Pin<&mut F>) -> Poll<()> {
-        let waker = noop_waker();
-        let mut context = Context::from_waker(&waker);
-        sleep.poll(&mut context)
-    }
-
-    /// Checks the future bounds promised by the runtime Clock facade.
-    const fn assert_send_static<T: Send + 'static>(_value: &T) {}
-
     #[test]
     fn zero_and_past_sleeps_are_ready_on_first_poll() {
         // Construct the fallback facade without native driver state.
@@ -114,13 +89,9 @@ mod tests {
         let zero = timer.sleep(Duration::ZERO);
         let past = timer.sleep_until(SystemTime::UNIX_EPOCH);
 
-        // Both futures satisfy the facade bounds and complete with fresh scheduler budget.
-        assert_send_static(&zero);
-        assert_send_static(&past);
-        let mut zero = std::pin::pin!(zero);
-        let mut past = std::pin::pin!(past);
-        assert_eq!(poll_once(zero.as_mut()), Poll::Ready(()));
-        assert_eq!(poll_once(past.as_mut()), Poll::Ready(()));
+        // Both complete with fresh scheduler budget.
+        assert_eq!(zero.now_or_never(), Some(()));
+        assert_eq!(past.now_or_never(), Some(()));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -156,16 +127,12 @@ mod tests {
             .expect("test wall deadline must be representable");
         let relative = timer.sleep(duration);
         let wall = timer.sleep_until(wall_deadline);
-        assert_send_static(&relative);
-        assert_send_static(&wall);
 
         // Let both eagerly created deadlines elapse through another timer.
         tokio::time::sleep(duration.saturating_mul(3)).await;
 
         // Their first polls observe the construction-time deadlines.
-        let mut relative = std::pin::pin!(relative);
-        let mut wall = std::pin::pin!(wall);
-        assert_eq!(poll_once(relative.as_mut()), Poll::Ready(()));
-        assert_eq!(poll_once(wall.as_mut()), Poll::Ready(()));
+        assert_eq!(relative.now_or_never(), Some(()));
+        assert_eq!(wall.now_or_never(), Some(()));
     }
 }
