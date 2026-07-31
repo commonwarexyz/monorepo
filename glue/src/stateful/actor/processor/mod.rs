@@ -924,10 +924,7 @@ where
 }
 
 /// Wait for `future` unless the request is cancelled.
-pub(super) async fn await_or_cancel<C, T, F>(
-    cancellation: &mut C,
-    future: F,
-) -> Option<T>
+pub(super) async fn await_or_cancel<C, T, F>(cancellation: &mut C, future: F) -> Option<T>
 where
     F: Future<Output = T>,
     C: Cancellation,

@@ -301,8 +301,8 @@ mod tests {
         actor::{metrics::Metrics as StatefulMetrics, processor::Processor, syncer::SyncPlan},
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::mocks::{
-            TestApp, TestBlock, TestDatabases, TestDb, TestMerkleized, TestScheme, TestVariant,
-            TestUnmerkleized, anchor, test_databases,
+            TestApp, TestBlock, TestDatabases, TestDb, TestMerkleized, TestScheme,
+            TestUnmerkleized, TestVariant, anchor, test_databases,
         },
     };
     use commonware_actor::mailbox as actor_mailbox;
@@ -381,9 +381,7 @@ mod tests {
             let mut gate = self.0.lock().take().expect("unexpected second execution");
             gate.started.send(()).expect("test must await execution");
             let _ = (&mut gate.release).await;
-            gate.finished
-                .send(())
-                .expect("test must await completion");
+            gate.finished.send(()).expect("test must await completion");
             Some(TestMerkleized)
         }
 
@@ -462,30 +460,29 @@ mod tests {
         .await
         .expect("failed to initialize blocks archive");
 
-        let (_actor, mailbox, _height) =
-            MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-                context.child("marshal_actor"),
-                finalizations_by_height,
-                finalized_blocks,
-                marshal::Config {
-                    provider,
-                    epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                    start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                    partition_prefix: "retained-verify-marshal".to_string(),
-                    mailbox_size: NZUsize!(8),
-                    view_retention: ViewDelta::new(1),
-                    prunable_items_per_section: NZU64!(4),
-                    page_cache,
-                    replay_buffer: NZUsize!(64),
-                    key_write_buffer: NZUsize!(64),
-                    value_write_buffer: NZUsize!(64),
-                    block_codec_config: (),
-                    max_repair: NZUsize!(1),
-                    max_pending_acks: NZUsize!(1),
-                    strategy: Sequential,
-                },
-            )
-            .await;
+        let (_actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+            context.child("marshal_actor"),
+            finalizations_by_height,
+            finalized_blocks,
+            marshal::Config {
+                provider,
+                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+                partition_prefix: "retained-verify-marshal".to_string(),
+                mailbox_size: NZUsize!(8),
+                view_retention: ViewDelta::new(1),
+                prunable_items_per_section: NZU64!(4),
+                page_cache,
+                replay_buffer: NZUsize!(64),
+                key_write_buffer: NZUsize!(64),
+                value_write_buffer: NZUsize!(64),
+                block_codec_config: (),
+                max_repair: NZUsize!(1),
+                max_pending_acks: NZUsize!(1),
+                strategy: Sequential,
+            },
+        )
+        .await;
         mailbox
     }
 
@@ -623,9 +620,7 @@ mod tests {
                 ),
                 skip_finalized_until: None,
             };
-            let actor = context
-                .child("actor")
-                .spawn(move |_| processing.start());
+            let actor = context.child("actor").spawn(move |_| processing.start());
 
             let block = TestBlock::new(1, 1);
             let genesis = TestBlock::new(0, 0);
@@ -638,10 +633,7 @@ mod tests {
                     first_mailbox
                         .verify(
                             (task_context, consensus_context),
-                            ancestry::from_iter([
-                                Arc::new(first_block),
-                                Arc::new(first_genesis),
-                            ]),
+                            ancestry::from_iter([Arc::new(first_block), Arc::new(first_genesis)]),
                         )
                         .await
                 }
