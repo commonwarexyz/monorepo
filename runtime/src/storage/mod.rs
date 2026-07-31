@@ -105,6 +105,9 @@ stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouri
 stability_scope!(BETA {
     pub mod metered;
 
+    pub(crate) mod batch;
+    #[cfg(not(target_arch = "wasm32"))]
+    mod generation;
     mod header;
     pub(crate) use header::{Header, Layout};
 
@@ -126,7 +129,9 @@ stability_scope!(BETA {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage};
+    use crate::{
+        BatchOperation, Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, RemoveTarget, Storage,
+    };
     use futures::FutureExt;
 
     /// Runs the full suite of tests on the provided storage implementation.
@@ -137,6 +142,12 @@ pub(crate) mod tests {
     {
         test_open_and_write(&storage).await;
         test_remove(&storage).await;
+        test_start_apply_is_self_driving(&storage).await;
+        test_apply_batch_dedup_and_subsumption(&storage).await;
+        test_apply_batch_mixed_success(&storage).await;
+        test_apply_batch_validates_atomically(&storage).await;
+        test_apply_batch_conflicts_are_atomic(&storage).await;
+        test_apply_batch_rejects_stale_handle(&storage).await;
         test_read_after_remove_blob(&storage).await;
         test_read_after_remove_partition(&storage).await;
         test_recreate_after_remove(&storage).await;
@@ -167,6 +178,74 @@ pub(crate) mod tests {
         test_read_at_buf_returns_same_buffer(&storage).await;
         test_read_at_buf_insufficient_capacity(&storage).await;
         test_read_at_buf_larger_capacity(&storage).await;
+    }
+
+    /// Verify that a batch rejects a blob handle created by another instance of the backend.
+    pub(crate) async fn run_storage_foreign_handle_test<S>(storage: &S, foreign_storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (local, _) = storage
+            .open("batch_foreign_handle", b"shared_name")
+            .await
+            .unwrap();
+        local.write_at_sync(0, b"local").await.unwrap();
+        let (victim, _) = storage
+            .open("batch_foreign_victim", b"victim")
+            .await
+            .unwrap();
+        victim.write_at_sync(0, b"keep").await.unwrap();
+
+        let (foreign, _) = foreign_storage
+            .open("batch_foreign_handle", b"shared_name")
+            .await
+            .unwrap();
+        foreign.write_at_sync(0, b"foreign").await.unwrap();
+
+        let result = storage
+            .apply(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_foreign_victim".into(),
+                    name: b"victim".to_vec(),
+                }),
+                BatchOperation::Resize {
+                    blob: foreign.clone(),
+                    len: 1,
+                },
+            ])
+            .await;
+        assert!(matches!(result, Err(crate::Error::BlobMissing(..))));
+
+        assert_eq!(local.read_at(0, 5).await.unwrap().coalesce(), b"local");
+        assert_eq!(
+            victim.read_at(0, 4).await.unwrap().coalesce(),
+            b"keep",
+            "a foreign resize must reject the batch before a valid removal"
+        );
+        assert_eq!(
+            foreign.read_at(0, 7).await.unwrap().coalesce(),
+            b"foreign",
+            "a rejected foreign resize must not mutate its source blob"
+        );
+
+        let result = storage
+            .apply(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_foreign_victim".into(),
+                    name: b"victim".to_vec(),
+                }),
+                BatchOperation::Update {
+                    blob: foreign.clone(),
+                    offset: 0,
+                    data: b"x".into(),
+                    len: 1,
+                },
+            ])
+            .await;
+        assert!(matches!(result, Err(crate::Error::BlobMissing(..))));
+        assert_eq!(victim.read_at(0, 4).await.unwrap().coalesce(), b"keep");
+        assert_eq!(foreign.read_at(0, 7).await.unwrap().coalesce(), b"foreign");
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -200,8 +279,379 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
+        // Single removes use the same idempotent batch path as multi-operation commits.
+        storage
+            .remove("partition", Some(b"test_blob"))
+            .await
+            .unwrap();
+        storage
+            .remove("missing_partition", Some(b"missing_blob"))
+            .await
+            .unwrap();
+        storage.remove("missing_partition", None).await.unwrap();
+
         let blobs = storage.scan("partition").await.unwrap();
         assert!(blobs.is_empty(), "Blob was not removed as expected");
+    }
+
+    /// Once intent is committed, aborting its observer does not cancel physical application.
+    async fn test_start_apply_is_self_driving<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        storage
+            .open("batch_start_generic", b"victim")
+            .await
+            .unwrap();
+        let (retained, _) = storage.open("batch_start_retained", b"blob").await.unwrap();
+        retained.write_at_sync(0, b"old bytes").await.unwrap();
+        let completion = storage
+            .start_apply(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_start_generic".into(),
+                    name: b"victim".to_vec(),
+                }),
+                BatchOperation::Update {
+                    blob: retained.clone(),
+                    offset: 0,
+                    data: b"new".into(),
+                    len: 3,
+                },
+            ])
+            .await
+            .unwrap();
+        completion.abort();
+        drop(completion);
+
+        assert!(
+            storage
+                .scan("batch_start_generic")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(retained.read_at(0, 3).await.unwrap().coalesce(), b"new");
+    }
+
+    /// Duplicate operations are idempotent, and partition removals subsume child removals.
+    async fn test_apply_batch_dedup_and_subsumption<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        storage.apply(Vec::new()).await.unwrap();
+        storage.open("batch_set_a", b"one").await.unwrap();
+        storage.open("batch_set_a", b"two").await.unwrap();
+        storage.open("batch_set_a", b"keep").await.unwrap();
+        storage.open("batch_set_b", b"victim").await.unwrap();
+        let (resized, _) = storage.open("batch_set_resize", b"blob").await.unwrap();
+        resized.write_at(0, b"abcdef").await.unwrap();
+        let (updated, _) = storage.open("batch_set_update", b"blob").await.unwrap();
+        updated.write_at(0, b"abcdef").await.unwrap();
+
+        let operations = vec![
+            BatchOperation::Resize {
+                blob: resized.clone(),
+                len: 3,
+            },
+            BatchOperation::Update {
+                blob: updated.clone(),
+                offset: 1,
+                data: b"NEW".into(),
+                len: 4,
+            },
+            BatchOperation::Update {
+                blob: updated.clone(),
+                offset: 1,
+                data: b"NEW".into(),
+                len: 4,
+            },
+            BatchOperation::Remove(RemoveTarget::Blob {
+                partition: "batch_set_a".into(),
+                name: b"two".to_vec(),
+            }),
+            BatchOperation::Remove(RemoveTarget::Blob {
+                partition: "batch_set_b".into(),
+                name: b"victim".to_vec(),
+            }),
+            BatchOperation::Remove(RemoveTarget::Blob {
+                partition: "batch_set_a".into(),
+                name: b"one".to_vec(),
+            }),
+            BatchOperation::Remove(RemoveTarget::Blob {
+                partition: "batch_set_a".into(),
+                name: b"two".to_vec(),
+            }),
+            BatchOperation::Remove(RemoveTarget::Partition("batch_set_b".into())),
+            BatchOperation::Remove(RemoveTarget::Partition("batch_set_missing".into())),
+            BatchOperation::Remove(RemoveTarget::Blob {
+                partition: "batch_blob_missing".into(),
+                name: b"missing".to_vec(),
+            }),
+            BatchOperation::Resize {
+                blob: resized.clone(),
+                len: 3,
+            },
+        ];
+        storage.apply(operations.clone()).await.unwrap();
+
+        let mut blobs = storage.scan("batch_set_a").await.unwrap();
+        blobs.sort();
+        assert_eq!(blobs, vec![b"keep".to_vec()]);
+        assert!(storage.scan("batch_set_b").await.is_err());
+        assert_eq!(resized.read_at(0, 3).await.unwrap().coalesce(), b"abc");
+        assert!(resized.read_at(3, 1).await.is_err());
+        assert_eq!(updated.read_at(0, 4).await.unwrap().coalesce(), b"aNEW");
+        assert!(updated.read_at(4, 1).await.is_err());
+
+        // Repeating the same canonical set succeeds after every removal target is absent.
+        storage.apply(operations).await.unwrap();
+    }
+
+    /// Pending blob contents, retained mutations, and removals commit together.
+    async fn test_apply_batch_mixed_success<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (resized, _) = storage
+            .open("batch_mixed_resize", b"resized")
+            .await
+            .unwrap();
+        resized.write_at(0, b"pending bytes").await.unwrap();
+        let (updated, _) = storage
+            .open("batch_mixed_update", b"updated")
+            .await
+            .unwrap();
+        updated.write_at(0, b"update-old").await.unwrap();
+        storage.open("batch_mixed_blob", b"victim").await.unwrap();
+        storage
+            .open("batch_mixed_partition", b"victim")
+            .await
+            .unwrap();
+        storage.open("batch_mixed_keep", b"survivor").await.unwrap();
+
+        storage
+            .apply(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_mixed_blob".into(),
+                    name: b"victim".to_vec(),
+                }),
+                BatchOperation::Resize {
+                    blob: resized.clone(),
+                    len: 7,
+                },
+                BatchOperation::Update {
+                    blob: updated.clone(),
+                    offset: 2,
+                    data: b"NEW".into(),
+                    len: 5,
+                },
+                BatchOperation::Remove(RemoveTarget::Partition("batch_mixed_partition".into())),
+            ])
+            .await
+            .unwrap();
+
+        drop(resized);
+        let (resized, len) = storage
+            .open("batch_mixed_resize", b"resized")
+            .await
+            .unwrap();
+        assert_eq!(len, 7);
+        assert_eq!(resized.read_at(0, 7).await.unwrap().coalesce(), b"pending");
+        drop(updated);
+        let (updated, len) = storage
+            .open("batch_mixed_update", b"updated")
+            .await
+            .unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(updated.read_at(0, 5).await.unwrap().coalesce(), b"upNEW");
+        assert!(storage.scan("batch_mixed_blob").await.unwrap().is_empty());
+        assert!(storage.scan("batch_mixed_partition").await.is_err());
+        assert_eq!(
+            storage.scan("batch_mixed_keep").await.unwrap(),
+            vec![b"survivor".to_vec()],
+        );
+    }
+
+    /// A bad late operation rejects the entire batch before any valid operation is applied.
+    async fn test_apply_batch_validates_atomically<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        storage.open("batch_validation", b"survivor").await.unwrap();
+        let result = storage
+            .apply(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_validation".into(),
+                    name: b"survivor".to_vec(),
+                }),
+                BatchOperation::Remove(RemoveTarget::Partition("../invalid".into())),
+            ])
+            .await
+            .unwrap_err();
+        assert!(matches!(result, crate::Error::PartitionNameInvalid(_)));
+        assert_eq!(
+            storage.scan("batch_validation").await.unwrap(),
+            vec![b"survivor".to_vec()]
+        );
+    }
+
+    /// Conflicting blob mutations reject the entire batch without changing blob state.
+    async fn test_apply_batch_conflicts_are_atomic<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (resized, _) = storage
+            .open("batch_conflict_resize", b"blob")
+            .await
+            .unwrap();
+        resized.write_at_sync(0, b"abcdef").await.unwrap();
+        let (victim, _) = storage
+            .open("batch_conflict_victim", b"victim")
+            .await
+            .unwrap();
+        victim.write_at_sync(0, b"keep").await.unwrap();
+
+        let removal = BatchOperation::Remove(RemoveTarget::Blob {
+            partition: "batch_conflict_victim".into(),
+            name: b"victim".to_vec(),
+        });
+        let cases = vec![
+            vec![
+                removal.clone(),
+                BatchOperation::Resize {
+                    blob: resized.clone(),
+                    len: 2,
+                },
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_conflict_resize".into(),
+                    name: b"blob".to_vec(),
+                }),
+            ],
+            vec![
+                removal.clone(),
+                BatchOperation::Remove(RemoveTarget::Partition("batch_conflict_resize".into())),
+                BatchOperation::Resize {
+                    blob: resized.clone(),
+                    len: 2,
+                },
+            ],
+            vec![
+                removal.clone(),
+                BatchOperation::Resize {
+                    blob: resized.clone(),
+                    len: 2,
+                },
+                BatchOperation::Resize {
+                    blob: resized.clone(),
+                    len: 3,
+                },
+            ],
+            vec![
+                removal.clone(),
+                BatchOperation::Resize {
+                    blob: resized.clone(),
+                    len: 4,
+                },
+                BatchOperation::Update {
+                    blob: resized.clone(),
+                    offset: 1,
+                    data: b"new".into(),
+                    len: 4,
+                },
+            ],
+            vec![
+                removal.clone(),
+                BatchOperation::Update {
+                    blob: resized.clone(),
+                    offset: 1,
+                    data: b"new".into(),
+                    len: 4,
+                },
+                BatchOperation::Update {
+                    blob: resized.clone(),
+                    offset: 0,
+                    data: b"old".into(),
+                    len: 4,
+                },
+            ],
+            vec![
+                removal,
+                BatchOperation::Update {
+                    blob: resized.clone(),
+                    offset: 2,
+                    data: b"new".into(),
+                    len: 4,
+                },
+            ],
+        ];
+        for operations in cases {
+            let result = storage.apply(operations).await;
+            assert!(
+                matches!(result, Err(crate::Error::Io(err)) if err.kind() == std::io::ErrorKind::InvalidInput)
+            );
+            assert_eq!(resized.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
+            assert_eq!(victim.read_at(0, 4).await.unwrap().coalesce(), b"keep");
+            assert_eq!(
+                storage.scan("batch_conflict_victim").await.unwrap(),
+                vec![b"victim".to_vec()]
+            );
+        }
+    }
+
+    /// An identical duplicate cannot hide a stale handle; rejection leaves the batch unchanged.
+    async fn test_apply_batch_rejects_stale_handle<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (old, _) = storage.open("batch_stale", b"shared_name").await.unwrap();
+        old.write_at_sync(0, b"old").await.unwrap();
+        storage
+            .apply(vec![BatchOperation::Remove(RemoveTarget::Blob {
+                partition: "batch_stale".into(),
+                name: b"shared_name".to_vec(),
+            })])
+            .await
+            .unwrap();
+
+        assert_eq!(old.read_at(0, 3).await.unwrap().coalesce(), b"old");
+
+        let (new, size) = storage.open("batch_stale", b"shared_name").await.unwrap();
+        assert_eq!(size, 0);
+        new.write_at_sync(0, b"new").await.unwrap();
+        let (victim, _) = storage.open("batch_stale_victim", b"victim").await.unwrap();
+        victim.write_at_sync(0, b"keep").await.unwrap();
+
+        let result = storage
+            .apply(vec![
+                BatchOperation::Remove(RemoveTarget::Blob {
+                    partition: "batch_stale_victim".into(),
+                    name: b"victim".to_vec(),
+                }),
+                BatchOperation::Update {
+                    blob: new.clone(),
+                    offset: 0,
+                    data: b"x".into(),
+                    len: 1,
+                },
+                BatchOperation::Update {
+                    blob: old.clone(),
+                    offset: 0,
+                    data: b"x".into(),
+                    len: 1,
+                },
+            ])
+            .await;
+        assert!(matches!(result, Err(crate::Error::BlobMissing(..))));
+
+        assert_eq!(old.read_at(0, 3).await.unwrap().coalesce(), b"old");
+        assert_eq!(new.read_at(0, 3).await.unwrap().coalesce(), b"new");
+        assert_eq!(victim.read_at(0, 4).await.unwrap().coalesce(), b"keep");
     }
 
     /// An already-open handle remains fully readable after the blob is removed by name.

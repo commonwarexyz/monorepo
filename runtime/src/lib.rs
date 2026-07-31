@@ -78,6 +78,51 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+    /// A namespace target to remove with [`Storage::apply`].
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum RemoveTarget {
+        /// Remove one blob from a partition.
+        Blob {
+            /// Partition containing the blob.
+            partition: String,
+            /// Exact blob name.
+            name: Vec<u8>,
+        },
+        /// Remove an entire partition.
+        Partition(String),
+    }
+
+    /// An operation in a durable [`Storage::apply`] batch.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum BatchOperation<B> {
+        /// Remove an exact namespace entry.
+        Remove(RemoveTarget),
+        /// Resize a retained blob to `len` bytes.
+        Resize {
+            /// Current blob handle to resize.
+            blob: B,
+            /// New logical blob length in bytes.
+            len: u64,
+        },
+        /// Write `data` at `offset` and resize a retained blob to `len` bytes.
+        Update {
+            /// Current blob handle to update.
+            blob: B,
+            /// Logical byte offset at which to write `data`.
+            offset: u64,
+            /// Bytes to write before applying the final length.
+            data: IoBuf,
+            /// Final logical blob length in bytes.
+            len: u64,
+        },
+    }
+
+    impl<B> From<RemoveTarget> for BatchOperation<B> {
+        fn from(target: RemoveTarget) -> Self {
+            Self::Remove(target)
+        }
+    }
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
     pub enum Error {
@@ -656,6 +701,7 @@ stability_scope!(BETA {
         /// Remove a blob from a given partition.
         ///
         /// If no `name` is provided, the entire partition is removed.
+        /// Removing a target that does not exist succeeds.
         ///
         /// An Ok result indicates the blob is durably removed.
         ///
@@ -675,7 +721,50 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: Option<&[u8]>,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            let target = name.map_or_else(
+                || RemoveTarget::Partition(partition.to_string()),
+                |name| RemoveTarget::Blob {
+                    partition: partition.to_string(),
+                    name: name.to_vec(),
+                },
+            );
+            self.apply(vec![target.into()])
+        }
+
+        /// Start applying removals and retained-blob mutations as one durable batch.
+        ///
+        /// A mutated handle must belong to this storage instance and still refer to the current
+        /// blob at its partition and name. Missing mutation targets fail the batch. Each blob may
+        /// have at most one distinct mutation: identical duplicates are permitted, while
+        /// conflicting mutations and mutations covered by a removal are rejected. Duplicate
+        /// removals and blob removals covered by a partition removal are permitted. Missing
+        /// removal targets and empty batches succeed.
+        ///
+        /// If this method returns `Ok`, the entire batch is durably committed and will finish
+        /// applying even if the returned handle is dropped or aborted. Awaiting the handle waits
+        /// until every operation is durably applied. A conflicting namespace operation waits for
+        /// the batch to finish. Rejecting an invalid batch leaves every target unchanged. Other
+        /// errors, or cancellation of this future, may leave the outcome indeterminate; only `Ok`
+        /// proves the batch is durably committed.
+        ///
+        /// A mutation also makes prior writes through its blob handle durable. A resize preserves
+        /// existing bytes below `len` and zero-fills an extension. An update writes `data` at
+        /// `offset` and sets the blob length to `len`; the written range must fit within that
+        /// length. Callers must not access a mutated blob until the handle completes. Operations
+        /// on disjoint, already-open blobs may proceed concurrently.
+        fn start_apply(
+            &self,
+            operations: Vec<BatchOperation<Self::Blob>>,
+        ) -> impl Future<Output = Result<Handle<()>, Error>> + Send;
+
+        /// Apply removals and retained-blob mutations as one durable batch.
+        fn apply(
+            &self,
+            operations: Vec<BatchOperation<Self::Blob>>,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            async move { self.start_apply(operations).await?.await }
+        }
 
         /// Return all blobs in a given partition.
         fn scan(&self, partition: &str)

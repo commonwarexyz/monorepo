@@ -1,4 +1,6 @@
-use crate::{Error, Handle, IoBufs, IoBufsMut, deterministic::Auditor};
+use crate::{
+    BatchOperation, Error, Handle, IoBufs, IoBufsMut, RemoveTarget, deterministic::Auditor,
+};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -62,6 +64,62 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             }
         });
         self.inner.remove(partition, name).await
+    }
+
+    async fn start_apply(
+        &self,
+        operations: Vec<BatchOperation<Self::Blob>>,
+    ) -> Result<Handle<()>, Error> {
+        let descriptors = crate::storage::batch::canonicalize_descriptors(&operations, |blob| {
+            (blob.partition.clone(), blob.name.clone())
+        })?;
+        self.auditor.event(b"apply_batch", |hasher| {
+            hasher.update((descriptors.len() as u64).to_be_bytes());
+            for descriptor in &descriptors {
+                match descriptor {
+                    crate::storage::batch::Operation::Remove(RemoveTarget::Partition(
+                        partition,
+                    )) => {
+                        hasher.update(b"remove_partition");
+                        hasher.update(partition.as_bytes());
+                    }
+                    crate::storage::batch::Operation::Remove(RemoveTarget::Blob {
+                        partition,
+                        name,
+                    }) => {
+                        hasher.update(b"remove_blob");
+                        hasher.update(partition.as_bytes());
+                        hasher.update(name);
+                    }
+                    crate::storage::batch::Operation::Resize {
+                        partition,
+                        name,
+                        len,
+                    } => {
+                        hasher.update(b"resize");
+                        hasher.update(partition.as_bytes());
+                        hasher.update(name);
+                        hasher.update(len.to_be_bytes());
+                    }
+                    crate::storage::batch::Operation::Update {
+                        partition,
+                        name,
+                        offset,
+                        data,
+                        len,
+                    } => {
+                        hasher.update(b"update");
+                        hasher.update(partition.as_bytes());
+                        hasher.update(name);
+                        hasher.update(offset.to_be_bytes());
+                        hasher.update(data.as_ref());
+                        hasher.update(len.to_be_bytes());
+                    }
+                }
+            }
+        });
+        let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
+        self.inner.start_apply(operations).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -162,12 +220,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
-        Storage as _,
+        BatchOperation, Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs,
+        IoBufsMut, RemoveTarget, Storage as _,
         deterministic::Auditor,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
-            tests::run_storage_tests,
+            tests::{run_storage_foreign_handle_test, run_storage_tests},
         },
         telemetry::metrics::Registry,
     };
@@ -184,8 +242,14 @@ mod tests {
         let inner = MemStorage::new(test_pool());
         let auditor = Arc::new(crate::deterministic::Auditor::default());
         let storage = AuditedStorage::new(inner, auditor.clone());
-
+        let tested = storage.clone();
         run_storage_tests(storage).await;
+
+        let foreign = AuditedStorage::new(
+            MemStorage::new(test_pool()),
+            Arc::new(Auditor::default()),
+        );
+        run_storage_foreign_handle_test(&tested, &foreign).await;
     }
 
     #[tokio::test]
@@ -199,6 +263,109 @@ mod tests {
         storage2.open("ab", b"c").await.unwrap();
 
         assert_ne!(auditor1.state(), auditor2.state());
+    }
+
+    #[tokio::test]
+    async fn test_audited_batch_hashes_canonical_operations() {
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+        let (resize1, _) = storage1.open("resize_partition", b"name").await.unwrap();
+        let (resize2, _) = storage2.open("resize_partition", b"name").await.unwrap();
+
+        storage1
+            .apply(vec![
+                BatchOperation::Resize {
+                    blob: resize1.clone(),
+                    len: 7,
+                },
+                RemoveTarget::Blob {
+                    partition: "blob_partition".into(),
+                    name: b"name".to_vec(),
+                }
+                .into(),
+                RemoveTarget::Blob {
+                    partition: "whole_partition".into(),
+                    name: b"subsumed".to_vec(),
+                }
+                .into(),
+                RemoveTarget::Partition("whole_partition".into()).into(),
+                RemoveTarget::Blob {
+                    partition: "blob_partition".into(),
+                    name: b"name".to_vec(),
+                }
+                .into(),
+                BatchOperation::Resize {
+                    blob: resize1,
+                    len: 7,
+                },
+            ])
+            .await
+            .unwrap();
+        storage2
+            .apply(vec![
+                RemoveTarget::Partition("whole_partition".into()).into(),
+                RemoveTarget::Blob {
+                    partition: "blob_partition".into(),
+                    name: b"name".to_vec(),
+                }
+                .into(),
+                BatchOperation::Resize {
+                    blob: resize2,
+                    len: 7,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(auditor1.state(), auditor2.state());
+    }
+
+    #[tokio::test]
+    async fn test_audited_batch_hashes_all_update_fields() {
+        async fn state(offset: u64, data: &'static [u8], len: u64) -> String {
+            let auditor = Arc::new(Auditor::default());
+            let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+            let (blob, _) = storage.open("partition", b"name").await.unwrap();
+            storage
+                .apply(vec![BatchOperation::Update {
+                    blob,
+                    offset,
+                    data: data.into(),
+                    len,
+                }])
+                .await
+                .unwrap();
+            auditor.state()
+        }
+
+        let baseline = state(1, b"a", 2).await;
+        assert_ne!(baseline, state(0, b"a", 2).await);
+        assert_ne!(baseline, state(1, b"b", 2).await);
+        assert_ne!(baseline, state(1, b"a", 3).await);
+    }
+
+    #[tokio::test]
+    async fn test_audited_batch_rejects_conflict_before_audit() {
+        let auditor = Arc::new(Auditor::default());
+        let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+        let (blob, _) = storage.open("partition", b"name").await.unwrap();
+        let before = auditor.state();
+
+        assert!(matches!(
+            storage
+                .apply(vec![
+                    BatchOperation::Resize {
+                        blob: blob.clone(),
+                        len: 1,
+                    },
+                    BatchOperation::Resize { blob, len: 2 },
+                ])
+                .await,
+            Err(Error::Io(_))
+        ));
+        assert_eq!(auditor.state(), before);
     }
 
     #[tokio::test]

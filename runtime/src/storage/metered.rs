@@ -1,5 +1,5 @@
 use crate::{
-    Buf, Error, Handle, IoBufs, IoBufsMut,
+    BatchOperation, Buf, Error, Handle, IoBufs, IoBufsMut,
     telemetry::metrics::{Counter, Gauge, Register, raw},
 };
 use std::{
@@ -97,6 +97,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             Blob {
                 inner,
                 partition: partition.into(),
+                name: Arc::from(name),
                 metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
             },
             len,
@@ -106,6 +107,32 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.inner.remove(partition, name).await
+    }
+
+    async fn start_apply(
+        &self,
+        operations: Vec<BatchOperation<Self::Blob>>,
+    ) -> Result<Handle<()>, Error> {
+        let descriptors = crate::storage::batch::canonicalize_descriptors(&operations, |blob| {
+            (blob.partition.to_string(), blob.name.to_vec())
+        })?;
+        let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
+        let completion = self.inner.start_apply(operations).await?;
+
+        for operation in descriptors {
+            match operation {
+                crate::storage::batch::Operation::Remove(_) => {}
+                crate::storage::batch::Operation::Resize { .. } => {
+                    self.metrics.storage_resizes.inc();
+                }
+                crate::storage::batch::Operation::Update { data, .. } => {
+                    self.metrics.storage_resizes.inc();
+                    self.metrics.storage_writes.inc();
+                    self.metrics.storage_write_bytes.inc_by(data.len() as u64);
+                }
+            }
+        }
+        Ok(completion)
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -118,6 +145,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 pub struct Blob<B> {
     inner: B,
     partition: Arc<str>,
+    name: Arc<[u8]>,
     metrics: Arc<MetricsHandle>,
 }
 
@@ -246,7 +274,10 @@ mod tests {
     use super::*;
     use crate::{
         Blob, BufferPool, BufferPoolConfig, Storage as _,
-        storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
+        storage::{
+            memory::Storage as MemoryStorage,
+            tests::{run_storage_foreign_handle_test, run_storage_tests},
+        },
         telemetry::metrics::Registry,
     };
 
@@ -259,8 +290,18 @@ mod tests {
         let mut registry = crate::telemetry::metrics::Registry::default();
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
-
+        let tested = storage.clone();
         run_storage_tests(storage).await;
+
+        let mut foreign_registry = crate::telemetry::metrics::Registry::default();
+        let foreign_inner = MemoryStorage::new(test_pool(
+            &mut foreign_registry.sub_registry("foreign_pool"),
+        ));
+        let foreign = Storage::new(
+            foreign_inner,
+            &mut foreign_registry.sub_registry("foreign_storage"),
+        );
+        run_storage_foreign_handle_test(&tested, &foreign).await;
     }
 
     /// Test that a failed open does not count an open blob.
@@ -370,6 +411,54 @@ mod tests {
             open_blobs_after_drop, 0,
             "open_blobs metric was not decremented after dropping the blob"
         );
+    }
+
+    #[tokio::test]
+    async fn test_metered_batch_counts_resize_and_update_effects() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+        let (first, _) = storage.open("partition", b"first").await.unwrap();
+        let (second, _) = storage.open("partition", b"second").await.unwrap();
+        let (updated, _) = storage.open("partition", b"updated").await.unwrap();
+
+        storage
+            .apply(vec![
+                BatchOperation::Resize {
+                    blob: first.clone(),
+                    len: 3,
+                },
+                BatchOperation::Resize {
+                    blob: first,
+                    len: 3,
+                },
+                BatchOperation::Resize {
+                    blob: second,
+                    len: 5,
+                },
+                BatchOperation::Update {
+                    blob: updated.clone(),
+                    offset: 1,
+                    data: b"new".into(),
+                    len: 4,
+                },
+                BatchOperation::Update {
+                    blob: updated,
+                    offset: 1,
+                    data: b"new".into(),
+                    len: 4,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(storage.metrics.storage_writes.get(), 1);
+        assert_eq!(storage.metrics.storage_write_bytes.get(), 3);
+        assert_eq!(storage.metrics.storage_resizes.get(), 3);
+
+        let (updated, len) = storage.inner.open("partition", b"updated").await.unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(updated.read_at(0, 4).await.unwrap().coalesce(), b"\0new");
     }
 
     /// Test that `start_sync` increments the sync metric, matching `sync`.
