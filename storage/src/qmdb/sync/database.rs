@@ -9,6 +9,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use std::future::Future;
 
+/// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
     type JournalConfig;
     fn journal_config(&self) -> Self::JournalConfig;

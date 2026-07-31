@@ -205,7 +205,7 @@ mod tests {
                     assert_eq!(request.size(), op_count);
                     assert_eq!(request.start(), start_loc);
                     assert_eq!(request.max_ops(), max_ops);
-                    assert!(request.retain_from().is_none());
+                    assert!(matches!(request, Request::Operations { .. }));
                 }
                 Message::AttachDatabase(_) => panic!("unexpected attach message"),
                 Message::CancelOperations { .. } => panic!("cancel should come after request"),
@@ -216,7 +216,7 @@ mod tests {
                     assert_eq!(request.size(), op_count);
                     assert_eq!(request.start(), start_loc);
                     assert_eq!(request.max_ops(), max_ops);
-                    assert!(request.retain_from().is_none());
+                    assert!(matches!(request, Request::Operations { .. }));
                 }
                 Message::AttachDatabase(_) => panic!("unexpected attach message"),
                 Message::GetOperations { .. } => panic!("unexpected duplicate request"),

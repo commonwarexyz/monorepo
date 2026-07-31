@@ -66,14 +66,6 @@ impl<F: Family> Request<F> {
             Self::Boundary { .. } => NonZeroU64::MIN,
         }
     }
-
-    /// The boundary whose pins the response must carry, if any.
-    pub const fn retain_from(&self) -> Option<Location<F>> {
-        match self {
-            Self::Operations { .. } => None,
-            Self::Boundary { start, .. } => Some(*start),
-        }
-    }
 }
 
 impl<F: Family> Request<F> {
@@ -120,6 +112,28 @@ impl<F: Family> Ord for Request<F> {
 impl<F: Family> std::hash::Hash for Request<F> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.order_key().hash(state);
+    }
+}
+
+impl<F: Family> std::fmt::Debug for Request<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Operations {
+                size,
+                start,
+                max_ops,
+            } => f
+                .debug_struct("Operations")
+                .field("size", size)
+                .field("start", start)
+                .field("max_ops", max_ops)
+                .finish(),
+            Self::Boundary { size, start } => f
+                .debug_struct("Boundary")
+                .field("size", size)
+                .field("start", start)
+                .finish(),
+        }
     }
 }
 
@@ -212,28 +226,6 @@ impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
                 max_ops: u.arbitrary()?,
             }
         })
-    }
-}
-
-impl<F: Family> std::fmt::Debug for Request<F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Operations {
-                size,
-                start,
-                max_ops,
-            } => f
-                .debug_struct("Operations")
-                .field("size", size)
-                .field("start", start)
-                .field("max_ops", max_ops)
-                .finish(),
-            Self::Boundary { size, start } => f
-                .debug_struct("Boundary")
-                .field("size", size)
-                .field("start", start)
-                .finish(),
-        }
     }
 }
 

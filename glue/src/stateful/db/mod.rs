@@ -1461,12 +1461,9 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
-/// Run engine sync for a compact database: the sync range is the one operation ending at the
-/// target, and the target-update and reached channels are translated between the compact
-/// target and the engine's ranged target.
-#[allow(clippy::too_many_arguments)]
 /// Run a standard replay sync: the shared body of every full database's
 /// [`StateSyncDb::sync_db`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_standard_db<E, DB, R>(
     context: E,
     config: DB::Config,
@@ -1498,6 +1495,9 @@ where
     .await
 }
 
+/// Run engine sync for a compact database: the sync range is the one operation ending at the
+/// target, and the target-update and reached channels are translated between the compact
+/// target and the engine's ranged target.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_compact_db<E, DB, R>(
     context: E,

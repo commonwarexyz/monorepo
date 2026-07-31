@@ -1889,7 +1889,7 @@ where
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         if request.size() == self.historical_target_size {
-            if request.retain_from().is_some() {
+            if matches!(request, Request::Boundary { .. }) {
                 // Simulate a source that has not answered the old target's pinned-nodes
                 // request when the target changes. The update cancels the request and drops
                 // this pending future.
@@ -1902,7 +1902,7 @@ where
             }
         }
 
-        if request.retain_from().is_some() && request.start() == self.boundary_start {
+        if matches!(request, Request::Boundary { .. }) && request.start() == self.boundary_start {
             let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
                 // Answer the boundary request with an operations response against the

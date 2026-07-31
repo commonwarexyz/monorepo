@@ -142,7 +142,7 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
 }
 
 impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
-    /// Wrap an opened journal and a verified witness into a store.
+    /// Wrap an opened journal and a derived witness into a store.
     pub(crate) const fn new(journal: Journal<E, F, D>, witness: DerivedWitness<F, D>) -> Self {
         Self {
             journal,
@@ -294,21 +294,21 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
-        let verified;
-        (self, verified) = self
+        let derived;
+        (self, derived) = self
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
-        let Some(verified) = verified else {
+        let Some(derived) = derived else {
             return Ok(self);
         };
-        (self.journal, _) = self.journal.append(&verified.witness).await?;
+        (self.journal, _) = self.journal.append(&derived.witness).await?;
         self.journal = match durability {
             Durability::Commit => self.journal.commit().await?,
             Durability::Sync => self.journal.sync().await?,
         };
         self.import_pending.store(false, Ordering::Relaxed);
         merkle.prune_to_frontier();
-        self.replace(verified);
+        self.replace(derived);
         Ok(self)
     }
 
@@ -331,7 +331,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         // is nothing to do. During a pending import the cached witness is not in the journal
         // yet, so it is exactly what must be persisted: replace the journal's contents with it.
         let cached_leaves = self.with(|w| w.leaf_count());
-        let verified = if cached_leaves == merkle.leaves() {
+        let derived = if cached_leaves == merkle.leaves() {
             if !self.import_pending.load(Ordering::Relaxed) {
                 return Ok((self, None));
             }
@@ -344,7 +344,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         if self.import_pending.load(Ordering::Relaxed) {
             self = self.clear_for_import().await?;
         }
-        Ok((self, Some(verified)))
+        Ok((self, Some(derived)))
     }
 
     /// Rewind the journal so the entry committing exactly `target` leaves becomes the tip, then
@@ -352,7 +352,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// of the restored tip.
     ///
     /// Rewinding to a pruned leaf count, or one no entry commits, returns
-    /// [`merkle::Error::RewindBeyondHistory`]. The target entry is verified before the journal
+    /// [`merkle::Error::RewindBeyondHistory`]. The target entry is derived before the journal
     /// is truncated, so a corrupt entry fails the rewind with the journal intact. The rewind is
     /// made durable before returning.
     pub(crate) async fn rewind<H, S, Op>(
@@ -641,8 +641,8 @@ where
     merkle.apply_batch(&batch)?;
 
     // The initial commit has one leaf and an inactivity floor of 0.
-    let verified = build_witness::<F, H, S>(merkle, Location::new(0), last_commit_op_bytes)?;
-    let (journal, _) = journal.append(&verified.witness).await?;
+    let derived = build_witness::<F, H, S>(merkle, Location::new(0), last_commit_op_bytes)?;
+    let (journal, _) = journal.append(&derived.witness).await?;
     let journal = journal.sync().await?;
     Ok(journal)
 }

@@ -313,6 +313,16 @@ where
         Ok(engine)
     }
 
+    /// Track `request` and spawn its fetch against the shared source.
+    fn spawn_fetch(&mut self, request: Request<DB::Family>) {
+        let source = Arc::clone(&self.source);
+        self.outstanding_requests
+            .insert(request, move |id| async move {
+                let result = source.serve(request).await;
+                IndexedFetchResult { id, result }
+            });
+    }
+
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     fn schedule_requests(&mut self) -> Result<(), Error<DB, S>> {
         let target_size = self.target.range.end();
@@ -329,12 +339,7 @@ where
                 size: target_size,
                 start: self.target.range.start(),
             };
-            let source = Arc::clone(&self.source);
-            self.outstanding_requests
-                .insert(request, move |id| async move {
-                    let result = source.serve(request).await;
-                    IndexedFetchResult { id, result }
-                });
+            self.spawn_fetch(request);
         }
 
         // Calculate the maximum number of requests to make
@@ -373,12 +378,7 @@ where
                 start: gap_range.start,
                 max_ops: batch_size,
             };
-            let source = Arc::clone(&self.source);
-            self.outstanding_requests
-                .insert(request, move |id| async move {
-                    let result = source.serve(request).await;
-                    IndexedFetchResult { id, result }
-                });
+            self.spawn_fetch(request);
         }
 
         Ok(())
@@ -529,7 +529,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub fn is_at_target(&mut self) -> Result<bool, Error<DB, S>> {
+    pub fn is_at_target(&self) -> Result<bool, Error<DB, S>> {
         let journal_size = self.journal.size();
         let target_journal_size = self.target.range.end();
 
@@ -556,7 +556,7 @@ where
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
-    fn is_ready_to_complete(&mut self) -> Result<bool, Error<DB, S>> {
+    fn is_ready_to_complete(&self) -> Result<bool, Error<DB, S>> {
         Ok(self.is_at_target()? && self.has_boundary_state())
     }
 
@@ -598,8 +598,6 @@ where
         if response.proof().leaves != size {
             return Self::reject_response(validity);
         }
-        let is_current_target = size == self.target.range.end();
-
         // A response must match the shape of its request.
         match (request, response) {
             (Request::Operations { max_ops, .. }, Response::Operations { proof, operations }) => {
@@ -607,7 +605,7 @@ where
                 if operations_len == 0 || operations_len > max_ops.get() {
                     return Self::reject_response(validity);
                 }
-                let Some(root) = self.verification_root(is_current_target, size) else {
+                let Some(root) = self.verification_root(size) else {
                     return Ok(());
                 };
                 let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
@@ -622,7 +620,7 @@ where
             (Request::Boundary { .. }, Response::Boundary { proof, op, pins }) => {
                 // Use the pins only if the current target still needs them. Otherwise
                 // keep the operation and drop the pins.
-                let need_pinned = is_current_target
+                let need_pinned = size == self.target.range.end()
                     && self.pinned_nodes.is_none()
                     && start_loc == self.target.range.start();
                 let element = [op.encode()];
@@ -635,7 +633,7 @@ where
                         &self.target.root,
                     )
                 } else {
-                    let Some(root) = self.verification_root(is_current_target, size) else {
+                    let Some(root) = self.verification_root(size) else {
                         return Ok(());
                     };
                     proof.verify_range_inclusion(&self.hasher, &element, start_loc, root)
@@ -664,12 +662,8 @@ where
     /// historical root for a request issued against a superseded target. `None` means the
     /// historical root was evicted (or `max_retained_roots` is 0); the caller drops the
     /// result without penalizing the source -- the data may be valid.
-    fn verification_root(
-        &self,
-        is_current_target: bool,
-        size: Location<DB::Family>,
-    ) -> Option<&DB::Digest> {
-        if is_current_target {
+    fn verification_root(&self, size: Location<DB::Family>) -> Option<&DB::Digest> {
+        if size == self.target.range.end() {
             Some(&self.target.root)
         } else {
             self.retained_roots.get(&size)

@@ -24,6 +24,14 @@ impl<F: Family, D: Digest> Target<F, D> {
     pub const fn new(root: D, range: NonEmptyRange<Location<F>>) -> Self {
         Self { root, range }
     }
+
+    /// Whether this target advances `from`: its end is in domain and strictly beyond, and
+    /// its start has not moved backward.
+    pub fn advances(&self, from: &Self) -> bool {
+        self.range.end().is_valid()
+            && self.range.end() > from.range.end()
+            && self.range.start() >= from.range.start()
+    }
 }
 
 impl<F: Family, D: Digest> Clone for Target<F, D> {
@@ -86,17 +94,6 @@ where
             root,
             range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
         })
-    }
-}
-
-impl<F: Family, D: Digest> Target<F, D> {
-    /// Whether this target advances `from`: its end is in domain and strictly beyond, and
-    /// its start has not moved backward. The single home for the rule; `validate_update`
-    /// and the engine's completion drain both consume it.
-    pub fn advances(&self, from: &Self) -> bool {
-        self.range.end().is_valid()
-            && self.range.end() > from.range.end()
-            && self.range.start() >= from.range.start()
     }
 }
 
