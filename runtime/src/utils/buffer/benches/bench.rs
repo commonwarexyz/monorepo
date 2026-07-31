@@ -16,9 +16,8 @@ mod append;
 mod read;
 mod sync;
 
-// An aligned physical page (4096 on disk), so benches measure the layout production
-// should use (see paged::page_size).
-const PAGE_SIZE: NonZeroU16 = page_size(4096);
+const PHYSICAL_PAGE_SIZE: u32 = 4096;
+const PAGE_SIZE: NonZeroU16 = page_size(PHYSICAL_PAGE_SIZE);
 const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;
 const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
 const CACHE_SIZE: usize = 10_000;
