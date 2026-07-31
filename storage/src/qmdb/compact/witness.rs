@@ -294,16 +294,31 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
+        // Match the deferred-failure convention used by the journal: return a prior completion's
+        // error through a ready handle before a later completion can replace it. Errors while
+        // staging or initiating this sync continue to use the outer result.
+        if let Err(err) = self.wait_for_sync().await {
+            return Ok((self, Handle::ready(Err(err))));
+        }
+
+        // Decide whether the journal needs a new witness before starting this sync. During import,
+        // staging verifies the cached witness before clearing the journal it will replace.
         let verified;
         (self, verified) = self
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
+
         if let Some(verified) = verified {
+            // Publish the witness to the cache only after it has been appended. The cache may
+            // then match the Merkle before the append is durable, which `pending_sync` tracks.
             (self.journal, _) = self.journal.append(&verified.witness).await?;
             self.import_pending.store(false, Ordering::Relaxed);
             merkle.prune_to_frontier();
             self.replace(verified);
         }
+
+        // Share one completion between the caller and the store. Retaining a clone keeps a
+        // dropped handle's failure observable by the next durability operation.
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
         let completion: SyncCompletion = handle.boxed().shared();

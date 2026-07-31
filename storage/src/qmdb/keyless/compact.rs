@@ -657,7 +657,7 @@ mod tests {
         BufferPooler, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
@@ -1088,6 +1088,47 @@ mod tests {
                 db.commit().await.is_err(),
                 "commit absorbed the retained metadata failure"
             );
+        });
+    }
+
+    /// A later `start_sync` cannot replace an unobserved failure from the prior handle.
+    #[test_traced]
+    fn test_compact_start_sync_retains_dropped_metadata_failure() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(
+                &ctx,
+                "delayed",
+                "keyless-start-sync-dropped-meta-fail",
+                &pending,
+            );
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_append(db, 1).await;
+
+            // Prove the data durable so the next call only advances recovery metadata.
+            let first;
+            (db, first) = db.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, first).await.unwrap();
+
+            let dropped;
+            (db, dropped) = db.start_sync().await.unwrap();
+            assert_eq!(
+                pending.lock().len(),
+                1,
+                "expected only the recovery-watermark sync"
+            );
+            fail_pending_syncs(&pending);
+            drop(dropped);
+
+            // The store retains the dropped handle's completion. Deferred failures stay on the
+            // handle channel, so this call succeeds but its handle must fail.
+            let next;
+            (db, next) = db.start_sync().await.unwrap();
+            assert!(
+                drive_pending_syncs(&pending, next).await.is_err(),
+                "a later start_sync masked the retained metadata failure"
+            );
+            drop(db);
         });
     }
 
