@@ -269,7 +269,8 @@ where
             None
         };
 
-        let metrics = Metrics::new(&config.context.child("sync"));
+        let sync_context = config.context.child("sync");
+        let metrics = Metrics::new(&sync_context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
