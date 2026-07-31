@@ -1269,9 +1269,7 @@ where
 
 mod compact_variable_mmr {
     use super::*;
-    use crate::qmdb::sync::source::tests::{
-        SequenceSource, feedback_validity, fetch_compact_state,
-    };
+    use crate::qmdb::sync::source::tests::{SequenceSource, dropped_feedback, fetch_compact_state};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
 
@@ -1501,8 +1499,8 @@ mod compact_variable_mmr {
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 SequenceSource::new(vec![
-                    (bad_state, feedback_validity()),
-                    (good_state, feedback_validity()),
+                    (bad_state, dropped_feedback()),
+                    (good_state, dropped_feedback()),
                 ]),
                 target.clone(),
                 client_config(&suffix, &context),
@@ -1606,8 +1604,8 @@ mod compact_variable_mmr {
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 SequenceSource::new(vec![
-                    (bad_state, feedback_validity()),
-                    (good_state, feedback_validity()),
+                    (bad_state, dropped_feedback()),
+                    (good_state, dropped_feedback()),
                 ]),
                 target.clone(),
                 client_config(&suffix, &context),
@@ -2064,7 +2062,7 @@ mod compact_variable_mmb {
     use super::*;
     use crate::{
         merkle::mmb,
-        qmdb::sync::source::tests::{SequenceSource, feedback_validity, fetch_compact_state},
+        qmdb::sync::source::tests::{SequenceSource, dropped_feedback, fetch_compact_state},
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
@@ -2227,8 +2225,8 @@ mod compact_variable_mmb {
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 SequenceSource::new(vec![
-                    (bad_state, feedback_validity()),
-                    (good_state, feedback_validity()),
+                    (bad_state, dropped_feedback()),
+                    (good_state, dropped_feedback()),
                 ]),
                 target.clone(),
                 client_config(&suffix, &context),
@@ -2337,8 +2335,8 @@ mod compact_variable_mmb {
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 SequenceSource::new(vec![
-                    (bad_state, feedback_validity()),
-                    (good_state, feedback_validity()),
+                    (bad_state, dropped_feedback()),
+                    (good_state, dropped_feedback()),
                 ]),
                 target.clone(),
                 client_cfg.clone(),
@@ -2394,8 +2392,8 @@ mod compact_variable_mmb {
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 SequenceSource::new(vec![
-                    (bad_state, feedback_validity()),
-                    (good_state, feedback_validity()),
+                    (bad_state, dropped_feedback()),
+                    (good_state, dropped_feedback()),
                 ]),
                 target.clone(),
                 client_config(&suffix, &context),

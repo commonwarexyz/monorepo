@@ -276,13 +276,13 @@ where
         &mut self,
         key: Request<F>,
         value: bytes::Bytes,
-        validity_tx: oneshot::Sender<bool>,
+        feedback_tx: oneshot::Sender<bool>,
     ) {
         // Only accept responses for keys we currently have in-flight.
         // Unknown keys are unsolicited/stale deliveries and are ignored.
         let Some(subscribers) = self.pending.remove(&key) else {
             self.metrics.deliveries.inc(status::Status::Dropped);
-            validity_tx.send_lossy(true);
+            feedback_tx.send_lossy(true);
             return;
         };
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
@@ -302,7 +302,7 @@ where
                 self.pending.insert(key, subscribers);
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
                 self.metrics.deliveries.inc(status::Status::Invalid);
-                validity_tx.send_lossy(false);
+                feedback_tx.send_lossy(false);
                 return;
             }
         };
@@ -321,7 +321,7 @@ where
 
         if approvals.is_empty() {
             self.metrics.deliveries.inc(status::Status::Success);
-            validity_tx.send_lossy(true);
+            feedback_tx.send_lossy(true);
             return;
         }
 
@@ -338,7 +338,7 @@ where
             self.metrics.deliveries.inc(status::Status::Failure);
             debug!(?key, "downstream marked response as peer-invalid");
         }
-        validity_tx.send_lossy(peer_valid);
+        feedback_tx.send_lossy(peer_valid);
     }
 
     /// Serve a peer's request by querying the local database.
@@ -359,7 +359,7 @@ where
         }
         let result = database.serve(key).await;
 
-        let Ok((response, _validity_tx)) = result else {
+        let Ok((response, _feedback_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
             return;
         };
@@ -464,7 +464,7 @@ mod tests {
     type TestPending = mailbox::ResponseTx<mmr::Family, TestOp, sha256::Digest>;
     type TestPendingResult = oneshot::Receiver<(
         Response<mmr::Family, TestOp, sha256::Digest>,
-        commonware_storage::qmdb::sync::ValidityTx,
+        commonware_storage::qmdb::sync::FeedbackTx,
     )>;
 
     fn test_subscriber() -> (TestPending, TestPendingResult) {
@@ -600,15 +600,15 @@ mod tests {
             futures::join!(
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let (_response, validity_tx) = sub1_rx.await.unwrap();
-                    validity_tx
+                    let (_response, feedback_tx) = sub1_rx.await.unwrap();
+                    feedback_tx
                         .expect("deliveries should include feedback")
                         .send(true)
                         .unwrap();
                 },
                 async {
-                    let (_response, validity_tx) = sub2_rx.await.unwrap();
-                    validity_tx
+                    let (_response, feedback_tx) = sub2_rx.await.unwrap();
+                    feedback_tx
                         .expect("deliveries should include feedback")
                         .send(false)
                         .unwrap();
@@ -637,8 +637,8 @@ mod tests {
                     drop(fetch);
                 },
                 async {
-                    let (_response, validity_tx) = sub2_rx.await.unwrap();
-                    validity_tx
+                    let (_response, feedback_tx) = sub2_rx.await.unwrap();
+                    feedback_tx
                         .expect("deliveries should include feedback")
                         .send(true)
                         .unwrap();
@@ -703,9 +703,9 @@ mod tests {
             actor.pending.insert(request, vec![sub_tx]);
 
             // An operations-shaped answer to a boundary request decodes but does not match.
-            let (validity_tx, validity_rx) = oneshot::channel();
+            let (feedback_tx, validity_rx) = oneshot::channel();
             actor
-                .handle_deliver(request, encoded_fetch_payload(), validity_tx)
+                .handle_deliver(request, encoded_fetch_payload(), feedback_tx)
                 .await;
 
             assert!(!validity_rx.await.unwrap());

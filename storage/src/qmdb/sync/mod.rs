@@ -22,7 +22,7 @@ pub use database::Database;
 pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
 
 pub mod source;
-pub use source::{Request, Response, Source, ValidityTx};
+pub use source::{FeedbackTx, Request, Response, Source};
 
 mod target;
 pub use target::{CompactTarget, Target};

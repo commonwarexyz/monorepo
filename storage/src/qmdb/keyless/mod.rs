@@ -618,7 +618,7 @@ where
     ) -> Result<
         (
             crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
-            crate::qmdb::sync::ValidityTx,
+            crate::qmdb::sync::FeedbackTx,
         ),
         Self::Error,
     > {

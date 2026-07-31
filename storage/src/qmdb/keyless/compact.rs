@@ -37,7 +37,7 @@ use crate::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
         },
-        sync::{CompactTarget, Request, Response, Source, ValidityTx},
+        sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -588,7 +588,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), Self::Error> {
+    ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), Self::Error> {
         Ok((
             self.witness
                 .compact_state(&self.commit_codec_config, request)?,
@@ -703,7 +703,7 @@ mod tests {
 
             // Requests without pinned nodes are also served, even when they ask for more operations
             // than the witness holds.
-            let (response, validity_tx) = db
+            let (response, feedback_tx) = db
                 .serve(Request::Operations {
                     size: n,
                     start: Location::new(*n - 1),
@@ -711,7 +711,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            assert!(validity_tx.is_none());
+            assert!(feedback_tx.is_none());
             let Response::Operations { operations, .. } = response else {
                 panic!("operations request should get an operations response");
             };

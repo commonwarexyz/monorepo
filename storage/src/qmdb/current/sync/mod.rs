@@ -63,7 +63,7 @@ use crate::{
         },
         metrics::Metrics as AnyMetrics,
         operation::{Committable, Key},
-        sync::{Database, DatabaseConfig as Config, Request, Response, ValidityTx},
+        sync::{Database, DatabaseConfig as Config, FeedbackTx, Request, Response},
     },
     translator::Translator,
 };
@@ -388,7 +388,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<F, Self::Op, H::Digest>, ValidityTx), qmdb::Error<F>> {
+    ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), qmdb::Error<F>> {
         self.any.serve(request).await
     }
 }

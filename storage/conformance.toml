@@ -522,6 +522,10 @@ hash = "c59085de482697991f0202388605c751020e257b858d4af35386495d4db7c14c"
 n_cases = 65536
 hash = "f742d92a0af0af78a9519bf637bc52ea869965a85a84101a4c53f53eb39325ca"
 
+["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<mmb::Family,sha256::Digest>>"]
+n_cases = 65536
+hash = "fae4fc2ff4f22c0614eea3f0928dec8940398014bb4d696b2bb89d880ad02bac"
+
 ["commonware_storage::queue::conformance::StorageConformance<QueueWorkload>"]
 n_cases = 512
 hash = "af39c4e1fccf63cac68a7866703d7764c3baf3be3e3906460dc4fab9c7ffd19d"

@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            source::{self, Request, Response, Source, ValidityTx, tests::feedback_validity},
+            source::{self, FeedbackTx, Request, Response, Source, tests::dropped_feedback},
         },
     },
 };
@@ -1784,8 +1784,8 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
-        let (mut response, validity_tx) = self.inner.serve(request).await?;
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
+        let (mut response, feedback_tx) = self.inner.serve(request).await?;
         // Corrupt pinned nodes only on the first boundary response.
         if let Response::Boundary { pinned_nodes, .. } = &mut response
             && !self
@@ -1794,9 +1794,9 @@ where
             && !pinned_nodes.is_empty()
         {
             pinned_nodes[0] = Digest::from([0xFFu8; 32]);
-            return Ok((response, feedback_validity()));
+            return Ok((response, dropped_feedback()));
         }
-        Ok((response, validity_tx))
+        Ok((response, feedback_tx))
     }
 }
 
@@ -1878,7 +1878,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
         if request.size() == self.historical_target_size {
             if matches!(request, Request::Boundary { .. }) {
                 // Simulate a source that has not answered the old target's pinned-nodes
@@ -1904,7 +1904,7 @@ where
                     max_ops: request.max_ops(),
                 };
                 let (response, _) = self.inner.serve(historical).await?;
-                return Ok((response, feedback_validity()));
+                return Ok((response, dropped_feedback()));
             }
 
             let release = self.release_boundary_retry.lock().take();

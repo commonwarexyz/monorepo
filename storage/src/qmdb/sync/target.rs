@@ -183,10 +183,9 @@ where
 }
 
 #[cfg(test)]
-// Only `MmrFamily` is exercised here. `Target`'s codec and predicates are
-// family-agnostic (the family only influences `Location::is_valid` via `F::MAX_LEAVES` and
-// the `arbitrary` range picker), so an MMB variant would duplicate coverage without catching
-// anything new.
+// The unit tests use `MmrFamily` only. The codec and predicates are family-agnostic (the
+// family only influences `Location::is_valid` via `F::MAX_LEAVES` and the `arbitrary` range
+// picker), so an MMB variant would duplicate coverage. Codec conformance covers both families.
 mod tests {
     use super::*;
     use crate::merkle::mmr::Family as MmrFamily;
@@ -367,6 +366,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Target<MmrFamily, sha256::Digest>>,
+            CodecConformance<Target<mmb::Family, sha256::Digest>>,
             CodecConformance<CompactTarget<MmrFamily, sha256::Digest>>,
             CodecConformance<CompactTarget<mmb::Family, sha256::Digest>>,
         }

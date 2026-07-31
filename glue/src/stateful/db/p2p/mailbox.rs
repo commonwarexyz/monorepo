@@ -6,7 +6,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{Request, Response, Source, ValidityTx},
+    qmdb::sync::{FeedbackTx, Request, Response, Source},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
@@ -17,8 +17,8 @@ use std::{collections::VecDeque, future::Future};
 pub struct ResponseDropped;
 
 /// Where the actor delivers a fetched response, along with the channel the caller reports
-/// peer validity on.
-pub(super) type ResponseTx<F, Op, D> = oneshot::Sender<(Response<F, Op, D>, ValidityTx)>;
+/// verification feedback on.
+pub(super) type ResponseTx<F, Op, D> = oneshot::Sender<(Response<F, Op, D>, FeedbackTx)>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
@@ -142,7 +142,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {
             request,

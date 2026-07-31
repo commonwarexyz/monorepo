@@ -8,7 +8,7 @@ use crate::{
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
-            source::{Request, Response, Source, ValidityTx},
+            source::{FeedbackTx, Request, Response, Source},
         },
     },
 };
@@ -58,7 +58,7 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
     /// Unique ID assigned when the request was scheduled.
     pub id: RequestId,
     /// The result of the fetch operation.
-    pub result: Result<(Response<F, Op, D>, ValidityTx), E>,
+    pub result: Result<(Response<F, Op, D>, FeedbackTx), E>,
 }
 
 /// Wait for the next synchronization event.
@@ -551,11 +551,11 @@ where
     /// A source that accepts feedback is told the response failed, and the request is
     /// retried. A source that is not listening cannot change its answer, so the failure
     /// is terminal.
-    fn reject_response(validity: ValidityTx) -> Result<(), Error<DB, S>> {
-        validity.map_or_else(
+    fn reject_response(feedback_tx: FeedbackTx) -> Result<(), Error<DB, S>> {
+        feedback_tx.map_or_else(
             || Err(SyncError::Engine(EngineError::InvalidResponse)),
-            |validity| {
-                validity.send_lossy(false);
+            |feedback_tx| {
+                feedback_tx.send_lossy(false);
                 Ok(())
             },
         )
@@ -575,31 +575,31 @@ where
             return Ok(());
         };
 
-        let (response, validity) = fetch_result.result.map_err(SyncError::Source)?;
+        let (response, feedback_tx) = fetch_result.result.map_err(SyncError::Source)?;
 
         let start_loc = request.start();
         let size = request.size();
 
         // The proof must cover exactly the requested size.
         if response.proof().leaves != size {
-            return Self::reject_response(validity);
+            return Self::reject_response(feedback_tx);
         }
         // A response must match the shape of its request.
         match (request, response) {
             (Request::Operations { max_ops, .. }, Response::Operations { proof, operations }) => {
                 let operations_len = operations.len() as u64;
                 if operations_len == 0 || operations_len > max_ops.get() {
-                    return Self::reject_response(validity);
+                    return Self::reject_response(feedback_tx);
                 }
                 let Some(root) = self.verification_root(size) else {
                     return Ok(());
                 };
                 let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
                 if !proof.verify_range_inclusion(&self.hasher, &elements, start_loc, root) {
-                    return Self::reject_response(validity);
+                    return Self::reject_response(feedback_tx);
                 }
-                if let Some(validity) = validity {
-                    validity.send_lossy(true);
+                if let Some(feedback_tx) = feedback_tx {
+                    feedback_tx.send_lossy(true);
                 }
                 self.store_operations(start_loc, operations);
             }
@@ -635,17 +635,17 @@ where
                     if need_pinned {
                         tracing::warn!("boundary response failed verification");
                     }
-                    return Self::reject_response(validity);
+                    return Self::reject_response(feedback_tx);
                 }
-                if let Some(validity) = validity {
-                    validity.send_lossy(true);
+                if let Some(feedback_tx) = feedback_tx {
+                    feedback_tx.send_lossy(true);
                 }
                 if need_pinned {
                     self.pinned_nodes = Some(pinned_nodes);
                 }
                 self.store_operations(start_loc, vec![op]);
             }
-            _ => return Self::reject_response(validity),
+            _ => return Self::reject_response(feedback_tx),
         }
 
         Ok(())
@@ -924,7 +924,7 @@ mod tests {
         async fn serve(
             &self,
             _request: Request<MmrFamily>,
-        ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>
+        ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>
         {
             Ok((
                 Response::Operations {

@@ -384,9 +384,12 @@ where
     }
 }
 
-/// Where to report whether a response was valid.
-/// This allows the sync engine to provide feedback to the [Source] that served the response.
-pub type ValidityTx = Option<oneshot::Sender<bool>>;
+/// Where to report whether a response verified.
+///
+/// After verifying a response, the sync engine sends `true` if it was valid and `false` if it
+/// was not, letting the [`Source`] provide feedback to whoever served it. `None` means the
+/// source accepts no feedback and its answer is final.
+pub type FeedbackTx = Option<oneshot::Sender<bool>>;
 
 /// A source for proofs and operations.
 pub trait Source: Send + Sync {
@@ -408,7 +411,7 @@ pub trait Source: Send + Sync {
         &'a self,
         request: Request<Self::Family>,
     ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>,
+        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
     > + Send
     + 'a;
 }
@@ -426,7 +429,7 @@ where
         &'a self,
         request: Request<Self::Family>,
     ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>,
+        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
     > + Send
     + 'a {
         T::serve(self, request)
@@ -446,7 +449,7 @@ where
     async fn serve(
         &self,
         request: Request<Self::Family>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
         Ok(source.serve(request).await?)
     }
@@ -466,7 +469,7 @@ macro_rules! impl_locked_source {
             async fn serve(
                 &self,
                 request: Request<Self::Family>,
-            ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error>
+            ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>
             {
                 self.read().await.serve(request).await
             }
@@ -504,7 +507,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<F, C::Item, H::Digest>, ValidityTx), qmdb::Error<F>> {
+    ) -> Result<(Response<F, C::Item, H::Digest>, FeedbackTx), qmdb::Error<F>> {
         // Reject before the floor lookup so the error carries the requested size and the
         // floor read never touches out-of-range locations.
         if request.size() > self.size() {
@@ -561,7 +564,7 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
         self.log.serve(request).await
     }
 }
@@ -595,9 +598,9 @@ pub(crate) mod tests {
 
     fn assert_serves<S: Source>() {}
 
-    /// A validity slot whose receiver is dropped. It marks a response as feedback-accepting,
+    /// A feedback slot whose receiver is dropped. It marks a response as feedback-accepting,
     /// so the engine retries instead of failing.
-    pub fn feedback_validity() -> ValidityTx {
+    pub fn dropped_feedback() -> FeedbackTx {
         let (tx, _rx) = oneshot::channel();
         Some(tx)
     }
@@ -606,11 +609,11 @@ pub(crate) mod tests {
     #[derive(Clone)]
     pub struct SequenceSource<F: Family, Op, D: Digest> {
         #[allow(clippy::type_complexity)]
-        responses: Arc<commonware_utils::sync::Mutex<VecDeque<(Response<F, Op, D>, ValidityTx)>>>,
+        responses: Arc<commonware_utils::sync::Mutex<VecDeque<(Response<F, Op, D>, FeedbackTx)>>>,
     }
 
     impl<F: Family, Op, D: Digest> SequenceSource<F, Op, D> {
-        pub fn new(responses: Vec<(Response<F, Op, D>, ValidityTx)>) -> Self {
+        pub fn new(responses: Vec<(Response<F, Op, D>, FeedbackTx)>) -> Self {
             Self {
                 responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from(
                     responses,
@@ -633,7 +636,7 @@ pub(crate) mod tests {
         async fn serve(
             &self,
             _request: Request<F>,
-        ) -> Result<(Response<F, Op, D>, ValidityTx), qmdb::Error<F>> {
+        ) -> Result<(Response<F, Op, D>, FeedbackTx), qmdb::Error<F>> {
             self.responses
                 .lock()
                 .pop_front()
@@ -645,7 +648,7 @@ pub(crate) mod tests {
     pub async fn fetch_compact_state<R: Source>(
         source: &R,
         target: crate::qmdb::sync::CompactTarget<R::Family, R::Digest>,
-    ) -> Result<(Response<R::Family, R::Op, R::Digest>, ValidityTx), R::Error> {
+    ) -> Result<(Response<R::Family, R::Op, R::Digest>, FeedbackTx), R::Error> {
         source
             .serve(Request::Boundary {
                 size: target.size,
@@ -673,7 +676,7 @@ pub(crate) mod tests {
         async fn serve(
             &self,
             _request: Request<F>,
-        ) -> Result<(Response<F, Op, D>, ValidityTx), qmdb::Error<F>> {
+        ) -> Result<(Response<F, Op, D>, FeedbackTx), qmdb::Error<F>> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }
