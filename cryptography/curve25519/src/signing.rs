@@ -5,7 +5,7 @@ mod msm;
 mod point;
 mod scalar;
 
-use crate::field_vec::LANES;
+use crate::simplified::{Backend, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::{Sequential, Strategy};
@@ -41,7 +41,8 @@ commonware_macros::stability_scope!(ALPHA {
         /// non-canonical `y` encodings (`y >= p`) are accepted; only encodings with no
         /// corresponding curve point are rejected.
         pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, Error> {
-            let point = EdwardsPoint::decompress(&bytes).ok_or(Error::InvalidVerificationKey)?;
+            let point = with_backend(DecompressPoint(bytes))
+                .ok_or(Error::InvalidVerificationKey)?;
             Ok(Self { bytes, point })
         }
 
@@ -56,16 +57,31 @@ commonware_macros::stability_scope!(ALPHA {
         /// (rather than the cofactorless `sB = kA + R`), so this agrees with [`verify_batch`] on
         /// every input, including small-order `A`/`R` components.
         pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), Error> {
+            with_backend(VerifyOne {
+                key: self,
+                message,
+                signature,
+            })
+        }
+
+        fn verify_with<B: Backend>(
+            &self,
+            backend: B,
+            message: &[u8],
+            signature: &Signature,
+        ) -> Result<(), Error> {
             let s = Scalar::from_canonical_bytes(&signature.s).ok_or(Error::NonCanonicalScalar)?;
-            let r = EdwardsPoint::decompress(&signature.r).ok_or(Error::InvalidSignature)?;
+            let r = EdwardsPoint::decompress(backend, &signature.r).ok_or(Error::InvalidSignature)?;
 
             let digest = sha512(&[&signature.r, &self.bytes, message]);
             let k = Scalar::from_bytes_mod_order_wide(&digest);
 
-            let sb = EdwardsPoint::basepoint().scalar_mul(&s);
-            let ka = self.point.scalar_mul(&k);
-            let check = sb.add(&ka.negate()).add(&r.negate());
-            if check.mul_by_cofactor().is_identity() {
+            let sb = EdwardsPoint::basepoint().scalar_mul(backend, &s);
+            let ka = self.point.scalar_mul(backend, &k);
+            let check = sb
+                .add(backend, &ka.negate(backend))
+                .add(backend, &r.negate(backend));
+            if check.mul_by_cofactor(backend).is_identity() {
                 Ok(())
             } else {
                 Err(Error::VerificationFailed)
@@ -73,6 +89,30 @@ commonware_macros::stability_scope!(ALPHA {
         }
     }
 });
+
+struct DecompressPoint([u8; 32]);
+
+impl WithBackend for DecompressPoint {
+    type Output = Option<EdwardsPoint>;
+
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        EdwardsPoint::decompress(backend, &self.0)
+    }
+}
+
+struct VerifyOne<'a> {
+    key: &'a VerifyingKey,
+    message: &'a [u8],
+    signature: &'a Signature,
+}
+
+impl WithBackend for VerifyOne<'_> {
+    type Output = Result<(), Error>;
+
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        self.key.verify_with(backend, self.message, self.signature)
+    }
+}
 
 commonware_macros::stability_scope!(ALPHA {
     /// An Ed25519 signature.
@@ -250,13 +290,15 @@ const fn parallel_min_items(parallelism: usize, per_item_ns: usize) -> usize {
 /// (at most `LANES - 1` element) second vector.
 ///
 /// Returns `None` if any encoding fails to decompress.
-fn decompress_phase<F>(
+fn decompress_phase<B, F>(
+    backend: B,
     count: usize,
     resolve: F,
     width: u32,
     strategy: &impl Strategy,
 ) -> Option<(Vec<[Term; LANES]>, Vec<Term>)>
 where
+    B: Backend,
     F: Fn(usize) -> ([u8; 32], Scalar) + Send + Sync,
 {
     // Measured serial cost per decompression (its share of an 8-wide sqrt kernel plus digit
@@ -276,18 +318,16 @@ where
         let base = unit * LANES;
         let resolved: [([u8; 32], Scalar); LANES] = core::array::from_fn(|k| resolve(base + k));
         let bytes = resolved.map(|(bytes, _)| bytes);
-        let points = EdwardsPoint::decompress_batch(&bytes);
+        let points = EdwardsPoint::decompress_batch(backend, &bytes);
+        let compact = points.map(|point| point.unwrap_or(EdwardsPoint::IDENTITY));
+        let mixed = MixedPoint::from_lanes(backend, &compact);
         core::array::from_fn(|k| {
-            points[k].as_ref().map_or_else(
+            points[k].map_or_else(
                 || {
                     failed.store(true, Ordering::Relaxed);
-                    Term::new(
-                        MixedPoint::new(&EdwardsPoint::IDENTITY),
-                        &Scalar::ZERO,
-                        width,
-                    )
+                    Term::new(MixedPoint::IDENTITY, &Scalar::ZERO, width)
                 },
-                |point| Term::new(MixedPoint::new(point), &resolved[k].1, width),
+                |_| Term::new(mixed[k], &resolved[k].1, width),
             )
         })
     };
@@ -307,8 +347,8 @@ where
     let mut tail = Vec::with_capacity(count - units * LANES);
     for i in units * LANES..count {
         let (bytes, scalar) = resolve(i);
-        let point = EdwardsPoint::decompress(&bytes)?;
-        tail.push(Term::new(MixedPoint::new(&point), &scalar, width));
+        let point = EdwardsPoint::decompress(backend, &bytes)?;
+        tail.push(Term::new(MixedPoint::new(backend, &point), &scalar, width));
     }
     Some((full, tail))
 }
@@ -330,7 +370,8 @@ where
 ///    instead, in a parallel map of their own.
 /// 4. One tile-parallel MSM over the term slices (with the coalesced basepoint term
 ///    `sum(z*s)·(-B)` riding along as one final term), then the cofactored identity check.
-fn verify_batch_inner(
+fn verify_batch_inner<B: Backend>(
+    backend: B,
     rng: &mut impl CryptoRng,
     items: &[(&[u8; 32], &Signature, &[u8])],
     a_points: Option<&[&EdwardsPoint]>,
@@ -398,13 +439,16 @@ fn verify_batch_inner(
     // The coalesced basepoint term: `sum(z*s)·B` moved to the equation's other side as
     // `sum(z*s)·(-B)`, one more ordinary MSM term.
     let basepoint = [Term::new(
-        MixedPoint::new(&EdwardsPoint::basepoint().negate()),
+        MixedPoint::new(
+            backend,
+            &EdwardsPoint::basepoint().negate(backend),
+        ),
         &s_sum,
         width,
     )];
 
     let result = if let Some(points) = a_points {
-        let Some((full, tail)) = decompress_phase(n, resolve_r, width, strategy) else {
+        let Some((full, tail)) = decompress_phase(backend, n, resolve_r, width, strategy) else {
             return false;
         };
         // `A` needs no decompression here, so its coalesced terms are built directly -- a term
@@ -412,7 +456,11 @@ fn verify_batch_inner(
         // phases.
         let a_body = |&(start, end): &(u32, u32)| {
             let point = points[order[start as usize].1 as usize];
-            Term::new(MixedPoint::new(point), &group_scalar((start, end)), width)
+            Term::new(
+                MixedPoint::new(backend, point),
+                &group_scalar((start, end)),
+                width,
+            )
         };
         let a_terms: Vec<Term> = if groups.len() < parallel_min_items(strategy.parallelism(), 300) {
             Sequential.map_collect_vec(groups.iter(), a_body)
@@ -420,6 +468,7 @@ fn verify_batch_inner(
             strategy.map_collect_vec(groups.iter(), a_body)
         };
         msm::multiscalar_mul_terms_parallel(
+            backend,
             &[full.as_flattened(), &tail, &a_terms, &basepoint],
             width,
             strategy,
@@ -433,17 +482,54 @@ fn verify_batch_inner(
                 (order[group.0 as usize].0, group_scalar(group))
             }
         };
-        let Some((full, tail)) = decompress_phase(n + groups.len(), resolve, width, strategy)
+        let Some((full, tail)) =
+            decompress_phase(backend, n + groups.len(), resolve, width, strategy)
         else {
             return false;
         };
         msm::multiscalar_mul_terms_parallel(
+            backend,
             &[full.as_flattened(), &tail, &basepoint],
             width,
             strategy,
         )
     };
-    result.mul_by_cofactor().is_identity()
+    result.mul_by_cofactor(backend).is_identity()
+}
+
+struct VerifyBatchCall<'a, 'b, R, S> {
+    rng: &'a mut R,
+    items: &'a [(&'b [u8; 32], &'b Signature, &'b [u8])],
+    a_points: Option<&'a [&'b EdwardsPoint]>,
+    strategy: &'a S,
+}
+
+impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
+    type Output = bool;
+
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        verify_batch_inner(
+            backend,
+            self.rng,
+            self.items,
+            self.a_points,
+            self.strategy,
+        )
+    }
+}
+
+fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
+    rng: &mut R,
+    items: &[(&'a [u8; 32], &'a Signature, &'a [u8])],
+    a_points: Option<&[&'a EdwardsPoint]>,
+    strategy: &S,
+) -> bool {
+    with_backend(VerifyBatchCall {
+        rng,
+        items,
+        a_points,
+        strategy,
+    })
 }
 
 /// Verifies a batch of `(verifying_key, signature, message)` triples, returning `true` only if
@@ -476,7 +562,7 @@ pub fn verify_batch<'a>(
         .map(|(vk, sig, msg)| (&vk.bytes, *sig, *msg))
         .collect();
     let a_points: Vec<&EdwardsPoint> = items.iter().map(|(vk, _, _)| &vk.point).collect();
-    verify_batch_inner(rng, &byte_items, Some(&a_points), strategy)
+    verify_batch_dispatch(rng, &byte_items, Some(&a_points), strategy)
 }
 
 /// Verifies a batch of `(verifying_key_bytes, signature, message)` triples, returning `true`
@@ -497,7 +583,7 @@ pub fn verify_batch_bytes<'a>(
     strategy: &impl Strategy,
 ) -> bool {
     let items: Vec<_> = items.into_iter().collect();
-    verify_batch_inner(rng, &items, None, strategy)
+    verify_batch_dispatch(rng, &items, None, strategy)
 }
 
 #[cfg(test)]
@@ -578,6 +664,24 @@ mod tests {
     fn verify_rejects_wrong_message() {
         let (vk, sig, _) = valid_batch(1).pop().unwrap();
         assert!(vk.verify(b"not the signed message", &sig).is_err());
+    }
+
+    #[test]
+    fn verifying_key_from_bytes_follows_zip215_encoding_rules() {
+        // y = p + 1 is a non-canonical encoding of the identity's y-coordinate and is accepted.
+        let mut noncanonical_identity = [0xff; 32];
+        noncanonical_identity[0] = 0xee;
+        noncanonical_identity[31] = 0x7f;
+        assert!(VerifyingKey::from_bytes(noncanonical_identity).is_ok());
+
+        // The identity has x = 0, which has no negative encoding.
+        let mut negative_zero = [0u8; 32];
+        negative_zero[0] = 1;
+        negative_zero[31] = 0x80;
+        assert_eq!(
+            VerifyingKey::from_bytes(negative_zero).unwrap_err(),
+            Error::InvalidVerificationKey
+        );
     }
 
     #[test]
