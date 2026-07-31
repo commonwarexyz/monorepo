@@ -631,7 +631,8 @@ stability_scope!(BETA {
         ///
         /// An Ok result indicates the blob is durably created (or already exists). On
         /// platforms without directory sync (e.g. Windows), the durability of the blob's
-        /// name is best-effort.
+        /// name is best-effort. Opens are ordered against removals of the same name
+        /// (see [`Storage::remove`]).
         ///
         /// # Versions
         ///
@@ -671,6 +672,17 @@ stability_scope!(BETA {
         ///
         /// Mutating a removed blob (e.g. via [`Blob::write_at`], [`Blob::resize`], or
         /// [`Blob::sync`]) is unspecified: implementations may succeed or return an error.
+        ///
+        /// # Ordering
+        ///
+        /// Removals and opens of the same blob name are mutually ordered, even when a caller
+        /// drops a future mid-flight: a dropped removal never unlinks a blob recreated by a
+        /// later open, and a dropped open never recreates a name removed by a later removal.
+        ///
+        /// This guarantee is scoped to a single [`Storage`] instance. Storages constructed
+        /// independently over the same underlying directory (e.g. two runtimes or two
+        /// processes) are not ordered against each other; a storage directory must be owned
+        /// by one live [`Storage`] instance at a time.
         fn remove(
             &self,
             partition: &str,
@@ -696,6 +708,30 @@ stability_scope!(BETA {
     /// When a blob is dropped, any unsynced changes may be discarded. Implementations
     /// may attempt to sync during drop but errors will go unhandled. Call `sync`
     /// before dropping to ensure all changes are durably persisted.
+    ///
+    /// # Operation Ordering
+    ///
+    /// Implementations must order operations on a single blob (a handle and its clones) as
+    /// follows, even when a caller drops an operation's future mid-flight:
+    ///
+    /// - Content mutations ([`Blob::write_at`], [`Blob::write_at_sync`], and [`Blob::resize`])
+    ///   execute in submission order, or never execute. An operation is submitted once its
+    ///   future has been polled. A dropped content mutation never takes effect after one
+    ///   submitted later. Ordering does not imply atomicity: a dropped or failed mutation
+    ///   may apply partially, but none of its effects land after a later-submitted
+    ///   operation's.
+    /// - Every operation observes the effects of all content mutations submitted before it.
+    ///   Reads may run concurrently with each other, and are not isolated from later
+    ///   mutations: a read may observe, in whole or in part, a mutation submitted after it.
+    /// - [`Blob::sync`] and [`Blob::start_sync`] begin only after all previously submitted
+    ///   content mutations complete, so a sync covers every earlier write. A sync's own
+    ///   completion is not ordered against operations submitted later: it alters no content,
+    ///   so callers that need ordered durability await its result before proceeding.
+    ///
+    /// Without this contract, an operation whose future was dropped mid-flight could keep
+    /// running in the background and take effect after operations submitted later, silently
+    /// undoing them. Blobs opened independently under the same name are not ordered against
+    /// each other (writing through both is already undefined behavior).
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read `len` bytes at `offset` into caller-provided buffer(s).

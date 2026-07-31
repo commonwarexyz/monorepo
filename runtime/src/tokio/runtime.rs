@@ -162,6 +162,9 @@ pub struct Config {
     catch_panics: bool,
 
     /// Base directory for all storage operations.
+    ///
+    /// Must be owned by one live runtime at a time: concurrently live runtimes sharing a
+    /// storage directory lose the cross-operation ordering guarantees of [crate::Storage].
     storage_directory: PathBuf,
 
     /// Maximum buffer size for operations on blobs.

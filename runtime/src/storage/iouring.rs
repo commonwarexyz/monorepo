@@ -28,7 +28,7 @@ use crate::{
     utils,
 };
 use commonware_formatting::{from_hex, hex};
-use commonware_utils::sync::Mutex;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
@@ -36,6 +36,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tokio::sync::Mutex as AsyncMutex;
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
 fn resolve_header(
@@ -199,19 +200,52 @@ impl crate::Storage for Storage {
         // Acquire the filesystem lock
         let _guard = self.lock.lock();
 
+        // Sync the directory below even when the target is already missing: an earlier
+        // removal may have unlinked it without its directory sync becoming durable (e.g.
+        // a crash between the two), so the unlink may not survive the next crash.
+        // Reporting the target as missing promises it is durably gone, and this retry is
+        // the only barrier left.
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
-            fs::remove_file(blob_path)
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+            let missing = match fs::remove_file(blob_path) {
+                Ok(()) => false,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+                Err(err) => return Err(err.into()),
+            };
 
-            // Sync the partition directory to ensure the removal is durable.
-            sync_dir(&path)?;
+            // Make the unlink durable before reporting the result. A deletion is
+            // durable only once the directory that held the entry is synced:
+            // - The partition directory exists: it held the blob's entry, sync it.
+            // - The partition directory is gone too: an earlier partition removal may
+            //   have deleted it without a durable sync. Its entry lived in the storage
+            //   directory, so sync that instead.
+            // - Neither exists: nothing was ever created, so there is nothing to sync.
+            if !missing || path.try_exists()? {
+                sync_dir(&path)?;
+            } else if self.storage_directory.try_exists()? {
+                sync_dir(&self.storage_directory)?;
+            }
+
+            if missing {
+                return Err(Error::BlobMissing(partition.into(), hex(name)));
+            }
         } else {
-            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            let missing = match fs::remove_dir_all(&path) {
+                Ok(()) => false,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+                Err(err) => return Err(err.into()),
+            };
 
-            // Sync the storage directory to ensure the removal is durable.
-            sync_dir(&self.storage_directory)?;
+            // When the partition was already missing, the storage directory itself may
+            // not exist yet; then there is no directory entry change to persist.
+            if !missing || self.storage_directory.try_exists()? {
+                sync_dir(&self.storage_directory)?;
+            }
+
+            if missing {
+                return Err(Error::PartitionMissing(partition.into()));
+            }
         }
         Ok(())
     }
@@ -253,6 +287,9 @@ impl crate::Storage for Storage {
     }
 }
 
+/// Completion receiver for a mutation staged into the ring.
+type MutationReceiver = oneshot::Receiver<Result<(), Error>>;
+
 pub struct Blob {
     /// The partition this blob lives in
     partition: String,
@@ -266,6 +303,18 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// The in-flight content mutation's completion receiver, if any.
+    ///
+    /// The kernel executes ring requests concurrently and completes them in any order,
+    /// and dropping a future does not cancel its request. If two mutations were ever in
+    /// the ring at once, an orphaned one could land after a later one and silently undo
+    /// it.
+    ///
+    /// Mutations therefore run one at a time. Each waits for any receiver stored here,
+    /// then stages its request and stores its own receiver. A receiver is only left
+    /// behind when its future was dropped mid-wait, and the next operation waits for it
+    /// before doing anything. This upholds the ordering contract on [crate::Blob].
+    inflight: Arc<AsyncMutex<Option<MutationReceiver>>>,
 }
 
 impl Clone for Blob {
@@ -277,6 +326,7 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
+            inflight: self.inflight.clone(),
         }
     }
 }
@@ -298,7 +348,47 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
+            inflight: Arc::new(AsyncMutex::new(None)),
         }
+    }
+
+    /// Wait for the in-flight mutation, if any, to finish, then clear it.
+    ///
+    /// The receiver is awaited in place and removed only after it resolves: a caller
+    /// dropped mid-wait leaves the mutation in flight for whoever comes next, and a
+    /// resolved receiver must never be awaited again (doing so panics).
+    async fn drain(inflight: &mut Option<MutationReceiver>) {
+        if let Some(rx) = inflight.as_mut() {
+            let _ = rx.await;
+            *inflight = None;
+        }
+    }
+
+    /// Wait for any in-flight mutation to finish.
+    async fn wait_for_inflight(&self) {
+        let mut inflight = self.inflight.lock().await;
+        Self::drain(&mut inflight).await;
+    }
+
+    /// Submit a write, ordered after any in-flight mutation.
+    ///
+    /// The `inflight` guard is held for the whole operation, so the only way a later
+    /// caller finds an in-flight receiver is that the future which owned it was dropped.
+    /// Dropping this future at any await point is safe: before the enqueue completes, the
+    /// write never executes; after it, the receiver stays in flight and the next operation
+    /// waits for it before starting.
+    async fn write_ordered(&self, offset: u64, bufs: IoBufs, sync: bool) -> Result<(), Error> {
+        let mut inflight = self.inflight.lock().await;
+        Self::drain(&mut inflight).await;
+
+        let rx = self
+            .io_handle
+            .start_write_at(self.file.clone(), offset, bufs, sync)
+            .await?;
+        let rx = inflight.insert(rx);
+        let result = rx.await;
+        *inflight = None;
+        result.map_err(|_| Error::WriteFailed)?
     }
 }
 
@@ -336,6 +426,8 @@ impl crate::Blob for Blob {
             return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
         }
 
+        // Wait for any in-flight mutation so this read sees it.
+        self.wait_for_inflight().await;
         let io_buf = self
             .io_handle
             .read_at(self.file.clone(), offset, len, io_buf)
@@ -361,9 +453,7 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
-        self.io_handle
-            .write_at(self.file.clone(), offset, bufs)
-            .await
+        self.write_ordered(offset, bufs, false).await
     }
 
     async fn write_at_sync(
@@ -380,9 +470,7 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
-        self.io_handle
-            .write_at_sync(self.file.clone(), offset, bufs)
-            .await
+        self.write_ordered(offset, bufs, true).await
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
@@ -390,6 +478,13 @@ impl crate::Blob for Blob {
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
+
+        // Wait for any in-flight write before truncating: set_len runs immediately on
+        // this thread and must not race a write still staged in the ring. The resize
+        // itself finishes within this call, so a dropped future cannot leave it in
+        // flight. The guard is held across set_len so no new write starts under it.
+        let mut inflight = self.inflight.lock().await;
+        Self::drain(&mut inflight).await;
         self.file.set_len(len).map_err(|e| {
             Error::BlobResizeFailed(
                 self.partition.clone(),
@@ -400,6 +495,10 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        // Wait for any in-flight mutation so this sync covers it. The sync changes no
+        // bytes, so even a dropped sync that finishes late cannot undo anything that
+        // comes after it.
+        self.wait_for_inflight().await;
         self.io_handle
             .sync(self.file.clone())
             .await
@@ -410,6 +509,7 @@ impl crate::Blob for Blob {
     }
 
     async fn start_sync(&self) -> Handle<()> {
+        self.wait_for_inflight().await;
         let partition = self.partition.clone();
         let name = self.name.clone();
         let receiver = self.io_handle.start_sync(self.file.clone()).await;
@@ -433,6 +533,7 @@ mod tests {
         telemetry::metrics::Registry,
         utils::thread,
     };
+    use futures::FutureExt as _;
     use std::{
         env,
         ffi::OsString,
@@ -545,6 +646,57 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
         run_storage_tests(storage).await;
         let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    // A write dropped mid-flight must execute before (never after) a later write to the
+    // same offset. Without in-flight ordering this test fails flakily.
+    #[tokio::test]
+    async fn test_dropped_write_ordered_before_replacement() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open("partition", b"ordering").await.unwrap();
+
+        for i in 0..100u32 {
+            let _ = blob.write_at(0, vec![0xAA; 64]).now_or_never();
+            blob.write_at(0, vec![0xBB; 64]).await.unwrap();
+            let read = blob.read_at(0, 64).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &[0xBB; 64][..], "iteration {i}");
+        }
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    // A resize waits for any in-flight write before truncating: the truncate runs
+    // immediately on the caller's thread, and an orphaned write still staged in the ring
+    // must not land after it and re-extend the file.
+    #[tokio::test]
+    async fn test_resize_waits_for_orphaned_write() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open("partition", b"resize").await.unwrap();
+
+        for i in 0..100u32 {
+            let _ = blob.write_at(0, vec![0xCC; 64]).now_or_never();
+            blob.resize(10).await.unwrap();
+
+            // The dropped write either landed before the truncate (its prefix survives) or
+            // never executed (zeros); it must never land after the truncate and re-extend
+            // the file.
+            let read = blob.read_at(0, 10).await.unwrap().coalesce();
+            let read = read.as_ref();
+            assert!(
+                read == [0xCC; 10] || read == [0u8; 10],
+                "iteration {i}: dropped write must land before the truncate or never"
+            );
+            assert!(
+                blob.read_at(0, 64).await.is_err(),
+                "iteration {i}: file must be exactly 10 bytes"
+            );
+
+            blob.resize(0).await.unwrap();
+        }
+
+        drop(blob);
+        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
     #[tokio::test]

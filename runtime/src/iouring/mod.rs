@@ -422,45 +422,31 @@ impl Handle {
         })
     }
 
-    /// Submit a logical positioned write request and wait for its completion.
+    /// Begin a logical positioned write request and return the completion receiver.
+    ///
+    /// When `sync` is set, the write is issued with `RWF_SYNC` so it is durable by the
+    /// time it completes.
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    pub async fn write_at(&self, file: Arc<File>, offset: u64, bufs: IoBufs) -> Result<(), Error> {
-        let (tx, rx) = oneshot::channel();
-        self.enqueue(Request::WriteAt(WriteAtRequest {
-            file,
-            offset,
-            written: 0,
-            write: bufs.into(),
-            sync: false,
-            result: None,
-            sender: tx,
-        }))
-        .await
-        .map_err(|_| Error::WriteFailed)?;
-        rx.await.map_err(|_| Error::WriteFailed)?
-    }
-
-    /// Submit a logical positioned write with per-write sync and wait for its completion.
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    pub async fn write_at_sync(
+    pub async fn start_write_at(
         &self,
         file: Arc<File>,
         offset: u64,
         bufs: IoBufs,
-    ) -> Result<(), Error> {
+        sync: bool,
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
             file,
             offset,
             written: 0,
             write: bufs.into(),
-            sync: true,
+            sync,
             result: None,
             sender: tx,
         }))
         .await
         .map_err(|_| Error::WriteFailed)?;
-        rx.await.map_err(|_| Error::WriteFailed)?
+        Ok(rx)
     }
 
     /// Submit a logical fsync request and wait for its completion.
