@@ -2794,9 +2794,9 @@ where
     /// different fork returns [`crate::qmdb::Error::StaleBatch`] (see
     /// [`crate::qmdb::batch_chain`] for more details).
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the
-    /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
-    /// guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal,
+    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
+    /// returned by [`Db::start_sync`], to guarantee durability.
     #[tracing::instrument(
         name = "qmdb.any.db.apply_batch",
         level = "info",

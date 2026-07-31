@@ -543,7 +543,8 @@ where
     /// from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
+    /// completes.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",

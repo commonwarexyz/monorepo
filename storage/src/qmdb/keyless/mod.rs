@@ -58,6 +58,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -422,7 +423,8 @@ where
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Self::commit`] or
-    /// [`Self::sync`].
+    /// [`Self::sync`] completes, or until the handle returned by a subsequent
+    /// [`Self::start_sync`] completes.
     #[tracing::instrument(name = "qmdb.keyless.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
@@ -472,6 +474,24 @@ where
         self.metrics.sync_calls.inc();
         self.journal = self.journal.sync().await?;
         Ok(self)
+    }
+
+    /// Begin durably persisting the journal state published by prior [`Keyless::apply_batch`]
+    /// calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
+    /// of the deferred durability work surface on the returned handle. A failed data sync also
+    /// fails the next durability operation. A failed recovery-watermark sync is not observed by
+    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
+    /// [Self::sync].
+    #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.metrics.start_sync_calls.inc();
+        let handle;
+        (self.journal, handle) = self.journal.start_sync().await?;
+        Ok((self, handle))
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
@@ -549,9 +569,9 @@ where
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the
-    /// journal, but does not durably commit it. Call [`Keyless::commit`] or
-    /// [`Keyless::sync`] to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal,
+    /// but does not durably commit it. Call [`Keyless::commit`] or [`Keyless::sync`], or await the
+    /// handle returned by [`Keyless::start_sync`], to guarantee durability.
     #[tracing::instrument(name = "qmdb.keyless.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
