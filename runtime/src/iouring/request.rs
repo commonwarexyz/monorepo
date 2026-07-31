@@ -9,14 +9,14 @@ use super::waiter::{WaiterId, WaiterState};
 use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs};
 use commonware_utils::channel::oneshot;
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
+#[cfg(feature = "iouring-storage")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     fs::File,
     os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
     time::Instant,
 };
-#[cfg(feature = "iouring-storage")]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Cap iovec batches at the kernel's IOV_MAX (1024): larger submissions fail with
 /// EINVAL. Storage writes span hundreds of chunks (two per page) and want maximal
@@ -526,9 +526,7 @@ impl Cache {
     fn rw_flag(&mut self) -> i32 {
         match self {
             #[cfg(feature = "iouring-storage")]
-            Self::Disabled(supported) if supported.load(Ordering::Relaxed) => {
-                libc::RWF_DONTCACHE
-            }
+            Self::Disabled(supported) if supported.load(Ordering::Relaxed) => libc::RWF_DONTCACHE,
             #[cfg(feature = "iouring-storage")]
             Self::Disabled(_) => {
                 *self = Self::Enabled;
@@ -1384,10 +1382,7 @@ mod tests {
             sender: tx,
         };
 
-        assert_eq!(
-            request.rw_flags(),
-            libc::RWF_DSYNC | libc::RWF_DONTCACHE
-        );
+        assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC);

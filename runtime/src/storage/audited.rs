@@ -162,7 +162,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         });
         self.inner.start_sync().await
     }
-
 }
 
 #[cfg(test)]
@@ -416,7 +415,8 @@ mod tests {
                 IoBuf::from(b"b".to_vec()),
                 IoBuf::from(b"c".to_vec()),
                 IoBuf::from(b"d".to_vec()),
-            ]))
+            ]),
+        )
         .await
         .unwrap();
 

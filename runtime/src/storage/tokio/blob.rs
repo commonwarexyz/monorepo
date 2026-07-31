@@ -105,7 +105,7 @@ impl Blob {
         flags: Option<libc::c_int>,
         mut cache: Cache,
     ) -> Result<(), Error> {
-        debug_assert!(
+        assert!(
             flags.is_none() || bufs.chunk_count() <= IOVEC_BATCH_SIZE,
             "durability flags on a multi-submission write serialize its batches"
         );

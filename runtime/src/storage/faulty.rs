@@ -478,7 +478,8 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at_with(0, b"data".to_vec(), WriteOptions::SYNC).await,
+            blob.write_at_with(0, b"data".to_vec(), WriteOptions::SYNC)
+                .await,
             Err(Error::Io(_))
         ));
     }
@@ -490,7 +491,8 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at_with(0, b"data".to_vec(), WriteOptions::SYNC).await,
+            blob.write_at_with(0, b"data".to_vec(), WriteOptions::SYNC)
+                .await,
             Err(Error::Io(_))
         ));
 

@@ -603,8 +603,8 @@ mod tests {
     use super::{super::Checksum, *};
     use crate::{
         BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufs, IoBufsMut, Runner as _,
-        Spawner as _, Storage as _, Supervisor as _, WriteOptions,
-        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry,
+        Spawner as _, Storage as _, Supervisor as _, WriteOptions, buffer::paged::CHECKSUM_SIZE,
+        deterministic, telemetry::metrics::Registry,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;

@@ -1,7 +1,5 @@
 use super::Header;
-use crate::{
-    Buf, BufferPool, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::AuditHasher,
-};
+use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::AuditHasher};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
@@ -239,11 +237,7 @@ impl crate::Blob for Blob {
             }
             content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
         }
-        if sync {
-            self.sync().await
-        } else {
-            Ok(())
-        }
+        if sync { self.sync().await } else { Ok(()) }
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
