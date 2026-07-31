@@ -31,7 +31,7 @@ use std::{collections::VecDeque, io::IoSlice, mem::align_of, num::NonZeroUsize, 
 /// Returns the system page size.
 ///
 /// On Unix systems, queries the actual page size via `sysconf`.
-/// On other systems (Windows), defaults to 4KB.
+/// On WebAssembly, defaults to 4KB.
 #[allow(clippy::missing_const_for_fn)]
 pub fn page_size() -> usize {
     #[cfg(unix)]
