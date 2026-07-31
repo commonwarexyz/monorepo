@@ -253,10 +253,13 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
         let Some(verified) = verified else {
-            // A commit already waited for the pipelined sync. A full sync still runs because
-            // the pipelined sync made only a best-effort attempt to persist all metadata.
-            if matches!(durability, Durability::Sync) && self.pending_sync.take().is_some() {
+            // `commit` already waited for the pipelined sync. `sync` waits here and then runs a
+            // full journal sync because the pipelined sync made only a best-effort attempt to
+            // persist all metadata.
+            if matches!(durability, Durability::Sync) && self.pending_sync.is_some() {
+                self.wait_for_sync().await?;
                 self.journal = self.journal.sync().await?;
+                self.pending_sync = None;
             }
             return Ok(self);
         };
