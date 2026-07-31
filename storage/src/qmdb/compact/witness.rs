@@ -659,22 +659,10 @@ where
     merkle
         .append_leaf(&hasher, &witness.op_bytes)
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
-    let inactive_peaks = F::inactive_peaks(F::location_to_position(size), inactivity_floor_loc);
-    let root = merkle
-        .root(&hasher, inactive_peaks)
-        .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
-    let proof = merkle
-        .with_mem(|mem| mem.proof(&hasher, last_commit_loc, inactive_peaks))
+    let verified = build_witness::<F, H, S>(merkle, inactivity_floor_loc, witness.op_bytes)
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
     merkle.prune_to_frontier();
-    Ok((
-        VerifiedWitness {
-            witness,
-            root,
-            proof,
-        },
-        last_commit_op,
-    ))
+    Ok((verified, last_commit_op))
 }
 
 /// Open the witness store for an existing or new compact db, returning it with the decoded
