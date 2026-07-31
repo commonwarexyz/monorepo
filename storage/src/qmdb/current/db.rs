@@ -677,30 +677,15 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any = self.any.rewind(size).await?;
 
-        let ops_size = self.any.log.merkle.size();
-        let ops_leaves = Location::<F>::try_from(ops_size)?;
-        let grafted_tree = build_grafted_tree::<F, H, S, N>(
+        let ops_leaves = Location::<F>::try_from(self.any.log.merkle.size())?;
+        let (grafted_tree, root) = rebuild_grafted_root::<F, H, S, N>(
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
             ops_leaves,
-            &self.strategy,
-        )
-        .await?;
-        let storage = grafting::Storage::<F, H, _, _>::new(
-            &grafted_tree,
-            grafting::height::<N>(),
-            &self.any.log.merkle,
-        );
-        let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
-        let ops_root = self.any.root();
-        let root = compute_db_root::<F, H, _, _, N>(
-            self.any.bitmap.as_ref(),
-            &storage,
-            ops_leaves,
-            partial_chunk,
             self.any.inactivity_floor_loc,
-            &ops_root,
+            self.any.root(),
+            &self.strategy,
         )
         .await?;
 
@@ -1054,6 +1039,44 @@ pub(super) async fn compute_db_root<
         pending.as_ref(),
         partial.as_ref().map(|(nb, d)| (*nb, d)),
     ))
+}
+
+/// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
+/// bitmap.
+///
+/// Database open and `rewind` must reconstruct identical overlay state for the same committed ops
+/// log, so both go through this single path. `ops_leaves` must be a consistent snapshot of the ops
+/// tree size taken with the bitmap state. Returns the rebuilt grafted tree and the db root.
+pub(super) async fn rebuild_grafted_root<F, H, S, const N: usize>(
+    bitmap: &impl bitmap::Readable<N>,
+    pinned_nodes: &[H::Digest],
+    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    ops_leaves: Location<F>,
+    inactivity_floor: Location<F>,
+    ops_root: H::Digest,
+    strategy: &S,
+) -> Result<(Mem<F, H::Digest>, H::Digest), Error<F>>
+where
+    F: merkle::Graftable,
+    H: Hasher,
+    S: Strategy,
+{
+    let grafted_tree =
+        build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
+            .await?;
+    let storage =
+        grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
+    let partial_chunk = partial_chunk(bitmap);
+    let root = compute_db_root::<F, H, _, _, N>(
+        bitmap,
+        &storage,
+        ops_leaves,
+        partial_chunk,
+        inactivity_floor,
+        &ops_root,
+    )
+    .await?;
+    Ok((grafted_tree, root))
 }
 
 /// Compute the root of the grafted structure represented by `storage`.
