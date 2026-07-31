@@ -175,10 +175,15 @@ trait WithBackend {
     type Output;
 
     /// Run the computation with a concrete backend.
+    ///
+    /// The AVX-512 dispatcher enables its target features around this entire method, allowing the
+    /// backend operations it invokes to inline without crossing a target-feature boundary for
+    /// every operation.
     fn call<B: Backend>(self, backend: B) -> Self::Output;
 }
 
 // Now, a module for each backend.
+#[cfg(target_arch = "x86_64")]
 mod avx512;
 mod portable;
 #[cfg(test)]
@@ -190,6 +195,27 @@ fn test_portable() {
     commonware_invariants::minifuzz::test(|u| test::fuzz_backend(u, portable::Backend::new()));
 }
 
+#[cfg(all(test, target_arch = "x86_64"))]
+#[test]
+fn test_avx512() {
+    let Some(backend) = avx512::Backend::new() else {
+        return;
+    };
+    commonware_invariants::minifuzz::test(|u| test::fuzz_backend(u, backend));
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+#[test]
+fn test_avx512_against_portable() {
+    let Some(backend) = avx512::Backend::new() else {
+        return;
+    };
+    test::check_backend_at_bounds(portable::Backend::new(), backend);
+    commonware_invariants::minifuzz::test(|u| {
+        test::fuzz_backend_against(u, portable::Backend::new(), backend)
+    });
+}
+
 /// Run a computation with the best [`Backend`] this CPU supports.
 ///
 /// This is the only way to gain access to a backend: the runtime feature
@@ -198,10 +224,10 @@ fn test_portable() {
 fn with_backend<F: WithBackend>(f: F) -> F::Output {
     #[cfg(target_arch = "x86_64")]
     {
-        // AVX-512F for the 512-bit integer operations, AVX-512 IFMA for the
-        // 52-bit multiply-accumulates.
-        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512ifma") {
-            todo!()
+        if let Some(backend) = avx512::Backend::new() {
+            // SAFETY: constructing `backend` confirmed that the CPU supports every target
+            // feature enabled by `Backend::call`.
+            return unsafe { backend.call(f) };
         }
     }
     // Portable fallback, available everywhere.
