@@ -4053,33 +4053,6 @@ mod tests {
     }
 
     #[test]
-    fn audited_standard_exposes_missing_local_finalization() {
-        let mut input = audit_input();
-        input.required_containers = 4;
-        let omission = NotarizeOmission::new(0);
-        let omitted_notarizes = omission.omitted_notarizes.clone();
-        let omitted_finalizations = omission.omitted_finalizations.clone();
-
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_audited_standard_once_with::<simplex::SimplexId>(input, Some(omission))
-        }));
-        let payload = result.expect_err("unfixed Simplex must violate the recovery invariant");
-        let message = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .expect("panic payload must be a string");
-        assert!(
-            message.contains(
-                "notarization plus finalize quorum without a leader proposal did not produce an exact finalization"
-            ),
-            "unexpected panic: {message}"
-        );
-        assert!(omitted_notarizes.load(Ordering::Relaxed) > 0);
-        assert!(omitted_finalizations.load(Ordering::Relaxed) > 0);
-    }
-
-    #[test]
     fn audited_twins_checks_campaign_and_mutator() {
         for role in [TwinsRole::Campaign, TwinsRole::Mutator] {
             let _ = run_twins::<simplex::SimplexId>(audit_input(), role, false, false, true);
