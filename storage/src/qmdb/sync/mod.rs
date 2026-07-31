@@ -25,9 +25,8 @@ pub mod source;
 pub use source::{Request, Response, Source, ValidityTx};
 
 mod target;
-pub use target::Target;
+pub use target::{CompactTarget, Target};
 
-pub mod compact;
 mod requests;
 
 /// A [`Source`] of operations whose associated types match a specific `Database`.

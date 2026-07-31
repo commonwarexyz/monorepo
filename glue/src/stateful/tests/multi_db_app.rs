@@ -52,7 +52,7 @@ use commonware_storage::{
     qmdb::{
         any::{FixedConfig, unordered::fixed},
         immutable,
-        sync::{Target, compact as compact_sync},
+        sync::{CompactTarget, Target},
     },
     translator::TwoCap,
 };
@@ -320,7 +320,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         (
             Target::new(block.root_a, block.range_a.clone()),
-            compact_sync::Target {
+            CompactTarget {
                 root: block.root_b,
                 leaf_count: block.range_b.end(),
             },

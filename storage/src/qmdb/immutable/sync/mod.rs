@@ -210,11 +210,11 @@ where
             journal,
             config.commit_codec_config,
             last_commit_loc,
-            // None only happens at the genesis boundary, which pins nothing.
+            // None only happens at the genesis boundary, where nothing is pinned.
             pinned_nodes.unwrap_or_default(),
             op,
         )?;
-        // The engine verified the operation and pins against the target root before handing
+        // The engine verified the operation and pinned nodes against the target root before handing
         // them over, so the rebuilt state is already authenticated and safe to persist.
         db.sync().await
     }

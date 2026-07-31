@@ -76,10 +76,10 @@ pub trait Database: Sized + Send {
         apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Return locally available pins for the target, if persisted local state can
+    /// Return locally available pinned nodes for the target, if persisted local state can
     /// authenticate them.
     ///
-    /// Returning `Some` lets a completed sync journal reuse pins from an on-disk
+    /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk
     /// database instead of fetching them from peers. Returning `None` always falls back to
     /// fetching from peers.
     fn local_pinned_nodes(
@@ -103,7 +103,7 @@ pub(crate) fn journal_covers_range<F: Family>(
 }
 
 /// Shared body for [`Database::local_pinned_nodes`] implementations backed by a persisted
-/// [`full::Merkle`]: reopen it from `config` under `context` and return the pins at
+/// [`full::Merkle`]: reopen it from `config` under `context` and return the pinned nodes at
 /// `target.range.start()` if the persisted bounds cover the target and the root, computed with
 /// `inactivity_floor`, matches `target.root`. Returns `Ok(None)` when the persisted state
 /// cannot authenticate the target.

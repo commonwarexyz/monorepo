@@ -10,7 +10,7 @@ use commonware_storage::{
     qmdb::{
         self,
         keyless::fixed::{self, CompactConfig},
-        sync::compact,
+        sync::CompactTarget,
     },
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -96,7 +96,7 @@ impl<E> super::CompactSyncable for Database<E>
 where
     E: Context,
 {
-    fn target(&self) -> compact::Target<Self::Family, Key> {
+    fn target(&self) -> CompactTarget<Self::Family, Key> {
         Self::target(self)
     }
 }

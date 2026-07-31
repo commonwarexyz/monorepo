@@ -210,7 +210,7 @@ curl http://localhost:9090/metrics
 
 1. Server initializes either a full or compact-storage `immutable` / `keyless` database.
 2. Client requests the latest compact target.
-3. Client fetches the last commit operation with its proof and boundary pins.
+3. Client fetches the last commit operation with its proof and boundary pinned nodes.
 4. Client reconstructs a compact-storage database that stores no historical operations, verifies the
    resulting root, persists it, and repeats after `--sync-interval`.
 

@@ -1149,9 +1149,9 @@ macro_rules! sync_tests_for_harness {
 sync_tests_for_harness!(harnesses::VariableMmrHarness, variable_mmr);
 sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
 
-/// A completed sync journal reuses local pins only when the persisted state can
+/// A completed sync journal reuses local pinned nodes only when the persisted state can
 /// authenticate the target: a target starting below the local pruning boundary is declined,
-/// while a matching target serves the pins locally.
+/// while a matching target serves the pinned nodes locally.
 #[commonware_macros::test_traced]
 fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
@@ -1211,7 +1211,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
 fn compact_engine_config<DB, S>(
     context: DB::Context,
     source: S,
-    target: sync::compact::Target<DB::Family, DB::Digest>,
+    target: sync::CompactTarget<DB::Family, DB::Digest>,
     db_config: DB::Config,
 ) -> sync::engine::Config<DB, S>
 where
@@ -1317,7 +1317,7 @@ mod compact_variable_mmr {
         deterministic::Runner::default().start(|_context| async move {
             let source: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: sha256::Digest::from([0; 32]),
                 leaf_count: Location::new(1),
             };
@@ -1350,7 +1350,7 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -1399,7 +1399,7 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -1451,7 +1451,7 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -1493,7 +1493,7 @@ mod compact_variable_mmr {
     #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_tampered_pinned_nodes() {
         deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-immutable-bad-pins-{}", context.next_u64());
+            let suffix = format!("compact-immutable-bad-pinned-nodes-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
                 .await
                 .unwrap();
@@ -1509,7 +1509,7 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -1519,10 +1519,10 @@ mod compact_variable_mmr {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            let sync::Response::Boundary { pins, .. } = &mut bad_state else {
+            let sync::Response::Boundary { pinned_nodes, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            pins[0] = sha256::Digest::from([0xaa; 32]);
+            pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
@@ -1568,7 +1568,7 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -1616,7 +1616,7 @@ mod compact_variable_mmr {
                 .await;
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = sync::compact::Target {
+            let stale_target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
@@ -1628,7 +1628,7 @@ mod compact_variable_mmr {
                 .await;
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.commit().await.unwrap();
-            let current_target = sync::compact::Target {
+            let current_target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
@@ -1841,7 +1841,7 @@ mod compact_variable_mmr {
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -1900,7 +1900,7 @@ mod compact_variable_mmr {
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
             let bounds = source.bounds();
-            let target_b = sync::compact::Target {
+            let target_b = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -1909,7 +1909,10 @@ mod compact_variable_mmr {
             let (response, _) = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let sync::Response::Boundary { op, pins, .. } = response else {
+            let sync::Response::Boundary {
+                op, pinned_nodes, ..
+            } = response
+            else {
                 unreachable!("boundary fetch returns a boundary response");
             };
             let journal = crate::journal::contiguous::variable::Journal::init(
@@ -1923,7 +1926,7 @@ mod compact_variable_mmr {
                 journal,
                 client_cfg.commit_codec_config,
                 Location::new(*target_b.leaf_count - 1),
-                pins,
+                pinned_nodes,
                 op,
             )
             .unwrap();
@@ -1937,7 +1940,10 @@ mod compact_variable_mmr {
             let (response, _) = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let sync::Response::Boundary { op, pins, .. } = response else {
+            let sync::Response::Boundary {
+                op, pinned_nodes, ..
+            } = response
+            else {
                 unreachable!("boundary fetch returns a boundary response");
             };
             let journal = crate::journal::contiguous::variable::Journal::init(
@@ -1951,7 +1957,7 @@ mod compact_variable_mmr {
                 journal,
                 client_cfg.commit_codec_config,
                 Location::new(*target_b.leaf_count - 1),
-                pins,
+                pinned_nodes,
                 op,
             )
             .unwrap();
@@ -2047,7 +2053,7 @@ mod compact_variable_mmb {
         deterministic::Runner::default().start(|_context| async move {
             let source: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: sha256::Digest::from([0; 32]),
                 leaf_count: Location::new(1),
             };
@@ -2080,7 +2086,7 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -2129,7 +2135,7 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -2181,7 +2187,7 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -2223,7 +2229,10 @@ mod compact_variable_mmb {
     #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_tampered_pinned_nodes() {
         deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-immutable-mmb-bad-pins-{}", context.next_u64());
+            let suffix = format!(
+                "compact-immutable-mmb-bad-pinned-nodes-{}",
+                context.next_u64()
+            );
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
                 .await
                 .unwrap();
@@ -2239,7 +2248,7 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -2249,10 +2258,10 @@ mod compact_variable_mmb {
                 .unwrap()
                 .0;
             let mut bad_state = good_state.clone();
-            let sync::Response::Boundary { pins, .. } = &mut bad_state else {
+            let sync::Response::Boundary { pinned_nodes, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            pins[0] = sha256::Digest::from([0xaa; 32]);
+            pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
@@ -2301,7 +2310,7 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: bounds.end,
             };
@@ -2349,7 +2358,7 @@ mod compact_variable_mmb {
                 .await;
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = sync::compact::Target {
+            let stale_target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
@@ -2361,7 +2370,7 @@ mod compact_variable_mmb {
                 .await;
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.commit().await.unwrap();
-            let current_target = sync::compact::Target {
+            let current_target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };

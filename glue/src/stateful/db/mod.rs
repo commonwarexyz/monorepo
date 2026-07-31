@@ -81,13 +81,9 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner, reschedule};
-use commonware_storage::{
-    merkle::{Family, Location},
-    qmdb::sync::{self, Request, Response, Source, ValidityTx},
-};
+use commonware_storage::qmdb::sync::{self, Request, Response, Source, ValidityTx};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
-    non_empty_range,
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
 use futures::{
@@ -1503,10 +1499,10 @@ pub(crate) async fn sync_compact_db<E, DB, R>(
     context: E,
     config: DB::Config,
     source: R,
-    target: sync::compact::Target<DB::Family, DB::Digest>,
-    mut tip_updates: mpsc::Receiver<sync::compact::Target<DB::Family, DB::Digest>>,
+    target: sync::CompactTarget<DB::Family, DB::Digest>,
+    mut tip_updates: mpsc::Receiver<sync::CompactTarget<DB::Family, DB::Digest>>,
     finish: Option<mpsc::Receiver<()>>,
-    reached_target: Option<mpsc::Sender<sync::compact::Target<DB::Family, DB::Digest>>>,
+    reached_target: Option<mpsc::Sender<sync::CompactTarget<DB::Family, DB::Digest>>>,
     sync_config: SyncEngineConfig,
 ) -> Result<DB, sync::Error<DB::Family, R::Error, DB::Digest>>
 where
@@ -1515,25 +1511,11 @@ where
     DB::Op: Encode,
     R: sync::SourceFor<DB>,
 {
-    fn engine_target<F: Family, D: Digest>(
-        target: &sync::compact::Target<F, D>,
-    ) -> Result<sync::Target<F, D>, sync::EngineError<F, D>> {
-        let end = target.leaf_count;
-        let start = end.checked_sub(1).ok_or(sync::EngineError::InvalidTarget {
-            lower_bound_pos: Location::new(0),
-            upper_bound_pos: end,
-        })?;
-        Ok(sync::Target {
-            root: target.root,
-            range: non_empty_range!(start, end),
-        })
-    }
-
-    let mut initial = engine_target(&target).map_err(sync::Error::Engine)?;
+    let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
     // Start at the newest target already queued, so a caller that queued an update before
     // starting the sync never has the stale target reported as reached.
     while let Ok(update) = tip_updates.try_recv() {
-        let Ok(update) = engine_target(&update) else {
+        let Ok(update) = sync::Target::try_from(&update) else {
             continue;
         };
         if update.advances(&initial) {
@@ -1545,7 +1527,7 @@ where
     context.child("compact_updates").spawn(move |_| async move {
         while let Some(update) = tip_updates.recv().await {
             // A malformed update cannot supersede anything, so skip it like a stale one.
-            let Ok(update) = engine_target(&update) else {
+            let Ok(update) = sync::Target::try_from(&update) else {
                 continue;
             };
             if update_tx.send(update).await.is_err() {
@@ -1558,7 +1540,7 @@ where
         let (tx, mut rx) = mpsc::channel::<sync::Target<DB::Family, DB::Digest>>(1);
         context.child("compact_reached").spawn(move |_| async move {
             while let Some(reached_engine_target) = rx.recv().await {
-                let target = sync::compact::Target {
+                let target = sync::CompactTarget {
                     root: reached_engine_target.root,
                     leaf_count: reached_engine_target.range.end(),
                 };

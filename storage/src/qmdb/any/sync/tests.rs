@@ -1796,13 +1796,13 @@ where
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
         let (mut response, validity_tx) = self.inner.serve(request).await?;
         // Corrupt pinned nodes only on the first boundary response.
-        if let Response::Boundary { pins, .. } = &mut response
+        if let Response::Boundary { pinned_nodes, .. } = &mut response
             && !self
                 .corrupted
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
-            && !pins.is_empty()
+            && !pinned_nodes.is_empty()
         {
-            pins[0] = Digest::from([0xFFu8; 32]);
+            pinned_nodes[0] = Digest::from([0xFFu8; 32]);
             return Ok((response, feedback_validity()));
         }
         Ok((response, validity_tx))

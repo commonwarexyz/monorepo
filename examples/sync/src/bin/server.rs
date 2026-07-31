@@ -340,11 +340,15 @@ where
             let op = operations
                 .pop()
                 .ok_or_else(|| Error::InvalidRequest("no operation at boundary".into()))?;
-            let pins = database.pinned_nodes_at(start).await.map_err(|err| {
+            let pinned_nodes = database.pinned_nodes_at(start).await.map_err(|err| {
                 warn!(?err, "failed to get pinned nodes");
                 Error::Database(err)
             })?;
-            sync::Response::Boundary { proof, op, pins }
+            sync::Response::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            }
         }
     };
 

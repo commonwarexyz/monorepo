@@ -14,7 +14,7 @@ use commonware_storage::{
     qmdb::{
         self,
         immutable::{Config, fixed},
-        sync::compact,
+        sync::CompactTarget,
     },
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -165,7 +165,7 @@ impl<E> super::CompactSyncable for Database<E>
 where
     E: Context,
 {
-    fn target(&self) -> compact::Target<Self::Family, Key> {
-        compact::Target::new(self.root(), self.bounds().end)
+    fn target(&self) -> CompactTarget<Self::Family, Key> {
+        CompactTarget::new(self.root(), self.bounds().end)
     }
 }

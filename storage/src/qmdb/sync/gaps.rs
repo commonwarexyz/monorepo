@@ -1,31 +1,33 @@
 //! Gap detection algorithm for sync operations.
 
 use crate::merkle::{Family, Location};
-use core::ops::Range;
+use core::{num::NonZeroU64, ops::Range};
 use std::collections::BTreeMap;
 
 /// Find the next gap in operations that needs to be fetched.
 /// Returns a Range of operations to fetch, or None if no gaps.
 ///
-/// An outstanding request is credited with its own span, but the source may return
-/// fewer operations. In that case, we'll fetch the remaining operations in a
-/// subsequent request.
+/// We assume that all outstanding requests will return `fetch_batch_size` operations,
+/// but the source may return fewer. In that case, we'll fetch the remaining operations
+/// in a subsequent request.
 ///
 /// # Arguments
 ///
 /// * `range` - The sync range
 /// * `fetched_operations` - Map of start_loc -> operation count for fetched batches
-/// * `outstanding_requests` - Operation spans of outstanding requests, in ascending order
+/// * `outstanding_requests` - Start locations of outstanding requests, in ascending order
+/// * `fetch_batch_size` - Expected size of each fetch batch
 ///
 /// # Invariants
 ///
 /// - All start locations in `fetched_operations` are in `range`
-/// - All spans in `outstanding_requests` start in `range`
+/// - All start locations in `outstanding_requests` are in `range`
 /// - All operation counts in `fetched_operations` are > 0
-pub fn find_next<F: Family>(
+pub fn find_next<'a, F: Family>(
     range: Range<Location<F>>,
     fetched_operations: &BTreeMap<Location<F>, u64>, // start_loc -> operation_count
-    outstanding_requests: impl IntoIterator<Item = Range<Location<F>>>,
+    outstanding_requests: impl IntoIterator<Item = &'a Location<F>>,
+    fetch_batch_size: NonZeroU64,
 ) -> Option<Range<Location<F>>> {
     if range.is_empty() {
         return None;
@@ -43,7 +45,13 @@ pub fn find_next<F: Family>(
         })
         .peekable();
 
-    let mut outstanding_reqs_iter = outstanding_requests.into_iter().peekable();
+    let mut outstanding_reqs_iter = outstanding_requests
+        .into_iter()
+        .map(|&start_loc| {
+            let end_loc = start_loc.checked_add(fetch_batch_size.get()).unwrap();
+            start_loc..end_loc
+        })
+        .peekable();
 
     // Merge process both iterators in sorted order
     loop {
@@ -252,15 +260,16 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (Location::new(k), v))
             .collect();
-        let outstanding_requests: Vec<Range<Location<MmrFamily>>> = test_case
+        let outstanding_requests: Vec<Location<MmrFamily>> = test_case
             .requested_ops
             .into_iter()
-            .map(|start| Location::new(start)..Location::new(start + test_case.fetch_batch_size))
+            .map(Location::new)
             .collect();
         let result = find_next(
             Location::new(test_case.lower_bound)..Location::new(test_case.upper_bound),
             &fetched_ops,
-            outstanding_requests,
+            &outstanding_requests,
+            NonZeroU64::new(test_case.fetch_batch_size).unwrap(),
         );
         assert_eq!(
             result,

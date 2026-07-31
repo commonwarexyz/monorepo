@@ -2,9 +2,9 @@
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
 //! [`Witness`] is a complete snapshot of one synced commit: the encoded commit operation, the
-//! committed leaf count, and the pins one operation below it. The commit's inclusion proof is
-//! not stored. It is derived from the pins and the operation when an entry is loaded. On open
-//! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pins,
+//! committed leaf count, and the pinned nodes one operation below it. The commit's inclusion proof is
+//! not stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open
+//! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pinned nodes,
 //! and a structurally invalid entry fails with [`Error::DataCorrupted`].
 //!
 //! Entries are strictly increasing in committed leaf count, so a leaf count uniquely identifies
@@ -20,7 +20,7 @@ use crate::{
     qmdb::{
         self, Error,
         operation::Floored,
-        sync::{Request, Response, compact::Target},
+        sync::{CompactTarget, Request, Response},
     },
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
@@ -102,8 +102,8 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
     }
 
     /// The compact-sync target this witness can serve: its root and leaf count.
-    pub(crate) const fn target(&self) -> Target<F, D> {
-        Target {
+    pub(crate) const fn target(&self) -> CompactTarget<F, D> {
+        CompactTarget {
             root: self.root,
             leaf_count: self.leaf_count(),
         }
@@ -168,7 +168,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
     /// Serve `request` from the single committed state this witness retains.
     ///
-    /// The witness holds exactly the final commit operation and the pins one operation
+    /// The witness holds exactly the final commit operation and the pinned nodes one operation
     /// below it. Anything else is refused with the same errors a pruned operation log
     /// reports.
     #[allow(clippy::type_complexity)]
@@ -203,8 +203,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         } = entry;
         let op = Op::decode_cfg(op_bytes.as_ref(), cfg)
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-        // After the checks above, `start == last_commit_loc`, so the stored pins are the
-        // pins for this request.
+        // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
+        // pinned nodes for this request.
         Ok(match request {
             Request::Operations { .. } => Response::Operations {
                 proof,
@@ -213,7 +213,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             Request::Boundary { .. } => Response::Boundary {
                 proof,
                 op,
-                pins: pinned_nodes,
+                pinned_nodes,
             },
         })
     }
@@ -532,7 +532,7 @@ where
 
 /// Rebuild the Merkle from `witness` and derive its root and commit proof.
 ///
-/// The Merkle is reset to the pins one operation below the commit, the commit operation is
+/// The Merkle is reset to the pinned nodes one operation below the commit, the commit operation is
 /// appended, and the root and the commit's inclusion proof are computed from the rebuilt
 /// state. A structurally invalid entry fails with [`Error::DataCorrupted`].
 fn rebuild<F, D, H, S, Op>(

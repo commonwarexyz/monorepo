@@ -4,7 +4,7 @@ use crate::Key;
 use commonware_codec::Encode;
 use commonware_storage::{
     merkle::{self, Location, Proof},
-    qmdb::{self, sync::compact},
+    qmdb::{self, sync::CompactTarget},
 };
 use std::{future::Future, num::NonZeroU64};
 
@@ -212,7 +212,7 @@ pub trait CompactSyncable: ExampleDatabase {
     /// Full databases implement this so they can act as compact-sync sources, and compact-storage
     /// databases implement it so compact nodes can sync from each other. The client still
     /// materializes into compact storage in both cases.
-    fn target(&self) -> compact::Target<Self::Family, Key>;
+    fn target(&self) -> CompactTarget<Self::Family, Key>;
 }
 
 #[cfg(test)]

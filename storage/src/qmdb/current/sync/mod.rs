@@ -175,7 +175,7 @@ where
     let grafted_pinned_nodes = {
         let grafted_boundary = Location::<F>::new(pruned_chunks as u64);
         let grafting_height = grafting::height::<N>();
-        let mut pins = Vec::new();
+        let mut pinned_nodes = Vec::new();
         for grafted_pos in F::nodes_to_pin(grafted_boundary) {
             let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, grafting_height);
             let digest = any
@@ -184,9 +184,9 @@ where
                 .get_node(ops_pos)
                 .await?
                 .ok_or(qmdb::Error::<F>::DataCorrupted("missing ops pinned node"))?;
-            pins.push(digest);
+            pinned_nodes.push(digest);
         }
-        pins
+        pinned_nodes
     };
 
     // Build grafted tree.

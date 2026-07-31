@@ -1289,7 +1289,7 @@ mod tests {
         multiple_forks::<crate::mmb::Family>();
     }
 
-    /// A structure rebuilt from the pins at `n - 1` plus the final element generates a
+    /// A structure rebuilt from the pinned nodes at `n - 1` plus the final element generates a
     /// verifiable proof for that element against the root at `n`.
     fn tip_proof_from_pins<F: Family>() {
         let executor = deterministic::Runner::default();

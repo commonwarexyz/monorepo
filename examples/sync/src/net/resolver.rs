@@ -5,7 +5,7 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
 use commonware_storage::{
     mmr,
-    qmdb::sync::{self, compact},
+    qmdb::sync::{self, CompactTarget},
 };
 use commonware_utils::channel::{mpsc, oneshot};
 
@@ -71,9 +71,7 @@ where
     }
 
     /// Returns the compact sync target currently served by the remote.
-    pub async fn get_compact_target(
-        &self,
-    ) -> Result<compact::Target<mmr::Family, D>, crate::Error> {
+    pub async fn get_compact_target(&self) -> Result<CompactTarget<mmr::Family, D>, crate::Error> {
         let request_id = self.request_id_generator.next();
         let request =
             wire::Message::GetCompactTargetRequest(wire::GetCompactTargetRequest { request_id });

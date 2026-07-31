@@ -6,7 +6,7 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
     mmr,
-    qmdb::sync::{self, Target, compact},
+    qmdb::sync::{self, CompactTarget, Target},
 };
 
 /// Maximum number of operations decoded per response.
@@ -58,7 +58,7 @@ where
     D: Digest,
 {
     pub request_id: RequestId,
-    pub target: compact::Target<mmr::Family, D>,
+    pub target: CompactTarget<mmr::Family, D>,
 }
 
 /// Messages that can be sent over the wire.
@@ -347,7 +347,7 @@ where
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let target = compact::Target::<mmr::Family, D>::read_cfg(buf, &())?;
+        let target = CompactTarget::<mmr::Family, D>::read_cfg(buf, &())?;
         Ok(Self { request_id, target })
     }
 }

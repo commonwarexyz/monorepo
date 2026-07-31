@@ -210,14 +210,14 @@ where
     type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, S, ()>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
-    type SyncTarget = sync::compact::Target<F, H::Digest>;
+    type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        sync::compact::Target::new(
+        sync::CompactTarget::new(
             initial_root::<F, K, FixedEncoding<V>, H>(),
             Location::new(1),
         )
@@ -277,14 +277,14 @@ where
     type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, VariableEncoding<V>, H, S, C>;
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
-    type SyncTarget = sync::compact::Target<F, H::Digest>;
+    type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        sync::compact::Target::new(
+        sync::CompactTarget::new(
             initial_root::<F, K, VariableEncoding<V>, H>(),
             Location::new(1),
         )
@@ -499,7 +499,7 @@ mod tests {
     #[derive(Clone)]
     struct SupersedingCompactSource {
         source: Arc<FullFixedDb>,
-        stale_target: sync::compact::Target<mmr::Family, Digest>,
+        stale_target: sync::CompactTarget<mmr::Family, Digest>,
         stale_request_tx: mpsc::Sender<()>,
     }
 
@@ -627,14 +627,14 @@ mod tests {
                 .await;
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
-            let target = sync::compact::Target {
+            let target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
 
             // A larger target the source never serves. Its sync attempt
             // hangs so the test can observe the gauges while they diverge.
-            let unservable_target = sync::compact::Target {
+            let unservable_target = sync::CompactTarget {
                 root: Sha256::hash(&[&[0xFF]]),
                 leaf_count: Location::new(*target.leaf_count + 1),
             };
@@ -718,7 +718,7 @@ mod tests {
                 .await;
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
-            let stale_target = sync::compact::Target {
+            let stale_target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };
@@ -731,7 +731,7 @@ mod tests {
                 .await;
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
-            let latest_target = sync::compact::Target {
+            let latest_target = sync::CompactTarget {
                 root: source.root(),
                 leaf_count: source.bounds().end,
             };

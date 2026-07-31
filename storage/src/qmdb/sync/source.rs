@@ -33,13 +33,13 @@ pub enum Request<F: Family> {
         /// Maximum number of operations to return.
         max_ops: NonZeroU64,
     },
-    /// Fetch the single operation at `start` plus the pins at that boundary, the lowest
-    /// location the client will retain. The proof in the response authenticates the pins,
+    /// Fetch the single operation at `start` plus the pinned nodes at that boundary, the lowest
+    /// location the client will retain. The proof in the response authenticates the pinned nodes,
     /// so there is no way to request them on their own.
     Boundary {
         /// Prove against the root the merkle structure had at this many operations.
         size: Location<F>,
-        /// The operation to return, which is also the pin boundary.
+        /// The operation to return, which is also the pinned-node boundary.
         start: Location<F>,
     },
 }
@@ -230,8 +230,8 @@ impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
 
 /// One authenticated response, shaped like the [`Request`] it answers.
 ///
-/// In a [`Response::Boundary`], the proof, the operation, and the pins are verified as a
-/// unit. The pins are only believable because the proof folds them into digests it already
+/// In a [`Response::Boundary`], the proof, the operation, and the pinned nodes are verified as a
+/// unit. The pinned nodes are only believable because the proof folds them into digests it already
 /// commits to.
 pub enum Response<F: Family, Op, D: Digest> {
     /// Answer to a [`Request::Operations`].
@@ -247,8 +247,8 @@ pub enum Response<F: Family, Op, D: Digest> {
         proof: Proof<F, D>,
         /// The operation at the requested boundary.
         op: Op,
-        /// Pins at the requested boundary.
-        pins: Vec<D>,
+        /// Pinned nodes at the requested boundary.
+        pinned_nodes: Vec<D>,
     },
 }
 
@@ -268,10 +268,14 @@ impl<F: Family, Op: Clone, D: Digest> Clone for Response<F, Op, D> {
                 proof: proof.clone(),
                 operations: operations.clone(),
             },
-            Self::Boundary { proof, op, pins } => Self::Boundary {
+            Self::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } => Self::Boundary {
                 proof: proof.clone(),
                 op: op.clone(),
-                pins: pins.clone(),
+                pinned_nodes: pinned_nodes.clone(),
             },
         }
     }
@@ -285,11 +289,15 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for Response<F, 
                 .field("proof", proof)
                 .field("operations", operations)
                 .finish(),
-            Self::Boundary { proof, op, pins } => f
+            Self::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } => f
                 .debug_struct("Boundary")
                 .field("proof", proof)
                 .field("op", op)
-                .field("pins", pins)
+                .field("pinned_nodes", pinned_nodes)
                 .finish(),
         }
     }
@@ -303,11 +311,15 @@ impl<F: Family, Op: Write, D: Digest> Write for Response<F, Op, D> {
                 proof.write(buf);
                 operations.write(buf);
             }
-            Self::Boundary { proof, op, pins } => {
+            Self::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } => {
                 1u8.write(buf);
                 proof.write(buf);
                 op.write(buf);
-                pins.write(buf);
+                pinned_nodes.write(buf);
             }
         }
     }
@@ -319,9 +331,11 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
             Self::Operations { proof, operations } => {
                 proof.encode_size() + operations.encode_size()
             }
-            Self::Boundary { proof, op, pins } => {
-                proof.encode_size() + op.encode_size() + pins.encode_size()
-            }
+            Self::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            } => proof.encode_size() + op.encode_size() + pinned_nodes.encode_size(),
         }
     }
 }
@@ -341,8 +355,12 @@ impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
             1 => {
                 let proof = Proof::<F, D>::read_cfg(buf, &MAX_PROOF_DIGESTS_PER_ELEMENT)?;
                 let op = Op::read_cfg(buf, op_cfg)?;
-                let pins = Vec::<D>::read_range(buf, ..=MAX_PINNED_NODES)?;
-                Ok(Self::Boundary { proof, op, pins })
+                let pinned_nodes = Vec::<D>::read_range(buf, ..=MAX_PINNED_NODES)?;
+                Ok(Self::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                })
             }
             d => Err(CodecError::InvalidEnum(d)),
         }
@@ -360,7 +378,7 @@ where
             Self::Boundary {
                 proof: u.arbitrary()?,
                 op: u.arbitrary()?,
-                pins: u.arbitrary()?,
+                pinned_nodes: u.arbitrary()?,
             }
         } else {
             Self::Operations {
@@ -517,8 +535,12 @@ where
                 let op = operations
                     .pop()
                     .ok_or(crate::merkle::Error::RangeOutOfBounds(start))?;
-                let pins = self.merkle.pinned_nodes_at(start).await?;
-                Response::Boundary { proof, op, pins }
+                let pinned_nodes = self.merkle.pinned_nodes_at(start).await?;
+                Response::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                }
             }
         };
         Ok((response, None))
@@ -672,10 +694,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// Fetch `target`'s final commit operation and boundary pins from `source`.
+    /// Fetch `target`'s final commit operation and boundary pinned nodes from `source`.
     pub async fn fetch_compact_state<R: Source>(
         source: &R,
-        target: crate::qmdb::sync::compact::Target<R::Family, R::Digest>,
+        target: crate::qmdb::sync::CompactTarget<R::Family, R::Digest>,
     ) -> Result<(Response<R::Family, R::Op, R::Digest>, ValidityTx), R::Error> {
         source
             .serve(Request::Boundary {

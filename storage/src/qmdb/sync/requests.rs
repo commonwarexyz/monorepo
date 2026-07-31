@@ -103,17 +103,9 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         self.by_location = keep;
     }
 
-    /// Iterate over the operation spans of outstanding requests in ascending order.
-    pub fn spans(&self) -> impl Iterator<Item = std::ops::Range<Location<F>>> {
-        self.by_location.values().map(|id| {
-            let request = &self.tracked[id].request;
-            // Engine-constructed requests satisfy start + max_ops <= MAX_LEAVES.
-            let end = request
-                .start()
-                .checked_add(request.max_ops().get())
-                .unwrap();
-            request.start()..end
-        })
+    /// Iterate over outstanding request locations in ascending order.
+    pub fn locations(&self) -> impl Iterator<Item = &Location<F>> {
+        self.by_location.keys()
     }
 
     /// Check if a location has an outstanding request.

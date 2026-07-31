@@ -10,7 +10,7 @@
 //!
 //! The witness journal holds a complete snapshot of every synced commit, so [`Db::rewind`] can
 //! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind rebuild the Merkle from the stored pins and operation. A snapshot that cannot
+//! and rewind rebuild the Merkle from the stored pinned nodes and operation. A snapshot that cannot
 //! rebuild surfaces as [`Error::DataCorrupted`]. The witness is also what lets compact nodes
 //! serve compact sync without retaining historical operations.
 //!
@@ -36,7 +36,7 @@ use crate::{
             witness::{self, VerifiedWitness},
         },
         operation::Key,
-        sync::{Request, Response, Source, ValidityTx, compact as compact_sync},
+        sync::{CompactTarget, Request, Response, Source, ValidityTx},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -285,7 +285,7 @@ where
 
     /// Build a compact db handle from state fetched by the sync engine.
     ///
-    /// The engine has already verified the commit operation and the pins against the target
+    /// The engine has already verified the commit operation and the pinned nodes against the target
     /// root, so the rebuilt Merkle deterministically reproduces that root. The import lives
     /// only in memory until the first [`Self::commit`] or [`Self::sync`], which replaces the
     /// journal's contents with it. Until then, dropping the handle leaves the previous on-disk
@@ -410,7 +410,7 @@ where
     ///
     /// This reflects the last durably persisted commit, which may lag behind live in-memory
     /// mutations until [`Self::commit`] or [`Self::sync`] is called.
-    pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
+    pub fn target(&self) -> CompactTarget<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
 
@@ -1237,7 +1237,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_reopen_rejects_tampered_pinned_nodes() {
         deterministic::Runner::default().start(|context| async move {
-            let partition = "immutable-pins-tamper";
+            let partition = "immutable-pinned-nodes-tamper";
             let db = open_db::<mmr::Family>(context.child("db"), partition).await;
             let batch = db
                 .new_batch()

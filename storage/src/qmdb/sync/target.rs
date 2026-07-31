@@ -5,7 +5,7 @@ use crate::{
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
-use commonware_utils::range::NonEmptyRange;
+use commonware_utils::{non_empty_range, range::NonEmptyRange};
 
 /// Target state to sync to.
 ///
@@ -25,8 +25,7 @@ impl<F: Family, D: Digest> Target<F, D> {
         Self { root, range }
     }
 
-    /// Whether this target advances `from`. Its end must be in domain and strictly beyond,
-    /// and its start must not move backward.
+    /// Whether this target advances relative to `from`.
     pub fn advances(&self, from: &Self) -> bool {
         self.range.end().is_valid()
             && self.range.end() > from.range.end()
@@ -94,6 +93,109 @@ where
             root,
             range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
         })
+    }
+}
+
+/// Target state for syncing to a compact-storage database.
+///
+/// Compact sync is ordinary [`crate::qmdb::sync::sync`] over a one-operation range. To reach
+/// `CompactTarget { root, leaf_count: N }`, the client syncs the range `[N - 1, N)`
+/// ([`Target::try_from`] performs the conversion). The engine's boundary request fetches the
+/// final commit operation, proven at `N`, plus the pinned nodes one operation below it, and
+/// verifies all of it against `root` before construction. A full database answers that request
+/// from its operation log like any other request. A compact database answers from its witness,
+/// refusing requests outside the single state it retains.
+///
+/// Authenticates only the final committed root and total leaf count. There is no lower replay
+/// bound because the replayed range is always the single final commit.
+#[derive(Debug)]
+pub struct CompactTarget<F: Family, D: Digest> {
+    /// Authenticated root of the committed compact state.
+    pub root: D,
+    /// Total committed operations/leaves in that state.
+    pub leaf_count: Location<F>,
+}
+
+impl<F: Family, D: Digest> CompactTarget<F, D> {
+    /// Create a compact-sync target.
+    pub const fn new(root: D, leaf_count: Location<F>) -> Self {
+        Self { root, leaf_count }
+    }
+}
+
+impl<F: Family, D: Digest> TryFrom<&CompactTarget<F, D>> for Target<F, D> {
+    type Error = EngineError<F, D>;
+
+    /// The ranged target that replays the one operation ending at `target`. Fails when
+    /// `leaf_count` is zero, which no committed state has.
+    fn try_from(target: &CompactTarget<F, D>) -> Result<Self, Self::Error> {
+        let end = target.leaf_count;
+        let start = end.checked_sub(1).ok_or(EngineError::InvalidTarget {
+            lower_bound_pos: Location::new(0),
+            upper_bound_pos: end,
+        })?;
+        Ok(Self {
+            root: target.root,
+            range: non_empty_range!(start, end),
+        })
+    }
+}
+
+impl<F: Family, D: Digest> Clone for CompactTarget<F, D> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            leaf_count: self.leaf_count,
+        }
+    }
+}
+
+impl<F: Family, D: Digest> PartialEq for CompactTarget<F, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.leaf_count == other.leaf_count
+    }
+}
+
+impl<F: Family, D: Digest> Eq for CompactTarget<F, D> {}
+
+impl<F: Family, D: Digest> Write for CompactTarget<F, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.root.write(buf);
+        self.leaf_count.write(buf);
+    }
+}
+
+impl<F: Family, D: Digest> EncodeSize for CompactTarget<F, D> {
+    fn encode_size(&self) -> usize {
+        self.root.encode_size() + self.leaf_count.encode_size()
+    }
+}
+
+impl<F: Family, D: Digest> Read for CompactTarget<F, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let root = D::read(buf)?;
+        let leaf_count = Location::<F>::read(buf)?;
+        if !leaf_count.is_valid() || leaf_count == 0 {
+            return Err(CodecError::Invalid(
+                "storage::qmdb::sync::CompactTarget",
+                "leaf_count must be in 1..=MAX_LEAVES",
+            ));
+        }
+        Ok(Self { root, leaf_count })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for CompactTarget<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let root = u.arbitrary()?;
+        let leaf_count = Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?);
+        Ok(Self { root, leaf_count })
     }
 }
 
@@ -275,13 +377,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_compact_target_decode_rejects_zero_leaf_count() {
+        use commonware_codec::{DecodeExt as _, Encode as _};
+        let unused_root = sha256::Digest::from([42; 32]);
+        let encoded = CompactTarget::<MmrFamily, sha256::Digest> {
+            root: unused_root,
+            leaf_count: Location::new(0),
+        }
+        .encode();
+
+        assert!(CompactTarget::<MmrFamily, sha256::Digest>::decode(encoded).is_err());
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::merkle::mmb;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Target<MmrFamily, sha256::Digest>>,
+            CodecConformance<CompactTarget<MmrFamily, sha256::Digest>>,
+            CodecConformance<CompactTarget<mmb::Family, sha256::Digest>>,
         }
     }
 }

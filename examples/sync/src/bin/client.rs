@@ -11,7 +11,6 @@ use commonware_runtime::{
     tokio as tokio_runtime,
 };
 use commonware_storage::{
-    merkle::Location,
     mmr,
     qmdb::sync::{self},
 };
@@ -24,7 +23,7 @@ use commonware_sync::{
 use commonware_utils::{
     DurationExt, NZU64,
     channel::mpsc::{self, error::TrySendError},
-    non_empty_range, sys_rng,
+    sys_rng,
 };
 use rand_core::Rng;
 use std::{
@@ -360,10 +359,7 @@ where
         let sync_config = sync::engine::Config::<DB, Resolver<Op, Key>> {
             context: context.child("sync"),
             source,
-            target: sync::Target {
-                root: target.root,
-                range: non_empty_range!(Location::new(*target.leaf_count - 1), target.leaf_count),
-            },
+            target: sync::Target::try_from(&target)?,
             db_config: make_db_config(&context),
             fetch_batch_size: NZU64!(1),
             apply_batch_size: 1,

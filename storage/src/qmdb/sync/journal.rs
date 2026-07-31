@@ -169,7 +169,6 @@ pub struct Memory<F: Family, E, Op> {
 }
 
 impl<F: Family, E, Op> Memory<F, E, Op> {
-    /// The first location this journal holds, and the fetched operations from it.
     /// Consume the journal, returning the single operation covering exactly `range`.
     ///
     /// A compact db retains exactly its final commit, so its sync range is one operation.

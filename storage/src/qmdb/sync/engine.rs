@@ -53,23 +53,6 @@ enum Event<F: Family, Op, D: Digest, E> {
     FinishChannelClosed,
 }
 
-/// The finish lifecycle.
-enum Finish {
-    /// No finish channel was configured. Complete as soon as the target is reached.
-    Disabled,
-    /// Hold at the target and keep taking updates until the caller requests completion.
-    Waiting(mpsc::Receiver<()>),
-    /// The caller requested completion. Ignore further updates and finish.
-    Requested,
-}
-
-impl Finish {
-    /// The caller requested completion.
-    fn request(&mut self) {
-        *self = Self::Requested;
-    }
-}
-
 /// Result from a fetch operation, tagged with its request ID.
 #[derive(Debug)]
 pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
@@ -83,13 +66,10 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
 /// Returns `None` when there are no outstanding requests and no channels to wait on.
 async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
     update_rx: &mut Option<mpsc::Receiver<Target<F, D>>>,
-    finish: &mut Finish,
+    finish_rx: &mut Option<mpsc::Receiver<()>>,
     outstanding_requests: &mut Requests<F, Op, D, E>,
 ) -> Option<Event<F, Op, D, E>> {
-    if outstanding_requests.len() == 0
-        && update_rx.is_none()
-        && !matches!(finish, Finish::Waiting(_))
-    {
+    if outstanding_requests.len() == 0 && update_rx.is_none() && finish_rx.is_none() {
         return None;
     }
 
@@ -97,10 +77,10 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
         || Either::Right(pending()),
         |update_rx| Either::Left(update_rx.recv()),
     );
-    let finish_fut = match finish {
-        Finish::Waiting(finish_rx) => Either::Left(finish_rx.recv()),
-        Finish::Disabled | Finish::Requested => Either::Right(pending()),
-    };
+    let finish_fut = finish_rx.as_mut().map_or_else(
+        || Either::Right(pending()),
+        |finish_rx| Either::Left(finish_rx.recv()),
+    );
     let batch_result_fut = outstanding_requests.next_completed();
 
     select! {
@@ -216,9 +196,13 @@ where
     /// Optional receiver for target updates during sync
     update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
 
-    /// Whether the engine completes as soon as it reaches its target, or holds for a
-    /// finish request.
-    finish: Finish,
+    /// Whether the caller has asked the sync to finish at the current target.
+    finish_requested: bool,
+
+    /// Channel that requests sync completion once the current target is reached.
+    ///
+    /// When `None`, sync completes as soon as the target is reached.
+    finish_rx: Option<mpsc::Receiver<()>>,
 
     /// Channel used to notify an observer once the current target is reached.
     /// The engine sends at most one notification for each target.
@@ -271,7 +255,7 @@ where
         let journal_size = journal.size();
 
         // The sync journal is the source of truth for resume. If it already
-        // reaches the target, try to recover boundary pins from local Merkle
+        // reaches the target, try to recover boundary pinned nodes from local Merkle
         // state before asking peers for them. Partial journals resume without
         // probing completed database state.
         let pinned_nodes = if journal_size == *config.target.range.end() {
@@ -303,7 +287,8 @@ where
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,
-            finish: config.finish_rx.map_or(Finish::Disabled, Finish::Waiting),
+            finish_requested: false,
+            finish_rx: config.finish_rx,
             reached_target_tx: config.reached_target_tx,
             reached_current_target_reported: false,
             metrics,
@@ -328,7 +313,7 @@ where
         let target_size = self.target.range.end();
 
         // Schedule a boundary request at the lower sync bound if we don't have boundary
-        // state yet and one isn't already in flight. The pins it returns are what let us
+        // state yet and one isn't already in flight. The pinned nodes it returns are what let us
         // rebuild the pruned prefix.
         if !self.has_boundary_state()
             && !self
@@ -349,19 +334,20 @@ where
 
         let log_size = self.journal.size();
 
-        // Fetched coverage does not change while scheduling. Outstanding spans do.
-        let operation_counts: BTreeMap<Location<DB::Family>, u64> = self
-            .fetched_operations
-            .iter()
-            .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
-            .collect();
-
         for _ in 0..num_requests {
+            // Convert fetched operations to operation counts for shared gap detection
+            let operation_counts: BTreeMap<Location<DB::Family>, u64> = self
+                .fetched_operations
+                .iter()
+                .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
+                .collect();
+
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
                 Location::new(log_size)..self.target.range.end(),
                 &operation_counts,
-                self.outstanding_requests.spans(),
+                self.outstanding_requests.locations(),
+                self.fetch_batch_size,
             ) else {
                 break; // No more gaps to fill
             };
@@ -423,12 +409,13 @@ where
     /// disconnected before a finish request is observed, this returns
     /// [`EngineError::FinishChannelClosed`].
     fn drain_finish_requests(&mut self) -> Result<(), Error<DB, S>> {
-        let Finish::Waiting(finish_rx) = &mut self.finish else {
+        let Some(finish_rx) = self.finish_rx.as_mut() else {
             return Ok(());
         };
         match finish_rx.try_recv() {
             Ok(()) => {
-                self.finish.request();
+                self.finish_rx = None;
+                self.finish_requested = true;
                 Ok(())
             }
             Err(TryRecvError::Empty) => Ok(()),
@@ -544,7 +531,7 @@ where
         Ok(false)
     }
 
-    /// Returns whether this target needs pins to reconstruct pruned state.
+    /// Returns whether this target needs pinned nodes to reconstruct pruned state.
     fn needs_pins(&self) -> bool {
         self.target.range.start() > Location::new(0)
     }
@@ -616,9 +603,16 @@ where
                 }
                 self.store_operations(start_loc, operations);
             }
-            (Request::Boundary { .. }, Response::Boundary { proof, op, pins }) => {
-                // Use the pins only if the current target still needs them. Otherwise
-                // keep the operation and drop the pins.
+            (
+                Request::Boundary { .. },
+                Response::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                },
+            ) => {
+                // Use the pinned nodes only if the current target still needs them. Otherwise
+                // keep the operation and drop the pinned nodes.
                 let need_pinned = size == self.target.range.end()
                     && self.pinned_nodes.is_none()
                     && start_loc == self.target.range.start();
@@ -628,7 +622,7 @@ where
                         &self.hasher,
                         &element,
                         start_loc,
-                        &pins,
+                        &pinned_nodes,
                         &self.target.root,
                     )
                 } else {
@@ -647,7 +641,7 @@ where
                     validity.send_lossy(true);
                 }
                 if need_pinned {
-                    self.pinned_nodes = Some(pins);
+                    self.pinned_nodes = Some(pinned_nodes);
                 }
                 self.store_operations(start_loc, vec![op]);
             }
@@ -688,7 +682,8 @@ where
                 Ok(NextStep::Continue(self))
             }
             Event::FinishRequested => {
-                self.finish.request();
+                self.finish_rx = None;
+                self.finish_requested = true;
                 Ok(NextStep::Continue(self))
             }
             Event::FinishChannelClosed => Err(SyncError::Engine(EngineError::FinishChannelClosed)),
@@ -724,7 +719,7 @@ where
             // Take a queued target update before completing at the old target, unless the
             // caller already asked to finish. Updates that do not advance the target are
             // discarded.
-            if !matches!(self.finish, Finish::Requested) {
+            if !self.finish_requested {
                 while let Some(update_rx) = self.update_rx.as_mut() {
                     match update_rx.try_recv() {
                         Ok(new_target) => {
@@ -742,10 +737,10 @@ where
 
             self.report_reached_target().await;
 
-            if matches!(self.finish, Finish::Waiting(_)) {
+            if self.finish_rx.is_some() {
                 let event = wait_for_event(
                     &mut self.update_rx,
-                    &mut self.finish,
+                    &mut self.finish_rx,
                     &mut self.outstanding_requests,
                 )
                 .await
@@ -759,7 +754,7 @@ where
         // Wait for the next synchronization event
         let event = wait_for_event(
             &mut self.update_rx,
-            &mut self.finish,
+            &mut self.finish_rx,
             &mut self.outstanding_requests,
         )
         .await
