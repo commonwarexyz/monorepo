@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            source::{self, Request, Response, Source, ValidityTx},
+            source::{self, Request, Response, Source, ValidityTx, tests::feedback_validity},
         },
     },
 };
@@ -1770,15 +1770,6 @@ where
         synced_db.destroy().await.unwrap();
         mmr.destroy().await.unwrap();
     });
-}
-
-/// A validity slot whose receiver is dropped: it marks a response as feedback-accepting,
-/// so the engine retries instead of failing terminally. Mocks that serve bad data and
-/// expect a retry stand in for resolver-backed sources, which are the only sources that
-/// can produce a different answer on retry.
-fn feedback_validity() -> ValidityTx {
-    let (tx, _rx) = oneshot::channel();
-    Some(tx)
 }
 
 /// A source wrapper that corrupts pinned nodes on the first request, then returns correct

@@ -103,7 +103,7 @@ async fn run_loop<E, Si, St, M>(
                     "failed to decode response; terminating I/O task"
                 );
                 for (_, sender) in pending_requests.drain() {
-                    let _ = sender.send(Err(Error::InvalidResponse));
+                    let _ = sender.send(Err(Error::MalformedResponse));
                 }
                 return;
             }

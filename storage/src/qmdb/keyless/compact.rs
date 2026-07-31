@@ -10,9 +10,9 @@
 //!
 //! The witness journal holds a complete snapshot of every synced commit, so [`Db::rewind`] can
 //! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind re-verify the persisted snapshot; corruption surfaces as [`Error::DataCorrupted`].
-//! The witness (the last-commit operation plus its inclusion proof) is also what lets compact
-//! nodes serve compact sync without retaining historical operations.
+//! and rewind rebuild the Merkle from the stored pins and operation; a snapshot that cannot
+//! rebuild surfaces as [`Error::DataCorrupted`]. The witness is also what lets compact nodes
+//! serve compact sync without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -334,7 +334,6 @@ where
             Operation::<F, V>::Commit(None, Location::new(0))
                 .encode()
                 .to_vec(),
-            Operation::has_floor,
         )
         .await?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
@@ -523,12 +522,7 @@ where
         let last_commit_op;
         (self.witness, last_commit_op) = self
             .witness
-            .rewind::<H, S, Operation<F, V>>(
-                &self.merkle,
-                target,
-                &self.commit_codec_config,
-                Operation::has_floor,
-            )
+            .rewind::<H, S, Operation<F, V>>(&self.merkle, target, &self.commit_codec_config)
             .await?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));

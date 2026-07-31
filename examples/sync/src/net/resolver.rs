@@ -124,10 +124,7 @@ where
         let request_id = self.request_id_generator.next();
         let message = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
             request_id,
-            op_count: request.size(),
-            start_loc: request.start(),
-            max_ops: request.max_ops(),
-            include_pinned_nodes: request.retain_from().is_some(),
+            request,
         });
         let (tx, rx) = oneshot::channel();
         self.request_tx
@@ -143,33 +140,21 @@ where
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
             wire::Message::GetOperationsResponse(r) => {
-                // The wire carries the flat shape; rebuild the typed response the request
-                // asked for, refusing an answer shaped unlike its question.
-                let response = match request {
-                    sync::Request::Boundary { .. } => {
-                        let mut operations = r.operations;
-                        let (Some(op), Some(pins), true) =
-                            (operations.pop(), r.pinned_nodes, operations.is_empty())
-                        else {
-                            return Err(crate::Error::UnexpectedResponse { request_id });
-                        };
-                        sync::Response::Boundary {
-                            proof: r.proof,
-                            op,
-                            pins,
-                        }
-                    }
-                    sync::Request::Operations { .. } => {
-                        if r.pinned_nodes.is_some() {
-                            return Err(crate::Error::UnexpectedResponse { request_id });
-                        }
-                        sync::Response::Operations {
-                            proof: r.proof,
-                            operations: r.operations,
-                        }
-                    }
-                };
-                Ok((response, None))
+                // Decode cannot know which shape the request asked for, so check
+                // that here.
+                if !matches!(
+                    (&request, &r.response),
+                    (
+                        sync::Request::Operations { .. },
+                        sync::Response::Operations { .. }
+                    ) | (
+                        sync::Request::Boundary { .. },
+                        sync::Response::Boundary { .. }
+                    )
+                ) {
+                    return Err(crate::Error::UnexpectedResponse { request_id });
+                }
+                Ok((r.response, None))
             }
             wire::Message::Error(err) => Err(crate::Error::Server {
                 code: err.error_code,

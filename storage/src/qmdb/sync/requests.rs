@@ -1,8 +1,8 @@
 //! Manages outstanding fetch requests with monotonically increasing request IDs.
 //!
-//! Each request is assigned a unique ID and remembers the merkle structure size it was issued
-//! against, letting the engine reject replies that do not match the requested
-//! historical view. Removing a request aborts its future.
+//! Each request is assigned a unique ID and keeps the request it was issued for, letting
+//! the engine check replies against what was asked and credit the gap scan with each
+//! request's true span. Removing a request aborts its future.
 
 use crate::{
     merkle::{Family, Location},
@@ -108,9 +108,17 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         self.by_location = keep;
     }
 
-    /// Iterate over outstanding request locations in ascending order.
-    pub fn locations(&self) -> impl Iterator<Item = &Location<F>> {
-        self.by_location.keys()
+    /// Iterate over the operation spans of outstanding requests in ascending order.
+    pub fn spans(&self) -> impl Iterator<Item = std::ops::Range<Location<F>>> {
+        self.by_location.values().map(|id| {
+            let request = &self.tracked[id].request;
+            // Engine-constructed requests satisfy start + max_ops <= MAX_LEAVES.
+            let end = request
+                .start()
+                .checked_add(request.max_ops().get())
+                .unwrap();
+            request.start()..end
+        })
     }
 
     /// Check if a location has an outstanding request.

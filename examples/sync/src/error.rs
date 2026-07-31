@@ -43,8 +43,8 @@ pub enum Error {
     ResponseChannelClosed { request_id: u64 },
 
     /// Received a malformed response that could not be decoded.
-    #[error("invalid response from server")]
-    InvalidResponse,
+    #[error("malformed response from server")]
+    MalformedResponse,
 
     /// Target update channel error
     #[error("target update channel error: {reason}")]

@@ -133,6 +133,9 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     }
 
     /// Hash `element` and append it as a single leaf, mutating in place.
+    ///
+    /// The batch is built under a read lock and applied under a write lock, so the caller
+    /// must have exclusive ownership of the db.
     pub(crate) fn append_leaf(
         &self,
         hasher: &impl Hasher<F, Digest = D>,

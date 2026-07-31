@@ -119,7 +119,7 @@ impl Read for ErrorResponse {
 mod tests {
     use crate::net::{ErrorCode, request_id::Generator, wire::GetOperationsRequest};
     use commonware_codec::{DecodeExt as _, Encode as _};
-    use commonware_storage::mmr::Location;
+    use commonware_storage::{mmr::Location, qmdb::sync};
     use commonware_utils::NZU64;
     use rstest::rstest;
 
@@ -150,42 +150,30 @@ mod tests {
     }
 
     #[test]
-    fn test_get_operations_request_validation() {
-        // Valid request
+    fn test_get_operations_request_roundtrip() {
+        // A valid typed request roundtrips through the wire envelope.
         let requester = Generator::new();
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100),
-            start_loc: Location::new(10),
-            max_ops: NZU64!(50),
-            include_pinned_nodes: false,
+            request: sync::Request::Operations {
+                size: Location::new(100),
+                start: Location::new(10),
+                max_ops: NZU64!(50),
+            },
         };
-        assert!(request.validate().is_ok());
+        let encoded = request.encode();
+        let decoded = GetOperationsRequest::decode(encoded).expect("roundtrip should succeed");
+        assert_eq!(decoded.request_id, request.request_id);
+        assert_eq!(decoded.request, request.request);
 
-        // Invalid start_loc
-        let request = GetOperationsRequest {
-            request_id: requester.next(),
-            op_count: Location::new(100),
-            start_loc: Location::new(100),
-            max_ops: NZU64!(50),
-            include_pinned_nodes: false,
-        };
-        assert!(matches!(
-            request.validate(),
-            Err(crate::Error::InvalidRequest(_))
-        ));
-
-        // start_loc beyond size
-        let request = GetOperationsRequest {
-            request_id: requester.next(),
-            op_count: Location::new(100),
-            start_loc: Location::new(150),
-            max_ops: NZU64!(50),
-            include_pinned_nodes: false,
-        };
-        assert!(matches!(
-            request.validate(),
-            Err(crate::Error::InvalidRequest(_))
-        ));
+        // A request whose start reaches its size is rejected at decode.
+        use commonware_codec::Write as _;
+        let mut malformed = Vec::new();
+        requester.next().write(&mut malformed);
+        0u8.write(&mut malformed); // Operations tag
+        Location::new(100).write(&mut malformed);
+        Location::new(100).write(&mut malformed); // start == size
+        NZU64!(50).write(&mut malformed);
+        assert!(GetOperationsRequest::decode(&malformed[..]).is_err());
     }
 }

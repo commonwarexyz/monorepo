@@ -1,6 +1,5 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
-use super::handler;
 use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
@@ -19,8 +18,7 @@ pub struct ResponseDropped;
 
 /// Where the actor delivers a fetched response, along with the channel the caller reports
 /// peer validity on.
-pub(super) type ResponseTx<F, Op, D> =
-    oneshot::Sender<Result<(Response<F, Op, D>, ValidityTx), ResponseDropped>>;
+pub(super) type ResponseTx<F, Op, D> = oneshot::Sender<(Response<F, Op, D>, ValidityTx)>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
@@ -28,11 +26,11 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     AttachDatabase(Shared<DB>),
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
-        request: handler::Request<F>,
+        request: Request<F>,
         response: ResponseTx<F, Op, D>,
     },
     /// Cancel a previously requested operation fetch.
-    CancelOperations { request: handler::Request<F> },
+    CancelOperations { request: Request<F> },
 }
 
 impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
@@ -145,16 +143,9 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, ValidityTx), Self::Error> {
-        let request = handler::Request {
-            op_count: request.size(),
-            start_loc: request.start(),
-            max_ops: request.max_ops(),
-            include_pinned_nodes: request.retain_from().is_some(),
-        };
-
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {
-            request: request.clone(),
+            request,
             response: response_tx,
         });
 
@@ -162,7 +153,7 @@ where
             cancel::Guard::new(self.sender.clone(), Message::CancelOperations { request });
         let result = response_rx.await;
         guard.disarm();
-        result.map_err(|_| ResponseDropped)?
+        result.map_err(|_| ResponseDropped)
     }
 }
 
@@ -211,10 +202,10 @@ mod tests {
 
             match receiver.recv().await.expect("request should be queued") {
                 Message::GetOperations { request, .. } => {
-                    assert_eq!(request.op_count, op_count);
-                    assert_eq!(request.start_loc, start_loc);
-                    assert_eq!(request.max_ops, max_ops);
-                    assert!(!request.include_pinned_nodes);
+                    assert_eq!(request.size(), op_count);
+                    assert_eq!(request.start(), start_loc);
+                    assert_eq!(request.max_ops(), max_ops);
+                    assert!(request.retain_from().is_none());
                 }
                 Message::AttachDatabase(_) => panic!("unexpected attach message"),
                 Message::CancelOperations { .. } => panic!("cancel should come after request"),
@@ -222,10 +213,10 @@ mod tests {
 
             match receiver.recv().await.expect("cancel should be queued") {
                 Message::CancelOperations { request } => {
-                    assert_eq!(request.op_count, op_count);
-                    assert_eq!(request.start_loc, start_loc);
-                    assert_eq!(request.max_ops, max_ops);
-                    assert!(!request.include_pinned_nodes);
+                    assert_eq!(request.size(), op_count);
+                    assert_eq!(request.start(), start_loc);
+                    assert_eq!(request.max_ops(), max_ops);
+                    assert!(request.retain_from().is_none());
                 }
                 Message::AttachDatabase(_) => panic!("unexpected attach message"),
                 Message::GetOperations { .. } => panic!("unexpected duplicate request"),
@@ -250,7 +241,7 @@ mod tests {
                 else {
                     panic!("expected a fetch request");
                 };
-                let _ = response.send(Err(ResponseDropped));
+                drop(response);
                 receiver
             };
 

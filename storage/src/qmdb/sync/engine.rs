@@ -53,7 +53,7 @@ enum Event<F: Family, Op, D: Digest, E> {
     FinishChannelClosed,
 }
 
-/// Result from a fetch operation with its request ID and starting location.
+/// Result from a fetch operation, tagged with its request ID.
 #[derive(Debug)]
 pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
     /// Unique ID assigned when the request was scheduled.
@@ -159,7 +159,7 @@ where
     /// (target.range.end()). Keys strictly increase across target updates
     /// (enforced by validate_update), so each merkle structure size maps to a unique
     /// root and the smallest key is the oldest. Eviction drops it first.
-    /// When a retained request completes, proof.leaves identifies which
+    /// When a retained request completes, its requested size selects the
     /// historical root to verify against.
     retained_roots: BTreeMap<Location<DB::Family>, DB::Digest>,
 
@@ -195,6 +195,9 @@ where
 
     /// Optional receiver for target updates during sync
     update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
+
+    /// Whether the caller has asked the sync to finish at the current target.
+    finish_requested: bool,
 
     /// Channel that requests sync completion once the current target is reached.
     ///
@@ -285,6 +288,7 @@ where
             config: config.db_config,
             update_rx: config.update_rx,
             finish_rx: config.finish_rx,
+            finish_requested: false,
             reached_target_tx: config.reached_target_tx,
             reached_current_target_reported: false,
             metrics,
@@ -325,20 +329,20 @@ where
 
         let log_size = self.journal.size();
 
-        for _ in 0..num_requests {
-            // Convert fetched operations to operation counts for shared gap detection
-            let operation_counts: BTreeMap<Location<DB::Family>, u64> = self
-                .fetched_operations
-                .iter()
-                .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
-                .collect();
+        // Convert fetched operations to operation counts for shared gap detection.
+        // Fetched coverage does not change while scheduling; outstanding spans do.
+        let operation_counts: BTreeMap<Location<DB::Family>, u64> = self
+            .fetched_operations
+            .iter()
+            .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
+            .collect();
 
+        for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
                 Location::new(log_size)..self.target.range.end(),
                 &operation_counts,
-                self.outstanding_requests.locations(),
-                self.fetch_batch_size,
+                self.outstanding_requests.spans(),
             ) else {
                 break; // No more gaps to fill
             };
@@ -377,7 +381,7 @@ where
     ) -> Result<Self, Error<DB, S>> {
         self.journal = self.journal.resize(new_target.range.start()).await?;
         // Remove requests at or before the new start. The request at start
-        // must be re-issued as a pinned-nodes request with the new target size.
+        // must be re-issued as a boundary request with the new target size.
         self.outstanding_requests
             .remove_before(new_target.range.start().checked_add(1).unwrap());
         self.fetched_operations.clear();
@@ -411,6 +415,7 @@ where
         match finish_rx.try_recv() {
             Ok(()) => {
                 self.finish_rx = None;
+                self.finish_requested = true;
                 Ok(())
             }
             Err(TryRecvError::Empty) => Ok(()),
@@ -543,9 +548,9 @@ where
 
     /// Handle a response that failed validation.
     ///
-    /// A source that accepts feedback is told and the request is retried: the feedback lets
-    /// a resolver penalize the peer and route the retry elsewhere. A source that is not
-    /// listening cannot serve a different answer, so the failure is terminal.
+    /// A source that accepts feedback is told the response failed, and the request is
+    /// retried. A source that is not listening cannot change its answer, so the failure
+    /// is terminal.
     fn reject_response(validity: ValidityTx) -> Result<(), Error<DB, S>> {
         validity.map_or_else(
             || Err(SyncError::Engine(EngineError::InvalidResponse)),
@@ -572,80 +577,89 @@ where
 
         let (response, validity) = fetch_result.result.map_err(SyncError::Source)?;
 
-        // An answer shaped unlike its question is invalid regardless of its contents.
-        let (proof, operations, pins) = match (request, response) {
-            (Request::Operations { .. }, Response::Operations { proof, operations }) => {
+        let start_loc = request.start();
+        let size = request.size();
+
+        // The proof must cover exactly the requested size.
+        if response.proof().leaves != size {
+            return Self::reject_response(validity);
+        }
+        let is_current_target = size == self.target.range.end();
+
+        // A response must match the shape of its request.
+        match (request, response) {
+            (Request::Operations { max_ops, .. }, Response::Operations { proof, operations }) => {
                 let operations_len = operations.len() as u64;
-                if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
+                if operations_len == 0 || operations_len > max_ops.get() {
                     return Self::reject_response(validity);
                 }
-                (proof, operations, None)
+                let Some(root) = self.verification_root(is_current_target, size) else {
+                    return Ok(());
+                };
+                let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
+                if !proof.verify_range_inclusion(&self.hasher, &elements, start_loc, root) {
+                    return Self::reject_response(validity);
+                }
+                if let Some(validity) = validity {
+                    validity.send_lossy(true);
+                }
+                self.store_operations(start_loc, operations);
             }
             (Request::Boundary { .. }, Response::Boundary { proof, op, pins }) => {
-                (proof, vec![op], Some(pins))
+                // Use the pins only if the current target still needs them. Otherwise
+                // keep the operation and drop the pins.
+                let need_pinned = is_current_target
+                    && self.pinned_nodes.is_none()
+                    && start_loc == self.target.range.start();
+                let element = [op.encode()];
+                let valid = if need_pinned {
+                    proof.verify_proof_and_pinned_nodes(
+                        &self.hasher,
+                        &element,
+                        start_loc,
+                        &pins,
+                        &self.target.root,
+                    )
+                } else {
+                    let Some(root) = self.verification_root(is_current_target, size) else {
+                        return Ok(());
+                    };
+                    proof.verify_range_inclusion(&self.hasher, &element, start_loc, root)
+                };
+                if !valid {
+                    if need_pinned {
+                        tracing::warn!("boundary proof or pinned nodes failed verification");
+                    }
+                    return Self::reject_response(validity);
+                }
+                if let Some(validity) = validity {
+                    validity.send_lossy(true);
+                }
+                if need_pinned {
+                    self.pinned_nodes = Some(pins);
+                }
+                self.store_operations(start_loc, vec![op]);
             }
             _ => return Self::reject_response(validity),
-        };
-
-        let start_loc = request.start();
-        if proof.leaves != request.size() {
-            return Self::reject_response(validity);
         }
-
-        // Look up the root to verify against using the merkle structure size the
-        // request asked for. Fresh requests match the current target; retained
-        // requests match a historical root that was explicitly retained.
-        let is_current_target = request.size() == self.target.range.end();
-        let target_root = if is_current_target {
-            &self.target.root
-        } else {
-            let Some(root) = self.retained_roots.get(&request.size()) else {
-                // No historical root to verify against (evicted or
-                // max_retained_roots is 0). Drop the result without
-                // penalizing the source -- the data may be valid.
-                return Ok(());
-            };
-            root
-        };
-
-        // Pins are consumed only from proofs verified against the current root, because
-        // the database needs them for the latest merkle structure size. A boundary answer
-        // for a superseded target still contributes its operation; its pins are dropped.
-        let need_pinned = is_current_target
-            && self.pinned_nodes.is_none()
-            && start_loc == self.target.range.start();
-        let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-        let valid = match &pins {
-            Some(pins) if need_pinned => proof.verify_proof_and_pinned_nodes(
-                &self.hasher,
-                &elements,
-                start_loc,
-                pins,
-                target_root,
-            ),
-            _ => proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root),
-        };
-
-        if !valid {
-            if pins.is_some() {
-                tracing::warn!("boundary proof or pinned nodes failed verification");
-            }
-            return Self::reject_response(validity);
-        }
-
-        // Report success to the source.
-        if let Some(validity) = validity {
-            validity.send_lossy(true);
-        }
-
-        if need_pinned && let Some(pins) = pins {
-            self.pinned_nodes = Some(pins);
-        }
-
-        // Store operations for later application.
-        self.store_operations(start_loc, operations);
 
         Ok(())
+    }
+
+    /// The root to verify a response against: the current target's root, or the retained
+    /// historical root for a request issued against a superseded target. `None` means the
+    /// historical root was evicted (or `max_retained_roots` is 0); the caller drops the
+    /// result without penalizing the source -- the data may be valid.
+    fn verification_root(
+        &self,
+        is_current_target: bool,
+        size: Location<DB::Family>,
+    ) -> Option<&DB::Digest> {
+        if is_current_target {
+            Some(&self.target.root)
+        } else {
+            self.retained_roots.get(&size)
+        }
     }
 
     /// Handle a sync event and return the next engine state.
@@ -668,6 +682,7 @@ where
             }
             Event::FinishRequested => {
                 self.finish_rx = None;
+                self.finish_requested = true;
                 Ok(NextStep::Continue(self))
             }
             Event::FinishChannelClosed => Err(SyncError::Engine(EngineError::FinishChannelClosed)),
@@ -700,6 +715,28 @@ where
 
         // Check if sync is complete
         if self.is_ready_to_complete()? {
+            // Take a queued target update before completing at the old target, unless the
+            // caller already asked to finish. Updates that do not advance the target are
+            // discarded, matching validate_update's rule for updates taken mid-sync.
+            if !self.finish_requested {
+                while let Some(update_rx) = self.update_rx.as_mut() {
+                    match update_rx.try_recv() {
+                        Ok(new_target) => {
+                            if new_target.range.end().is_valid()
+                                && new_target.range.end() > self.target.range.end()
+                                && new_target.range.start() >= self.target.range.start()
+                            {
+                                return self.handle_event(Event::TargetUpdate(new_target)).await;
+                            }
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            self.update_rx = None;
+                        }
+                    }
+                }
+            }
+
             self.report_reached_target().await;
 
             if self.finish_rx.is_some() {
@@ -943,6 +980,57 @@ mod tests {
                 .unwrap();
 
             assert_eq!(boundary_probes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn step_takes_queued_update_before_completing() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = mpsc::channel(2);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+            // Queue a stale update and an advancing one: the stale one is discarded and
+            // the advancing one retargets the engine instead of completing.
+            let stale = Target {
+                root: sha256::Digest::from([2u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(10)),
+            };
+            let advancing = Target {
+                root: sha256::Digest::from([3u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            update_tx.send(stale).await.unwrap();
+            update_tx.send(advancing.clone()).await.unwrap();
+
+            let engine = Engine::new(config).await.unwrap();
+            let NextStep::Continue(engine) = engine.step().await.unwrap() else {
+                panic!("engine should retarget instead of completing");
+            };
+            assert_eq!(engine.target, advancing);
+        });
+    }
+
+    #[test]
+    fn step_completes_at_current_target_after_finish() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = mpsc::channel(1);
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            // TestDb's root, so completion's final check passes.
+            config.target.root = sha256::Digest::from([0u8; 32]);
+            config.update_rx = Some(update_rx);
+            config.finish_rx = Some(finish_rx);
+            let advancing = Target {
+                root: sha256::Digest::from([3u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            update_tx.send(advancing).await.unwrap();
+            finish_tx.send(()).await.unwrap();
+
+            let engine = Engine::new(config).await.unwrap();
+            let NextStep::Complete(_) = engine.step().await.unwrap() else {
+                panic!("a requested finish must win over a queued update");
+            };
         });
     }
 

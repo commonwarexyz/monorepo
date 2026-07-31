@@ -5,11 +5,11 @@
 Continuously synchronize state between a server and client using either:
 
 - `full` sync: replay authenticated operations into `qmdb::any`, `qmdb::current`, `qmdb::immutable`, or `qmdb::keyless`
-- `compact` sync: serve compact authenticated state from full or compact `qmdb::immutable` / `qmdb::keyless` sources into compact targets
+- `compact` sync: sync only the latest commit from full or compact `qmdb::immutable` / `qmdb::keyless` sources into compact targets
 
 ## Components
 
-- [Server](src/bin/server.rs): Serves either full replay data or compact authenticated state.
+- [Server](src/bin/server.rs): Serves authenticated operations and proofs for both sync modes.
 - [Client](src/bin/client.rs): Continuously syncs to the server's database state.
 - [Network layer](src/net): Shared request/response protocol and resolver implementation.
 
@@ -160,8 +160,8 @@ it has reconstructed the same full database state locally.
 
 ### Compact sync
 
-Compact sync is the "jump directly to the latest authenticated state" path. Instead of replaying
-historical operations, the client fetches only the current compact authenticated state and
+Compact sync is the "jump directly to the latest commit" path. Instead of replaying
+historical operations, the client fetches the last commit operation with its proof and
 materializes a compact-storage database locally.
 
 1. **Start the compact server:**
@@ -171,7 +171,7 @@ materializes a compact-storage database locally.
 
    Here the server is using a full immutable database as the source for compact sync. A compact
    sync source may use either `--storage full` or `--storage compact`, as long as it can serve the
-   latest compact authenticated state.
+   latest commit.
 
 2. **Run the compact client:**
    ```bash
@@ -183,7 +183,7 @@ materializes a compact-storage database locally.
    repeats after `--sync-interval`.
 
    Unlike full sync, the compact client is not reconstructing local history. After sync completes,
-   the local database stores the current compact authenticated state, but not the full sequence of
+   the local database stores the current latest commit state, but not the full sequence of
    historical operations that produced it.
 
 ## Metrics
@@ -210,7 +210,7 @@ curl http://localhost:9090/metrics
 
 1. Server initializes either a full or compact-storage `immutable` / `keyless` database.
 2. Client requests the latest compact target.
-3. Client fetches compact authenticated state: frontier, pinned nodes, last commit operation, and proof.
+3. Client fetches the last commit operation with its proof and boundary pins.
 4. Client reconstructs a compact-storage database that stores no historical operations, verifies the
    resulting root, persists it, and repeats after `--sync-interval`.
 

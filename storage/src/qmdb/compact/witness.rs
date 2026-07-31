@@ -19,6 +19,7 @@ use crate::{
     merkle::{self, Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{
         self, Error,
+        operation::Floored,
         sync::{Request, Response, compact::Target},
     },
 };
@@ -207,8 +208,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         } = entry;
         let op = Op::decode_cfg(op_bytes.as_ref(), cfg)
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-        // The checks above leave `start == last_commit_loc`, so a boundary request's pin
-        // boundary is exactly the location the stored pins describe.
+        // After the checks above, `start == last_commit_loc`, so the stored pins are the
+        // pins for this request.
         Ok(match request {
             Request::Operations { .. } => Response::Operations {
                 proof,
@@ -359,12 +360,11 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         merkle: &compact::Merkle<F, D, S>,
         target: Location<F>,
         commit_codec_config: &Op::Cfg,
-        last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
     ) -> Result<(Self, Op), Error<F>>
     where
         H: Hasher<Digest = D>,
         S: Strategy,
-        Op: Read,
+        Op: Read + Floored<F>,
     {
         self.check_import_persisted()?;
 
@@ -372,8 +372,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .position_of(target)
             .await?
             .ok_or(Error::Merkle(merkle::Error::RewindBeyondHistory))?;
-        let (witness, op) =
-            rebuild::<F, D, H, S, Op>(entry, merkle, commit_codec_config, last_commit_floor)?;
+        let (witness, op) = rebuild::<F, D, H, S, Op>(entry, merkle, commit_codec_config)?;
         self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
         self.replace(witness);
         Ok((self, op))
@@ -521,21 +520,20 @@ async fn load_tip<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
     merkle: &compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
-    last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
 ) -> Result<(VerifiedWitness<F, H::Digest>, Op), Error<F>>
 where
     E: Context,
     F: Family,
     H: Hasher,
     S: Strategy,
-    Op: Read,
+    Op: Read + Floored<F>,
 {
     let size = journal.size();
     if size == 0 {
         return Err(Error::DataCorrupted("missing compact witness"));
     }
     let entry = journal.read(size - 1).await?;
-    rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config, last_commit_floor)
+    rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config)
 }
 
 /// Rebuild the Merkle from `witness` and derive its root and commit proof.
@@ -547,14 +545,13 @@ fn rebuild<F, D, H, S, Op>(
     witness: Witness<F, D>,
     merkle: &compact::Merkle<F, D, S>,
     commit_codec_config: &Op::Cfg,
-    last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
 ) -> Result<(VerifiedWitness<F, D>, Op), Error<F>>
 where
     F: Family,
     D: Digest,
     H: Hasher<Digest = D>,
     S: Strategy,
-    Op: Read,
+    Op: Read + Floored<F>,
 {
     let leaf_count = witness.leaf_count;
     if leaf_count == 0 {
@@ -566,7 +563,8 @@ where
     let last_commit_loc = Location::new(*leaf_count - 1);
     let last_commit_op = Op::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-    let inactivity_floor_loc = last_commit_floor(&last_commit_op)
+    let inactivity_floor_loc = last_commit_op
+        .has_floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
@@ -607,22 +605,19 @@ pub(crate) async fn init<E, F, H, S, Op>(
     merkle: &mut compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
     initial_commit_op_bytes: Vec<u8>,
-    last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
 ) -> Result<(Store<E, F, H::Digest>, Op), Error<F>>
 where
     E: Context,
     F: Family,
     H: Hasher,
     S: Strategy,
-    Op: Read,
+    Op: Read + Floored<F>,
 {
     if journal.size() == 0 {
         journal = bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
             .await?;
     }
-    let (witness, op) =
-        load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config, last_commit_floor)
-            .await?;
+    let (witness, op) = load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
     Ok((Store::new(journal, witness), op))
 }
 

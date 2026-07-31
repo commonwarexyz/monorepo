@@ -1,7 +1,7 @@
 use crate::{
     Context,
     journal::{authenticated, contiguous::Contiguous},
-    merkle::{Family, Location, Proof},
+    merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
     qmdb::{
         self,
         operation::{Floored, Key},
@@ -9,14 +9,18 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::EncodeShared;
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _, Write,
+};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
+    Span,
     channel::oneshot,
     sync::{AsyncRwLock, TracedAsyncRwLock},
 };
-use std::{future::Future, num::NonZeroU64, sync::Arc};
+use std::{cmp::Ordering, future::Future, num::NonZeroU64, sync::Arc};
 
 /// A request for operations from a source's log.
 pub enum Request<F: Family> {
@@ -72,6 +76,19 @@ impl<F: Family> Request<F> {
     }
 }
 
+impl<F: Family> Request<F> {
+    /// Total-order key for map lookups: (size, start, max_ops, is-boundary). The final
+    /// component separates the variants.
+    fn order_key(&self) -> (u64, u64, u64, bool) {
+        (
+            *self.size(),
+            *self.start(),
+            self.max_ops().get(),
+            matches!(self, Self::Boundary { .. }),
+        )
+    }
+}
+
 impl<F: Family> Clone for Request<F> {
     fn clone(&self) -> Self {
         *self
@@ -79,6 +96,124 @@ impl<F: Family> Clone for Request<F> {
 }
 
 impl<F: Family> Copy for Request<F> {}
+
+impl<F: Family> PartialEq for Request<F> {
+    fn eq(&self, other: &Self) -> bool {
+        self.order_key() == other.order_key()
+    }
+}
+
+impl<F: Family> Eq for Request<F> {}
+
+impl<F: Family> PartialOrd for Request<F> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<F: Family> Ord for Request<F> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.order_key().cmp(&other.order_key())
+    }
+}
+
+impl<F: Family> std::hash::Hash for Request<F> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.order_key().hash(state);
+    }
+}
+
+impl<F: Family> std::fmt::Display for Request<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Operations {
+                size,
+                start,
+                max_ops,
+            } => write!(f, "Operations(size={size}, start={start}, max={max_ops})"),
+            Self::Boundary { size, start } => write!(f, "Boundary(size={size}, start={start})"),
+        }
+    }
+}
+
+impl<F: Family> Write for Request<F> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Operations {
+                size,
+                start,
+                max_ops,
+            } => {
+                0u8.write(buf);
+                size.write(buf);
+                start.write(buf);
+                max_ops.write(buf);
+            }
+            Self::Boundary { size, start } => {
+                1u8.write(buf);
+                size.write(buf);
+                start.write(buf);
+            }
+        }
+    }
+}
+
+impl<F: Family> EncodeSize for Request<F> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Operations {
+                size,
+                start,
+                max_ops,
+            } => size.encode_size() + start.encode_size() + max_ops.encode_size(),
+            Self::Boundary { size, start } => size.encode_size() + start.encode_size(),
+        }
+    }
+}
+
+impl<F: Family> Read for Request<F> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request = match u8::read(buf)? {
+            0 => Self::Operations {
+                size: Location::<F>::read(buf)?,
+                start: Location::<F>::read(buf)?,
+                max_ops: NonZeroU64::read(buf)?,
+            },
+            1 => Self::Boundary {
+                size: Location::<F>::read(buf)?,
+                start: Location::<F>::read(buf)?,
+            },
+            d => return Err(CodecError::InvalidEnum(d)),
+        };
+        if request.start() >= request.size() {
+            return Err(CodecError::Invalid("Request", "start >= size"));
+        }
+        Ok(request)
+    }
+}
+
+impl<F: Family> Span for Request<F> {}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let size = u.int_in_range(1..=*F::MAX_LEAVES)?;
+        let start = u.int_in_range(0..=size - 1)?;
+        let size = Location::new(size);
+        let start = Location::new(start);
+        Ok(if u.arbitrary()? {
+            Self::Boundary { size, start }
+        } else {
+            Self::Operations {
+                size,
+                start,
+                max_ops: u.arbitrary()?,
+            }
+        })
+    }
+}
 
 impl<F: Family> std::fmt::Debug for Request<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -166,6 +301,82 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for Response<F, 
                 .field("pins", pins)
                 .finish(),
         }
+    }
+}
+
+impl<F: Family, Op: Write, D: Digest> Write for Response<F, Op, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Operations { proof, operations } => {
+                0u8.write(buf);
+                proof.write(buf);
+                operations.write(buf);
+            }
+            Self::Boundary { proof, op, pins } => {
+                1u8.write(buf);
+                proof.write(buf);
+                op.write(buf);
+                pins.write(buf);
+            }
+        }
+    }
+}
+
+impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Operations { proof, operations } => {
+                proof.encode_size() + operations.encode_size()
+            }
+            Self::Boundary { proof, op, pins } => {
+                proof.encode_size() + op.encode_size() + pins.encode_size()
+            }
+        }
+    }
+}
+
+impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
+    /// The `max_ops` the request asked for, and the configuration for decoding one operation.
+    type Cfg = (usize, Op::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => {
+                let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
+                let proof = Proof::<F, D>::read_cfg(buf, &max_proof_digests)?;
+                let operations = Vec::<Op>::read_cfg(buf, &((..=*max_ops).into(), op_cfg.clone()))?;
+                Ok(Self::Operations { proof, operations })
+            }
+            1 => {
+                let proof = Proof::<F, D>::read_cfg(buf, &MAX_PROOF_DIGESTS_PER_ELEMENT)?;
+                let op = Op::read_cfg(buf, op_cfg)?;
+                let pins = Vec::<D>::read_range(buf, ..=MAX_PINNED_NODES)?;
+                Ok(Self::Boundary { proof, op, pins })
+            }
+            d => Err(CodecError::InvalidEnum(d)),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family, Op, D: Digest> arbitrary::Arbitrary<'_> for Response<F, Op, D>
+where
+    Op: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(if u.arbitrary()? {
+            Self::Boundary {
+                proof: u.arbitrary()?,
+                op: u.arbitrary()?,
+                pins: u.arbitrary()?,
+            }
+        } else {
+            Self::Operations {
+                proof: u.arbitrary()?,
+                operations: u.arbitrary()?,
+            }
+        })
     }
 }
 
@@ -410,7 +621,7 @@ pub(crate) mod tests {
         NZU64,
         sync::{AsyncRwLock, TracedAsyncRwLock},
     };
-    use std::{marker::PhantomData, sync::Arc};
+    use std::{collections::VecDeque, marker::PhantomData, sync::Arc};
 
     macro_rules! assert_source_variants {
         ($db:ty) => {
@@ -423,6 +634,66 @@ pub(crate) mod tests {
     }
 
     fn assert_serves<S: Source>() {}
+
+    /// A validity slot whose receiver is dropped. It marks a response as feedback-accepting,
+    /// so the engine retries instead of failing. Use it when a scripted source serves bad
+    /// data and the test expects a retry.
+    pub fn feedback_validity() -> ValidityTx {
+        let (tx, _rx) = oneshot::channel();
+        Some(tx)
+    }
+
+    /// A source that answers each request with the next scripted response.
+    #[derive(Clone)]
+    pub struct SequenceSource<F: Family, Op, D: Digest> {
+        #[allow(clippy::type_complexity)]
+        responses: Arc<commonware_utils::sync::Mutex<VecDeque<(Response<F, Op, D>, ValidityTx)>>>,
+    }
+
+    impl<F: Family, Op, D: Digest> SequenceSource<F, Op, D> {
+        pub fn new(responses: Vec<(Response<F, Op, D>, ValidityTx)>) -> Self {
+            Self {
+                responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from(
+                    responses,
+                ))),
+            }
+        }
+    }
+
+    impl<F, Op, D> Source for SequenceSource<F, Op, D>
+    where
+        F: Family,
+        D: Digest,
+        Op: Send + Sync + Clone + 'static,
+    {
+        type Family = F;
+        type Digest = D;
+        type Op = Op;
+        type Error = qmdb::Error<F>;
+
+        async fn serve(
+            &self,
+            _request: Request<F>,
+        ) -> Result<(Response<F, Op, D>, ValidityTx), qmdb::Error<F>> {
+            self.responses
+                .lock()
+                .pop_front()
+                .ok_or(qmdb::Error::DataCorrupted("missing scripted response"))
+        }
+    }
+
+    /// Fetch `target`'s final commit operation and boundary pins from `source`.
+    pub async fn fetch_compact_state<R: Source>(
+        source: &R,
+        target: crate::qmdb::sync::compact::Target<R::Family, R::Digest>,
+    ) -> Result<(Response<R::Family, R::Op, R::Digest>, ValidityTx), R::Error> {
+        source
+            .serve(Request::Boundary {
+                size: target.leaf_count,
+                start: Location::new(*target.leaf_count - 1),
+            })
+            .await
+    }
 
     /// A source that always fails. Not `Clone`, which the engine must not require.
     pub struct FailSource<F: Family, Op, D> {
@@ -619,6 +890,28 @@ pub(crate) mod tests {
         assert_source_variants!(ImmutableVariableCompactDb);
     }
 
+    /// The request codec refuses frames whose start reaches their size, and unknown tags.
+    #[test]
+    fn test_request_decode_rejects_malformed() {
+        use commonware_codec::{DecodeExt as _, Encode as _};
+        let valid = Request::<mmr::Family>::Operations {
+            size: Location::new(10),
+            start: Location::new(3),
+            max_ops: NZU64!(2),
+        };
+        let decoded = Request::<mmr::Family>::decode(valid.encode()).unwrap();
+        assert_eq!(decoded, valid);
+
+        let mut malformed = Vec::new();
+        1u8.write(&mut malformed); // Boundary tag
+        Location::<mmr::Family>::new(10).write(&mut malformed);
+        Location::<mmr::Family>::new(10).write(&mut malformed); // start == size
+        assert!(Request::<mmr::Family>::decode(&malformed[..]).is_err());
+
+        let bad_tag = [7u8];
+        assert!(Request::<mmr::Family>::decode(&bad_tag[..]).is_err());
+    }
+
     /// A source behind a lock reaches the source and reports its error.
     #[test]
     fn test_locked_source_reaches_source() {
@@ -633,5 +926,20 @@ pub(crate) mod tests {
             let result = lock.serve(request).await;
             assert!(matches!(result, Err(crate::qmdb::Error::KeyNotFound)));
         });
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use crate::merkle::{mmb, mmr};
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Request<mmr::Family>>,
+        CodecConformance<Request<mmb::Family>>,
+        CodecConformance<Response<mmr::Family, u64, Sha256Digest>>,
+        CodecConformance<Response<mmb::Family, u64, Sha256Digest>>,
     }
 }

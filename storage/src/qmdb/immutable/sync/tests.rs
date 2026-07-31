@@ -30,7 +30,7 @@ use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     future::Future,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -1239,7 +1239,10 @@ where
 
 mod compact_variable_mmr {
     use super::*;
-    use crate::merkle::mmr;
+    use crate::{
+        merkle::mmr,
+        qmdb::sync::source::tests::{SequenceSource, feedback_validity, fetch_compact_state},
+    };
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
 
@@ -1307,66 +1310,6 @@ mod compact_variable_mmr {
             },
             commit_codec_config: ((), ((0..=10000).into(), ())),
         }
-    }
-
-    #[derive(Clone)]
-    struct SequenceSource {
-        responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
-    }
-
-    type CompactResponse = (
-        sync::source::Response<
-            mmr::Family,
-            immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>,
-            sha256::Digest,
-        >,
-        sync::source::ValidityTx,
-    );
-
-    /// A validity slot whose receiver is dropped: it marks a response as feedback-accepting,
-    /// so the engine retries instead of failing terminally, like a resolver-backed source.
-    fn feedback_validity() -> sync::source::ValidityTx {
-        let (tx, _rx) = commonware_utils::channel::oneshot::channel();
-        Some(tx)
-    }
-
-    impl sync::source::Source for SequenceSource {
-        type Family = mmr::Family;
-        type Digest = sha256::Digest;
-        type Op = immutable::variable::Operation<mmr::Family, sha256::Digest, Vec<u8>>;
-        type Error = qmdb::Error<mmr::Family>;
-
-        async fn serve(
-            &self,
-            _request: sync::Request<Self::Family>,
-        ) -> Result<CompactResponse, Self::Error> {
-            self.responses
-                .lock()
-                .pop_front()
-                .ok_or(qmdb::Error::DataCorrupted("missing compact response"))
-        }
-    }
-
-    /// Fetch `target`'s final commit operation and boundary pins from `source`.
-    async fn fetch_compact_state<R>(
-        source: &R,
-        target: sync::compact::Target<mmr::Family, sha256::Digest>,
-    ) -> Result<
-        (
-            sync::source::Response<mmr::Family, R::Op, sha256::Digest>,
-            sync::source::ValidityTx,
-        ),
-        R::Error,
-    >
-    where
-        R: sync::source::Source<Family = mmr::Family, Digest = sha256::Digest>,
-    {
-        source
-            .serve(sync::Request::Boundary {
-                size: target.leaf_count,
-                start: Location::new(*target.leaf_count - 1),
-            })
-            .await
     }
 
     #[test_traced("WARN")]
@@ -1469,16 +1412,16 @@ mod compact_variable_mmr {
             let sync::Response::Boundary { proof, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            *proof = crate::merkle::Proof::default();
+            // Corrupt the proof without touching `leaves`, so the response passes the
+            // engine's size check and fails at verification itself.
+            proof.digests.push(sha256::Digest::from([0xee; 32]));
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource {
-                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, feedback_validity()),
-                        (good_state, feedback_validity()),
-                    ]))),
-                },
+                SequenceSource::new(vec![
+                    (bad_state, feedback_validity()),
+                    (good_state, feedback_validity()),
+                ]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -1530,12 +1473,7 @@ mod compact_variable_mmr {
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource {
-                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, Some(bad_tx)),
-                        (good_state, Some(good_tx)),
-                    ]))),
-                },
+                SequenceSource::new(vec![(bad_state, Some(bad_tx)), (good_state, Some(good_tx))]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -1589,12 +1527,10 @@ mod compact_variable_mmr {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource {
-                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, feedback_validity()),
-                        (good_state, feedback_validity()),
-                    ]))),
-                },
+                SequenceSource::new(vec![
+                    (bad_state, feedback_validity()),
+                    (good_state, feedback_validity()),
+                ]),
                 target.clone(),
                 client_cfg.clone(),
             ))
@@ -1649,12 +1585,10 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource {
-                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, feedback_validity()),
-                        (good_state, feedback_validity()),
-                    ]))),
-                },
+                SequenceSource::new(vec![
+                    (bad_state, feedback_validity()),
+                    (good_state, feedback_validity()),
+                ]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -1825,8 +1759,7 @@ mod compact_variable_mmr {
             );
             // target2 names a divergent history: the regrown source reaches the same leaf
             // count under a different root, so it serves state the client can never verify.
-            // The source accepts no feedback, so the engine fails instead of retrying, as it
-            // must against any source (or byzantine peer) that cannot satisfy the target.
+            // With no feedback channel, the engine fails instead of retrying.
             let divergent_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("divergent_client"),
                 source.clone(),
@@ -2036,7 +1969,10 @@ mod compact_variable_mmr {
 
 mod compact_variable_mmb {
     use super::*;
-    use crate::merkle::mmb;
+    use crate::{
+        merkle::mmb,
+        qmdb::sync::source::tests::{SequenceSource, feedback_validity, fetch_compact_state},
+    };
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
 
@@ -2104,66 +2040,6 @@ mod compact_variable_mmb {
             },
             commit_codec_config: ((), ((0..=10000).into(), ())),
         }
-    }
-
-    #[derive(Clone)]
-    struct SequenceSource {
-        responses: Arc<commonware_utils::sync::Mutex<VecDeque<CompactResponse>>>,
-    }
-
-    type CompactResponse = (
-        sync::source::Response<
-            mmb::Family,
-            immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>,
-            sha256::Digest,
-        >,
-        sync::source::ValidityTx,
-    );
-
-    /// A validity slot whose receiver is dropped: it marks a response as feedback-accepting,
-    /// so the engine retries instead of failing terminally, like a resolver-backed source.
-    fn feedback_validity() -> sync::source::ValidityTx {
-        let (tx, _rx) = commonware_utils::channel::oneshot::channel();
-        Some(tx)
-    }
-
-    impl sync::source::Source for SequenceSource {
-        type Family = mmb::Family;
-        type Digest = sha256::Digest;
-        type Op = immutable::variable::Operation<mmb::Family, sha256::Digest, Vec<u8>>;
-        type Error = qmdb::Error<mmb::Family>;
-
-        async fn serve(
-            &self,
-            _request: sync::Request<Self::Family>,
-        ) -> Result<CompactResponse, Self::Error> {
-            self.responses
-                .lock()
-                .pop_front()
-                .ok_or(qmdb::Error::DataCorrupted("missing compact response"))
-        }
-    }
-
-    /// Fetch `target`'s final commit operation and boundary pins from `source`.
-    async fn fetch_compact_state<R>(
-        source: &R,
-        target: sync::compact::Target<mmb::Family, sha256::Digest>,
-    ) -> Result<
-        (
-            sync::source::Response<mmb::Family, R::Op, sha256::Digest>,
-            sync::source::ValidityTx,
-        ),
-        R::Error,
-    >
-    where
-        R: sync::source::Source<Family = mmb::Family, Digest = sha256::Digest>,
-    {
-        source
-            .serve(sync::Request::Boundary {
-                size: target.leaf_count,
-                start: Location::new(*target.leaf_count - 1),
-            })
-            .await
     }
 
     #[test_traced("WARN")]
@@ -2266,16 +2142,16 @@ mod compact_variable_mmb {
             let sync::Response::Boundary { proof, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            *proof = crate::merkle::Proof::default();
+            // Corrupt the proof without touching `leaves`, so the response passes the
+            // engine's size check and fails at verification itself.
+            proof.digests.push(sha256::Digest::from([0xee; 32]));
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource {
-                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, feedback_validity()),
-                        (good_state, feedback_validity()),
-                    ]))),
-                },
+                SequenceSource::new(vec![
+                    (bad_state, feedback_validity()),
+                    (good_state, feedback_validity()),
+                ]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -2327,12 +2203,7 @@ mod compact_variable_mmb {
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource {
-                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, Some(bad_tx)),
-                        (good_state, Some(good_tx)),
-                    ]))),
-                },
+                SequenceSource::new(vec![(bad_state, Some(bad_tx)), (good_state, Some(good_tx))]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -2386,12 +2257,10 @@ mod compact_variable_mmb {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource {
-                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, feedback_validity()),
-                        (good_state, feedback_validity()),
-                    ]))),
-                },
+                SequenceSource::new(vec![
+                    (bad_state, feedback_validity()),
+                    (good_state, feedback_validity()),
+                ]),
                 target.clone(),
                 client_cfg.clone(),
             ))
@@ -2449,12 +2318,10 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource {
-                    responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                        (bad_state, feedback_validity()),
-                        (good_state, feedback_validity()),
-                    ]))),
-                },
+                SequenceSource::new(vec![
+                    (bad_state, feedback_validity()),
+                    (good_state, feedback_validity()),
+                ]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -2626,8 +2493,7 @@ mod compact_variable_mmb {
             assert_eq!(source.target(), target3);
             // target2 names a divergent history: the regrown source reaches the same leaf
             // count under a different root, so it serves state the client can never verify.
-            // The source accepts no feedback, so the engine fails instead of retrying, as it
-            // must against any source (or byzantine peer) that cannot satisfy the target.
+            // With no feedback channel, the engine fails instead of retrying.
             let divergent_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("divergent_client"),
                 source.clone(),

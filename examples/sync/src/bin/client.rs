@@ -338,7 +338,7 @@ where
     .await
 }
 
-/// Repeatedly sync a compact-storage database via compact state transfer.
+/// Repeatedly sync a compact-storage database to the latest commit.
 async fn run_compact_sync<DB, Op, E, MakeConfig>(
     context: E,
     config: Config,
@@ -348,7 +348,6 @@ async fn run_compact_sync<DB, Op, E, MakeConfig>(
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
     DB: sync::Database<Family = mmr::Family, Context = E, Digest = Key, Op = Op>,
-    DB::Config: Clone,
     Op: Clone + Read + EncodeShared + Send + Sync + 'static,
     Op::Cfg: commonware_codec::IsUnit,
     MakeConfig: Fn(&E) -> DB::Config,
@@ -369,7 +368,7 @@ where
             fetch_batch_size: NZU64!(1),
             apply_batch_size: 1,
             max_outstanding_requests: 1,
-            max_retained_roots: 1,
+            max_retained_roots: 0,
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -384,6 +383,7 @@ where
                     sync_iteration = iteration,
                     "{label} target went stale before state fetch: {message}; retrying"
                 );
+                context.sleep(config.sync_interval).await;
                 continue;
             }
             Err(sync::Error::Engine(
@@ -394,6 +394,7 @@ where
                     ?err,
                     "{label} fetched state did not match the target; refetching target"
                 );
+                context.sleep(config.sync_interval).await;
                 continue;
             }
             Err(err) => return Err(err.into()),

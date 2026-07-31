@@ -281,72 +281,83 @@ where
     DB: Syncable<Family = mmr::Family>,
 {
     state.request_counter.inc();
-    request.validate()?;
 
     let guard = state.database.read().await;
     let database = guard.as_ref().ok_or(Error::DatabaseUnavailable)?;
 
     // Check if we have enough operations
     let db_size = database.size();
-    if request.start_loc >= db_size {
+    let start = request.request.start();
+    if start >= db_size {
         return Err(Error::InvalidRequest(format!(
-            "start_loc ({}) >= database size ({})",
-            request.start_loc, db_size
+            "start ({start}) >= database size ({db_size})"
         )));
     }
 
-    // Calculate how many operations to return
-    let max_ops = std::cmp::min(request.max_ops.get(), *db_size - *request.start_loc);
-    let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
-    let max_ops =
-        NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start_loc < db_size");
+    let response = match request.request {
+        sync::Request::Operations {
+            size,
+            start,
+            max_ops,
+        } => {
+            // Calculate how many operations to return
+            let max_ops = std::cmp::min(max_ops.get(), *db_size - *start);
+            let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
+            let max_ops =
+                NonZeroU64::new(max_ops).expect("max_ops cannot be zero since start < db_size");
 
-    debug!(
-        request_id = request.request_id,
-        max_ops,
-        start_loc = ?request.start_loc,
-        ?db_size,
-        "operations request"
-    );
+            debug!(
+                request_id = request.request_id,
+                max_ops,
+                ?start,
+                ?db_size,
+                "operations request"
+            );
 
-    // Get the historical proof and operations
-    let result = database
-        .historical_proof(request.op_count, request.start_loc, max_ops)
-        .await;
-
-    let (proof, operations) = result.map_err(|err| {
-        warn!(?err, "failed to generate historical proof");
-        Error::Database(err)
-    })?;
-
-    // Optionally fetch pinned nodes
-    let pinned_nodes = if request.include_pinned_nodes {
-        let nodes = database
-            .pinned_nodes_at(request.start_loc)
-            .await
-            .map_err(|err| {
+            let (proof, operations) = database
+                .historical_proof(size, start, max_ops)
+                .await
+                .map_err(|err| {
+                    warn!(?err, "failed to generate historical proof");
+                    Error::Database(err)
+                })?;
+            sync::Response::Operations { proof, operations }
+        }
+        sync::Request::Boundary { size, start } => {
+            debug!(
+                request_id = request.request_id,
+                ?start,
+                ?db_size,
+                "boundary request"
+            );
+            let (proof, mut operations) = database
+                .historical_proof(size, start, NonZeroU64::MIN)
+                .await
+                .map_err(|err| {
+                    warn!(?err, "failed to generate historical proof");
+                    Error::Database(err)
+                })?;
+            let op = operations
+                .pop()
+                .ok_or_else(|| Error::InvalidRequest("no operation at boundary".into()))?;
+            let pins = database.pinned_nodes_at(start).await.map_err(|err| {
                 warn!(?err, "failed to get pinned nodes");
                 Error::Database(err)
             })?;
-        Some(nodes)
-    } else {
-        None
+            sync::Response::Boundary { proof, op, pins }
+        }
     };
 
     drop(guard);
 
     debug!(
         request_id = request.request_id,
-        operations_len = operations.len(),
-        proof_len = proof.digests.len(),
         "sending operations and proof"
     );
 
     Ok(wire::GetOperationsResponse::<DB::Operation, Key> {
         request_id: request.request_id,
-        proof,
-        operations,
-        pinned_nodes,
+        response,
     })
 }
 
@@ -365,24 +376,9 @@ where
         >,
 {
     state.request_counter.inc();
-    request.validate()?;
 
-    // A boundary fetch returns one operation, so the wire's max_ops is ignored when the
-    // pinned-nodes flag is set.
-    let serve_request = if request.include_pinned_nodes {
-        sync::Request::Boundary {
-            size: request.op_count,
-            start: request.start_loc,
-        }
-    } else {
-        sync::Request::Operations {
-            size: request.op_count,
-            start: request.start_loc,
-            max_ops: request.max_ops,
-        }
-    };
-    let (response, _) = state.database.serve(serve_request).await.map_err(|err| {
-        warn!(?err, "failed to serve operations from compact state");
+    let (response, _) = state.database.serve(request.request).await.map_err(|err| {
+        warn!(?err, "failed to serve operations");
         match err {
             // A compact server retains only its latest committed state, so a request outside it
             // means the client's target is stale and it should fetch a fresh one.
@@ -395,15 +391,9 @@ where
         }
     })?;
 
-    let (proof, operations, pinned_nodes) = match response {
-        sync::Response::Operations { proof, operations } => (proof, operations, None),
-        sync::Response::Boundary { proof, op, pins } => (proof, vec![op], Some(pins)),
-    };
     Ok(wire::GetOperationsResponse {
         request_id: request.request_id,
-        proof,
-        operations,
-        pinned_nodes,
+        response,
     })
 }
 

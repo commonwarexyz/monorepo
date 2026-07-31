@@ -1495,7 +1495,19 @@ where
         })
     }
 
-    let initial = engine_target(&target).map_err(sync::Error::Engine)?;
+    let mut initial = engine_target(&target).map_err(sync::Error::Engine)?;
+    // Start at the newest target already queued, so a caller that queued an update before
+    // starting the sync never has the stale target reported as reached. The guard mirrors
+    // validate_update's rule for updates taken mid-sync.
+    while let Ok(update) = tip_updates.try_recv() {
+        let Ok(update) = engine_target(&update) else {
+            continue;
+        };
+        if update.range.end() > initial.range.end() && update.range.start() >= initial.range.start()
+        {
+            initial = update;
+        }
+    }
 
     let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
     context.child("compact_updates").spawn(move |_| async move {

@@ -171,13 +171,8 @@ where
         range: NonEmptyRange<Location<F>>,
         _apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error<F>> {
-        // A compact db retains exactly its final commit, so the sync range is one operation.
         let last_commit_loc = range.start();
-        let (start, ops) = log.into_parts();
-        if *range.end() - *last_commit_loc != 1 || start != last_commit_loc || ops.len() != 1 {
-            return Err(qmdb::Error::UnexpectedData(last_commit_loc));
-        }
-        let op = ops.into_iter().next().expect("checked length");
+        let op = log.into_single_op(range)?;
 
         let journal: crate::qmdb::compact::witness::Journal<E, F, H::Digest> =
             crate::journal::contiguous::variable::Journal::init(
@@ -190,6 +185,7 @@ where
             journal,
             config.commit_codec_config,
             last_commit_loc,
+            // None only happens at the genesis boundary, which pins nothing.
             pinned_nodes.unwrap_or_default(),
             op,
         )?;
