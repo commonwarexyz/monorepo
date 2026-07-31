@@ -91,8 +91,33 @@ impl SyncState {
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
+        self.write_at_inner(blob, offset, bufs, false).await
+    }
+
+    /// Write data with an uncached hint that will require a later sync.
+    async fn write_at_uncached(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+    ) -> Result<(), crate::Error> {
+        self.write_at_inner(blob, offset, bufs, true).await
+    }
+
+    async fn write_at_inner(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+        uncached: bool,
+    ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-        blob.write_at(offset, bufs).await?;
+        let bufs = bufs.into();
+        if uncached {
+            blob.write_at_uncached(offset, bufs).await?;
+        } else {
+            blob.write_at(offset, bufs).await?;
+        }
         self.mark_dirty();
         Ok(())
     }
@@ -104,11 +129,36 @@ impl SyncState {
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
     ) -> Result<(), crate::Error> {
+        self.write_at_sync_inner(blob, offset, bufs, false).await
+    }
+
+    /// Write data with an uncached hint and make it durable before returning.
+    async fn write_at_sync_uncached(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+    ) -> Result<(), crate::Error> {
+        self.write_at_sync_inner(blob, offset, bufs, true).await
+    }
+
+    async fn write_at_sync_inner(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+        uncached: bool,
+    ) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
+        let bufs = bufs.into();
         match self {
             Self::Dirty => {
                 // Earlier mutations need a full durability barrier too.
-                blob.write_at(offset, bufs).await?;
+                if uncached {
+                    blob.write_at_uncached(offset, bufs).await?;
+                } else {
+                    blob.write_at(offset, bufs).await?;
+                }
                 blob.sync().await?;
                 *self = Self::Clean;
                 Ok(())
@@ -116,7 +166,11 @@ impl SyncState {
             Self::Clean => {
                 // If this fails, a later sync must still cover the attempted write.
                 self.mark_dirty();
-                blob.write_at_sync(offset, bufs).await?;
+                if uncached {
+                    blob.write_at_sync_uncached(offset, bufs).await?;
+                } else {
+                    blob.write_at_sync(offset, bufs).await?;
+                }
                 *self = Self::Clean;
                 Ok(())
             }
@@ -190,6 +244,12 @@ mod tests {
 
         /// Number of range-scoped write syncs.
         range_syncs: usize,
+
+        /// Number of writes carrying the uncached hint.
+        uncached_writes: usize,
+
+        /// Number of range-scoped write syncs carrying the uncached hint.
+        uncached_range_syncs: usize,
     }
 
     /// Test blob with separate visible and durable state.
@@ -222,6 +282,11 @@ mod tests {
 
         pub fn size(&self) -> u64 {
             self.state.lock().data.len() as u64
+        }
+
+        pub fn uncached_snapshot(&self) -> (usize, usize) {
+            let state = self.state.lock();
+            (state.uncached_writes, state.uncached_range_syncs)
         }
 
         fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -266,6 +331,16 @@ mod tests {
             Ok(())
         }
 
+        async fn write_at_uncached(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at(offset, buf).await?;
+            self.state.lock().uncached_writes += 1;
+            Ok(())
+        }
+
         async fn write_at_sync(
             &self,
             offset: u64,
@@ -277,6 +352,16 @@ mod tests {
             Self::write(&mut state.durable, offset, buf.as_ref())?;
             state.writes += 1;
             state.range_syncs += 1;
+            Ok(())
+        }
+
+        async fn write_at_sync_uncached(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at_sync(offset, buf).await?;
+            self.state.lock().uncached_range_syncs += 1;
             Ok(())
         }
 

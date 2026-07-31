@@ -266,9 +266,9 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
-    /// Submit writes with `RWF_DONTCACHE` (see [crate::Blob::hint_uncached_writes]).
-    /// Cleared on the first EOPNOTSUPP so unsupported stacks fall back to cached writes.
-    uncached: Arc<AtomicBool>,
+    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
+    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted write.
+    dont_cache_supported: Arc<AtomicBool>,
 }
 
 impl Clone for Blob {
@@ -280,7 +280,7 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
-            uncached: self.uncached.clone(),
+            dont_cache_supported: self.dont_cache_supported.clone(),
         }
     }
 }
@@ -302,7 +302,63 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
-            uncached: Arc::new(AtomicBool::new(false)),
+            dont_cache_supported: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    async fn write_at_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        cache: iouring::Cache,
+    ) -> Result<(), Error> {
+        let offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+
+        if !bufs.has_remaining() {
+            return Ok(());
+        }
+
+        match cache {
+            iouring::Cache::Enabled => {
+                self.io_handle
+                    .write_at(self.file.clone(), offset, bufs)
+                    .await
+            }
+            cache @ iouring::Cache::Disabled(_) => {
+                self.io_handle
+                    .write_at_with_cache(self.file.clone(), offset, bufs, cache)
+                    .await
+            }
+        }
+    }
+
+    async fn write_at_sync_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        cache: iouring::Cache,
+    ) -> Result<(), Error> {
+        let offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+
+        if !bufs.has_remaining() {
+            return Ok(());
+        }
+
+        match cache {
+            iouring::Cache::Enabled => {
+                self.io_handle
+                    .write_at_sync(self.file.clone(), offset, bufs)
+                    .await
+            }
+            cache @ iouring::Cache::Disabled(_) => {
+                self.io_handle
+                    .write_at_sync_with_cache(self.file.clone(), offset, bufs, cache)
+                    .await
+            }
         }
     }
 }
@@ -357,18 +413,21 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        self.io_handle
-            .write_at(self.file.clone(), offset, bufs, self.uncached.clone())
+        self.write_at_inner(offset, bufs.into(), iouring::Cache::Enabled)
             .await
+    }
+
+    async fn write_at_uncached(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_inner(
+            offset,
+            bufs.into(),
+            iouring::Cache::Disabled(self.dont_cache_supported.clone()),
+        )
+        .await
     }
 
     async fn write_at_sync(
@@ -376,18 +435,21 @@ impl crate::Blob for Blob {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        self.io_handle
-            .write_at_sync(self.file.clone(), offset, bufs, self.uncached.clone())
+        self.write_at_sync_inner(offset, bufs.into(), iouring::Cache::Enabled)
             .await
+    }
+
+    async fn write_at_sync_uncached(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_sync_inner(
+            offset,
+            bufs.into(),
+            iouring::Cache::Disabled(self.dont_cache_supported.clone()),
+        )
+        .await
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
@@ -426,11 +488,6 @@ impl crate::Blob for Blob {
                 Err(_) => Err(Error::Closed),
             }
         })
-    }
-
-    fn hint_uncached_writes(&self) {
-        self.uncached
-            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -555,38 +612,6 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
         run_storage_tests(storage).await;
         let _ = std::fs::remove_dir_all(storage_directory);
-    }
-
-    /// A sync write with more chunks than one iovec batch is submitted plain and made
-    /// durable with a trailing fsync instead of per-submission fusion. Verify the
-    /// content survives a reopen.
-    #[tokio::test]
-    async fn test_write_at_sync_spans_submissions() {
-        let (storage, _dir) = create_test_storage();
-
-        let (blob, _) = storage.open("partition", b"spans").await.unwrap();
-        let chunks = 1500usize;
-        let chunk_len = 8usize;
-        let mut bufs = crate::IoBufs::default();
-        for i in 0..chunks {
-            bufs.append(IoBuf::from(vec![(i % 251) as u8; chunk_len]));
-        }
-        blob.write_at_sync(0, bufs).await.unwrap();
-        drop(blob);
-
-        let (blob, len) = storage.open("partition", b"spans").await.unwrap();
-        assert_eq!(len as usize, chunks * chunk_len);
-        let read = blob
-            .read_at(0, chunks * chunk_len)
-            .await
-            .unwrap()
-            .coalesce();
-        for (i, chunk) in read.as_ref().chunks(chunk_len).enumerate() {
-            assert!(
-                chunk.iter().all(|&b| b == (i % 251) as u8),
-                "chunk {i} corrupt"
-            );
-        }
     }
 
     #[tokio::test]

@@ -170,6 +170,7 @@ use io_uring::{
     squeue::SubmissionQueue,
     types::{SubmitArgs, Timespec},
 };
+pub(crate) use request::Cache;
 use request::{
     IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest,
 };
@@ -177,7 +178,7 @@ use std::{
     collections::VecDeque,
     fs::File,
     os::fd::OwnedFd,
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -431,7 +432,18 @@ impl Handle {
         file: Arc<File>,
         offset: u64,
         bufs: IoBufs,
-        uncached: Arc<AtomicBool>,
+    ) -> Result<(), Error> {
+        self.write_at_with_cache(file, offset, bufs, Cache::Enabled)
+            .await
+    }
+
+    /// Submit a logical positioned write request with an explicit page-cache policy.
+    pub(crate) async fn write_at_with_cache(
+        &self,
+        file: Arc<File>,
+        offset: u64,
+        bufs: IoBufs,
+        cache: Cache,
     ) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
@@ -440,7 +452,7 @@ impl Handle {
             written: 0,
             write: bufs.into(),
             sync: false,
-            uncached,
+            cache,
             result: None,
             sender: tx,
         }))
@@ -461,7 +473,18 @@ impl Handle {
         file: Arc<File>,
         offset: u64,
         bufs: IoBufs,
-        uncached: Arc<AtomicBool>,
+    ) -> Result<(), Error> {
+        self.write_at_sync_with_cache(file, offset, bufs, Cache::Enabled)
+            .await
+    }
+
+    /// Submit a logical positioned write with per-write sync and an explicit page-cache policy.
+    pub(crate) async fn write_at_sync_with_cache(
+        &self,
+        file: Arc<File>,
+        offset: u64,
+        bufs: IoBufs,
+        cache: Cache,
     ) -> Result<(), Error> {
         let fused = bufs.chunk_count() <= IOVEC_BATCH_SIZE;
         let (tx, rx) = oneshot::channel();
@@ -471,7 +494,7 @@ impl Handle {
             written: 0,
             write: bufs.into(),
             sync: fused,
-            uncached,
+            cache,
             result: None,
             sender: tx,
         }))

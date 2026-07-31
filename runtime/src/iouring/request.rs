@@ -12,12 +12,11 @@ use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
     os::fd::{AsRawFd, OwnedFd},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::Instant,
 };
+#[cfg(feature = "iouring-storage")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Cap iovec batches at the kernel's IOV_MAX (1024): larger submissions fail with
 /// EINVAL. Storage writes span hundreds of chunks (two per page) and want maximal
@@ -512,6 +511,46 @@ impl ReadAtRequest {
     }
 }
 
+/// Page-cache policy for a positioned write request.
+pub(crate) enum Cache {
+    /// Use the operating system's normal page-cache behavior.
+    Enabled,
+    /// Best-effort bypass of the page cache while the backend supports it.
+    #[cfg(feature = "iouring-storage")]
+    Disabled(Arc<AtomicBool>),
+}
+
+impl Cache {
+    /// Return the write flag for this request, falling back to normal caching
+    /// when another request has already found the hint unsupported.
+    fn rw_flag(&mut self) -> i32 {
+        match self {
+            #[cfg(feature = "iouring-storage")]
+            Self::Disabled(supported) if supported.load(Ordering::Relaxed) => {
+                libc::RWF_DONTCACHE
+            }
+            #[cfg(feature = "iouring-storage")]
+            Self::Disabled(_) => {
+                *self = Self::Enabled;
+                0
+            }
+            Self::Enabled => 0,
+        }
+    }
+
+    /// Record that cache bypass is unsupported and use normal caching when retried.
+    fn fallback(&mut self) -> bool {
+        match std::mem::replace(self, Self::Enabled) {
+            #[cfg(feature = "iouring-storage")]
+            Self::Disabled(supported) => {
+                supported.store(false, Ordering::Relaxed);
+                true
+            }
+            Self::Enabled => false,
+        }
+    }
+}
+
 /// Logical positioned file write request and its in-loop state.
 pub(super) struct WriteAtRequest {
     /// File used by the current write SQE.
@@ -524,9 +563,8 @@ pub(super) struct WriteAtRequest {
     pub(super) write: WriteBuffers,
     /// Whether the write should be durably persisted before completion.
     pub(super) sync: bool,
-    /// The owning blob's uncached-writes hint (see [crate::Blob::hint_uncached_writes]).
-    /// Shared so an EOPNOTSUPP can clear it for the blob and resubmit cached.
-    pub(super) uncached: Arc<AtomicBool>,
+    /// Page-cache policy for this request.
+    pub(super) cache: Cache,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
     pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
@@ -535,16 +573,16 @@ pub(super) struct WriteAtRequest {
 
 impl WriteAtRequest {
     /// Return the flags for this write request: `RWF_DSYNC` when `sync` is set (data
-    /// durability is the contract, so timestamp-only commits are skipped), plus
-    /// `RWF_DONTCACHE` while the blob's uncached hint holds.
-    fn rw_flags(&self) -> i32 {
+    /// durability is the contract, so timestamp-only commits are skipped), plus the
+    /// request-local `RWF_DONTCACHE` hint.
+    fn rw_flags(&mut self) -> i32 {
         let sync = if self.sync { libc::RWF_DSYNC } else { 0 };
-        let uncached = if self.uncached.load(Ordering::Relaxed) {
-            libc::RWF_DONTCACHE
-        } else {
-            0
-        };
-        sync | uncached
+        sync | self.cache.rw_flag()
+    }
+
+    /// Fall back to normal caching when the cache-bypass hint is unsupported.
+    fn retry_cached(&mut self, code: i32) -> bool {
+        code == -libc::EOPNOTSUPP && self.cache.fallback()
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
@@ -594,6 +632,7 @@ impl WriteAtRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => false,
+            CqeResult::Error(code) if self.retry_cached(code) => false,
             CqeResult::Cancelled | CqeResult::Error(_) | CqeResult::Zero => {
                 self.result = Some(Err(Error::WriteFailed));
                 true
@@ -1195,13 +1234,13 @@ mod tests {
 
         // Retryable CQEs should requeue the positioned write.
         let (tx, _rx) = oneshot::channel();
-        let write = WriteAtRequest {
+        let mut write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         };
@@ -1217,7 +1256,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1239,7 +1278,7 @@ mod tests {
             written: 0,
             write: vectored.into(),
             sync: false,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1258,7 +1297,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1276,7 +1315,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1290,13 +1329,13 @@ mod tests {
         // Synchronous writes use the same logical error surface as regular
         // writes, `sync` only changes the SQE flags.
         let (tx, rx) = oneshot::channel();
-        let write = WriteAtRequest {
+        let mut write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: true,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         };
@@ -1317,7 +1356,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1327,6 +1366,28 @@ mod tests {
             block_on(rx).expect("missing timeout-cancel write failure"),
             Err(Error::WriteFailed)
         ));
+    }
+
+    #[cfg(feature = "iouring-storage")]
+    #[test]
+    fn test_uncached_write_retries_without_hint_when_unsupported() {
+        let dont_cache_supported = Arc::new(AtomicBool::new(true));
+        let (tx, _rx) = oneshot::channel();
+        let mut request = WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
+            cache: Cache::Disabled(dont_cache_supported.clone()),
+            result: None,
+            sender: tx,
+        };
+
+        assert_eq!(request.rw_flags(), libc::RWF_DONTCACHE);
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        assert!(!dont_cache_supported.load(Ordering::Relaxed));
+        assert_eq!(request.rw_flags(), 0);
     }
 
     #[test]
@@ -1475,7 +1536,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1561,7 +1622,7 @@ mod tests {
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             sync: false,
-            uncached: Arc::new(AtomicBool::new(false)),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });

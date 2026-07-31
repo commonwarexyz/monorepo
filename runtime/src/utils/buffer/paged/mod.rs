@@ -41,22 +41,6 @@
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
-//!
-//! # Durability model
-//!
-//! Recovery relies on the crash model documented on [crate::Blob]: a crash-interrupted write
-//! may leave any subset of its bytes applied, but every byte holds either its old or its new
-//! value, never garbage.
-//!
-//! The two-slot CRC record is the defense for rewriting a synced partial page in place. If a
-//! torn rewrite lands the new record but not all of the extension's payload bytes, the new
-//! checksum fails validation and recovery falls back to the preserved slot, so a previously
-//! synced prefix is never lost. This requires every rewrite to resubmit the committed prefix and
-//! the protected slot byte-identically: a tear over identical bytes cannot change them.
-//!
-//! Torn bulk writes are bounded the same way. Every full page carries its own record, so a
-//! partially landed multi-page write leaves invalid pages that never held synced data.
-//! [Writer::recoverable_prefix_len] measures the surviving prefix.
 
 use crate::{Blob, Buf, BufMut, Error, IoBuf};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};

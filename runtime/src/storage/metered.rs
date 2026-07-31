@@ -149,6 +149,43 @@ impl Drop for MetricsHandle {
     }
 }
 
+impl<B: crate::Blob> Blob<B> {
+    async fn write_at_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        uncached: bool,
+    ) -> Result<(), Error> {
+        let bufs_len = bufs.remaining();
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
+        Span::current().record("bytes", bufs_len as u64);
+        if uncached {
+            self.inner.write_at_uncached(offset, bufs).await
+        } else {
+            self.inner.write_at(offset, bufs).await
+        }
+    }
+
+    async fn write_at_sync_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        uncached: bool,
+    ) -> Result<(), Error> {
+        let bufs_len = bufs.remaining();
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
+        self.metrics.storage_syncs.inc();
+        Span::current().record("bytes", bufs_len as u64);
+        if uncached {
+            self.inner.write_at_sync_uncached(offset, bufs).await
+        } else {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+    }
+}
+
 impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
         self.metrics.storage_reads.inc();
@@ -174,12 +211,21 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         fields(partition = %self.partition, bytes = Empty)
     )]
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let bufs_len = bufs.remaining();
-        self.metrics.storage_writes.inc();
-        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
-        Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at(offset, bufs).await
+        self.write_at_inner(offset, bufs.into(), false).await
+    }
+
+    #[tracing::instrument(
+        name = "runtime.storage.blob.write_at",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, bytes = Empty)
+    )]
+    async fn write_at_uncached(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_inner(offset, bufs.into(), true).await
     }
 
     #[tracing::instrument(
@@ -193,13 +239,21 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let bufs_len = bufs.remaining();
-        self.metrics.storage_writes.inc();
-        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
-        self.metrics.storage_syncs.inc();
-        Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at_sync(offset, bufs).await
+        self.write_at_sync_inner(offset, bufs.into(), false).await
+    }
+
+    #[tracing::instrument(
+        name = "runtime.storage.blob.write_at_sync",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, bytes = Empty)
+    )]
+    async fn write_at_sync_uncached(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_sync_inner(offset, bufs.into(), true).await
     }
 
     #[tracing::instrument(
@@ -240,9 +294,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         )))
     }
 
-    fn hint_uncached_writes(&self) {
-        self.inner.hint_uncached_writes()
-    }
 }
 
 #[cfg(test)]

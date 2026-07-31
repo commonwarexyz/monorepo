@@ -17,6 +17,30 @@ use tokio::task;
 // EINVAL. Larger batches reduce syscall count with no measurable per-iovec penalty.
 const IOVEC_BATCH_SIZE: usize = 1024;
 
+/// Page-cache policy for one write request.
+enum Cache {
+    /// Use the operating system's normal page-cache behavior.
+    Enabled,
+    /// Best-effort bypass of the page cache while the backend supports it.
+    Disabled(Arc<AtomicBool>),
+}
+
+impl Cache {
+    /// Return whether the next submission should request cache bypass.
+    fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled(supported) if supported.load(Ordering::Relaxed))
+    }
+
+    /// Record that cache bypass is unsupported and use normal caching when retried.
+    fn fallback(&mut self) -> bool {
+        let Self::Disabled(supported) = std::mem::replace(self, Self::Enabled) else {
+            return false;
+        };
+        supported.store(false, Ordering::Relaxed);
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct Blob {
     partition: String,
@@ -25,9 +49,9 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
-    /// Submit writes with `RWF_DONTCACHE` (see [crate::Blob::hint_uncached_writes]).
-    /// Cleared on the first EOPNOTSUPP so unsupported stacks fall back to cached writes.
-    uncached: Arc<AtomicBool>,
+    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
+    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted write.
+    dont_cache_supported: Arc<AtomicBool>,
 }
 
 impl Blob {
@@ -44,7 +68,7 @@ impl Blob {
             file: Arc::new(file),
             pool,
             data_offset,
-            uncached: Arc::new(AtomicBool::new(false)),
+            dont_cache_supported: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -71,15 +95,15 @@ impl Blob {
     /// Write `bufs` at `offset`, batching up to [IOVEC_BATCH_SIZE] iovecs per submission.
     ///
     /// `flags` apply to every submission, so callers must only pass durability flags for
-    /// writes that fit a single submission (see [Blob::write_at_sync]). While `uncached`
-    /// holds, submissions carry `RWF_DONTCACHE` on Linux. An EOPNOTSUPP clears it and the
-    /// submission retries cached, so unsupported kernels and filesystems degrade silently.
+    /// writes that fit a single submission (see [Blob::write_at_sync]). Hinted submissions
+    /// carry `RWF_DONTCACHE` on Linux while the backend may support it. An EOPNOTSUPP clears
+    /// that capability and retries the submission without the hint.
     fn write_vectored_at(
         file: &File,
         mut offset: u64,
         mut bufs: IoBufs,
         flags: Option<libc::c_int>,
-        uncached: &AtomicBool,
+        mut cache: Cache,
     ) -> Result<(), Error> {
         debug_assert!(
             flags.is_none() || bufs.chunk_count() <= IOVEC_BATCH_SIZE,
@@ -98,6 +122,7 @@ impl Blob {
 
             cfg_if! {
                 if #[cfg(target_os = "linux")] {
+                    let attempted_dont_cache = cache.is_disabled();
                     // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
                     // `io_slices` points to valid readable buffers held alive for this syscall.
                     let ret = unsafe {
@@ -107,15 +132,12 @@ impl Blob {
                             io_slices_len as i32,
                             offset.try_into().map_err(|_| Error::OffsetOverflow)?,
                             flags.unwrap_or(0)
-                                | if uncached.load(Ordering::Relaxed) {
-                                    libc::RWF_DONTCACHE
-                                } else {
-                                    0
-                                },
+                                | if attempted_dont_cache { libc::RWF_DONTCACHE } else { 0 },
                         )
                     };
                 } else {
-                    let _ = uncached;
+                    let _ = &cache;
+                    let attempted_dont_cache = false;
                     assert!(flags.is_none(), "flags are only supported on Linux");
 
                     // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
@@ -136,12 +158,12 @@ impl Blob {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                if err.raw_os_error() == Some(libc::EOPNOTSUPP)
-                    && uncached.swap(false, Ordering::Relaxed)
-                {
+                if err.raw_os_error() == Some(libc::EOPNOTSUPP) && attempted_dont_cache {
                     // The kernel or filesystem does not support RWF_DONTCACHE: fall back
-                    // to cached writes for the rest of this blob's lifetime.
-                    continue;
+                    // to cached writes for this and future hinted writes.
+                    if cache.fallback() {
+                        continue;
+                    }
                 }
                 return Err(err.into());
             }
@@ -157,6 +179,95 @@ impl Blob {
         }
 
         Ok(())
+    }
+
+    async fn write_at_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        cache: Cache,
+    ) -> Result<(), Error> {
+        let file = self.file.clone();
+        let offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+        task::spawn_blocking(move || {
+            if cache.is_disabled() {
+                return Self::write_vectored_at(&file, offset, bufs, None, cache);
+            }
+            match bufs.try_into_single() {
+                Ok(buf) => Self::write_single_at(&file, offset, buf.as_ref()),
+                Err(bufs) => Self::write_vectored_at(&file, offset, bufs, None, cache),
+            }
+        })
+        .await
+        .map_err(|_| Error::WriteFailed)?
+    }
+
+    async fn write_at_sync_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        cache: Cache,
+    ) -> Result<(), Error> {
+        let file = self.file.clone();
+        let offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+
+        if !bufs.has_remaining() {
+            return Ok(());
+        }
+
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                // Fuse durability into the write only when it fits one submission:
+                // fusing every batch would serialize the batches behind per-call
+                // durability waits, while plain batches keep the device pipelined
+                // and pay a single fdatasync at the end.
+                let fused = bufs.chunk_count() <= IOVEC_BATCH_SIZE;
+                let partition = self.partition.clone();
+                let name = self.name.clone();
+                task::spawn_blocking(move || {
+                    if fused {
+                        return Self::write_vectored_at(
+                            &file,
+                            offset,
+                            bufs,
+                            Some(libc::RWF_DSYNC),
+                            cache,
+                        );
+                    }
+                    Self::write_vectored_at(
+                        &file,
+                        offset,
+                        bufs,
+                        None,
+                        cache,
+                    )?;
+                    file.sync_data().map_err(|e| {
+                        Error::BlobSyncFailed(partition, hex(&name), e.into())
+                    })
+                })
+                .await
+                .map_err(|_| Error::WriteFailed)?
+            } else {
+                let partition = self.partition.clone();
+                let name = self.name.clone();
+                task::spawn_blocking(move || {
+                    Self::write_vectored_at(
+                        &file,
+                        offset,
+                        bufs,
+                        None,
+                        cache,
+                    )?;
+                    Self::sync_inner(&file, &partition, &name)
+                })
+                .await
+                .map_err(|_| Error::WriteFailed)?
+            }
+        }
     }
 }
 
@@ -197,23 +308,21 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let file = self.file.clone();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-        let uncached = self.uncached.clone();
-        task::spawn_blocking(move || {
-            if uncached.load(Ordering::Relaxed) {
-                return Self::write_vectored_at(&file, offset, bufs, None, &uncached);
-            }
-            match bufs.try_into_single() {
-                Ok(buf) => Self::write_single_at(&file, offset, buf.as_ref()),
-                Err(bufs) => Self::write_vectored_at(&file, offset, bufs, None, &uncached),
-            }
-        })
+        self.write_at_inner(offset, bufs.into(), Cache::Enabled)
+            .await
+    }
+
+    async fn write_at_uncached(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_inner(
+            offset,
+            bufs.into(),
+            Cache::Disabled(self.dont_cache_supported.clone()),
+        )
         .await
-        .map_err(|_| Error::WriteFailed)?
     }
 
     async fn write_at_sync(
@@ -221,55 +330,21 @@ impl crate::Blob for Blob {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let file = self.file.clone();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
+        self.write_at_sync_inner(offset, bufs.into(), Cache::Enabled)
+            .await
+    }
 
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                // Fuse durability into the write only when it fits one submission:
-                // fusing every batch would serialize the batches behind per-call
-                // durability waits, while plain batches keep the device pipelined
-                // and pay a single fdatasync at the end.
-                let fused = bufs.chunk_count() <= IOVEC_BATCH_SIZE;
-                let partition = self.partition.clone();
-                let name = self.name.clone();
-                let uncached = self.uncached.clone();
-                task::spawn_blocking(move || {
-                    if fused {
-                        return Self::write_vectored_at(
-                            &file,
-                            offset,
-                            bufs,
-                            Some(libc::RWF_DSYNC),
-                            &uncached,
-                        );
-                    }
-                    Self::write_vectored_at(&file, offset, bufs, None, &uncached)?;
-                    file.sync_data().map_err(|e| {
-                        Error::BlobSyncFailed(partition, hex(&name), e.into())
-                    })
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?
-            } else {
-                let partition = self.partition.clone();
-                let name = self.name.clone();
-                let uncached = self.uncached.clone();
-                task::spawn_blocking(move || {
-                    Self::write_vectored_at(&file, offset, bufs, None, &uncached)?;
-                    Self::sync_inner(&file, &partition, &name)
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?
-            }
-        }
+    async fn write_at_sync_uncached(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_sync_inner(
+            offset,
+            bufs.into(),
+            Cache::Disabled(self.dont_cache_supported.clone()),
+        )
+        .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -309,9 +384,5 @@ impl crate::Blob for Blob {
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)
-    }
-
-    fn hint_uncached_writes(&self) {
-        self.uncached.store(true, Ordering::Relaxed);
     }
 }

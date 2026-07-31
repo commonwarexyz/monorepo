@@ -696,19 +696,6 @@ stability_scope!(BETA {
     /// When a blob is dropped, any unsynced changes may be discarded. Implementations
     /// may attempt to sync during drop but errors will go unhandled. Call `sync`
     /// before dropping to ensure all changes are durably persisted.
-    ///
-    /// # Durability
-    ///
-    /// While the system stays up, writes are exact: a completed write is fully visible to
-    /// subsequent reads, and a write that returns an error has applied some prefix of its
-    /// bytes and left the rest untouched.
-    ///
-    /// Durability is decided only by sync. A crash discards visibility: any subset of the
-    /// bytes written since the last completed sync may persist, within a single write and
-    /// across writes alike, with every byte holding either its old or its new value, never
-    /// anything else. Completion order does not carry across a crash: bytes from a later
-    /// write may persist while bytes from an earlier unsynced one do not. Bytes outside
-    /// written ranges are unaffected in all cases.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read `len` bytes at `offset` into caller-provided buffer(s).
@@ -750,6 +737,19 @@ stability_scope!(BETA {
             bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
+        /// Write `bufs` while advising that the submitted bytes need not remain in the OS page
+        /// cache.
+        ///
+        /// This is a best-effort performance hint for callers that maintain their own cache.
+        /// Implementations may ignore it. It does not change the write's visibility or durability.
+        fn write_at_uncached(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            self.write_at(offset, bufs)
+        }
+
         /// Write `bufs` to the blob at the given offset and durably persist that write.
         ///
         /// This is not a durability barrier for previous operations. When it completes,
@@ -761,6 +761,16 @@ stability_scope!(BETA {
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// [`Blob::write_at_sync`] with the best-effort cache hint from
+        /// [`Blob::write_at_uncached`].
+        fn write_at_sync_uncached(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            self.write_at_sync(offset, bufs)
+        }
 
         /// Resize the blob to the given length.
         ///
@@ -776,16 +786,6 @@ stability_scope!(BETA {
         /// Awaiting this future waits until the sync has started. Awaiting the returned
         /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
-
-        /// Advise that this blob's writes need not populate the OS page cache, because the
-        /// caller maintains its own cache over the data (see [crate::buffer::paged]).
-        ///
-        /// Advisory and one-way for the handle's lifetime: implementations may ignore it,
-        /// and wrappers should forward it. On Linux backends, writes are submitted with
-        /// `RWF_DONTCACHE` where the kernel and filesystem support it, falling back to
-        /// cached writes automatically otherwise. Writeback is started at submission, so
-        /// later syncs wait on less.
-        fn hint_uncached_writes(&self) {}
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

@@ -38,16 +38,10 @@ pub struct Config {
     /// Failure rate for `write_at` operations.
     pub write_rate: Option<f64>,
 
-    /// Probability that a write failure is a torn write (a subset of bytes written
+    /// Probability that a write failure is a partial write (some bytes written
     /// before failure) rather than a complete failure (no bytes written).
     /// Only applies when `write_rate` triggers a failure.
-    /// Value from 0.0 (always complete failure) to 1.0 (always torn write).
-    ///
-    /// A torn write models a failed write followed by a crash: the surviving bytes
-    /// are an arbitrary subset per the crash model on [crate::Blob], not the
-    /// in-order prefix a live system would observe. Callers treat write failures
-    /// as fatal and reopen through recovery, so recovery is what observes the
-    /// injected state.
+    /// Value from 0.0 (always complete failure) to 1.0 (always partial write).
     pub partial_write_rate: Option<f64>,
 
     /// Failure rate for `sync` operations.
@@ -102,7 +96,7 @@ impl Config {
         self
     }
 
-    /// Set the torn write rate (probability of torn vs complete write failure).
+    /// Set the partial write rate (probability of partial vs complete write failure).
     pub const fn partial_write(mut self, rate: f64) -> Self {
         self.partial_write_rate = Some(rate);
         self
@@ -192,35 +186,13 @@ impl Oracle {
         Some(self.rng.lock().random_range(min + 1..max))
     }
 
-    /// Try to sample the byte runs of a torn write that persist, as sorted
-    /// `(start, len)` pairs. Returns None if the rate check fails or the write is
-    /// too small to tear.
-    ///
-    /// The write is cut into randomly sized runs and each run is kept or lost
-    /// independently, so the persisted subset can be a prefix, a suffix, or any
-    /// combination of interior runs (see the crash model on [crate::Blob]).
-    /// The result always keeps at least one byte and loses at least one byte.
-    fn try_tear(&self, rate: Option<f64>, len: usize) -> Option<Vec<(usize, usize)>> {
-        if len < 2 || !self.roll(rate) {
-            return None;
-        }
-        let mut rng = self.rng.lock();
-        let max_run = (len / 4).max(1);
-        loop {
-            let mut runs = Vec::new();
-            let mut kept = 0;
-            let mut start = 0;
-            while start < len {
-                let run = rng.random_range(1..=max_run.min(len - start));
-                if rng.random::<bool>() {
-                    runs.push((start, run));
-                    kept += run;
-                }
-                start += run;
-            }
-            if kept > 0 && kept < len {
-                return Some(runs);
-            }
+    /// Try to generate a partial operation target. Returns Some if both the rate
+    /// check passes and an intermediate value exists between `from` and `to`.
+    fn try_partial(&self, rate: Option<f64>, from: u64, to: u64) -> Option<u64> {
+        if self.roll(rate) {
+            self.random_between(from, to)
+        } else {
+            None
         }
     }
 }
@@ -311,6 +283,90 @@ impl<B: crate::Blob> Blob<B> {
             size: Arc::new(AtomicU64::new(size)),
         }
     }
+
+    async fn write_at_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        uncached: bool,
+    ) -> Result<(), Error> {
+        let total_bytes = bufs.remaining() as u64;
+
+        let (should_fail, partial_rate) = self.ctx.check_write_fault();
+        if should_fail {
+            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
+                // Partial write: write some bytes, sync, then fail
+                let bufs = bufs.coalesce().slice(..bytes as usize);
+                if uncached {
+                    self.inner.write_at_uncached(offset, bufs).await?;
+                } else {
+                    self.inner.write_at(offset, bufs).await?;
+                }
+                self.inner.sync().await?;
+                self.size
+                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
+                return Err(injected_io_error().into());
+            }
+            return Err(injected_io_error().into());
+        }
+
+        if uncached {
+            self.inner.write_at_uncached(offset, bufs).await?;
+        } else {
+            self.inner.write_at(offset, bufs).await?;
+        }
+        self.size
+            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn write_at_sync_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        uncached: bool,
+    ) -> Result<(), Error> {
+        let total_bytes = bufs.remaining() as u64;
+        if total_bytes == 0 {
+            return Ok(());
+        }
+
+        let (should_fail, partial_rate) = self.ctx.check_write_fault();
+        if should_fail {
+            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
+                let bufs = bufs.coalesce().slice(..bytes as usize);
+                if uncached {
+                    self.inner.write_at_sync_uncached(offset, bufs).await?;
+                } else {
+                    self.inner.write_at_sync(offset, bufs).await?;
+                }
+                self.size
+                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
+                return Err(injected_io_error().into());
+            }
+            return Err(injected_io_error().into());
+        }
+
+        if self.ctx.should_fail(Op::Sync) {
+            if uncached {
+                self.inner.write_at_uncached(offset, bufs).await?;
+            } else {
+                self.inner.write_at(offset, bufs).await?;
+            }
+            self.size
+                .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+            return Err(injected_io_error().into());
+        }
+
+        if uncached {
+            self.inner.write_at_sync_uncached(offset, bufs).await?;
+        } else {
+            self.inner.write_at_sync(offset, bufs).await?;
+        }
+        self.size
+            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
@@ -334,33 +390,15 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let total_bytes = bufs.remaining() as u64;
+        self.write_at_inner(offset, bufs.into(), false).await
+    }
 
-        let (should_fail, partial_rate) = self.ctx.check_write_fault();
-        if should_fail {
-            if let Some(runs) = self.ctx.try_tear(partial_rate, total_bytes as usize) {
-                // Torn write: persist a random subset of the write's byte runs, sync, then fail.
-                let bytes = bufs.coalesce();
-                let mut extent = 0;
-                for &(start, len) in &runs {
-                    self.inner
-                        .write_at(offset + start as u64, bytes.slice(start..start + len))
-                        .await?;
-                    extent = start + len;
-                }
-                self.inner.sync().await?;
-                self.size
-                    .fetch_max(offset.saturating_add(extent as u64), Ordering::Relaxed);
-                return Err(injected_io_error().into());
-            }
-            return Err(injected_io_error().into());
-        }
-
-        self.inner.write_at(offset, bufs).await?;
-        self.size
-            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
-        Ok(())
+    async fn write_at_uncached(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_inner(offset, bufs.into(), true).await
     }
 
     async fn write_at_sync(
@@ -368,52 +406,22 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let total_bytes = bufs.remaining() as u64;
-        if total_bytes == 0 {
-            return Ok(());
-        }
+        self.write_at_sync_inner(offset, bufs.into(), false).await
+    }
 
-        let (should_fail, partial_rate) = self.ctx.check_write_fault();
-        if should_fail {
-            if let Some(runs) = self.ctx.try_tear(partial_rate, total_bytes as usize) {
-                // Torn write: persist a random subset of the write's byte runs, sync, then fail.
-                let bytes = bufs.coalesce();
-                let mut extent = 0;
-                for &(start, len) in &runs {
-                    self.inner
-                        .write_at(offset + start as u64, bytes.slice(start..start + len))
-                        .await?;
-                    extent = start + len;
-                }
-                self.inner.sync().await?;
-                self.size
-                    .fetch_max(offset.saturating_add(extent as u64), Ordering::Relaxed);
-                return Err(injected_io_error().into());
-            }
-            return Err(injected_io_error().into());
-        }
-
-        if self.ctx.should_fail(Op::Sync) {
-            self.inner.write_at(offset, bufs).await?;
-            self.size
-                .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
-            return Err(injected_io_error().into());
-        }
-
-        self.inner.write_at_sync(offset, bufs).await?;
-        self.size
-            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
-        Ok(())
+    async fn write_at_sync_uncached(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_sync_inner(offset, bufs.into(), true).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let (should_fail, partial_rate) = self.ctx.check_resize_fault();
         if should_fail {
             let current = self.size.load(Ordering::Relaxed);
-            if self.ctx.roll(partial_rate)
-                && let Some(len) = self.ctx.random_between(current, len)
-            {
+            if let Some(len) = self.ctx.try_partial(partial_rate, current, len) {
                 // Partial resize: resize to an intermediate size, sync, then fail
                 self.inner.resize(len).await?;
                 self.inner.sync().await?;
@@ -439,10 +447,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return Handle::ready(Err(injected_io_error().into()));
         }
         self.inner.start_sync().await
-    }
-
-    fn hint_uncached_writes(&self) {
-        self.inner.hint_uncached_writes()
     }
 }
 
@@ -679,27 +683,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_torn_write() {
-        let h = Harness::new(Config::default());
+    async fn test_faulty_storage_partial_write() {
+        let h = Harness::new(Config::default().write(1.0).partial_write(1.0));
 
-        // Durably persist a baseline, then make every write fail as a torn write.
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        let baseline = vec![0x11u8; 64];
-        blob.write_at(0, baseline).await.unwrap();
-        blob.sync().await.unwrap();
-        h.config.write().write_rate = Some(1.0);
-        h.config.write().partial_write_rate = Some(1.0);
+        let data = b"hello world".to_vec();
+        let result = blob.write_at(0, data.clone()).await;
 
-        let update = vec![0x22u8; 64];
-        assert!(matches!(blob.write_at(0, update).await, Err(Error::Io(_))));
+        assert!(matches!(result, Err(Error::Io(_))));
 
-        // The torn write persisted some bytes and lost others, and every byte holds either
-        // its old or its new value (the crash model on [crate::Blob]).
-        let (inner_blob, _) = h.inner.open("partition", b"test").await.unwrap();
-        let read = inner_blob.read_at(0, 64).await.unwrap().coalesce();
-        assert!(read.as_ref().iter().all(|&b| b == 0x11 || b == 0x22));
-        assert!(read.as_ref().contains(&0x11), "some bytes must be lost");
-        assert!(read.as_ref().contains(&0x22), "some bytes must persist");
+        let (inner_blob, size) = h.inner.open("partition", b"test").await.unwrap();
+        let bytes_written = size as usize;
+        assert!(
+            bytes_written > 0 && bytes_written < data.len(),
+            "Expected partial write: {bytes_written} bytes out of {}",
+            data.len()
+        );
+
+        let read_result = inner_blob.read_at(0, bytes_written).await.unwrap();
+        assert_eq!(read_result.coalesce().as_ref(), &data[..bytes_written]);
     }
 
     #[tokio::test]
