@@ -21,8 +21,7 @@
 //! groups one or more databases into a single unit.
 //!
 //! The [`db::p2p`] submodule provides a P2P resolver actor
-//! ([`db::p2p::standard`], implementing
-//! [`commonware_storage::qmdb::sync::Source`]) over
+//! (implementing [`commonware_storage::qmdb::sync::Source`]) over
 //! [`commonware-resolver`](commonware_resolver), enabling databases to fetch
 //! and serve sync operations from peers.
 //!

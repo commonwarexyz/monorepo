@@ -9,7 +9,7 @@ use crate::{
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p::standard as qmdb_resolver,
+            p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
