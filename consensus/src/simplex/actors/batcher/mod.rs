@@ -467,7 +467,7 @@ mod tests {
         );
     }
 
-    fn certified_vote_outcome(retain_votes_after_certification: bool) -> (bool, bool) {
+    fn certified_conflict_reported(retain_votes_after_certification: bool) -> bool {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -492,28 +492,26 @@ mod tests {
 
         let notarization = build_notarization(&schemes, &proposal, quorum(5) as usize);
         assert!(round.record_certificate(&Certificate::Notarization(notarization)));
-        let retained = round.has_notarize(signer);
 
         let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
         assert!(!round.add_network(
             participants[0].clone(),
             Vote::Notarize(Notarize::sign(&schemes[0], conflicting).unwrap()),
         ));
-        let conflict_reported = activities
+        activities
             .lock()
             .iter()
-            .any(|activity| matches!(activity, Activity::ConflictingNotarize(_)));
-        (retained, conflict_reported)
+            .any(|activity| matches!(activity, Activity::ConflictingNotarize(_)))
     }
 
     #[test]
     fn test_certificate_releases_votes_without_retention() {
-        assert_eq!(certified_vote_outcome(false), (false, false));
+        assert!(!certified_conflict_reported(false));
     }
 
     #[test]
     fn test_certificate_retains_votes_when_configured() {
-        assert_eq!(certified_vote_outcome(true), (true, true));
+        assert!(certified_conflict_reported(true));
     }
 
     #[test]

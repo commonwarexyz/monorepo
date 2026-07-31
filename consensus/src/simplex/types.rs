@@ -341,39 +341,6 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
     }
 
-    #[cfg(test)]
-    fn remember_notarize(&mut self, signer: Participant, has_proposal: bool) -> bool {
-        Self::remember(
-            self.participants,
-            &mut self.compacted,
-            signer,
-            Self::NOTARIZE_SEEN,
-            has_proposal.then_some(Self::NOTARIZE_HAS_PROPOSAL),
-        )
-    }
-
-    #[cfg(test)]
-    fn remember_nullify(&mut self, signer: Participant) -> bool {
-        Self::remember(
-            self.participants,
-            &mut self.compacted,
-            signer,
-            Self::NULLIFY_SEEN,
-            None,
-        )
-    }
-
-    #[cfg(test)]
-    fn remember_finalize(&mut self, signer: Participant, has_proposal: bool) -> bool {
-        Self::remember(
-            self.participants,
-            &mut self.compacted,
-            signer,
-            Self::FINALIZE_SEEN,
-            has_proposal.then_some(Self::FINALIZE_HAS_PROPOSAL),
-        )
-    }
-
     /// Returns whether `signer` previously nullified, including compact state.
     pub(crate) fn saw_nullify(&self, signer: Participant) -> bool {
         self.nullify(signer).is_some() || self.remembered(signer, Self::NULLIFY_SEEN)
@@ -3766,30 +3733,38 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_vote_tracker_clears_compacted_state() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 2);
+        let round = Round::new(Epoch::new(0), View::new(1));
         let mut tracker = VoteTracker::<ed25519::Scheme, Sha256>::new(2, false);
         let signer = Participant::new(1);
-        let proposal = Proposal::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            View::zero(),
-            sample_digest(1),
-        );
+        let scheme = &fixture.schemes[usize::from(signer)];
+        let proposal = Proposal::new(round, View::zero(), sample_digest(1));
+        let notarize = Vote::Notarize(Notarize::sign(scheme, proposal.clone()).unwrap());
+        let nullify = Vote::Nullify(Nullify::sign::<Sha256>(scheme, round).unwrap());
+        let finalize = Vote::Finalize(Finalize::sign(scheme, proposal.clone()).unwrap());
 
-        assert!(tracker.remember_notarize(signer, true));
-        assert!(tracker.remember_nullify(signer));
-        assert!(tracker.remember_finalize(signer, true));
-        assert!(!tracker.remember_notarize(Participant::new(2), true));
+        tracker.release_notarizes(&proposal);
+        tracker.release_nullifies();
+        tracker.release_finalizes(&proposal);
+        assert!(tracker.record(&notarize, Some(&proposal)).inserted);
+        assert!(tracker.record(&nullify, Some(&proposal)).inserted);
+        assert!(tracker.record(&finalize, Some(&proposal)).inserted);
         assert!(tracker.has_notarize_for(signer, &proposal));
+        assert!(tracker.saw_nullify(signer));
         assert!(tracker.has_finalize_for(signer, &proposal));
 
         tracker.clear_notarizes();
         assert!(!tracker.has_notarize_for(signer, &proposal));
+        assert!(tracker.record(&notarize, Some(&proposal)).inserted);
 
-        assert!(!tracker.remember_nullify(signer));
         tracker.clear_nullifies();
-        assert!(tracker.remember_nullify(signer));
+        assert!(!tracker.saw_nullify(signer));
+        assert!(tracker.record(&nullify, Some(&proposal)).inserted);
 
         tracker.clear_finalizes();
         assert!(!tracker.has_finalize_for(signer, &proposal));
+        assert!(tracker.record(&finalize, Some(&proposal)).inserted);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

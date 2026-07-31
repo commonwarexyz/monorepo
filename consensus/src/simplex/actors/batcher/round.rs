@@ -355,11 +355,6 @@ impl<
         self.votes.has_nullify(signer)
     }
 
-    #[cfg(test)]
-    pub(super) fn has_notarize(&self, signer: Participant) -> bool {
-        self.votes.has_notarize(signer)
-    }
-
     /// Returns participant indices whose matching vote for `proposal` was not
     /// observed locally.
     ///
