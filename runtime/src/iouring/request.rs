@@ -9,12 +9,13 @@ use super::waiter::{WaiterId, WaiterState};
 use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs};
 use commonware_utils::channel::oneshot;
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
-#[cfg(feature = "iouring-storage")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     fs::File,
     os::fd::{AsRawFd, OwnedFd},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -514,7 +515,7 @@ pub(crate) enum Cache {
     /// Use the operating system's normal page-cache behavior.
     Enabled,
     /// Best-effort bypass of the page cache while the backend supports it.
-    #[cfg(feature = "iouring-storage")]
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     Disabled(Arc<AtomicBool>),
 }
 
@@ -524,9 +525,7 @@ impl Cache {
     /// already found the hint unsupported.
     fn rw_flag(&mut self) -> i32 {
         match self {
-            #[cfg(feature = "iouring-storage")]
             Self::Disabled(supported) if supported.load(Ordering::Relaxed) => libc::RWF_DONTCACHE,
-            #[cfg(feature = "iouring-storage")]
             Self::Disabled(_) => {
                 *self = Self::Enabled;
                 0
@@ -538,7 +537,6 @@ impl Cache {
     /// Record that cache bypass is unsupported and use normal caching when retried.
     fn fallback(&mut self) -> bool {
         match std::mem::replace(self, Self::Enabled) {
-            #[cfg(feature = "iouring-storage")]
             Self::Disabled(supported) => {
                 supported.store(false, Ordering::Relaxed);
                 true
@@ -1363,7 +1361,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "iouring-storage")]
     #[test]
     fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
         let dont_cache_supported = Arc::new(AtomicBool::new(true));
