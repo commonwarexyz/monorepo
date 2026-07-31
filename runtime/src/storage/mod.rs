@@ -10,8 +10,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
     /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
     ///   crash-durable.
-    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`; it needs admin and is skipped
-    ///   otherwise, so it is **not** crash-durable.
     ///
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
     /// >= 5.8. A missing `dir` is treated as success.
@@ -34,56 +32,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     "made storage filesystem durable at startup (syncfs)"
                 );
                 Ok(())
-            } else if #[cfg(unix)] {
+            } else {
                 // SAFETY: `sync` takes no arguments and cannot fail.
                 unsafe { libc::sync() };
                 tracing::debug!(
                     storage_directory = %dir.display(),
                     "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
-                );
-                Ok(())
-            } else if #[cfg(windows)] {
-                // Resolve the volume containing `dir` (e.g. `C:\...` -> `\\.\C:`). `sync_all` on a
-                // volume handle is `FlushFileBuffers`, which flushes every open file on the volume.
-                // Best-effort (see fn docs): opening the volume needs admin, so a failure (or a
-                // non-disk storage path) is logged, not fatal.
-                use std::path::{Component, Prefix};
-                let volume = dir.components().next().and_then(|component| match component {
-                    Component::Prefix(prefix) => match prefix.kind() {
-                        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
-                            Some(format!(r"\\.\{}:", drive as char))
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                });
-                let flushed = volume.as_deref().map(|volume| {
-                    std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(volume)
-                        .and_then(|handle| handle.sync_all())
-                });
-                match flushed {
-                    Some(Ok(())) => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        "made storage volume durable at startup (FlushFileBuffers)"
-                    ),
-                    Some(Err(e)) => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        error = %e,
-                        "best-effort volume flush skipped at startup; not crash-durable"
-                    ),
-                    None => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        "unable to guarantee storage durability at startup"
-                    ),
-                }
-                Ok(())
-            } else {
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "no whole-filesystem durable flush on this platform; recovered-data durability not guaranteed"
                 );
                 Ok(())
             }

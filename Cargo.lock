@@ -2017,7 +2017,6 @@ dependencies = [
  "ahash",
  "arbitrary",
  "bytes",
- "cfg-if",
  "commonware-codec",
  "commonware-conformance",
  "commonware-formatting",

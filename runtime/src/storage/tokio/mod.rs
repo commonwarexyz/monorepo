@@ -1,24 +1,22 @@
 use super::Header;
 use crate::{BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
-#[cfg(unix)]
-use std::path::Path;
-use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
+use std::{
+    ops::RangeInclusive,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
 };
 
-#[cfg(not(unix))]
-mod fallback;
-#[cfg(unix)]
 mod unix;
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly
 /// fsynced.
-#[cfg(unix)]
 async fn sync_dir(path: &Path) -> Result<(), Error> {
     let dir = fs::File::open(path).await.map_err(|e| {
         Error::BlobOpenFailed(
@@ -84,10 +82,7 @@ impl Storage {
 }
 
 impl crate::Storage for Storage {
-    #[cfg(unix)]
     type Blob = unix::Blob;
-    #[cfg(not(unix))]
-    type Blob = fallback::Blob;
 
     async fn open_versioned(
         &self,
@@ -149,16 +144,9 @@ impl crate::Storage for Storage {
                     // header always implies durable directory entries (an open that
                     // parses a header never re-runs these). The storage directory is
                     // synced unconditionally: the partition directory existing in the
-                    // namespace does not imply its entry is durable. (Windows has no
-                    // notion of syncing a directory entry; see
-                    // https://github.com/commonwarexyz/monorepo/issues/2026.)
-                    #[cfg(unix)]
-                    {
-                        sync_dir(&parent).await?;
-                        sync_dir(&storage_directory).await?;
-                    }
-                    #[cfg(not(unix))]
-                    let _ = (parent, storage_directory);
+                    // namespace does not imply its entry is durable.
+                    sync_dir(&parent).await?;
+                    sync_dir(&storage_directory).await?;
 
                     // Truncate to zero before writing, per the [Header::create] contract.
                     let (region, blob_version) = Header::create(&versions);
@@ -185,7 +173,6 @@ impl crate::Storage for Storage {
         };
 
         // Convert to a blocking std::fs::File
-        #[cfg(unix)]
         let file = file.into_std().await;
 
         // Construct the blob while still holding the filesystem lock.
@@ -209,9 +196,6 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
 
             // Sync the partition directory to ensure the removal is durable.
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
             sync_dir(&path).await?;
         } else {
             fs::remove_dir_all(&path)
@@ -219,9 +203,6 @@ impl crate::Storage for Storage {
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
 
             // Sync the storage directory to ensure the removal is durable.
-            // Windows doesn't have a notion of syncing a directory entry to ensure that it's
-            // durably persisted. See https://github.com/commonwarexyz/monorepo/issues/2026.
-            #[cfg(unix)]
             sync_dir(&self.cfg.storage_directory).await?;
         }
         Ok(())
