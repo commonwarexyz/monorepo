@@ -1,6 +1,6 @@
 //! Property suites shared by field and group backends.
 
-use super::{Backend, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES};
+use super::{Backend, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, WithBackend};
 use arbitrary::Unstructured;
 
 const MASK_51: u64 = (1 << 51) - 1;
@@ -64,6 +64,14 @@ fn assert_f_eq(actual: FVec, expected: FVec, property: &str) {
     }
 }
 
+fn assert_f_nonzero(value: FVec, property: &str) {
+    assert_bounded(value);
+    for lane in 0..LANES {
+        let value = canonical(value.limbs.map(|limbs| limbs[lane]));
+        assert_ne!(value, [0; 5], "{property}, lane {lane}");
+    }
+}
+
 fn identity() -> GVec {
     GVec {
         x: F::ZERO.splat(),
@@ -121,6 +129,14 @@ fn scale<B: GBackend>(backend: B, point: GVec, mut scalar: u32) -> GVec {
 }
 
 fn assert_g_eq<B: FBackend>(backend: B, actual: GVec, expected: GVec, property: &str) {
+    for coordinate in [actual.x, actual.y, actual.t, actual.z] {
+        assert_bounded(coordinate);
+    }
+    for coordinate in [expected.x, expected.y, expected.t, expected.z] {
+        assert_bounded(coordinate);
+    }
+    assert_f_nonzero(actual.z, property);
+    assert_f_nonzero(expected.z, property);
     assert_f_eq(
         backend.mul(actual.x, expected.z),
         backend.mul(expected.x, actual.z),
@@ -139,6 +155,10 @@ fn assert_g_eq<B: FBackend>(backend: B, actual: GVec, expected: GVec, property: 
 }
 
 fn assert_on_curve<B: FBackend>(backend: B, point: GVec) {
+    for coordinate in [point.x, point.y, point.t, point.z] {
+        assert_bounded(coordinate);
+    }
+    assert_f_nonzero(point.z, "projective Z coordinate");
     let lhs = backend.sub(backend.square(point.y), backend.square(point.x));
     let rhs = backend.add(
         backend.square(point.z),
@@ -268,8 +288,41 @@ pub(super) fn fuzz_backend<B: Backend>(
     }
 }
 
+/// Compares field operations at the loosest input allowed by [`FVec`].
+pub(super) fn check_backend_at_bounds<R: Backend, B: Backend>(reference: R, backend: B) {
+    let max = FVec {
+        limbs: [[MASK_52; LANES]; 5],
+    };
+    let zero = F::ZERO.splat();
+    assert_f_eq(
+        reference.add(max, max),
+        backend.add(max, max),
+        "backend addition at bound",
+    );
+    assert_f_eq(
+        reference.sub(zero, max),
+        backend.sub(zero, max),
+        "backend subtraction at bound",
+    );
+    assert_f_eq(
+        reference.neg(max),
+        backend.neg(max),
+        "backend negation at bound",
+    );
+    assert_f_eq(
+        reference.mul(max, max),
+        backend.mul(max, max),
+        "backend multiplication at bound",
+    );
+    assert_f_eq(
+        reference.square(max),
+        backend.square(max),
+        "backend square at bound",
+    );
+}
+
 /// Compares a backend's field and group operations with a reference backend.
-fn fuzz_backend_against<R: Backend, B: Backend>(
+pub(super) fn fuzz_backend_against<R: Backend, B: Backend>(
     u: &mut Unstructured<'_>,
     reference: R,
     backend: B,
@@ -317,4 +370,56 @@ fn fuzz_backend_against<R: Backend, B: Backend>(
         "backend mixed addition",
     );
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct DispatchComputation {
+    field: FVec,
+    point: GVec,
+    affine: GAffineVec,
+}
+
+impl WithBackend for DispatchComputation {
+    type Output = (FVec, GVec);
+
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        let field = backend.sub(
+            backend.add(
+                backend.mul(self.field, self.point.x),
+                backend.square(self.point.y),
+            ),
+            backend.neg(self.field),
+        );
+        let point = backend.g_add_mixed(
+            backend.g_add(backend.g_double(self.point), self.point),
+            self.affine,
+        );
+        (field, point)
+    }
+}
+
+/// Checks the runtime dispatch path as one multi-operation computation.
+#[test]
+fn with_backend_matches_portable() {
+    let portable = super::portable::Backend::new();
+    let basepoint = basepoint(portable);
+    let point = scale(portable, basepoint, 13);
+    let computation = DispatchComputation {
+        field: point.x,
+        point,
+        affine: GAffineVec {
+            x: basepoint.x,
+            y: basepoint.y,
+            t2d: portable.mul(basepoint.t, F::EDWARDS_D2.splat()),
+        },
+    };
+    let expected = computation.call(portable);
+    let actual = super::with_backend(computation);
+    assert_f_eq(actual.0, expected.0, "runtime-dispatched field computation");
+    assert_g_eq(
+        portable,
+        actual.1,
+        expected.1,
+        "runtime-dispatched group computation",
+    );
 }
