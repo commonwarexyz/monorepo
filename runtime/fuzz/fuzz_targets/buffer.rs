@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
-    Blob, BufferPoolConfig, BufferPooler, Runner, Storage,
+    Blob, BufferPoolConfig, BufferPooler, Runner, Storage, WriteOptions,
     buffer::{
         Read, Write,
         paged::{CacheRef, Writer},
@@ -124,7 +124,9 @@ fn fuzz(input: FuzzInput) {
         let prefill = (input.seed as usize) & 0x0FFF;
         if prefill > 0 && initial_size == 0 {
             let initial_data: Vec<u8> = (0..prefill).map(|i| i as u8).collect();
-            let _ = blob.write_at(0, initial_data).await;
+            let _ = blob
+                .write_at(0, initial_data, WriteOptions::default())
+                .await;
         }
 
         let mut read_buffer = None;
@@ -150,7 +152,9 @@ fn fuzz(input: FuzzInput) {
                     if size == 0 && blob_size > 0 {
                         let data: Vec<u8> = (0..blob_size).map(|i| i as u8).collect();
                         if (0u64).checked_add(data.len() as u64).is_some() {
-                            blob.write_at(0, data).await.expect("cannot write");
+                            blob.write_at(0, data, WriteOptions::default())
+                                .await
+                                .expect("cannot write");
                         }
                     }
 

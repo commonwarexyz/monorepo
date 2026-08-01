@@ -14,7 +14,9 @@ fn test_storage_operations() {
             .await
             .expect("open blob");
 
-        blob.write_at(0, vec![1, 2, 3, 4]).await.expect("write");
+        blob.write_at(0, vec![1, 2, 3, 4], WriteOptions::default())
+            .await
+            .expect("write");
         let data = blob.read_at(0, 4).await.expect("read").coalesce();
         assert_eq!(data.as_ref(), &[1, 2, 3, 4]);
         blob.sync().await.expect("sync");

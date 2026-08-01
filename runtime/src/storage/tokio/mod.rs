@@ -245,7 +245,7 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _,
+        Blob, BufferPoolConfig, Storage as _, WriteOptions,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -284,7 +284,9 @@ mod tests {
         let storage = Storage::new(config, test_pool());
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Drop the completion receiver immediately.
         drop(blob.start_sync().await);
@@ -323,7 +325,9 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at the data offset
         let data = b"hello world";
-        blob.write_at(0, data).await.unwrap();
+        blob.write_at(0, data, WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -366,7 +370,9 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(0, b"test data").await.unwrap();
+        blob.write_at(0, b"test data", WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
@@ -483,7 +489,9 @@ mod tests {
             std::fs::write(&path, &state).unwrap();
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 
@@ -566,7 +574,9 @@ mod tests {
             // Retry, write data, and confirm it survives reopen.
             let (blob, size) = storage.open("partition", name).await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
             let (blob, size) = storage.open("partition", name).await.unwrap();
@@ -642,7 +652,9 @@ mod tests {
             blob.read_at(0, payload.len()).await.unwrap().coalesce(),
             payload
         );
-        blob.write_at(size, b"!".to_vec()).await.unwrap();
+        blob.write_at(size, b"!".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
