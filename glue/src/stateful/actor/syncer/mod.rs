@@ -227,13 +227,15 @@ where
         }
     }
 
-    /// Marks state sync as in progress for the resolved floor.
+    /// Marks state sync as in progress for the initial floor.
     ///
     /// This must be persisted before any state sync database mutation begins so the database
-    /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
+    /// sync engine can reopen partial sync state after a crash. Once set, marshal's archived tip
+    /// selects newer resume targets without duplicating that progress here.
     ///
-    /// If an interrupted state sync already stored a floor, the newly selected
-    /// floor must resume from the same or a later consensus round.
+    /// If an interrupted state sync already stored a floor, the newly selected floor must resume
+    /// from the same or a later consensus round. The original floor remains the durable bootstrap
+    /// anchor until state sync completes.
     pub(crate) async fn begin_sync(mut self, floor: Finalization<S, C>) -> Self {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(existing)) => {
@@ -246,8 +248,8 @@ where
                         floor.proposal.payload == existing.proposal.payload,
                         "selected state sync floor conflicts with the persisted in-progress round",
                     );
-                    return self;
                 }
+                return self;
             }
             Some(SyncState::Complete(_)) => {
                 panic!("completed state sync cannot be marked in-progress");
@@ -285,7 +287,41 @@ where
     }
 }
 
-/// Resolves the selected state sync floor into its anchor and targets.
+/// Selects the newest state sync floor available from marshal's finalized archive.
+///
+/// The runtime flushes storage before opening it at startup, and marshal eventually dispatches
+/// every archived finalization through its durability-gated application stream. The archive may
+/// still be empty while marshal fetches a remote startup floor, in which case the selected floor
+/// remains the target.
+pub(crate) async fn select_state_sync_floor<S, V>(
+    marshal: &MarshalMailbox<S, V>,
+    selected: &Finalization<S, V::Commitment>,
+) -> Finalization<S, V::Commitment>
+where
+    S: Scheme,
+    V: Variant,
+{
+    let latest = loop {
+        let Some((height, _)) = marshal.get_info(Identifier::Latest).await else {
+            return selected.clone();
+        };
+        if let Some(finalization) = marshal.get_finalization(height).await {
+            break finalization;
+        }
+    };
+    if latest.round() < selected.round() {
+        return selected.clone();
+    }
+    if latest.round() == selected.round() {
+        assert!(
+            latest.proposal.payload == selected.proposal.payload,
+            "marshal's latest finalization conflicts with the selected state sync floor",
+        );
+    }
+    latest
+}
+
+/// Resolves the newest available state sync floor into its anchor and targets.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     finalization: &Finalization<S, V::Commitment>,
@@ -296,16 +332,32 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
+    let finalization = select_state_sync_floor(marshal, finalization).await;
+
     // Wait to retrieve the floor block from marshal. We use `Wait` here,
     // since marshal triggers a fetch for the floor block if it is not
     // already available.
-    let floor = {
+    let mut floor = {
         let block = marshal
             .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
             .await
             .expect("marshal must yield floor block");
         V::into_inner_shared(block)
     };
+
+    // A subscription is notified before marshal finishes the actor turn that archives a newly
+    // fetched startup floor. This follow-up mailbox round observes that completed turn and also
+    // picks up any newer archived finalization that arrived while the floor was being fetched.
+    let latest = select_state_sync_floor(marshal, &finalization).await;
+    if latest.proposal.payload != finalization.proposal.payload {
+        floor = {
+            let block = marshal
+                .subscribe_by_commitment(latest.proposal.payload, CommitmentFallback::Wait)
+                .await
+                .expect("marshal must yield latest floor block");
+            V::into_inner_shared(block)
+        };
+    }
 
     ResolvedFloor {
         anchor: Anchor::from(floor.as_ref()),

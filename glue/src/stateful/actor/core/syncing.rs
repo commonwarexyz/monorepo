@@ -12,11 +12,9 @@ use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Block, Epochable, Heightable, Viewable,
     marshal::{
-        Identifier,
         ancestry::{BlockProvider, BoxedAncestry},
         core::{Mailbox as MarshalMailbox, Variant},
     },
-    types::Height,
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::{select, select_loop};
@@ -50,9 +48,9 @@ enum FinalizedHandoff<B> {
 
 /// A finalized block retained with its marshal acknowledgement while state sync is active.
 ///
-/// The acknowledgement remains paired with the block until a certified recovery floor covers it
-/// and either the full window's newest target is recorded or the block is durably handed off after
-/// state sync completes.
+/// The acknowledgement remains paired with the block until either the full window's newest target
+/// is recorded or the block is durably handed off after state sync completes. Marshal archives the
+/// block and its certifying finalization before dispatch, so that durable tip is the restart floor.
 pub(super) struct PendingFinalization<B> {
     block: B,
     acknowledgement: Exact,
@@ -103,9 +101,6 @@ where
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
 
-    /// Highest finalized height covered by durable state-sync recovery metadata.
-    pub(super) recovery_frontier: Option<Height>,
-
     /// Unacknowledged finalizations retained until the window retargets or sync completes.
     pub(super) pending_finalizations: VecDeque<PendingFinalization<Arc<A::Block>>>,
 
@@ -141,19 +136,6 @@ where
                 error!("syncer stopped before publishing state sync artifact");
                 break;
             } => {
-                // Handoff can durably advance databases before completion metadata is written.
-                // Persist a certified restart floor before releasing any pending acknowledgement.
-                if let Some(height) = self
-                    .pending_finalizations
-                    .back()
-                    .map(|pending| pending.block.height())
-                {
-                    let covered;
-                    (self, covered) = self.ensure_recovery_frontier(height).await;
-                    if !covered {
-                        return;
-                    }
-                }
                 self.artifact = Some(artifact);
                 let finalized = std::mem::take(&mut self.pending_finalizations);
                 let handoffs = self.prepare_handoffs(finalized);
@@ -254,12 +236,6 @@ where
             .expect("full acknowledgement window must contain a block")
             .block
             .clone();
-        let covered;
-        (self, covered) = self.ensure_recovery_frontier(newest.height()).await;
-        if !covered {
-            return (self, None);
-        }
-
         let observed;
         (self, observed) = self.update_target(&newest).await;
         if !observed {
@@ -275,36 +251,6 @@ where
             pending.acknowledgement.acknowledge();
         }
         (self, None)
-    }
-
-    /// Ensure restart can recover every finalized block through `height`.
-    async fn ensure_recovery_frontier(mut self, height: Height) -> (Self, bool) {
-        if self
-            .recovery_frontier
-            .is_some_and(|frontier| frontier >= height)
-        {
-            return (self, true);
-        }
-
-        let (frontier, _) = select! {
-            _ = self.context.stopped() => return (self, false),
-            latest = self.marshal.get_info(Identifier::Latest) => {
-                latest.expect("marshal must retain a certificate for each finalized block")
-            },
-        };
-        assert!(
-            frontier >= height,
-            "certifying marshal tip cannot precede a finalized block",
-        );
-        let finalization = select! {
-            _ = self.context.stopped() => return (self, false),
-            finalization = self.marshal.get_finalization(frontier) => {
-                finalization.expect("latest finalized marshal block must have a certificate")
-            },
-        };
-        self.sync_metadata = self.sync_metadata.begin_sync(finalization).await;
-        self.recovery_frontier = Some(frontier);
-        (self, true)
     }
 
     /// Record `block` as the live sync target.
@@ -634,7 +580,6 @@ mod tests {
                     artifact: None,
                     resolvers: NoopResolver,
                     sync_completed,
-                    recovery_frontier: None,
                     pending_finalizations: VecDeque::new(),
                     prune_config: None,
                     metrics: StatefulMetrics::new(&context),
@@ -692,7 +637,6 @@ mod tests {
                     }),
                     resolvers: NoopResolver,
                     sync_completed,
-                    recovery_frontier: None,
                     pending_finalizations: VecDeque::new(),
                     prune_config: None,
                     metrics: StatefulMetrics::new(&context),
@@ -971,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_window_persists_recovery_floor_before_handoff_acknowledgement() {
+    fn partial_window_uses_marshal_tip_before_completion_metadata() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let initial = fixtures::finalization(&fixture, 7, Sha256::fill(9));
@@ -984,11 +928,12 @@ mod tests {
                 context.child("marshal"),
                 "syncing-harness",
                 fixture.schemes[0].clone(),
-                Some((&newest, newest_finalization)),
+                Some((&newest, newest_finalization.clone())),
                 NZUsize!(3),
                 true,
             )
             .await;
+            let restart_marshal = marshal.clone();
 
             let pending = PendingSyncs::default();
             pending.unblock();
@@ -1003,7 +948,11 @@ mod tests {
             let (mut harness, mut mailbox, _syncer_receiver, sync_complete) =
                 TestHarness::new_syncing_on(context.child("harness"), syncing_context, marshal)
                     .await;
-            harness.syncing.sync_metadata = harness.syncing.sync_metadata.begin_sync(initial).await;
+            harness.syncing.sync_metadata = harness
+                .syncing
+                .sync_metadata
+                .begin_sync(initial.clone())
+                .await;
             let actor = context
                 .child("syncing_actor")
                 .spawn(move |_| harness.syncing.start());
@@ -1034,7 +983,7 @@ mod tests {
             }
 
             pending.arm();
-            let recovery_gate = next_pending_sync(&pending);
+            let completion_gate = next_pending_sync(&pending);
             assert!(
                 sync_complete
                     .send(SyncResult {
@@ -1043,26 +992,33 @@ mod tests {
                     })
                     .is_ok()
             );
-            recovery_gate
+            completion_gate
                 .blocked
                 .await
-                .expect("partial handoff must first persist its recovery floor");
+                .expect("partial handoff must reach completion metadata");
             for waiter in &mut waiters {
                 assert!(
-                    poll!(waiter).is_pending(),
-                    "handoff acknowledgement must wait for the recovery floor",
+                    poll!(waiter).is_ready(),
+                    "durable handoff should acknowledge before completion metadata",
                 );
             }
-            recovery_gate
+            let (latest, _) = restart_marshal
+                .get_info(marshal::Identifier::Latest)
+                .await
+                .expect("marshal must retain the partial handoff's certifying tip");
+            assert_eq!(latest, Height::new(9));
+            assert_eq!(
+                syncer::select_state_sync_floor(&restart_marshal, &initial).await,
+                newest_finalization,
+            );
+
+            completion_gate
                 .release
                 .send(Ok(()))
-                .expect("recovery floor must be waiting on the metadata flush");
+                .expect("completion must be waiting on the metadata flush");
 
             drop(mailbox);
             actor.await.expect("syncing actor failed");
-            for waiter in waiters {
-                assert!(waiter.await.is_ok());
-            }
 
             let reopened =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
@@ -1094,7 +1050,6 @@ mod tests {
             let harness = harness
                 .advance_full_ack_window(&context, &mut syncer_receiver)
                 .await;
-            assert_eq!(harness.syncing.recovery_frontier, Some(Height::new(10)));
             let actor = context
                 .child("syncing_actor")
                 .spawn(move |_| harness.syncing.start());
@@ -1117,9 +1072,35 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_during_retarget_window_restarts_from_acknowledged_floor() {
+    fn selected_floor_is_used_while_marshal_archive_is_empty() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let selected = fixtures::finalization(&fixture, 7, Sha256::fill(9));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "syncing-harness",
+                fixture.schemes[0].clone(),
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+
+            assert_eq!(
+                syncer::select_state_sync_floor(&marshal, &selected).await,
+                selected,
+            );
+        });
+    }
+
+    #[test]
+    fn shutdown_during_retarget_window_keeps_initial_floor_and_marshal_tip() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let initial = fixtures::finalization(&fixture, 7, Sha256::fill(9));
             let newest = TestBlock::new(10, 12);
             let newest_finalization = fixtures::finalization(&fixture, 10, Sha256::fill(12));
             let MarshalFixture {
@@ -1134,14 +1115,21 @@ mod tests {
                 true,
             )
             .await;
-            let (harness, _mailbox, mut syncer_receiver, _sync_complete) =
+            let restart_marshal = marshal.clone();
+            let (mut harness, _mailbox, mut syncer_receiver, _sync_complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
+            harness.syncing.sync_metadata = harness
+                .syncing
+                .sync_metadata
+                .begin_sync(initial.clone())
+                .await;
             let harness = harness
                 .advance_full_ack_window(&context, &mut syncer_receiver)
                 .await;
             assert_eq!(
                 harness.syncing.sync_metadata.in_progress_floor(),
-                Some(&newest_finalization),
+                Some(&initial),
+                "retargeting must not duplicate marshal's durable tip in stateful metadata",
             );
 
             // Drop all volatile retarget state after marshal has acknowledged the window.
@@ -1157,12 +1145,28 @@ mod tests {
             let floor = plan
                 .floor()
                 .cloned()
-                .expect("the acknowledged recovery floor must survive shutdown");
-            assert_eq!(floor, newest_finalization);
+                .expect("the initial state sync floor must survive shutdown");
+            assert_eq!(floor, initial);
             assert!(matches!(
                 plan.marshal_start(()),
                 marshal::Start::Floor(ref selected) if selected == &floor
             ));
+
+            let (latest, _) = restart_marshal
+                .get_info(marshal::Identifier::Latest)
+                .await
+                .expect("marshal must retain its latest archived finalized block");
+            assert_eq!(latest, Height::new(10));
+            assert_eq!(
+                restart_marshal.get_finalization(latest).await.as_ref(),
+                Some(&newest_finalization),
+                "marshal's durable certificate must provide the QMDB restart target",
+            );
+            assert_eq!(
+                syncer::select_state_sync_floor(&restart_marshal, &floor).await,
+                newest_finalization,
+                "restarted state sync must select marshal's durable tip",
+            );
         });
     }
 
@@ -1170,6 +1174,7 @@ mod tests {
     fn target_observation_shutdown_preserves_floor_without_acknowledging() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let initial = fixtures::finalization(&fixture, 7, Sha256::fill(9));
             let block = TestBlock::new(8, 10);
             let finalization = fixtures::finalization(&fixture, 8, Sha256::fill(10));
             let MarshalFixture {
@@ -1184,8 +1189,13 @@ mod tests {
                 true,
             )
             .await;
-            let (harness, _mailbox, mut syncer_receiver, _sync_complete) =
+            let (mut harness, _mailbox, mut syncer_receiver, _sync_complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
+            harness.syncing.sync_metadata = harness
+                .syncing
+                .sync_metadata
+                .begin_sync(initial.clone())
+                .await;
 
             let (acknowledgement, mut waiter) = Exact::handle();
             let process = context.child("process_finalized").spawn(move |_| {
@@ -1213,8 +1223,8 @@ mod tests {
             assert!(handoff.is_none());
             assert_eq!(
                 syncing.sync_metadata.in_progress_floor(),
-                Some(&finalization),
-                "the pending block must remain covered after observation is canceled",
+                Some(&initial),
+                "target observation must not duplicate marshal progress in stateful metadata",
             );
             drop(syncing);
             drop(pending_update);
@@ -1223,12 +1233,12 @@ mod tests {
         });
     }
 
-    /// A transitively finalized ancestor persists its certifying descendant before marshal is
-    /// acknowledged.
+    /// A transitively finalized ancestor restarts from its durable certifying descendant.
     #[test]
-    fn retarget_transitive_ancestor_persists_descendant_floor() {
+    fn retarget_transitive_ancestor_restarts_from_descendant() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+            let initial = fixtures::finalization(&fixture, 7, Sha256::fill(9));
             let block = TestBlock::new(8, 10);
             let descendant = TestBlock::new(9, 11);
             let finalization = fixtures::finalization(&fixture, 9, Sha256::fill(11));
@@ -1244,38 +1254,21 @@ mod tests {
                 true,
             )
             .await;
-            let pending = PendingSyncs::default();
-            let syncing_context = DelayedSyncContext {
-                inner: context.child("delayed"),
-                pending: pending.clone(),
-            };
-            let (harness, _mailbox, mut syncer_receiver, _sync_complete) =
-                TestHarness::new_syncing_on(context.child("harness"), syncing_context, marshal)
-                    .await;
+            let restart_marshal = marshal.clone();
+            let (mut harness, _mailbox, mut syncer_receiver, _sync_complete) =
+                TestHarness::new_syncing(context.child("harness"), marshal).await;
+            harness.syncing.sync_metadata = harness
+                .syncing
+                .sync_metadata
+                .begin_sync(initial.clone())
+                .await;
 
-            let (acknowledgement, mut waiter) = Exact::handle();
-            pending.arm();
+            let (acknowledgement, waiter) = Exact::handle();
             let process = context.child("retarget").spawn(move |_| {
                 harness
                     .syncing
                     .process_finalized(Arc::new(block), acknowledgement)
             });
-
-            let gate = next_pending_sync(&pending);
-            gate.blocked
-                .await
-                .expect("retarget must persist its descendant floor");
-            assert!(
-                syncer_receiver.try_recv().is_err(),
-                "the sync engine must not observe the ancestor before its floor is durable",
-            );
-            assert!(
-                poll!(&mut waiter).is_pending(),
-                "marshal must not be acknowledged before the descendant floor is durable",
-            );
-            gate.release
-                .send(Ok(()))
-                .expect("retarget must be waiting on the metadata flush");
 
             let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                 syncer_receiver.recv().await
@@ -1295,25 +1288,17 @@ mod tests {
             assert!(action.is_none(), "retarget mid-sync must not hand off");
             assert!(waiter.await.is_ok(), "marshal must be acknowledged");
             assert_eq!(
-                syncing.recovery_frontier,
-                Some(Height::new(9)),
-                "the certifying descendant must remain the recovery frontier",
-            );
-            assert_eq!(
                 syncing.sync_metadata.in_progress_floor(),
-                Some(&finalization),
-                "the descendant floor must cover the transitive target before acknowledgement",
+                Some(&initial),
+                "retargeting must leave the initial stateful floor unchanged",
             );
             drop(syncing);
 
-            let plan =
-                syncer::SyncPlan::<_, TestScheme, TestVariant>::init(&context, "syncing-test")
-                    .await;
-            assert_eq!(plan.floor(), Some(&finalization));
-            assert!(matches!(
-                plan.marshal_start(()),
-                marshal::Start::Floor(ref floor) if floor == &finalization
-            ));
+            assert_eq!(
+                syncer::select_state_sync_floor(&restart_marshal, &initial).await,
+                finalization,
+                "restart must use the descendant that certifies the observed ancestor",
+            );
         });
     }
 }

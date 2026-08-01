@@ -16,8 +16,10 @@ use tracing::warn;
 /// 1. [`SyncPlan::init`] reads the durable state sync state.
 /// 2. If [`SyncPlan::may_state_sync`] returns `true`, the caller may fetch a
 ///    finalized floor and attach it via [`SyncPlan::with_floor`]. An interrupted
-///    sync already has a persisted floor, while a fresh sync needs one from the
-///    caller. Otherwise the caller skips floor selection entirely.
+///    sync already has a persisted bootstrap floor, while a fresh sync needs one
+///    from the caller. Once marshal starts, the syncer selects its latest archived
+///    finalization so an interrupted QMDB journal never resumes behind recorded
+///    progress. Otherwise the caller skips floor selection entirely.
 ///
 /// The plan owns the opened metadata store and is later consumed by
 /// [`Stateful`](crate::stateful::Stateful), so startup does not reopen the same
@@ -84,7 +86,7 @@ where
         self.sync_metadata.partition_prefix()
     }
 
-    /// Returns the selected or persisted in-progress state sync floor.
+    /// Returns the selected or persisted state sync bootstrap floor.
     pub const fn floor(&self) -> Option<&Finalization<S, V::Commitment>> {
         self.floor.as_ref()
     }
@@ -93,7 +95,8 @@ where
     ///
     /// Has no effect if state sync has already completed. When resuming an
     /// interrupted sync, a lagging selection is ignored in favor of the
-    /// persisted floor.
+    /// persisted bootstrap floor. The syncer later considers marshal's archived
+    /// latest finalization before reopening the database journals.
     #[must_use]
     pub fn with_floor(mut self, floor: Finalization<S, V::Commitment>) -> Self {
         if !self.may_state_sync() {
@@ -118,9 +121,9 @@ where
     /// Returns marshal's startup anchor for this plan.
     ///
     /// If a finalized floor was attached or persisted by an interrupted sync,
-    /// marshal starts from that floor. Otherwise marshal starts from genesis
-    /// and relies on its own durable progress to override that anchor when
-    /// available.
+    /// marshal starts from that bootstrap floor. Otherwise marshal starts from
+    /// genesis and relies on its own durable progress to override that anchor
+    /// when available.
     pub fn marshal_start<B>(&self, genesis: B) -> Start<S, V::Commitment, B> {
         self.floor
             .as_ref()
@@ -133,7 +136,8 @@ where
     /// This is `true` after a previous process crashed while state sync was
     /// in progress. In that case [`Self::may_state_sync`] is also `true`, and
     /// the persisted floor keeps partially synced database state on the same
-    /// recovery path.
+    /// recovery path. Marshal's latest archived finalization selects the actual
+    /// resume target after startup.
     pub fn requires_state_sync_floor(&self) -> bool {
         self.sync_metadata.in_progress()
     }
@@ -247,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn in_progress_sync_requires_compatible_floor() {
+    fn in_progress_sync_validates_resume_floor_without_rewriting_bootstrap() {
         deterministic::Runner::default().start(|mut context| async move {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
@@ -262,10 +266,11 @@ mod tests {
             assert!(plan.may_state_sync());
             assert!(plan.requires_state_sync_floor());
             assert!(plan.should_state_sync(false));
-            let metadata = plan.sync_metadata.begin_sync(stored).await;
-            metadata
+            let metadata = plan.sync_metadata.begin_sync(stored.clone()).await;
+            let metadata = metadata
                 .begin_sync(finalization(&fixture.schemes, 9, 9))
                 .await;
+            assert_eq!(metadata.in_progress_floor(), Some(&stored));
         });
     }
 

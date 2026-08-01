@@ -58,17 +58,17 @@
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
 //!   [`db::StateSyncSet::sync`]. The actor retains finalized blocks and their
-//!   acknowledgements until marshal's pending-ack window fills. It then persists a
-//!   certified recovery frontier covering the newest block, waits for the live sync
-//!   coordinator to record that block's target, and releases the acknowledgement
-//!   batch. If state sync completes before the window fills, the pending blocks are
-//!   handled during the transition to normal processing. Durable metadata is marked
-//!   in-progress before any database mutation and is marked complete only after the
-//!   converged state and any required handoff blocks are durable. A crash before
-//!   completion restarts through the state-sync path from the persisted floor,
-//!   reopening the existing sync journals. A lagging floor sampled during restart
-//!   cannot move that floor backward. Subsequent restarts after completion take the
-//!   marshal sync path to ensure a contiguous stream.
+//!   acknowledgements until marshal's pending-ack window fills, waits for the live
+//!   sync coordinator to record the newest block's target, and releases the batch.
+//!   Marshal archives each finalized block and its certifying finalization and gates
+//!   dispatch on durability, so a restart selects marshal's latest certificate before
+//!   reopening the QMDB sync journals. If state sync completes before the window
+//!   fills, the pending blocks are handled during the transition to normal
+//!   processing. Durable metadata records the initial in-progress floor before any
+//!   database mutation and is marked complete only after the converged state and any
+//!   required handoff blocks are durable. A lagging floor sampled during restart
+//!   cannot move the initial floor backward. Subsequent restarts after completion
+//!   take the marshal sync path to ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!

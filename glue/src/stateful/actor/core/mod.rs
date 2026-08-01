@@ -250,7 +250,6 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
-            recovery_frontier: None,
             pending_finalizations: Default::default(),
             prune_config: self.prune_config,
             metrics,
