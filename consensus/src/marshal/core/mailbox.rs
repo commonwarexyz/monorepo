@@ -21,6 +21,7 @@ use commonware_runtime::{
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
+    num::NonZeroUsize,
     sync::Arc,
 };
 use tracing::{Span, info_span};
@@ -614,12 +615,22 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
+    max_pending_acks: usize,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: Sender<Message<S, V>>) -> Self {
-        Self { sender }
+    pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
+        Self {
+            sender,
+            max_pending_acks: max_pending_acks.get(),
+        }
+    }
+
+    /// Returns the maximum number of application blocks marshal can dispatch before
+    /// acknowledgements advance its processed floor.
+    pub const fn max_pending_acks(&self) -> usize {
+        self.max_pending_acks
     }
 
     /// Create an ancestor stream that fetches missing parents by commitment.
@@ -1273,7 +1284,7 @@ mod tests {
         runner.start(|context| async move {
             let (sender, receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender);
+            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1));
             drop(receiver);
 
             let (ack, receiver) = oneshot::channel();

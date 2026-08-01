@@ -387,6 +387,7 @@ mod tests {
                 "syncer-wedge",
                 fixture.schemes[0].clone(),
                 Some((&block, finalization.clone())),
+                NZUsize!(1),
                 true,
             )
             .await;

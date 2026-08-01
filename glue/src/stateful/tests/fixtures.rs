@@ -25,6 +25,7 @@ use commonware_storage::archive::{Archive as _, immutable};
 use commonware_utils::{
     NZU16, NZU64, NZUsize, acknowledgement::Acknowledgement as _, vec::NonEmptyVec,
 };
+use std::num::NonZeroUsize;
 
 /// Reporter for a started marshal fixture that acknowledges every dispatched block.
 #[derive(Clone)]
@@ -152,6 +153,7 @@ pub(crate) async fn marshal_fixture(
     prefix: &str,
     scheme: TestScheme,
     seed: Option<(&TestBlock, Finalization<TestScheme, Sha256Digest>)>,
+    max_pending_acks: NonZeroUsize,
     start: bool,
 ) -> MarshalFixture {
     let provider = ConstantProvider::new(scheme);
@@ -196,7 +198,7 @@ pub(crate) async fn marshal_fixture(
             value_write_buffer: NZUsize!(64),
             block_codec_config: (),
             max_repair: NZUsize!(1),
-            max_pending_acks: NZUsize!(1),
+            max_pending_acks,
             strategy: Sequential,
         },
     )

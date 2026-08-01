@@ -291,6 +291,7 @@ mod tests {
             prefix,
             scheme_fixture.schemes[0].clone(),
             None,
+            NZUsize!(1),
             false,
         )
         .await;

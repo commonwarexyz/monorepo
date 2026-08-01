@@ -25,7 +25,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::{NonZeroDuration, channel::oneshot};
+use commonware_utils::channel::oneshot;
 use futures::join;
 use rand_core::Rng;
 use std::num::NonZeroUsize;
@@ -113,11 +113,6 @@ where
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
 
-    /// Duration for which state sync remains on a fixed target before considering a newer
-    /// finalized target. Acknowledgements never wait for this window (see [`crate::stateful`]'s
-    /// state-sync mode). Choose a delay long enough for a typical sync attempt to complete.
-    pub retarget_delay: NonZeroDuration,
-
     /// Periodic database and marshal pruning configuration.
     ///
     /// When enabled, glue retains `max_pending_acks + 1` finalized blocks plus
@@ -163,9 +158,6 @@ where
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
 
-    /// How long state sync remains on a target before considering a newer finalized target.
-    retarget_delay: NonZeroDuration,
-
     /// Periodic prune configuration.
     prune_config: Option<PruneConfig>,
 }
@@ -187,6 +179,11 @@ where
     pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
         if let Some(prune_config) = config.prune_config {
             prune_config.assert_valid();
+            assert_eq!(
+                prune_config.max_pending_acks.get(),
+                config.marshal.max_pending_acks(),
+                "stateful pruning and marshal must use the same pending acknowledgement window",
+            );
         }
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -201,7 +198,6 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
-                retarget_delay: config.retarget_delay,
                 prune_config: config.prune_config,
             },
             Mailbox::new(sender),
@@ -254,10 +250,8 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
-            retarget_delay: self.retarget_delay.get(),
             recovery_frontier: None,
-            handoff_blocks: Default::default(),
-            pending_retarget: None,
+            pending_finalizations: Default::default(),
             prune_config: self.prune_config,
             metrics,
         };
@@ -323,7 +317,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{NZDuration, NZU64, NZUsize, channel::mpsc};
+    use commonware_utils::{NZU64, NZUsize, channel::mpsc};
     use std::{convert::Infallible, time::Duration};
 
     #[derive(Clone)]
@@ -361,6 +355,7 @@ mod tests {
                 "pending-floor",
                 fixture.schemes[0].clone(),
                 None,
+                NZUsize!(1),
                 false,
             )
             .await;
@@ -383,7 +378,6 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
                     },
-                    retarget_delay: NZDuration!(Duration::from_secs(1)),
                     prune_config: None,
                 },
             );
