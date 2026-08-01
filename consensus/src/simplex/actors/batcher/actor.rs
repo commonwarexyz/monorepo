@@ -59,7 +59,7 @@ where
 
     blocker: B,
     reporter: Re,
-    retain_recovered_votes: bool,
+    historical_conflict_reporting: bool,
     relay: Rl,
     strategy: T,
 
@@ -145,7 +145,7 @@ where
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
-                retain_recovered_votes: cfg.retain_recovered_votes,
+                historical_conflict_reporting: cfg.historical_conflict_reporting,
                 relay: cfg.relay,
                 strategy: cfg.strategy,
 
@@ -176,7 +176,7 @@ where
             Arc::clone(&self.scheme),
             self.blocker.clone(),
             self.reporter.clone(),
-            self.retain_recovered_votes,
+            self.historical_conflict_reporting,
         )
     }
 
@@ -428,7 +428,7 @@ where
                         let round = work.entry(view).or_insert_with(|| self.new_round(view));
                         let process = process_span(round.span());
                         let _guard = process.entered();
-                        round.accept_vote(message, true);
+                        round.add_constructed(message);
                         self.added.inc();
                         updated_view = view;
                     }

@@ -22,7 +22,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
     pub blocker: B,
     pub reporter: Re,
-    pub retain_recovered_votes: bool,
+    pub historical_conflict_reporting: bool,
     pub relay: Rl,
 
     /// Strategy for parallel operations.
@@ -184,7 +184,7 @@ mod tests {
         skip_timeout: Duration,
         term_length: TermLength,
         forwarding: ForwardingPolicy,
-        retain_recovered_votes: bool,
+        historical_conflict_reporting: bool,
         floor: View,
     }
 
@@ -195,7 +195,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
-                retain_recovered_votes: false,
+                historical_conflict_reporting: false,
                 floor: View::zero(),
             }
         }
@@ -215,7 +215,7 @@ mod tests {
             scheme,
             blocker,
             reporter,
-            retain_recovered_votes: options.retain_recovered_votes,
+            historical_conflict_reporting: options.historical_conflict_reporting,
             relay,
             strategy: Sequential,
             view_retention: options.view_retention,
@@ -323,6 +323,18 @@ mod tests {
         type PublicKey = PublicKey;
 
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingBlocker(Arc<Mutex<Vec<PublicKey>>>);
+
+    impl commonware_p2p::Blocker for RecordingBlocker {
+        type PublicKey = PublicKey;
+
+        fn block(&mut self, peer: Self::PublicKey) -> Feedback {
+            self.0.lock().push(peer);
             Feedback::Ok
         }
     }
@@ -467,7 +479,11 @@ mod tests {
         );
     }
 
-    fn certified_conflict_reported(retain_recovered_votes: bool) -> bool {
+    fn certified_conflict_outcome(
+        historical_conflict_reporting: bool,
+        kind: Kind,
+        first_matches: bool,
+    ) -> (bool, bool) {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -476,42 +492,70 @@ mod tests {
         } = ed25519::fixture(&mut rng, b"batcher_test", 5);
         let round_id = Round::new(Epoch::new(0), View::new(1));
         let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
-        let signer = Participant::from_usize(0);
+        let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
+        let (first, second) = if first_matches {
+            (&proposal, &conflicting)
+        } else {
+            (&conflicting, &proposal)
+        };
         let activities = Arc::new(Mutex::new(Vec::new()));
+        let blocked = Arc::new(Mutex::new(Vec::new()));
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            RecordingBlocker(blocked.clone()),
             RecordingReporter(activities.clone()),
-            retain_recovered_votes,
+            historical_conflict_reporting,
         );
 
-        let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
-        assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
-        assert!(!round.is_missing_voter(&proposal, signer));
-
-        let notarization = build_notarization(&schemes, &proposal, quorum(5) as usize);
-        assert!(round.record_certificate(&Certificate::Notarization(notarization)));
-
-        let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
-        assert!(!round.add_network(
-            participants[0].clone(),
-            Vote::Notarize(Notarize::sign(&schemes[0], conflicting).unwrap()),
-        ));
-        activities
-            .lock()
-            .iter()
-            .any(|activity| matches!(activity, Activity::ConflictingNotarize(_)))
+        match kind {
+            Kind::Notarization => {
+                let vote = Notarize::sign(&schemes[0], first.clone()).unwrap();
+                assert!(round.add_network(participants[0].clone(), Vote::Notarize(vote)));
+                let certificate = build_notarization(&schemes, &proposal, quorum(5) as usize);
+                assert!(round.record_certificate(&Certificate::Notarization(certificate)));
+                let vote = Notarize::sign(&schemes[0], second.clone()).unwrap();
+                assert!(!round.add_network(participants[0].clone(), Vote::Notarize(vote)));
+            }
+            Kind::Finalization => {
+                let vote = Finalize::sign(&schemes[0], first.clone()).unwrap();
+                assert!(round.add_network(participants[0].clone(), Vote::Finalize(vote)));
+                let certificate = build_finalization(&schemes, &proposal, quorum(5) as usize);
+                assert!(!round.record_certificate(&Certificate::Finalization(certificate)));
+                let vote = Finalize::sign(&schemes[0], second.clone()).unwrap();
+                assert!(!round.add_network(participants[0].clone(), Vote::Finalize(vote)));
+            }
+            Kind::Nullification => unreachable!("nullify votes do not carry proposals"),
+        }
+        let reported = activities.lock().iter().any(|activity| match kind {
+            Kind::Notarization => matches!(activity, Activity::ConflictingNotarize(_)),
+            Kind::Finalization => matches!(activity, Activity::ConflictingFinalize(_)),
+            Kind::Nullification => false,
+        });
+        let blocked = blocked.lock().contains(&participants[0]);
+        (reported, blocked)
     }
 
     #[test]
     fn test_certificate_releases_votes_without_retention() {
-        assert!(!certified_conflict_reported(false));
+        for kind in [Kind::Notarization, Kind::Finalization] {
+            for first_matches in [false, true] {
+                let (reported, blocked) = certified_conflict_outcome(false, kind, first_matches);
+                assert!(!reported);
+                assert!(blocked, "compact proposal conflict should block its signer");
+            }
+        }
     }
 
     #[test]
     fn test_certificate_retains_votes_when_configured() {
-        assert!(certified_conflict_reported(true));
+        for kind in [Kind::Notarization, Kind::Finalization] {
+            for first_matches in [false, true] {
+                let (reported, blocked) = certified_conflict_outcome(true, kind, first_matches);
+                assert!(reported);
+                assert!(blocked);
+            }
+        }
     }
 
     #[test]
@@ -677,26 +721,23 @@ mod tests {
         round.record_certificate(&Certificate::Notarization(build_notarization(
             &schemes, &proposal, quorum,
         )));
-        round.accept_vote(
-            Vote::Notarize(Notarize::sign(&schemes[0], proposal.clone()).unwrap()),
-            true,
-        );
+        round.add_constructed(Vote::Notarize(
+            Notarize::sign(&schemes[0], proposal.clone()).unwrap(),
+        ));
 
         round.record_certificate(&Certificate::Nullification(build_nullification(
             &schemes, round_id, quorum,
         )));
-        round.accept_vote(
-            Vote::Nullify(Nullify::sign::<Sha256Digest>(&schemes[0], round_id).unwrap()),
-            true,
-        );
+        round.add_constructed(Vote::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], round_id).unwrap(),
+        ));
 
         round.record_certificate(&Certificate::Finalization(build_finalization(
             &schemes, &proposal, quorum,
         )));
-        round.accept_vote(
-            Vote::Finalize(Finalize::sign(&schemes[0], proposal).unwrap()),
-            true,
-        );
+        round.add_constructed(Vote::Finalize(
+            Finalize::sign(&schemes[0], proposal).unwrap(),
+        ));
 
         let activities = activities.lock();
         assert_eq!(
@@ -737,13 +778,13 @@ mod tests {
         );
         let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round_id).unwrap();
 
-        round.accept_vote(Vote::Nullify(nullify.clone()), true);
+        round.add_constructed(Vote::Nullify(nullify.clone()));
         round.record_certificate(&Certificate::Nullification(build_nullification(
             &schemes,
             round_id,
             quorum(5) as usize,
         )));
-        round.accept_vote(Vote::Nullify(nullify), true);
+        round.add_constructed(Vote::Nullify(nullify));
 
         assert_eq!(
             activities
@@ -818,7 +859,7 @@ mod tests {
         // The constructed finalize establishes the proposal without relying
         // on a leader vote.
         let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
-        round.accept_vote(Vote::Finalize(finalize), true);
+        round.add_constructed(Vote::Finalize(finalize));
         assert_eq!(
             round.try_forward_proposal(Participant::from_usize(0)),
             Some(proposal)
@@ -870,7 +911,7 @@ mod tests {
 
         // The voter's durable finalize may arrive after certificate recovery.
         let finalize = Finalize::sign(&schemes[quorum_size], proposal.clone()).unwrap();
-        round.accept_vote(Vote::Finalize(finalize), true);
+        round.add_constructed(Vote::Finalize(finalize));
 
         // Certificate-backed proposal state is immutable even if conflicting
         // certificate evidence is presented later.
@@ -921,7 +962,7 @@ mod tests {
         // The constructed finalize replaces the proposal and restores the
         // matching network votes before it enters the tracker itself.
         let finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
-        round.accept_vote(Vote::Finalize(finalize), true);
+        round.add_constructed(Vote::Finalize(finalize));
 
         // Only the network votes require verification.
         let (batch, invalid) = round

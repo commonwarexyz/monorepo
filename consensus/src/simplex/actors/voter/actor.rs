@@ -64,6 +64,8 @@ enum Resolved {
 /// [Actor::notify]).
 #[allow(clippy::type_complexity)]
 struct Staged<S: Scheme<D>, D: Digest> {
+    nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
+    certification: Option<(bool, Notarization<S, D>)>,
     notarize: Option<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     /// A nullification certificate, with the parent certificate of our proposal
@@ -134,7 +136,7 @@ pub struct Actor<
     write_buffer: NonZeroUsize,
     page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
-    dirty: bool,
+    dirty_section: Option<View>,
 
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
@@ -195,7 +197,7 @@ impl<
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,
                 journal: None,
-                dirty: false,
+                dirty_section: None,
 
                 mailbox_receiver,
 
@@ -258,13 +260,18 @@ impl<
             })
             .await
             .expect("unable to append to journal");
-            self.dirty = true;
+            match self.dirty_section {
+                Some(dirty) => assert_eq!(
+                    dirty, view,
+                    "one voter iteration must append to a single journal section"
+                ),
+                None => self.dirty_section = Some(view),
+            }
         }
         self
     }
 
-    /// Syncs the journal section for `view` (the view being processed) if the
-    /// iteration appended anything.
+    /// Syncs the journal section written by this iteration, if any.
     ///
     /// Invoked once per event loop iteration, after [Self::construct] and before
     /// [Self::notify] (regardless of whether anything will be broadcast), so
@@ -272,10 +279,10 @@ impl<
     /// a restart. Deferring syncs to this boundary (rather than syncing after
     /// each append) coalesces all appends in the same loop iteration into a
     /// single sync.
-    async fn sync_journal(mut self, view: View) -> Self {
-        if !self.dirty {
+    async fn sync_journal(mut self) -> Self {
+        let Some(view) = self.dirty_section else {
             return self;
-        }
+        };
         let span = info_span!(
             "simplex.voter.journal.sync",
             epoch = self.state.epoch().traced(),
@@ -286,22 +293,25 @@ impl<
         })
         .await
         .expect("unable to sync journal");
-        self.dirty = false;
+        self.dirty_section = None;
         self
     }
 
-    /// Send a vote to every peer.
+    /// Publishes a durable local vote to the batcher and every peer.
     ///
     /// Callers must sync pending journal appends first (via [Self::sync_journal]).
-    /// A vote must be durable before it reaches the network: a restart that
-    /// forgets a sent vote can sign a conflicting one, and conflicting votes
-    /// from the same signer allow conflicting certificates to form (a safety
-    /// failure).
-    fn broadcast_vote<T: Sender>(
+    /// A vote must be durable before it reaches either destination: a restart
+    /// that forgets a published vote can sign a conflicting one, and conflicting
+    /// votes from the same signer allow conflicting certificates to form (a
+    /// safety failure).
+    fn publish_vote<T: Sender>(
         &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
         sender: &mut WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
+        batcher.constructed(vote.clone());
+
         // Update outbound metrics
         let metric = match &vote {
             Vote::Notarize(_) => metrics::Outbound::notarize(),
@@ -819,6 +829,8 @@ impl<
         (
             self,
             Staged {
+                nullify: None,
+                certification: None,
                 notarize,
                 notarization,
                 nullification,
@@ -832,7 +844,6 @@ impl<
     ///
     /// Callers must sync pending journal appends first (via [Self::sync_journal])
     /// so no locally constructed vote is reported or broadcast before it is durable.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -840,12 +851,13 @@ impl<
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         staged: Staged<S, D>,
-        nullify: Option<(Nullify<S>, Option<Certificate<S, D>>)>,
-        certification: Option<(bool, Notarization<S, D>)>,
     ) {
-        assert!(!self.dirty, "journal must be synced before broadcast");
+        assert!(
+            self.dirty_section.is_none(),
+            "journal must be synced before broadcast"
+        );
 
-        if let Some((certified, notarization)) = certification {
+        if let Some((certified, notarization)) = staged.certification {
             // Always forward certification outcomes to resolver. This can happen
             // after a nullification for the same view because certification is
             // asynchronous; finalization is the boundary that cancels in-flight
@@ -856,10 +868,9 @@ impl<
             }
         }
 
-        if let Some((nullify, entry)) = nullify {
-            batcher.constructed(Vote::Nullify(nullify.clone()));
+        if let Some((nullify, entry)) = staged.nullify {
             debug!(round=?nullify.round(), "broadcasting nullify");
-            self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
+            self.publish_vote(batcher, vote_sender, Vote::Nullify(nullify));
 
             // Broadcast entry to help others enter the view (if on retry).
             if let Some(entry) = entry {
@@ -867,9 +878,8 @@ impl<
             }
         }
         if let Some(notarize) = staged.notarize {
-            batcher.constructed(Vote::Notarize(notarize.clone()));
             debug!(proposal=?notarize.proposal, "broadcasting notarize");
-            self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
+            self.publish_vote(batcher, vote_sender, Vote::Notarize(notarize));
         }
         if let Some(notarization) = staged.notarization {
             debug!(proposal=?notarization.proposal, "broadcasting notarization");
@@ -892,9 +902,8 @@ impl<
             self.reporter.report(Activity::Nullification(nullification));
         }
         if let Some(finalize) = staged.finalize {
-            batcher.constructed(Vote::Finalize(finalize.clone()));
             debug!(proposal=?finalize.proposal, "broadcasting finalize");
-            self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
+            self.publish_vote(batcher, vote_sender, Vote::Finalize(finalize));
         }
         if let Some(finalization) = staged.finalization {
             debug!(proposal=?finalization.proposal, "broadcasting finalization");
@@ -1221,17 +1230,19 @@ impl<
                 );
                 self = async {
                     // Build and record everything that became available for `view`.
-                    let staged;
+                    let mut staged;
                     (self, staged) = self
                         .construct(&mut resolver, view, resolved)
                         .await;
+                    staged.nullify = nullify;
+                    staged.certification = certification;
 
                     // Sync everything appended this iteration (during message
                     // processing and construction) in a single coalesced sync.
                     // This runs even if there is nothing to broadcast (e.g. a
                     // certification result was recorded) so every artifact is
                     // durable by the end of the iteration that appended it.
-                    self = self.sync_journal(view).await;
+                    self = self.sync_journal().await;
 
                     // Broadcast everything we built (and report it to the application).
                     self.notify(
@@ -1240,8 +1251,6 @@ impl<
                         &mut vote_sender,
                         &mut certificate_sender,
                         staged,
-                        nullify,
-                        certification,
                     );
                     self
                 }

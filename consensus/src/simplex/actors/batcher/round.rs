@@ -6,7 +6,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize, Kind,
-            NullifyFinalize, Proposal, Vote, VoteTracker,
+            NullifyFinalize, Proposal, Vote, VoteRecord, VoteTracker,
         },
     },
     types::{Participant, Round as Rnd},
@@ -18,6 +18,16 @@ use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::Span;
+
+/// Outcome of recording a vote after preliminary conflict checks.
+enum VoteAcceptance {
+    /// The vote was newly recorded and reported.
+    Added,
+    /// The signer was already recorded with the same known vote state.
+    Duplicate,
+    /// Compact state proves the signer changed its relation to the authoritative proposal.
+    ConflictingProposal,
+}
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -61,7 +71,7 @@ impl<
         scheme: Arc<S>,
         blocker: B,
         reporter: R,
-        retain_recovered_votes: bool,
+        historical_conflict_reporting: bool,
     ) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
         let len = scheme.participants().len();
@@ -70,7 +80,7 @@ impl<
             reporter,
             verifier: Verifier::new(round, scheme, quorum),
 
-            votes: VoteTracker::new(len, retain_recovered_votes),
+            votes: VoteTracker::new(len, historical_conflict_reporting),
 
             proposal_sent: false,
 
@@ -153,7 +163,7 @@ impl<
     /// certification. When extended conflict reporting is disabled, compact
     /// state preserves duplicate suppression and proposal forwarding without
     /// reallocating the released vote map.
-    pub(super) fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> bool {
+    fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> VoteAcceptance {
         if constructed && let Vote::Finalize(finalize) = &message {
             // The voter only constructs a finalize after independently
             // authenticating the proposal.
@@ -161,18 +171,24 @@ impl<
         }
 
         let record = self.votes.record(&message, self.verifier.proposal());
-        if !record.inserted && record.retained && constructed {
-            match &message {
-                Vote::Notarize(_) => panic!("duplicate notarize"),
-                Vote::Nullify(_) => {}
-                Vote::Finalize(_) => panic!("duplicate finalize"),
+        let retained = match record {
+            VoteRecord::NewRetained => true,
+            VoteRecord::NewCompacted => false,
+            VoteRecord::DuplicateRetained => {
+                if constructed {
+                    match &message {
+                        Vote::Notarize(_) => panic!("duplicate notarize"),
+                        Vote::Nullify(_) => {}
+                        Vote::Finalize(_) => panic!("duplicate finalize"),
+                    }
+                }
+                return VoteAcceptance::Duplicate;
             }
-        }
-        if !record.inserted {
-            return false;
-        }
+            VoteRecord::DuplicateCompacted => return VoteAcceptance::Duplicate,
+            VoteRecord::ConflictingProposal => return VoteAcceptance::ConflictingProposal,
+        };
 
-        let verifier_message = record.retained.then(|| message.clone());
+        let verifier_message = retained.then(|| message.clone());
         let activity = match message {
             Vote::Notarize(notarize) => Activity::Notarize(notarize),
             Vote::Nullify(nullify) => Activity::Nullify(nullify),
@@ -182,7 +198,18 @@ impl<
         if let Some(message) = verifier_message {
             self.verifier.add(message, constructed);
         }
-        true
+        VoteAcceptance::Added
+    }
+
+    /// Adds a durable locally constructed vote.
+    pub fn add_constructed(&mut self, message: Vote<S, D>) {
+        assert!(
+            !matches!(
+                self.accept_vote(message, true),
+                VoteAcceptance::ConflictingProposal
+            ),
+            "conflicting constructed vote"
+        );
     }
 
     /// Makes an independently authenticated proposal authoritative, restoring
@@ -238,7 +265,14 @@ impl<
                         }
                         false
                     }
-                    None => self.accept_vote(Vote::Notarize(notarize), false),
+                    None => match self.accept_vote(Vote::Notarize(notarize), false) {
+                        VoteAcceptance::Added => true,
+                        VoteAcceptance::Duplicate => false,
+                        VoteAcceptance::ConflictingProposal => {
+                            commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
+                            false
+                        }
+                    },
                 }
             }
             Vote::Nullify(nullify) => {
@@ -266,7 +300,13 @@ impl<
                         }
                         false
                     }
-                    None => self.accept_vote(Vote::Nullify(nullify), false),
+                    None => match self.accept_vote(Vote::Nullify(nullify), false) {
+                        VoteAcceptance::Added => true,
+                        VoteAcceptance::Duplicate => false,
+                        VoteAcceptance::ConflictingProposal => {
+                            unreachable!("nullify votes do not carry proposals")
+                        }
+                    },
                 }
             }
             Vote::Finalize(finalize) => {
@@ -299,7 +339,14 @@ impl<
                         }
                         false
                     }
-                    None => self.accept_vote(Vote::Finalize(finalize), false),
+                    None => match self.accept_vote(Vote::Finalize(finalize), false) {
+                        VoteAcceptance::Added => true,
+                        VoteAcceptance::Duplicate => false,
+                        VoteAcceptance::ConflictingProposal => {
+                            commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
+                            false
+                        }
+                    },
                 }
             }
         }
@@ -358,8 +405,7 @@ impl<
         self.votes.has_nullify(signer)
     }
 
-    /// Returns participant indices whose matching vote for `proposal` was not
-    /// observed locally.
+    /// Returns whether `participant` has not voted for `proposal` locally.
     ///
     /// Uses the vote tracker and compact post-certificate membership rather
     /// than the verified vote vectors because we only verify the first quorum
