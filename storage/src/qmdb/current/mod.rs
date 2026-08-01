@@ -448,42 +448,23 @@ where
     let (metadata, pruned_chunks, pinned_nodes) =
         db::init_metadata(context.child("metadata"), &metadata_partition).await?;
 
-    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted
-    // metadata, then hand it to `any` which becomes the sole owner. `any::init_with_bitmap`
-    // populates it during snapshot rebuild.
+    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
+    // Initialize the underlying `any` database. It takes sole ownership of the bitmap and
+    // populates it during snapshot rebuild.
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
-    // Build the grafted tree from the bitmap and ops tree.
-    let ops_size = any.log.merkle.size();
-    let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
-    let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
+    // Rebuild the grafted tree and canonical root from the initialized `any` state.
+    let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
-        ops_leaves,
-        &strategy,
-    )
-    .await?;
-
-    // Compute and cache the root.
-    let storage = grafting::Storage::<F, H, _, _>::new(
-        &grafted_tree,
-        grafting::height::<N>(),
-        &any.log.merkle,
-    );
-    let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
-    let ops_root = any.root();
-    let root = db::compute_db_root::<F, H, _, _, N>(
-        any.bitmap.as_ref(),
-        &storage,
-        ops_leaves,
-        partial_chunk,
         any.inactivity_floor_loc,
-        &ops_root,
+        any.root(),
+        &strategy,
     )
     .await?;
 

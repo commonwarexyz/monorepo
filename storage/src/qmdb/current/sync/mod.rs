@@ -189,35 +189,16 @@ where
         pinned_nodes
     };
 
-    // Build grafted tree.
-    let ops_size = any.log.merkle.size();
-    let ops_leaves = Location::<F>::try_from(ops_size)?;
-    let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
+    // Rebuild the grafted tree and canonical root from the synced `any` state.
+    // The canonical root is deterministic because the engine authenticates the ops and the
+    // bitmap is derived from them.
+    let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
-        ops_leaves,
-        &strategy,
-    )
-    .await?;
-
-    // Compute the canonical root. The grafted root is deterministic from the ops
-    // (which are authenticated by the engine) and the bitmap (which is deterministic
-    // from the ops).
-    let storage = grafting::Storage::<F, H, _, _>::new(
-        &grafted_tree,
-        grafting::height::<N>(),
-        &any.log.merkle,
-    );
-    let partial = db::partial_chunk(any.bitmap.as_ref());
-    let ops_root = any.root();
-    let root = db::compute_db_root::<F, H, _, _, N>(
-        any.bitmap.as_ref(),
-        &storage,
-        ops_leaves,
-        partial,
         any.inactivity_floor_loc,
-        &ops_root,
+        any.root(),
+        &strategy,
     )
     .await?;
 
