@@ -3866,6 +3866,7 @@ mod tests {
         type Key = handler::Key<D>;
         type Value = Bytes;
         type Subscriber = handler::Annotation;
+        type Outcome = bool;
 
         fn deliver(
             &mut self,

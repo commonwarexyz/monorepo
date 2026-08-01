@@ -111,6 +111,31 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
+    /// Consumer disposition for a delivered response.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Outcome {
+        /// The response is invalid for the peer-visible key.
+        ///
+        /// Network resolvers may penalize the serving peer before retrying.
+        Invalid,
+
+        /// The response is valid and satisfies every delivered subscriber.
+        Complete,
+
+        /// The peer-visible key admits multiple valid responses, and this response does not
+        /// satisfy every delivered subscriber.
+        ///
+        /// The resolver retries the key without penalizing the serving peer so another response
+        /// can be tried.
+        Ambiguous,
+    }
+
+    impl From<bool> for Outcome {
+        fn from(valid: bool) -> Self {
+            if valid { Self::Complete } else { Self::Invalid }
+        }
+    }
+
     /// Notified when data is available, and must validate it.
     pub trait Consumer: Clone + Send + 'static {
         /// Type used to key data requested from peers.
@@ -122,9 +147,17 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to track subscribers on fetch keys.
         type Subscriber: Clone + Eq + Send + 'static;
 
+        /// Delivery disposition returned after validation.
+        ///
+        /// Consumers that only distinguish valid and invalid data may use
+        /// `bool`, which maps to [`crate::Outcome::Complete`] and
+        /// [`crate::Outcome::Invalid`].
+        type Outcome: Into<crate::Outcome> + Send + 'static;
+
         /// Deliver data to the consumer.
         ///
-        /// Returns a receiver that resolves to `true` if the data is valid for the key.
+        /// Returns a receiver that reports whether the response completes the
+        /// delivery, is invalid, or is valid but leaves subscribers unresolved.
         ///
         /// The returned receiver may be dropped before completion if the application
         /// cancels the fetch via [`Resolver::retain`]. When this happens, the
@@ -140,7 +173,7 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
-        ) -> oneshot::Receiver<bool>;
+        ) -> oneshot::Receiver<Self::Outcome>;
     }
 
     /// Responsible for fetching data and notifying a `Consumer`.

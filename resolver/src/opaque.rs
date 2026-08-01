@@ -11,7 +11,7 @@
 //! fetchers do not have peer-specific routing.
 
 use crate::{
-    Consumer, Delivery, Fetch, TargetedResolver,
+    Consumer, Delivery, Fetch, Outcome, TargetedResolver,
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
     ingress::{self, FetchKey, Message},
     subscribers,
@@ -389,7 +389,7 @@ where
         let DeliveryCompletion {
             context: id,
             delivery,
-            valid,
+            outcome,
         } = completion;
         let Delivery {
             key,
@@ -399,7 +399,7 @@ where
         if !self.current_delivery(&key, id) {
             return;
         }
-        self.handle_delivered(key, delivered, valid);
+        self.handle_delivered(key, delivered, outcome);
     }
 
     /// Return whether a fetch completion matches the current attempt id.
@@ -494,48 +494,54 @@ where
         &mut self,
         key: F::Key,
         delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
-        valid: bool,
+        outcome: Outcome,
     ) {
         let accepted = self.deliveries.response_accepted(&key);
 
-        if valid {
-            let remaining = self
-                .subscribers
-                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+        match outcome {
+            Outcome::Complete => {
+                let remaining = self
+                    .subscribers
+                    .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
 
-            // The first accepted response is reused for subscribers that joined
-            // while validation was pending, avoiding a duplicate source fetch
-            // for the same key.
-            if let Some(subscribers) = remaining {
-                if !accepted {
-                    self.deliveries.accept_response(&key);
+                // The first accepted response is reused for subscribers that joined
+                // while validation was pending, avoiding a duplicate source fetch
+                // for the same key.
+                if let Some(subscribers) = remaining {
+                    if !accepted {
+                        self.deliveries.accept_response(&key);
+                    }
+                    self.redeliver(key, subscribers);
+                } else {
+                    self.requests.remove(&key);
+                    self.subscribers.remove(&key);
+                    self.deliveries.remove(&key);
                 }
-                self.redeliver(key, subscribers);
-            } else {
-                self.requests.remove(&key);
-                self.subscribers.remove(&key);
-                self.deliveries.remove(&key);
             }
-            return;
-        }
+            Outcome::Ambiguous => {
+                self.deliveries.discard_response(&key);
+                self.schedule_retry(key);
+            }
+            Outcome::Invalid => {
+                // A cached response already satisfied at least one subscriber. Treat a
+                // later rejection during redelivery as stale application feedback rather
+                // than re-fetching data that was accepted once.
+                if accepted {
+                    warn!(
+                        ?key,
+                        "previously accepted resolver response rejected during opaque redelivery"
+                    );
+                    self.requests.remove(&key);
+                    self.subscribers.remove(&key);
+                    self.deliveries.remove(&key);
+                    return;
+                }
 
-        // A cached response already satisfied at least one subscriber. Treat a
-        // later rejection during redelivery as stale application feedback rather
-        // than re-fetching data that was accepted once.
-        if accepted {
-            warn!(
-                ?key,
-                "previously accepted resolver response rejected during opaque redelivery"
-            );
-            self.requests.remove(&key);
-            self.subscribers.remove(&key);
-            self.deliveries.remove(&key);
-            return;
+                warn!(?key, "consumer rejected opaque resolver delivery");
+                self.deliveries.discard_response(&key);
+                self.schedule_retry(key);
+            }
         }
-
-        warn!(?key, "consumer rejected opaque resolver delivery");
-        self.deliveries.discard_response(&key);
-        self.schedule_retry(key);
     }
 
     /// Schedule the next fetch attempt for `key`.
@@ -678,7 +684,7 @@ mod tests {
     struct CapturedDelivery {
         delivery: Delivery<u8, u16>,
         value: Bytes,
-        response: oneshot::Sender<bool>,
+        response: oneshot::Sender<Outcome>,
     }
 
     #[derive(Clone, Default)]
@@ -700,12 +706,13 @@ mod tests {
         type Key = u8;
         type Value = Bytes;
         type Subscriber = u16;
+        type Outcome = Outcome;
 
         fn deliver(
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
+        ) -> oneshot::Receiver<Self::Outcome> {
             let (response, receiver) = oneshot::channel();
             self.deliveries.lock().push_back(CapturedDelivery {
                 delivery,
@@ -777,7 +784,10 @@ mod tests {
                     .accepted()
             );
             context.sleep(Duration::from_millis(10)).await;
-            first.response.send(true).expect("response dropped");
+            first
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
 
             let second = wait_for_delivery(&context, &consumer).await;
             assert_eq!(second.value, Bytes::from_static(b"value"));
@@ -790,7 +800,10 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![11]
             );
-            second.response.send(true).expect("response dropped");
+            second
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
 
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(fetcher.calls(), 1);
@@ -822,7 +835,72 @@ mod tests {
 
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
-            delivery.response.send(true).expect("response dropped");
+            delivery
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
+            assert_eq!(fetcher.calls(), 2);
+        });
+    }
+
+    #[test]
+    fn ambiguous_delivery_retries_without_retiring_subscriber() {
+        Runner::default().start(|context| async move {
+            let fetcher = MockFetcher::default();
+            fetcher.push(1, Some(Bytes::from_static(b"ambiguous")));
+            fetcher.push(1, Some(Bytes::from_static(b"complete")));
+            let consumer = MockConsumer::default();
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+
+            let first = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(first.value, Bytes::from_static(b"ambiguous"));
+            assert_eq!(
+                first
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| *subscriber)
+                    .collect::<Vec<_>>(),
+                vec![10]
+            );
+            first
+                .response
+                .send(Outcome::Ambiguous)
+                .expect("response dropped");
+
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
+            let second = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(second.value, Bytes::from_static(b"complete"));
+            assert_eq!(
+                second
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| *subscriber)
+                    .collect::<Vec<_>>(),
+                vec![10]
+            );
+            assert_eq!(fetcher.calls(), 2);
+
+            second
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(consumer.len(), 0);
             assert_eq!(fetcher.calls(), 2);
         });
     }
@@ -857,10 +935,16 @@ mod tests {
                     .accepted()
             );
             context.sleep(Duration::from_millis(10)).await;
-            first.response.send(true).expect("response dropped");
+            first
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
 
             let second = wait_for_delivery(&context, &consumer).await;
-            second.response.send(false).expect("response dropped");
+            second
+                .response
+                .send(Outcome::Invalid)
+                .expect("response dropped");
 
             context
                 .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
@@ -916,7 +1000,10 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![11]
             );
-            delivery.response.send(true).expect("response dropped");
+            delivery
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
         });
     }
 
@@ -974,7 +1061,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(
-                delivery.response.send(false).is_err(),
+                delivery.response.send(Outcome::Invalid).is_err(),
                 "delivery future should be aborted after its last subscriber is pruned"
             );
             context
@@ -1009,7 +1096,10 @@ mod tests {
             );
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
-            delivery.response.send(true).expect("response dropped");
+            delivery
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
             assert_eq!(fetcher.calls(), 1);
         });
     }
