@@ -127,10 +127,12 @@ pub struct SimplexConfig<L> {
     /// Time a leader may remain inactive before triggering immediate nullification.
     pub skip_timeout: Duration,
 
-    /// Retain signed votes after certification to extend conflict reporting.
+    /// Report historical conflicts after certification.
     ///
-    /// Enabling this increases per-view memory usage.
-    pub extended_conflict_reporting: bool,
+    /// By default, conflicts that require full vote evidence can be reported only
+    /// until the corresponding certificate is constructed or received. Enabling
+    /// this retains those votes at the cost of higher per-view memory usage.
+    pub historical_conflict_reporting: bool,
 
     /// Policy for proactively forwarding certified blocks.
     pub forwarding: ForwardingPolicy,
@@ -723,7 +725,7 @@ where
                 view_retention: self.simplex.view_retention,
                 skip_timeout: self.simplex.skip_timeout,
                 forwarding: self.simplex.forwarding,
-                extended_conflict_reporting: self.simplex.extended_conflict_reporting,
+                historical_conflict_reporting: self.simplex.historical_conflict_reporting,
             },
         );
 

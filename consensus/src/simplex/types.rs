@@ -173,13 +173,15 @@ impl<T: Attributable> AttributableMap<T> {
 /// Tracks notarize/nullify/finalize votes for a view.
 ///
 /// Each vote type is stored in its own lazily allocated [`AttributableMap`] so a
-/// validator can only contribute one vote per phase. Unless extended conflict reporting
-/// is enabled, full votes are released once their certificate exists. Compact signer
-/// state remains available for forwarding and duplicate suppression.
+/// validator can only contribute one vote per phase. Unless historical conflict reporting
+/// is enabled, full votes are released once their certificate exists. Compact signer state
+/// remains available for forwarding and duplicate suppression.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct VoteTracker<S: Scheme, D: Digest> {
+    /// Number of validators represented by the vote maps and compact signer table.
     participants: usize,
-    retain_votes_after_certification: bool,
+    /// Whether full votes remain available after their certificate is recovered.
+    retain_recovered_votes: bool,
     /// Compact state records whether a signer voted and whether the vote carried the
     /// authoritative proposal. The former suppresses duplicates and cross-phase
     /// conflicts; the latter avoids forwarding blocks to validators that already have them.
@@ -196,8 +198,11 @@ pub struct VoteTracker<S: Scheme, D: Digest> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Outcome of recording a vote in its phase-specific lifecycle state.
 pub(crate) struct VoteRecord {
+    /// Whether the signer was newly recorded in this phase.
     pub inserted: bool,
+    /// Whether the phase still stores full votes for recovery and conflict evidence.
     pub retained: bool,
 }
 
@@ -211,12 +216,12 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Creates a tracker sized for `participants` validators.
     ///
-    /// Unless `retain_votes_after_certification` is enabled, each vote map transitions
+    /// Unless `retain_recovered_votes` is enabled, each vote map transitions
     /// to compact storage once its certificate is recorded.
-    pub const fn new(participants: usize, retain_votes_after_certification: bool) -> Self {
+    pub const fn new(participants: usize, retain_recovered_votes: bool) -> Self {
         Self {
             participants,
-            retain_votes_after_certification,
+            retain_recovered_votes,
             compacted: Vec::new(),
             notarizes: Some(AttributableMap::new(participants)),
             nullifies: Some(AttributableMap::new(participants)),
@@ -224,6 +229,11 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
     }
 
+    /// Records signer facts after the phase's full vote map has been released.
+    ///
+    /// The facts are monotonic until the phase is cleared. In particular, a matching
+    /// vote may establish that the signer has the authoritative proposal even when a
+    /// vote from that signer was already observed.
     fn remember(
         participants: usize,
         compacted: &mut Vec<u8>,
@@ -235,6 +245,8 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         if index >= participants {
             return false;
         }
+
+        // Certificate-first rounds remain allocation-free until a vote arrives.
         if compacted.is_empty() {
             compacted.resize(participants, 0);
         }
@@ -248,6 +260,11 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         inserted
     }
 
+    /// Records one phase according to its full-to-compact storage lifecycle.
+    ///
+    /// A present map owns duplicate detection and full-vote storage. An absent map is
+    /// the post-certificate marker until the phase is explicitly cleared, so only
+    /// compact signer facts are kept.
     fn record_phase<T: Attributable>(
         participants: usize,
         compacted: &mut Vec<u8>,
@@ -256,6 +273,8 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         seen: u8,
         has_proposal: Option<u8>,
     ) -> VoteRecord {
+        // Never recreate a released map: doing so would lose the compact state's
+        // duplicate history and make retention depend on message arrival order.
         let Some(votes) = votes else {
             return VoteRecord {
                 inserted: Self::remember(
@@ -275,6 +294,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
     }
 
+    /// Returns whether compact post-certificate state contains `flag` for `signer`.
     fn remembered(&self, signer: Participant, flag: u8) -> bool {
         self.compacted
             .get(usize::from(signer))
@@ -318,6 +338,10 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
     }
 
+    /// Moves a phase from full vote storage to compact signer state.
+    ///
+    /// Taking the map makes the transition idempotent. Empty phases stay
+    /// allocation-free, while existing signer and proposal-ownership facts survive.
     fn release<T: Attributable>(
         participants: usize,
         compacted: &mut Vec<u8>,
@@ -329,9 +353,14 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         let Some(votes) = votes.take() else {
             return;
         };
+
+        // A certificate may arrive before any individual votes, in which case there
+        // are no signer facts worth allocating a table for.
         if !votes.is_empty() && compacted.is_empty() {
             compacted.resize(participants, 0);
         }
+
+        // Proposal bits are relative to the certificate-backed authoritative proposal.
         for vote in votes.iter() {
             let flags = &mut compacted[usize::from(vote.signer())];
             *flags |= seen;
@@ -369,7 +398,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Releases notarize votes while retaining compact signer state.
     pub(crate) fn release_notarizes(&mut self, proposal: &Proposal<D>) {
-        if self.retain_votes_after_certification {
+        if self.retain_recovered_votes {
             return;
         }
         Self::release(
@@ -384,7 +413,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Releases nullify votes while retaining compact signer state.
     pub(crate) fn release_nullifies(&mut self) {
-        if self.retain_votes_after_certification {
+        if self.retain_recovered_votes {
             return;
         }
         Self::release(
@@ -399,7 +428,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Releases finalize votes while retaining compact signer state.
     pub(crate) fn release_finalizes(&mut self, proposal: &Proposal<D>) {
-        if self.retain_votes_after_certification {
+        if self.retain_recovered_votes {
             return;
         }
         Self::release(

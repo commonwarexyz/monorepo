@@ -149,17 +149,17 @@ where
     /// may differ from the one exported before the crash.
     pub reporter: F,
 
-    /// Extend conflict reporting beyond certification.
+    /// Report historical conflicts after certification.
     ///
-    /// Enabling this retains full votes after their corresponding certificate is
-    /// recovered. Otherwise, conflict evidence that requires a released vote can
-    /// no longer be constructed. Compact signer data remains available for
-    /// forwarding and duplicate suppression.
+    /// By default, conflicts that require full vote evidence can be reported only
+    /// until the corresponding certificate is constructed or received. Enabling
+    /// this retains those votes so the conflicts can still be reported. Compact
+    /// signer data remains available for forwarding and duplicate suppression
+    /// either way.
     ///
-    /// This is disabled by default in provided configurations because retaining
-    /// full signed votes for every tracked view can consume substantial memory,
-    /// especially when certificates arrive far ahead of the current view.
-    pub extended_conflict_reporting: bool,
+    /// Historical conflict reporting increases per-view memory usage, especially
+    /// when certificates arrive far ahead of the current view.
+    pub historical_conflict_reporting: bool,
 
     /// Strategy for parallel operations.
     pub strategy: T,

@@ -59,7 +59,7 @@ where
 
     blocker: B,
     reporter: Re,
-    retain_votes_after_certification: bool,
+    retain_recovered_votes: bool,
     relay: Rl,
     strategy: T,
 
@@ -145,7 +145,7 @@ where
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
-                retain_votes_after_certification: cfg.retain_votes_after_certification,
+                retain_recovered_votes: cfg.retain_recovered_votes,
                 relay: cfg.relay,
                 strategy: cfg.strategy,
 
@@ -176,7 +176,7 @@ where
             Arc::clone(&self.scheme),
             self.blocker.clone(),
             self.reporter.clone(),
-            self.retain_votes_after_certification,
+            self.retain_recovered_votes,
         )
     }
 

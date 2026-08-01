@@ -22,7 +22,8 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
     pub blocker: B,
     pub reporter: Re,
-    pub retain_votes_after_certification: bool,
+    /// Whether to retain full votes after recovering their certificate.
+    pub retain_recovered_votes: bool,
     pub relay: Rl,
 
     /// Strategy for parallel operations.
@@ -184,7 +185,7 @@ mod tests {
         skip_timeout: Duration,
         term_length: TermLength,
         forwarding: ForwardingPolicy,
-        retain_votes_after_certification: bool,
+        retain_recovered_votes: bool,
         floor: View,
     }
 
@@ -195,7 +196,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
-                retain_votes_after_certification: false,
+                retain_recovered_votes: false,
                 floor: View::zero(),
             }
         }
@@ -215,7 +216,7 @@ mod tests {
             scheme,
             blocker,
             reporter,
-            retain_votes_after_certification: options.retain_votes_after_certification,
+            retain_recovered_votes: options.retain_recovered_votes,
             relay,
             strategy: Sequential,
             view_retention: options.view_retention,
@@ -467,7 +468,7 @@ mod tests {
         );
     }
 
-    fn certified_conflict_reported(retain_votes_after_certification: bool) -> bool {
+    fn certified_conflict_reported(retain_recovered_votes: bool) -> bool {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -483,7 +484,7 @@ mod tests {
             Arc::new(schemes[0].clone()),
             NoopBlocker,
             RecordingReporter(activities.clone()),
-            retain_votes_after_certification,
+            retain_recovered_votes,
         );
 
         let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();

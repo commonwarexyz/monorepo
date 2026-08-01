@@ -61,7 +61,7 @@ impl<
         scheme: Arc<S>,
         blocker: B,
         reporter: R,
-        retain_votes_after_certification: bool,
+        retain_recovered_votes: bool,
     ) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
         let len = scheme.participants().len();
@@ -70,7 +70,7 @@ impl<
             reporter,
             verifier: Verifier::new(round, scheme, quorum),
 
-            votes: VoteTracker::new(len, retain_votes_after_certification),
+            votes: VoteTracker::new(len, retain_recovered_votes),
 
             proposal_sent: false,
 

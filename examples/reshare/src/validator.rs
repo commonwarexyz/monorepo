@@ -370,7 +370,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(5),
                 forwarding: ForwardingPolicy::Disabled,
-                extended_conflict_reporting: false,
+                historical_conflict_reporting: false,
             },
             gate,
             state_sync,
