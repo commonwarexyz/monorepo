@@ -1140,10 +1140,10 @@ where
         }
     }
 
-    /// Drops subscriptions whose result is bound to an exact commitment.
+    /// Drops subscriptions bound to an exact commitment.
     ///
-    /// A different commitment can still reconstruct the same block digest.
-    /// Digest subscriptions remain open for that later availability.
+    /// Before marshal accepts a block, a candidate can claim a digest it cannot reconstruct.
+    /// Retiring it therefore does not prove the digest unavailable.
     fn drop_commitment_subscriptions(&mut self, commitment: Commitment) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
@@ -4212,8 +4212,8 @@ mod tests {
         // Error::DigestMismatch in try_reconstruct. Verify that:
         //   1. The failed commitment's state is cleaned up
         //   2. The exact commitment subscription closes
-        //   3. The digest subscription survives for another commitment
-        //   4. A subsequent valid commitment reconstructs successfully
+        //   3. The digest subscription survives the invalid candidate
+        //   4. The valid commitment later reconstructs the claimed digest
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -4230,7 +4230,8 @@ mod tests {
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
                 let real_commitment2 = coded_block2.commitment();
 
-                // Build a fake commitment: block1's digest + block2's coding root/context/config.
+                // This is an invalid claim, not a second accepted commitment for block1.
+                // Build it from block1's digest and block2's coding root/context/config.
                 // Shards from block2 will verify against block2's root (present in the fake
                 // commitment), but try_reconstruct will decode block2 and find its digest != D1.
                 let fake_commitment = Commitment::from((
