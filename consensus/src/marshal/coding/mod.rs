@@ -1795,24 +1795,22 @@ mod tests {
             };
 
             // Verify must not synthesize `false` when the block cannot be fetched.
-            let verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
+            let mut verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
 
-            // Ensure the certification gate task has registered its subscription, then
-            // force cancellation by pruning the missing commitment.
+            // Register the certification gate before pruning reconstruction state.
             context.sleep(Duration::from_millis(100)).await;
             shards.prune(missing_payload);
 
-            select! {
-                result = verify_rx => {
-                    assert!(
-                        result.is_err(),
-                        "verify should resolve without explicit false when re-proposal block is unavailable"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("verify should resolve promptly when re-proposal block is unavailable");
-                },
-            }
+            // Pruning removes reconstruction state but preserves the live local wait.
+            assert!(shards.get(missing_payload).await.is_none());
+            assert!(
+                matches!(
+                    verify_rx.try_recv(),
+                    Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+                ),
+                "pruning must not cancel a live local-only block wait"
+            );
+            drop(verify_rx);
 
             // Certify should not surface the closed certification gate task as the final result.
             // With no block available, it remains pending on the recovery path until the
@@ -1831,7 +1829,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_core_subscription_closes_when_coding_buffer_prunes_missing_commitment() {
+    fn test_coding_floor_preserves_registered_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1846,6 +1844,8 @@ mod tests {
             )
             .await;
 
+            // No links are added. Network fetches cannot complete. Waiters
+            // resolve only through the buffer or closure.
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
@@ -1853,45 +1853,115 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
-            let marshal = setup.mailbox;
+            let mailbox = setup.mailbox;
             let shards = setup.extra;
 
-            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
-            let missing_commitment = Commitment::from((
-                Sha256::hash(&[b"missing_block"]),
-                Sha256::hash(&[b"missing_root"]),
-                Sha256::hash(&[b"missing_context"]),
-                coding_config,
-            ));
-            let round = Round::new(Epoch::zero(), View::new(1));
+            // Give the missing commitment reconstruction state below the coming
+            // floor. Coding finalization prunes this state even though the block
+            // has not yet been reconstructed.
+            let missing_round = Round::new(Epoch::zero(), View::new(1));
+            let missing = CodingHarness::make_test_block(
+                Sha256::hash(&[b""]),
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                Height::new(1),
+                1_000,
+                NUM_VALIDATORS as u16,
+            );
+            let missing_commitment = CodingHarness::commitment(&missing);
+            shards.discovered(missing_commitment, participants[0].clone(), missing_round);
+            assert!(shards.get(missing_commitment).await.is_none());
 
-            // Subscribe through the core actor. This internally subscribes to the
-            // coding shard buffer and registers local waiters.
-            let block_rx = marshal.subscribe_by_commitment(
+            // Coalesce two fetch-backed subscriptions and a local wait onto the
+            // same core and shard-buffer subscription.
+            let mut by_round = mailbox.subscribe_by_commitment(
                 missing_commitment,
-                core::CommitmentFallback::FetchByRound { round },
+                core::CommitmentFallback::FetchByRound {
+                    round: missing_round,
+                },
+            );
+            let mut by_height = mailbox.subscribe_by_commitment(
+                missing_commitment,
+                core::CommitmentFallback::FetchByCommitment {
+                    height: Height::new(1),
+                },
+            );
+            let mut wait =
+                mailbox.subscribe_by_commitment(missing_commitment, core::CommitmentFallback::Wait);
+            let _ = mailbox.get_processed_height().await;
+
+            // Build a valid floor anchor above the missing reconstruction state.
+            const ANCHOR_HEIGHT: u64 = 5;
+            let mut parent = Sha256::hash(&[b""]);
+            let mut parent_commitment =
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
+            let mut anchor = None;
+            for height in 1..=ANCHOR_HEIGHT {
+                let block = CodingHarness::make_test_block(
+                    parent,
+                    parent_commitment,
+                    Height::new(height),
+                    height,
+                    NUM_VALIDATORS as u16,
+                );
+                parent = CodingHarness::digest(&block);
+                parent_commitment = CodingHarness::commitment(&block);
+                anchor = Some(block);
+            }
+            let anchor = anchor.unwrap();
+            let anchor_round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
+            let anchor_commitment = CodingHarness::commitment(&anchor);
+            let anchor_wait = mailbox.subscribe_by_commitment(
+                anchor_commitment,
+                core::CommitmentFallback::FetchByRound {
+                    round: anchor_round,
+                },
             );
 
-            // Allow core actor to register the underlying buffer subscription.
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Prune the missing commitment in the shard engine, which should cancel
-            // the underlying buffer subscription.
-            shards.prune(missing_commitment);
-
-            // The core actor must surface cancellation by closing the subscription,
-            // not by panicking or leaving the waiter parked indefinitely.
-            select! {
-                result = block_rx => {
-                    assert!(
-                        result.is_err(),
-                        "core subscription should close when coding buffer drops subscription"
-                    );
+            let finalization = CodingHarness::make_finalization(
+                Proposal {
+                    round: anchor_round,
+                    parent: View::new(ANCHOR_HEIGHT - 1),
+                    payload: anchor_commitment,
                 },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("core subscription should resolve promptly after coding prune");
-                },
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(finalization);
+            shards.proposed(anchor_round, anchor);
+            assert_eq!(anchor_wait.await.unwrap().commitment(), anchor_commitment);
+
+            // Wait for the application acknowledgement that advances the floors
+            // and asks Coding to prune reconstruction state through the anchor.
+            while mailbox.get_processed_height().await != Some(Height::new(ANCHOR_HEIGHT)) {
+                context.sleep(Duration::from_millis(10)).await;
             }
+            assert!(
+                shards.get(anchor_commitment).await.is_none(),
+                "coding buffer did not process the finalization prune"
+            );
+            let _ = mailbox.get_processed_height().await;
+
+            assert!(matches!(
+                by_round.try_recv(),
+                Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                by_height.try_recv(),
+                Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(
+                matches!(
+                    wait.try_recv(),
+                    Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+                ),
+                "local wait closed during coding finalization"
+            );
+
+            // Reconstruction after pruning satisfies every registered caller.
+            shards.proposed(missing_round, missing);
+            assert_eq!(by_round.await.unwrap().commitment(), missing_commitment);
+            assert_eq!(by_height.await.unwrap().commitment(), missing_commitment);
+            assert_eq!(wait.await.unwrap().commitment(), missing_commitment);
         })
     }
 

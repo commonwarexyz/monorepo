@@ -1031,7 +1031,7 @@ where
             Err(err) => {
                 warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
                 self.state.remove(&commitment);
-                self.drop_subscriptions(commitment);
+                self.drop_commitment_subscriptions(commitment);
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -1140,24 +1140,21 @@ where
         }
     }
 
-    /// Drops all subscriptions associated with a commitment.
+    /// Drops subscriptions for an exact commitment that cannot reconstruct a valid block.
     ///
-    /// Removing these entries drops all senders, causing receivers to resolve
-    /// with cancellation (`RecvError`) instead of hanging indefinitely.
-    fn drop_subscriptions(&mut self, commitment: Commitment) {
+    /// A different commitment can still reconstruct the same block digest.
+    /// Digest subscriptions remain open for that later availability.
+    fn drop_commitment_subscriptions(&mut self, commitment: Commitment) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
         self.block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(commitment));
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(
-                commitment.block::<B::Digest>(),
-            ));
     }
 
     /// Prunes all blocks in the reconstructed block cache that are older than the block
-    /// with the given commitment. Also cleans up stale reconstruction state
-    /// and subscriptions.
+    /// with the given commitment. Also cleans up stale reconstruction state and
+    /// assigned-shard subscriptions. Pruning is eviction rather than a tombstone,
+    /// so caller-owned block subscriptions survive.
     ///
     /// This is the only place reconstruction state is pruned by round. We
     /// intentionally avoid pruning on reconstruction success because a
@@ -1174,10 +1171,11 @@ where
                 .retain(|_, entry| entry.block.height() > height);
         }
 
-        // Always clear direct state/subscriptions for the pruned commitment.
-        // This avoids dangling waiters when prune is called for a commitment
-        // that was never reconstructed locally.
-        self.drop_subscriptions(through);
+        // Assigned-shard readiness cannot outlive the reconstruction state
+        // being pruned. Block-availability subscriptions are caller-owned.
+        // They survive cache and state pruning. Event-loop cleanup removes
+        // subscriptions whose receivers have closed.
+        self.assigned_shard_verified_subscriptions.remove(&through);
         let state_round = self.state.remove(&through).map(|state| state.round());
         let cached_round = cached.map(|(round, _)| round);
         let Some(round) = state_round.or(cached_round) else {
@@ -1193,7 +1191,7 @@ where
             keep
         });
         for pruned in pruned_commitments {
-            self.drop_subscriptions(pruned);
+            self.assigned_shard_verified_subscriptions.remove(&pruned);
         }
     }
 }
@@ -3048,7 +3046,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_local_proposal_prune_clears_older_reconstruction_state() {
+    fn test_local_proposal_prune_preserves_older_block_subscription() {
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -3076,7 +3074,7 @@ mod tests {
                 let round_b = Round::new(Epoch::zero(), View::new(2));
 
                 peers[2].mailbox.discovered(commitment_a, leader, round_a);
-                let block_sub = peers[2].mailbox.subscribe(commitment_a);
+                let mut block_sub = peers[2].mailbox.subscribe(commitment_a);
 
                 let peer1_index = peers[1].index.get() as u16;
                 let shard_a = block_a.shard(peer1_index).expect("missing shard");
@@ -3102,18 +3100,17 @@ mod tests {
                     "local proposal should be cached before pruning"
                 );
                 peers[2].mailbox.prune(commitment_b);
-
-                select! {
-                    result = block_sub => {
-                        assert!(
-                            result.is_err(),
-                            "older block subscription should close after local-proposal prune"
-                        );
-                    },
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("older block subscription remained open after local-proposal prune");
-                    },
-                }
+                assert!(
+                    peers[2].mailbox.get(commitment_b).await.is_none(),
+                    "pruned local proposal should leave the cache"
+                );
+                assert!(
+                    matches!(
+                        block_sub.try_recv(),
+                        Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+                    ),
+                    "older block subscription should survive state pruning"
+                );
 
                 peers[1]
                     .sender
@@ -3128,6 +3125,15 @@ mod tests {
                     !blocked_peer1,
                     "peer1 should not be blocked after older state was pruned"
                 );
+
+                peers[2].mailbox.proposed(round_a, block_a);
+                let reconstructed = select! {
+                    result = block_sub => result.expect("block subscription closed after prune"),
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("preserved block subscription was not satisfied");
+                    },
+                };
+                assert_eq!(reconstructed.commitment(), commitment_a);
             },
         );
     }
@@ -4221,8 +4227,9 @@ mod tests {
         // decoded blob has a different digest than what the commitment claims. This triggers
         // Error::DigestMismatch in try_reconstruct. Verify that:
         //   1. The failed commitment's state is cleaned up
-        //   2. Subscriptions for the failed commitment never resolve
-        //   3. A subsequent valid commitment reconstructs successfully
+        //   2. The exact commitment subscription closes
+        //   3. The digest subscription survives for another commitment
+        //   4. A subsequent valid commitment reconstructs successfully
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -4303,16 +4310,16 @@ mod tests {
                     "block should not be available after DigestMismatch"
                 );
 
-                // Block subscription should be closed after failed reconstruction cleanup.
+                // Commitment validity governs the exact-commitment subscription.
+                // The digest subscription accepts another valid commitment.
                 assert!(
                     matches!(block_sub.try_recv(), Err(TryRecvError::Closed)),
                     "subscription should close for failed reconstruction"
                 );
                 assert!(
-                    matches!(digest_sub.try_recv(), Err(TryRecvError::Closed)),
-                    "digest subscription should close after failed reconstruction"
+                    matches!(digest_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "digest subscription should survive failed reconstruction"
                 );
-
                 // Now verify the engine is not stuck: send valid shards for block1's real
                 // commitment and confirm reconstruction succeeds.
                 let real_commitment1 = coded_block1.commitment();
@@ -4348,6 +4355,10 @@ mod tests {
                     .await
                     .expect("valid block should reconstruct after prior failure");
                 assert_eq!(reconstructed.commitment(), real_commitment1);
+                let by_digest = digest_sub
+                    .await
+                    .expect("valid commitment should satisfy digest subscription");
+                assert_eq!(by_digest.commitment(), real_commitment1);
             },
         );
     }

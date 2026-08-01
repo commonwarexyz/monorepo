@@ -185,6 +185,25 @@ pub(crate) const fn resolve(verdict: Option<bool>, durable: bool) -> Option<bool
     }
 }
 
+/// Forwards `input` while `output` still has a receiver.
+///
+/// Dropping the output receiver cancels this task and, by ownership, the input operation.
+pub(crate) async fn forward<T, U>(
+    mut output: oneshot::Sender<T>,
+    input: oneshot::Receiver<U>,
+    map: impl FnOnce(U) -> Option<T>,
+) {
+    let result = select! {
+        _ = output.closed() => return,
+        result = input => result,
+    };
+    if let Ok(value) = result
+        && let Some(value) = map(value)
+    {
+        output.send_lossy(value);
+    }
+}
+
 /// Drives a certification gate `task` to a certify verdict, recovering through `fallback` when the
 /// gate cannot speak for the notarized proposal.
 ///
@@ -368,6 +387,20 @@ mod tests {
         // A true verdict publishes only once the store is durable.
         assert_eq!(resolve(Some(true), true), Some(true));
         assert_eq!(resolve(Some(true), false), None);
+    }
+
+    #[test]
+    fn test_forward_cancels_input_when_output_closes() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let (input_tx, input_rx) = oneshot::channel::<bool>();
+            let (output_tx, output_rx) = oneshot::channel::<bool>();
+            drop(output_rx);
+
+            forward(output_tx, input_rx, Some).await;
+
+            assert!(input_tx.is_closed());
+        });
     }
 
     #[test]

@@ -324,7 +324,13 @@ where
         receiver
     }
 
-    /// Request to prune all caches at and below the given commitment.
+    /// Request to prune reconstruction caches and state at and below the given commitment.
+    ///
+    /// Pruning only evicts reconstruction state. It does not declare the commitment permanently
+    /// unavailable. A later proposal or discovery can recreate the state. Block-availability
+    /// subscriptions remain registered and can resolve if the block is reconstructed again. Drop
+    /// the receiver to cancel a subscription. Assigned-shard verification subscriptions are tied
+    /// to reconstruction state and close when it is pruned.
     pub fn prune(&self, through: Commitment) {
         let _ = self.sender.enqueue(Message::Prune { through });
     }

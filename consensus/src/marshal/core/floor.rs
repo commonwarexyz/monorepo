@@ -34,6 +34,7 @@ pub(super) enum FetchAdmission {
 }
 
 impl FetchAdmission {
+    #[cfg(test)]
     pub(super) const fn denied(self) -> bool {
         matches!(self, Self::Denied)
     }
