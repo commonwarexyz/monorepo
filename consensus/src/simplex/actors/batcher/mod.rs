@@ -866,62 +866,86 @@ mod tests {
         );
     }
 
-    /// A durable local finalize preserves certificate-backed proposal authority
-    /// after the batcher has already compacted the finalize phase.
+    /// A locally recovered certificate makes its proposal authoritative before
+    /// compacting the corresponding vote phase.
     #[test_async]
-    async fn test_constructed_finalize_after_local_finalization_preserves_authority() {
-        let mut rng = test_rng();
-        let Fixture {
-            participants,
-            schemes,
-            verifier,
-            ..
-        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
-        let quorum_size = quorum(5) as usize;
-        let round_id = Round::new(Epoch::new(0), View::new(1));
-        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"finalized"]));
-        let mut round = super::Round::new(
-            round_id,
-            Arc::new(verifier),
-            NoopBlocker,
-            NoopReporter(PhantomData),
-            false,
-        );
+    async fn test_local_certificate_preserves_proposal_authority() {
+        for kind in [Kind::Notarization, Kind::Finalization] {
+            let mut rng = test_rng();
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+            let quorum_size = quorum(5) as usize;
+            let round_id = Round::new(Epoch::new(0), View::new(1));
+            let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"certified"]));
+            let mut round = super::Round::new(
+                round_id,
+                Arc::new(verifier),
+                NoopBlocker,
+                NoopReporter(PhantomData),
+                false,
+            );
 
-        // Learn the proposal only from the leader, then locally recover a
-        // finalization without using a constructed vote.
-        let leader = Participant::from_usize(0);
-        let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
-        assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
-        round.set_leader(leader);
-        for i in 0..quorum_size {
-            let finalize = Finalize::sign(&schemes[i], proposal.clone()).unwrap();
-            assert!(round.add_network(participants[i].clone(), Vote::Finalize(finalize)));
+            let leader = Participant::from_usize(0);
+            let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+            assert!(round.add_network(participants[0].clone(), Vote::Notarize(notarize)));
+            round.set_leader(leader);
+            match kind {
+                Kind::Notarization => {
+                    for i in 1..quorum_size {
+                        let notarize = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
+                        assert!(
+                            round.add_network(participants[i].clone(), Vote::Notarize(notarize))
+                        );
+                    }
+                }
+                Kind::Finalization => {
+                    for i in 0..quorum_size {
+                        let finalize = Finalize::sign(&schemes[i], proposal.clone()).unwrap();
+                        assert!(
+                            round.add_network(participants[i].clone(), Vote::Finalize(finalize))
+                        );
+                    }
+                }
+                Kind::Nullification => unreachable!(),
+            }
+
+            let (batch, invalid) = round
+                .try_verify(&mut rng, &Sequential)
+                .await
+                .expect("certificate quorum must be ready");
+            assert_eq!(batch, quorum_size);
+            assert!(invalid.is_empty());
+            let certificate = round
+                .try_construct_certificate(&Sequential)
+                .await
+                .expect("verified quorum must construct a certificate");
+            assert_eq!(certificate.kind(), kind);
+
+            let conflicting =
+                Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
+            let conflicting = match kind {
+                Kind::Notarization => Certificate::Finalization(build_finalization(
+                    &schemes,
+                    &conflicting,
+                    quorum_size,
+                )),
+                Kind::Finalization => Certificate::Notarization(build_notarization(
+                    &schemes,
+                    &conflicting,
+                    quorum_size,
+                )),
+                Kind::Nullification => unreachable!(),
+            };
+            assert!(!round.record_certificate(&conflicting));
+            assert_eq!(
+                round.try_forward_proposal(Participant::from_usize(1)),
+                Some(proposal)
+            );
         }
-        let (batch, invalid) = round
-            .try_verify(&mut rng, &Sequential)
-            .await
-            .expect("finalize quorum must be ready");
-        assert_eq!(batch, quorum_size);
-        assert!(invalid.is_empty());
-        assert!(matches!(
-            round.try_construct_certificate(&Sequential).await,
-            Some(Certificate::Finalization(finalization)) if finalization.proposal == proposal
-        ));
-
-        // The voter's durable finalize may arrive after certificate recovery.
-        let finalize = Finalize::sign(&schemes[quorum_size], proposal.clone()).unwrap();
-        round.add_constructed(Vote::Finalize(finalize));
-
-        // Certificate-backed proposal state is immutable even if conflicting
-        // certificate evidence is presented later.
-        let conflicting = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"conflicting"]));
-        let notarization = build_notarization(&schemes, &conflicting, quorum_size);
-        assert!(!round.record_certificate(&Certificate::Notarization(notarization)));
-        assert_eq!(
-            round.try_forward_proposal(Participant::from_usize(1)),
-            Some(proposal)
-        );
     }
 
     /// A constructed finalize is added as verified while restoring only

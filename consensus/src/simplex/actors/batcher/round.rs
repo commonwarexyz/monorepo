@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tracing::Span;
 
 /// Outcome of recording a vote after preliminary conflict checks.
-enum VoteAcceptance {
+enum Outcome {
     /// The vote was newly recorded and reported.
     Added,
     /// The signer was already recorded with the same known vote state.
@@ -118,7 +118,18 @@ impl<
     /// `true` when a notarization selects a new proposal, making its buffered
     /// finalize votes eligible for processing.
     pub fn record_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
-        let process_votes = match certificate {
+        let process_votes = self.adopt_certificate_proposal(certificate);
+        self.verifier.record_certificate(certificate.kind());
+        self.release_votes(certificate.kind());
+        process_votes
+    }
+
+    /// Makes a certificate's proposal authoritative.
+    ///
+    /// Returns whether a notarization made buffered finalize votes eligible
+    /// for processing.
+    fn adopt_certificate_proposal(&mut self, certificate: &Certificate<S, D>) -> bool {
+        match certificate {
             Certificate::Notarization(notarization) => {
                 self.set_authoritative_proposal(&notarization.proposal)
             }
@@ -130,10 +141,7 @@ impl<
                 false
             }
             Certificate::Nullification(_) => false,
-        };
-        self.verifier.record_certificate(certificate.kind());
-        self.release_votes(certificate.kind());
-        process_votes
+        }
     }
 
     /// Releases full votes that are no longer needed for certificate assembly.
@@ -163,7 +171,7 @@ impl<
     /// certification. When extended conflict reporting is disabled, compact
     /// state preserves duplicate suppression and proposal forwarding without
     /// reallocating the released vote map.
-    fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> VoteAcceptance {
+    fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> Outcome {
         if constructed && let Vote::Finalize(finalize) = &message {
             // The voter only constructs a finalize after independently
             // authenticating the proposal.
@@ -182,10 +190,10 @@ impl<
                         Vote::Finalize(_) => panic!("duplicate finalize"),
                     }
                 }
-                return VoteAcceptance::Duplicate;
+                return Outcome::Duplicate;
             }
-            VoteRecord::DuplicateCompacted => return VoteAcceptance::Duplicate,
-            VoteRecord::ConflictingProposal => return VoteAcceptance::ConflictingProposal,
+            VoteRecord::DuplicateCompacted => return Outcome::Duplicate,
+            VoteRecord::ConflictingProposal => return Outcome::ConflictingProposal,
         };
 
         let verifier_message = retained.then(|| message.clone());
@@ -198,7 +206,7 @@ impl<
         if let Some(message) = verifier_message {
             self.verifier.add(message, constructed);
         }
-        VoteAcceptance::Added
+        Outcome::Added
     }
 
     /// Adds a durable locally constructed vote.
@@ -206,7 +214,7 @@ impl<
         assert!(
             !matches!(
                 self.accept_vote(message, true),
-                VoteAcceptance::ConflictingProposal
+                Outcome::ConflictingProposal
             ),
             "conflicting constructed vote"
         );
@@ -266,9 +274,9 @@ impl<
                         false
                     }
                     None => match self.accept_vote(Vote::Notarize(notarize), false) {
-                        VoteAcceptance::Added => true,
-                        VoteAcceptance::Duplicate => false,
-                        VoteAcceptance::ConflictingProposal => {
+                        Outcome::Added => true,
+                        Outcome::Duplicate => false,
+                        Outcome::ConflictingProposal => {
                             commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
                             false
                         }
@@ -301,9 +309,9 @@ impl<
                         false
                     }
                     None => match self.accept_vote(Vote::Nullify(nullify), false) {
-                        VoteAcceptance::Added => true,
-                        VoteAcceptance::Duplicate => false,
-                        VoteAcceptance::ConflictingProposal => {
+                        Outcome::Added => true,
+                        Outcome::Duplicate => false,
+                        Outcome::ConflictingProposal => {
                             unreachable!("nullify votes do not carry proposals")
                         }
                     },
@@ -340,9 +348,9 @@ impl<
                         false
                     }
                     None => match self.accept_vote(Vote::Finalize(finalize), false) {
-                        VoteAcceptance::Added => true,
-                        VoteAcceptance::Duplicate => false,
-                        VoteAcceptance::ConflictingProposal => {
+                        Outcome::Added => true,
+                        Outcome::Duplicate => false,
+                        Outcome::ConflictingProposal => {
                             commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
                             false
                         }
@@ -454,6 +462,7 @@ impl<
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
         let certificate = self.verifier.try_construct_certificate(strategy).await?;
+        self.adopt_certificate_proposal(&certificate);
         self.release_votes(certificate.kind());
         Some(certificate)
     }

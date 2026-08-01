@@ -171,11 +171,13 @@ impl<T: Attributable> AttributableMap<T> {
 }
 
 /// Full vote storage for a phase, or its compacted lifecycle marker.
+#[cfg(not(target_arch = "wasm32"))]
 enum Phase<T: Attributable> {
     Full(AttributableMap<T>),
     Compacted,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<T: Attributable> Phase<T> {
     const fn new(participants: usize) -> Self {
         Self::Full(AttributableMap::new(participants))
@@ -228,9 +230,9 @@ impl<T: Attributable> Phase<T> {
 /// Each vote type is stored in its own lazily allocated phase so a validator can
 /// contribute at most one vote per phase. Once certified, a phase can drop its full
 /// votes while compact signer facts preserve forwarding and duplicate suppression.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct VoteTracker<S: Scheme, D: Digest> {
     participants: usize,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     retain_votes_after_certification: bool,
     /// Compact state records whether a signer voted and whether the vote carried the
     /// authoritative proposal. The former suppresses duplicates and cross-phase
@@ -262,6 +264,7 @@ pub(crate) enum VoteRecord {
     ConflictingProposal,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     const NOTARIZE_SEEN: u8 = 1 << 0;
     const NOTARIZE_HAS_PROPOSAL: u8 = 1 << 1;
@@ -506,6 +509,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     fn clear_compacted(&mut self, cleared: u8) {
         for flags in &mut self.compacted {
