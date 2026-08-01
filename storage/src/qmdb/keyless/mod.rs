@@ -362,8 +362,7 @@ where
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count, |op| op.has_floor())
-                .await?;
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
 
         Ok(self
             .journal
@@ -595,6 +594,35 @@ where
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok((self, range))
+    }
+}
+
+impl<F, E, V, C, H, S> crate::qmdb::sync::Source for Keyless<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, V>;
+    type Error = Error<F>;
+
+    async fn serve(
+        &self,
+        request: crate::qmdb::sync::Request<F>,
+    ) -> Result<
+        (
+            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
+            crate::qmdb::sync::FeedbackTx,
+        ),
+        Self::Error,
+    > {
+        self.journal.serve(request).await
     }
 }
 

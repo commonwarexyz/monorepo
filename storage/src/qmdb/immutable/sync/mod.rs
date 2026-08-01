@@ -12,7 +12,7 @@ use crate::{
         build_snapshot_from_log,
         immutable::{self, CompactDb, Metrics, Operation},
         operation::Key,
-        sync::{self},
+        sync,
     },
     translator::Translator,
 };
@@ -20,6 +20,7 @@ use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
+use std::num::NonZeroU64;
 
 impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
 where
@@ -64,7 +65,7 @@ where
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
-        apply_batch_size: usize,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
@@ -83,7 +84,7 @@ where
             merkle,
             log,
             hasher,
-            apply_batch_size as u64,
+            apply_batch_size.get(),
         )
         .await?;
 
@@ -101,7 +102,6 @@ where
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
                 &journal.journal,
                 Location::new(bounds.end),
-                |op| op.has_floor(),
             )
             .await?;
 
@@ -138,7 +138,11 @@ where
         db.sync().await
     }
 
-    async fn local_boundary_nodes(
+    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+        Ok(self)
+    }
+
+    async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
         target: &sync::Target<F, Self::Digest>,
@@ -153,12 +157,9 @@ where
         // The inactivity floor is carried by the last commit operation rather than being
         // the target range's start.
         let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end(), |op| {
-                op.has_floor()
-            })
-            .await?;
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
 
-        sync::local_boundary_nodes::<F, _, H, S>(
+        sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,
@@ -172,7 +173,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
+impl<F, E, K, V, H, Cfg, S> sync::Database for CompactDb<F, E, K, V, H, Cfg, S>
 where
     F: Family,
     E: Context,
@@ -186,35 +187,46 @@ where
 {
     type Family = F;
     type Op = Operation<F, K, V>;
+    type Journal = sync::journal::Memory<F, E, Operation<F, K, V>>;
     type Config = immutable::CompactConfig<Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
 
-    async fn from_validated_state(
+    async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
-        state: sync::compact::ValidatedState<Self::Family, Self::Op, Self::Digest>,
+        log: Self::Journal,
+        pinned_nodes: Option<Vec<Self::Digest>>,
+        range: NonEmptyRange<Location<F>>,
+        _apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
-        let journal: crate::qmdb::compact::witness::Journal<E, F, H::Digest> =
-            crate::journal::contiguous::variable::Journal::init(
-                context.child("witness"),
-                config.witness,
-            )
-            .await?;
-        Self::init_from_validated_state(config.strategy, journal, config.commit_codec_config, state)
+        crate::qmdb::compact::from_sync_result(
+            context,
+            config,
+            log,
+            pinned_nodes,
+            range,
+            Self::init_from_sync,
+        )
+        .await
     }
 
-    fn inactivity_floor(op: &Self::Op) -> Option<Location<Self::Family>> {
-        op.has_floor()
+    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+        self.sync().await
+    }
+
+    async fn local_pinned_nodes(
+        _context: Self::Context,
+        _config: &Self::Config,
+        _target: &sync::Target<F, Self::Digest>,
+        _journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        Ok(None)
     }
 
     fn root(&self) -> Self::Digest {
         self.root()
-    }
-
-    async fn persist_compact_state(self) -> Result<Self, Error<F>> {
-        self.sync().await
     }
 }
 

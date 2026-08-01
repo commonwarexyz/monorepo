@@ -73,17 +73,15 @@
 //! generations currently assigned to at least one database, so memory usage
 //! is bounded by the number of databases regardless of how long sync runs.
 
+use commonware_codec::Encode;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Roundable, Viewable,
     types::{Height, Round},
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::{Metrics, Spawner, reschedule};
-use commonware_storage::{
-    merkle::Location,
-    qmdb::sync::{compact, resolver},
-};
+use commonware_runtime::{Handle, Metrics, Spawner, reschedule};
+use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -115,12 +113,12 @@ pub mod p2p;
 /// write lock ([Self::write]) and put it back on success ([WriteSlot::put]); a failure,
 /// panic, or cancellation mid-operation leaves the cell empty permanently, and every
 /// later [Self::read] or [Self::write] panics: a lost database is fatal here by design;
-/// restart to recover. Resolver access instead reports the source as missing, so serving
-/// degrades without crashing remote sync.
+/// restart to recover. Serve calls instead report the source as missing, so remote
+/// sync degrades without crashing.
 pub struct Shared<DB>(Inner<DB>);
 
-/// The lock wrapped by [`Shared`]. Storage implements its sync resolver traits on
-/// this shape, so [`Shared`]'s resolver impls delegate to it.
+/// The lock wrapped by [`Shared`]. Storage implements its sync source traits on
+/// this shape, so [`Shared`]'s source impls delegate to it.
 type Inner<DB> = Arc<TracedAsyncRwLock<Option<DB>>>;
 
 impl<DB> Clone for Shared<DB> {
@@ -187,46 +185,21 @@ impl<DB> WriteSlot<'_, DB> {
     }
 }
 
-/// Serve full sync fetches by delegating to the storage impl on the inner lock.
-impl<DB> resolver::Resolver for Shared<DB>
+impl<DB> Source for Shared<DB>
 where
     DB: Send + Sync + 'static,
-    Inner<DB>: resolver::Resolver,
+    Inner<DB>: Source,
 {
-    type Family = <Inner<DB> as resolver::Resolver>::Family;
-    type Digest = <Inner<DB> as resolver::Resolver>::Digest;
-    type Op = <Inner<DB> as resolver::Resolver>::Op;
-    type Error = <Inner<DB> as resolver::Resolver>::Error;
+    type Family = <Inner<DB> as Source>::Family;
+    type Digest = <Inner<DB> as Source>::Digest;
+    type Op = <Inner<DB> as Source>::Op;
+    type Error = <Inner<DB> as Source>::Error;
 
-    async fn get_operations(
+    async fn serve(
         &self,
-        op_count: Location<Self::Family>,
-        start_loc: Location<Self::Family>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-    ) -> Result<resolver::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        self.0
-            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
-            .await
-    }
-}
-
-/// Serve compact sync fetches by delegating to the storage impl on the inner lock.
-impl<DB> compact::Resolver for Shared<DB>
-where
-    DB: Send + Sync + 'static,
-    Inner<DB>: compact::Resolver,
-{
-    type Family = <Inner<DB> as compact::Resolver>::Family;
-    type Digest = <Inner<DB> as compact::Resolver>::Digest;
-    type Op = <Inner<DB> as compact::Resolver>::Op;
-    type Error = <Inner<DB> as compact::Resolver>::Error;
-
-    async fn get_compact_state(
-        &self,
-        target: compact::Target<Self::Family, Self::Digest>,
-    ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        self.0.get_compact_state(target).await
+        request: Request<Self::Family>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
+        self.0.serve(request).await
     }
 }
 
@@ -440,13 +413,13 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 /// Parameters for a one-time state-sync pass.
 #[derive(Clone, Copy, Debug)]
 pub struct SyncEngineConfig {
-    /// Maximum operations fetched per resolver request.
+    /// Maximum operations fetched per source request.
     pub fetch_batch_size: NonZeroU64,
 
     /// Number of operations applied per local apply step.
-    pub apply_batch_size: usize,
+    pub apply_batch_size: NonZeroU64,
 
-    /// Maximum number of outstanding resolver requests.
+    /// Maximum number of outstanding source requests.
     pub max_outstanding_requests: usize,
 
     /// Capacity of per-database target-update channels.
@@ -467,7 +440,7 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
@@ -561,7 +534,7 @@ where
     fn sync(
         context: E,
         config: Self::Config,
-        resolvers: R,
+        sources: R,
         anchor: Anchor<D>,
         targets: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
@@ -637,7 +610,7 @@ where
     async fn sync(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         anchor: Anchor<D>,
         target: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
@@ -650,7 +623,7 @@ where
         let sync = T::sync_db(
             context,
             config,
-            resolver,
+            source,
             target,
             target_rx,
             Some(finish_rx),
@@ -935,7 +908,7 @@ macro_rules! impl_state_sync_set {
             async fn sync(
                 context: E,
                 config: Self::Config,
-                resolvers: ($($R,)+),
+                sources: ($($R,)+),
                 anchor: Anchor<D>,
                 targets: Self::SyncTargets,
                 tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
@@ -1077,7 +1050,7 @@ macro_rules! impl_state_sync_set {
                             let reached_event_sender = reached_event_tx.clone();
                             let completion_signal = completion_tx.clone();
                             let config = config.$idx;
-                            let resolver = resolvers.$idx;
+                            let source = sources.$idx;
                             let target = targets.$idx;
                             let target_rx = db_channels.$idx.target_rx;
                             let finish_rx = db_channels.$idx.finish_rx;
@@ -1086,7 +1059,7 @@ macro_rules! impl_state_sync_set {
                                 let sync = $T::sync_db(
                                     context,
                                     config,
-                                    resolver,
+                                    source,
                                     target,
                                     target_rx,
                                     Some(finish_rx),
@@ -1484,6 +1457,125 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
+/// Sync a database that durably persists an operation log.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn sync_standard_db<E, DB, S>(
+    context: E,
+    config: DB::Config,
+    source: S,
+    target: sync::Target<DB::Family, DB::Digest>,
+    tip_updates: mpsc::Receiver<sync::Target<DB::Family, DB::Digest>>,
+    finish: Option<mpsc::Receiver<()>>,
+    reached_target: Option<mpsc::Sender<sync::Target<DB::Family, DB::Digest>>>,
+    sync_config: SyncEngineConfig,
+) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
+where
+    DB: sync::Database<Context = E>,
+    DB::Op: Encode,
+    S: sync::SourceFor<DB>,
+{
+    sync::sync(sync::engine::Config {
+        context,
+        source,
+        target,
+        max_outstanding_requests: sync_config.max_outstanding_requests,
+        fetch_batch_size: sync_config.fetch_batch_size,
+        apply_batch_size: sync_config.apply_batch_size,
+        db_config: config,
+        update_rx: Some(tip_updates),
+        finish_rx: finish,
+        reached_target_tx: reached_target,
+        max_retained_roots: sync_config.max_retained_roots,
+    })
+    .await
+}
+
+/// Aborts an adapter task when its owning sync future completes or is cancelled.
+struct Forwarder(Handle<()>);
+
+impl Drop for Forwarder {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Sync a database that does not durably persist an operation log.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn sync_compact_db<E, DB, S>(
+    context: E,
+    config: DB::Config,
+    source: S,
+    target: sync::CompactTarget<DB::Family, DB::Digest>,
+    mut tip_updates: mpsc::Receiver<sync::CompactTarget<DB::Family, DB::Digest>>,
+    finish: Option<mpsc::Receiver<()>>,
+    reached_target: Option<mpsc::Sender<sync::CompactTarget<DB::Family, DB::Digest>>>,
+    sync_config: SyncEngineConfig,
+) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
+where
+    E: Metrics + Spawner,
+    DB: sync::Database<Context = E>,
+    DB::Op: Encode,
+    S: sync::SourceFor<DB>,
+{
+    let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
+    // Start at the newest target already queued.
+    while let Ok(update) = tip_updates.try_recv() {
+        let Ok(update) = sync::Target::try_from(&update) else {
+            continue;
+        };
+        if update.advances(&initial) {
+            initial = update;
+        }
+    }
+
+    let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
+    // Retain the handle until the engine exits so the adapter is aborted on completion or cancel.
+    let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
+        while let Some(update) = tip_updates.recv().await {
+            // Ignore malformed updates.
+            let Ok(update) = sync::Target::try_from(&update) else {
+                continue;
+            };
+            if update_tx.send(update).await.is_err() {
+                break;
+            }
+        }
+    }));
+
+    let reached_target_tx = reached_target.map(|reached| {
+        let (tx, mut rx) = mpsc::channel::<sync::Target<DB::Family, DB::Digest>>(1);
+        context.child("compact_reached").spawn(move |_| async move {
+            while let Some(reached_engine_target) = rx.recv().await {
+                let target = sync::CompactTarget {
+                    root: reached_engine_target.root,
+                    size: reached_engine_target.range.end(),
+                };
+                if reached.send(target).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tx
+    });
+
+    let result = sync::sync(sync::engine::Config {
+        context,
+        source,
+        target: initial,
+        db_config: config,
+        fetch_batch_size: sync_config.fetch_batch_size,
+        apply_batch_size: sync_config.apply_batch_size,
+        max_outstanding_requests: sync_config.max_outstanding_requests,
+        max_retained_roots: sync_config.max_retained_roots,
+        update_rx: Some(update_rx),
+        finish_rx: finish,
+        reached_target_tx,
+    })
+    .await;
+    drop(update_forwarder);
+    result
+}
+
 #[tracing::instrument(name = "stateful.db.finalize_or_panic", level = "info", skip_all, fields(index = index))]
 async fn finalize_or_panic<E, T: ManagedDb<E>>(
     database: T,
@@ -1632,7 +1724,10 @@ mod tests {
     use commonware_runtime::{
         Clock, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
     };
-    use commonware_utils::channel::{mpsc, oneshot, ring};
+    use commonware_utils::{
+        NZU64,
+        channel::{mpsc, oneshot, ring},
+    };
     use futures::{FutureExt, SinkExt, pin_mut};
     use std::{
         convert::Infallible,
@@ -3459,7 +3554,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
@@ -3498,7 +3593,7 @@ mod tests {
                 tip_rx,
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
+                    apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
@@ -3515,7 +3610,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let release = Arc::new(AtomicBool::new(true));
-            let resolver = SlowSyncController {
+            let source = SlowSyncController {
                 release: release.clone(),
             };
 
@@ -3529,13 +3624,13 @@ mod tests {
                     >>::sync(
                         context,
                         (),
-                        resolver,
+                        source,
                         anchor(0),
                         0,
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
@@ -3585,7 +3680,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
@@ -3632,7 +3727,7 @@ mod tests {
                             tip_rx,
                             SyncEngineConfig {
                                 fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                                apply_batch_size: 1,
+                                apply_batch_size: NZU64!(1),
                                 max_outstanding_requests: 1,
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                                 max_retained_roots: 0,
@@ -3683,7 +3778,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
@@ -3742,7 +3837,7 @@ mod tests {
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(8).unwrap(),
                             max_retained_roots: 0,
@@ -3800,7 +3895,7 @@ mod tests {
                 tip_rx,
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
+                    apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
@@ -3838,7 +3933,7 @@ mod tests {
                     tip_rx,
                     SyncEngineConfig {
                         fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                        apply_batch_size: 1,
+                        apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
                         max_retained_roots: 0,
@@ -3880,7 +3975,7 @@ mod tests {
                 tip_rx,
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
+                    apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
@@ -3922,7 +4017,7 @@ mod tests {
                     tip_rx,
                     SyncEngineConfig {
                         fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                        apply_batch_size: 1,
+                        apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
                         max_retained_roots: 0,
@@ -4030,10 +4125,10 @@ mod tests {
             let fast_ready = Arc::new(AtomicBool::new(false));
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
-            let slow_resolver = SlowSyncController {
+            let slow_source = SlowSyncController {
                 release: slow_release.clone(),
             };
-            let fast_resolver = FastSyncObserver {
+            let fast_source = FastSyncObserver {
                 ready: fast_ready.clone(),
                 update_count: fast_update_count.clone(),
             };
@@ -4049,13 +4144,13 @@ mod tests {
                     >>::sync(
                         context,
                         ((), ()),
-                        (slow_resolver, fast_resolver),
+                        (slow_source, fast_source),
                         anchor(0),
                         (0, 0),
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
@@ -4105,8 +4200,8 @@ mod tests {
             let target = 7u64;
 
             let sync = context.child("tuple_state_sync_noop").spawn({
-                let slow_resolver = slow_release.clone();
-                let fast_resolver = FastSyncObserver {
+                let slow_source = slow_release.clone();
+                let fast_source = FastSyncObserver {
                     ready: fast_ready.clone(),
                     update_count: fast_update_count.clone(),
                 };
@@ -4118,13 +4213,13 @@ mod tests {
                     >>::sync(
                         context,
                         ((), ()),
-                        (slow_resolver, fast_resolver),
+                        (slow_source, fast_source),
                         anchor(target),
                         (target, target),
                         tip_rx,
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: 1,
+                            apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
@@ -4168,8 +4263,8 @@ mod tests {
             let sync = context
                 .child("tuple_state_sync_regroup_unchanged_target")
                 .spawn({
-                    let slow_resolver = slow_release.clone();
-                    let fast_resolver = FastSyncObserver {
+                    let slow_source = slow_release.clone();
+                    let fast_source = FastSyncObserver {
                         ready: fast_ready.clone(),
                         update_count: fast_update_count.clone(),
                     };
@@ -4181,13 +4276,13 @@ mod tests {
                         >>::sync(
                             context,
                             ((), ()),
-                            (slow_resolver, fast_resolver),
+                            (slow_source, fast_source),
                             anchor(0),
                             (0, 7),
                             tip_rx,
                             SyncEngineConfig {
                                 fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                                apply_batch_size: 1,
+                                apply_batch_size: NZU64!(1),
                                 max_outstanding_requests: 1,
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                                 max_retained_roots: 0,

@@ -93,7 +93,7 @@ use crate::{
             unordered::{Update, variable::Operation},
         },
         build_snapshot_from_log, delete_key,
-        operation::{Committable as _, Key, Operation as _},
+        operation::{Committable as _, Floored as _, Key},
         update_key,
     },
     translator::Translator,

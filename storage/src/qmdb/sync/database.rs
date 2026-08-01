@@ -7,8 +7,9 @@ use crate::{
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
-use std::future::Future;
+use std::{future::Future, num::NonZeroU64};
 
+/// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
     type JournalConfig;
     fn journal_config(&self) -> Self::JournalConfig;
@@ -38,6 +39,12 @@ impl<J: Clone, S: Strategy> Config for crate::qmdb::keyless::Config<J, S> {
     }
 }
 
+impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::compact::Config<C, S> {
+    type JournalConfig = ();
+
+    fn journal_config(&self) -> Self::JournalConfig {}
+}
+
 pub trait Database: Sized + Send {
     type Family: Family;
     type Op: Send + Sync;
@@ -56,18 +63,24 @@ pub trait Database: Sized + Send {
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<Self::Family>>,
-        apply_batch_size: usize,
+        apply_batch_size: NonZeroU64,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Return locally available boundary nodes for the target, if persisted local state can
+    /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
+    ///
+    /// The engine calls this only after [`Self::root`] matches the requested target. Implementations
+    /// that persist everything in [`Self::from_sync_result`] must explicitly return `Ok(self)`.
+    fn persist_sync_result(
+        self,
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+
+    /// Return locally available pinned nodes for the target, if persisted local state can
     /// authenticate them.
     ///
-    /// Returning `Some` lets a completed sync journal reuse boundary nodes from an on-disk
+    /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk
     /// database instead of fetching them from peers. Returning `None` always falls back to
-    /// fetching from peers. Simple append-only variants may verify only the persisted tree size
-    /// and root. Variants with additional pruning-dependent state should also ensure their
-    /// persisted lower bound still covers `target.range.start()`.
-    fn local_boundary_nodes(
+    /// fetching from peers.
+    fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
         target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
@@ -87,12 +100,12 @@ pub(crate) fn journal_covers_range<F: Family>(
     Location::new(bounds.start) <= range.start() && Location::new(bounds.end) == range.end()
 }
 
-/// Shared body for [`Database::local_boundary_nodes`] implementations backed by a persisted
-/// [`full::Merkle`]: reopen it from `config` under `context` and return the boundary nodes at
+/// Shared body for [`Database::local_pinned_nodes`] implementations backed by a persisted
+/// [`full::Merkle`]. Reopens it from `config` under `context` and returns the pinned nodes at
 /// `target.range.start()` if the persisted bounds cover the target and the root, computed with
 /// `inactivity_floor`, matches `target.root`. Returns `Ok(None)` when the persisted state
 /// cannot authenticate the target.
-pub(crate) async fn local_boundary_nodes<F, E, H, S>(
+pub(crate) async fn local_pinned_nodes<F, E, H, S>(
     context: E,
     config: full::Config<S>,
     target: &Target<F, H::Digest>,
@@ -124,4 +137,29 @@ where
         .await
         .map(Some)
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::journal_covers_range;
+    use crate::merkle::{Location, mmr::Family as MmrFamily};
+    use commonware_utils::{non_empty_range, range::NonEmptyRange};
+
+    #[test]
+    fn test_journal_covers_range() {
+        let range: NonEmptyRange<Location<MmrFamily>> =
+            non_empty_range!(Location::new(10), Location::new(20));
+
+        // Bounds reaching at least back to the start and ending exactly at the end cover.
+        assert!(journal_covers_range(10..20, &range));
+        assert!(journal_covers_range(5..20, &range));
+
+        // Bounds starting after the range start do not cover.
+        assert!(!journal_covers_range(11..20, &range));
+
+        // Bounds ending anywhere but exactly at the range end do not cover.
+        assert!(!journal_covers_range(10..19, &range));
+        assert!(!journal_covers_range(10..21, &range));
+        assert!(!journal_covers_range(0..0, &range));
+    }
 }

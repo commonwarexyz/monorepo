@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
+    qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
@@ -26,11 +26,12 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Op<DB> = <Shared<DB> as SyncResolver>::Op;
-type DatabaseRoot<DB> = <Shared<DB> as SyncResolver>::Digest;
+type Op<DB> = <Shared<DB> as Source>::Op;
+type DatabaseRoot<DB> = <Shared<DB> as Source>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
-type Pending<F, Op, D> = oneshot::Sender<Result<FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
-type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
+type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>;
+type PendingSubs<F, DB> =
+    BTreeMap<Request<F>, Vec<mailbox::ResponseTx<F, Op<DB>, DatabaseRoot<DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -84,8 +85,8 @@ enum State<DB> {
 /// An action dispatched by incoming mailbox messages.
 enum MailboxAction<F: Family> {
     None,
-    Fetch(handler::Request<F>),
-    Cancel(handler::Request<F>),
+    Fetch(Request<F>),
+    Cancel(Request<F>),
 }
 
 /// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
@@ -96,12 +97,13 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Shared<DB>: SyncResolver<Family = F>,
+    DB: Send + Sync + 'static,
+    Shared<DB>: Source<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
-    mailbox_rx: actor_mailbox::Receiver<mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>>,
+    mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB>>,
     state: State<DB>,
     metrics: ResolverMetrics,
     pending: PendingSubs<F, DB>,
@@ -114,7 +116,8 @@ where
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Shared<DB>: SyncResolver<Family = F>,
+    DB: Send + Sync + 'static,
+    Shared<DB>: Source<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
@@ -221,10 +224,7 @@ where
     }
 
     /// Process a mailbox message. Returns a request to fetch if a new key was registered.
-    fn handle_mailbox_message(
-        &mut self,
-        message: mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>,
-    ) -> MailboxAction<F> {
+    fn handle_mailbox_message(&mut self, message: SyncMessage<F, DB>) -> MailboxAction<F> {
         match message {
             mailbox::Message::AttachDatabase(db) => {
                 let replacing_existing = matches!(self.state, State::HasDb(_));
@@ -241,7 +241,7 @@ where
                         return MailboxAction::None;
                     }
                 }
-                self.pending.insert(request.clone(), vec![response]);
+                self.pending.insert(request, vec![response]);
                 self.metrics.fetch_requests.inc();
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
                 MailboxAction::Fetch(request)
@@ -259,7 +259,7 @@ where
     }
 
     /// Returns `true` if a request should be cancelled.
-    fn should_cancel_request(&mut self, request: &handler::Request<F>) -> bool {
+    fn should_cancel_request(&mut self, request: &Request<F>) -> bool {
         let Some(subscribers) = self.pending.get_mut(request) else {
             return true;
         };
@@ -274,43 +274,44 @@ where
     /// Decode a peer's response, fan it out to pending subscribers, and aggregate approvals.
     async fn handle_deliver(
         &mut self,
-        key: handler::Request<F>,
+        key: Request<F>,
         value: bytes::Bytes,
-        response: oneshot::Sender<bool>,
+        feedback_tx: oneshot::Sender<bool>,
     ) {
         // Only accept responses for keys we currently have in-flight.
         // Unknown keys are unsolicited/stale deliveries and are ignored.
         let Some(subscribers) = self.pending.remove(&key) else {
             self.metrics.deliveries.inc(status::Status::Dropped);
-            response.send_lossy(true);
+            feedback_tx.send_lossy(true);
             return;
         };
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
 
-        // `max_ops` is sourced from the original local request key above.
-        let max_ops = key.max_ops.get() as usize;
-        let decoded =
-            match handler::Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &max_ops) {
-                Ok(decoded) => decoded,
-                Err(_) => {
-                    self.pending.insert(key, subscribers);
-                    let _ = self.metrics.pending_requests.try_set(self.pending.len());
-                    self.metrics.deliveries.inc(status::Status::Invalid);
-                    response.send_lossy(false);
-                    return;
-                }
-            };
+        let cfg = (key.max_ops().get() as usize, ());
+        let response = match Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &cfg) {
+            Ok(response)
+                if matches!(
+                    (&key, &response),
+                    (Request::Operations { .. }, Response::Operations { .. })
+                        | (Request::Boundary { .. }, Response::Boundary { .. })
+                ) =>
+            {
+                response
+            }
+            _ => {
+                self.pending.insert(key, subscribers);
+                let _ = self.metrics.pending_requests.try_set(self.pending.len());
+                self.metrics.deliveries.inc(status::Status::Invalid);
+                feedback_tx.send_lossy(false);
+                return;
+            }
+        };
 
         let mut approvals = Vec::new();
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok(FetchResult::with_callback(
-                    decoded.proof.clone(),
-                    decoded.operations.clone(),
-                    decoded.pinned_nodes.clone(),
-                    success_tx,
-                )))
+                .send((response.clone(), Some(success_tx)))
                 .is_err()
             {
                 continue;
@@ -320,7 +321,7 @@ where
 
         if approvals.is_empty() {
             self.metrics.deliveries.inc(status::Status::Success);
-            response.send_lossy(true);
+            feedback_tx.send_lossy(true);
             return;
         }
 
@@ -337,45 +338,33 @@ where
             self.metrics.deliveries.inc(status::Status::Failure);
             debug!(?key, "downstream marked response as peer-invalid");
         }
-        response.send_lossy(peer_valid);
+        feedback_tx.send_lossy(peer_valid);
     }
 
     /// Serve a peer's request by querying the local database.
     async fn handle_produce(
         &mut self,
-        key: handler::Request<F>,
-        response: oneshot::Sender<bytes::Bytes>,
+        key: Request<F>,
+        response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
-        if key.max_ops > self.config.max_serve_ops {
+        if let Request::Operations { max_ops, .. } = key
+            && max_ops > self.config.max_serve_ops
+        {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let result = database
-            .get_operations(
-                key.op_count,
-                key.start_loc,
-                key.max_ops,
-                key.include_pinned_nodes,
-            )
-            .await;
+        let result = database.serve(key).await;
 
-        let Ok(fetch) = result else {
+        let Ok((response, _feedback_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
             return;
         };
 
-        response.send_lossy(
-            handler::Response {
-                proof: fetch.proof,
-                operations: fetch.operations,
-                pinned_nodes: fetch.pinned_nodes,
-            }
-            .encode(),
-        );
+        response_tx.send_lossy(response.encode());
         self.metrics.serve_requests.inc(status::Status::Success);
     }
 }
@@ -397,7 +386,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, channel::oneshot};
-    use std::{num::NonZeroU64, time::Duration};
+    use std::time::Duration;
 
     #[derive(Clone, Debug)]
     struct DummyProvider;
@@ -435,7 +424,7 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Shared<TestDb> as SyncResolver>::Op;
+    type TestOp = <Shared<TestDb> as Source>::Op;
 
     type TestActor = Actor<
         deterministic::Context,
@@ -458,25 +447,25 @@ mod tests {
             initial: Duration::from_millis(10),
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
-            max_serve_ops: NonZeroU64::new(16).unwrap(),
+            max_serve_ops: NZU64!(16),
             priority_requests: false,
             priority_responses: false,
         }
     }
 
-    fn test_request_at(op_count: Location) -> handler::Request<mmr::Family> {
-        handler::Request {
-            op_count,
-            start_loc: Location::new(0),
-            max_ops: NonZeroU64::new(1).unwrap(),
-            include_pinned_nodes: false,
+    fn test_request_at(size: Location) -> Request<mmr::Family> {
+        Request::Operations {
+            size,
+            start: Location::new(0),
+            max_ops: NZU64!(1),
         }
     }
 
-    type TestPending = Pending<mmr::Family, TestOp, sha256::Digest>;
-    type TestPendingResult = oneshot::Receiver<
-        Result<FetchResult<mmr::Family, TestOp, sha256::Digest>, mailbox::ResponseDropped>,
-    >;
+    type TestPending = mailbox::ResponseTx<mmr::Family, TestOp, sha256::Digest>;
+    type TestPendingResult = oneshot::Receiver<(
+        Response<mmr::Family, TestOp, sha256::Digest>,
+        commonware_storage::qmdb::sync::FeedbackTx,
+    )>;
 
     fn test_subscriber() -> (TestPending, TestPendingResult) {
         oneshot::channel()
@@ -514,14 +503,13 @@ mod tests {
     }
 
     fn encoded_fetch_payload() -> Bytes {
-        handler::Response::<mmr::Family, TestOp, sha256::Digest> {
+        Response::<mmr::Family, TestOp, sha256::Digest>::Operations {
             proof: Proof {
                 leaves: Location::new(0),
                 inactive_peaks: 0,
                 digests: Vec::new(),
             },
             operations: Vec::new(),
-            pinned_nodes: None,
         }
         .encode()
     }
@@ -544,12 +532,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
-            let op_count = db.read().await.bounds().end;
+            let size = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
-                .handle_produce(test_request_at(op_count), response_tx)
+                .handle_produce(test_request_at(size), response_tx)
                 .await;
 
             let payload = response_rx
@@ -564,14 +552,13 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
-            let op_count = db.read().await.bounds().end;
+            let size = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
-            let request = handler::Request {
-                op_count,
-                start_loc: Location::new(0),
-                max_ops: NonZeroU64::new(1_000).unwrap(),
-                include_pinned_nodes: false,
+            let request = Request::Operations {
+                size,
+                start: Location::new(0),
+                max_ops: NZU64!(1_000),
             };
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(request, response_tx).await;
@@ -588,7 +575,7 @@ mod tests {
 
             let (subscriber_tx, subscriber_rx) = test_subscriber();
             drop(subscriber_rx);
-            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+            actor.pending.insert(request, vec![subscriber_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             actor
@@ -607,26 +594,22 @@ mod tests {
 
             let (sub1_tx, sub1_rx) = test_subscriber();
             let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request.clone(), vec![sub1_tx, sub2_tx]);
+            actor.pending.insert(request, vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let fetch = sub1_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
-                        .expect("standard deliveries should include feedback")
+                    let (_response, feedback_tx) = sub1_rx.await.unwrap();
+                    feedback_tx
+                        .expect("deliveries should include feedback")
                         .send(true)
                         .unwrap();
                 },
                 async {
-                    let fetch = sub2_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
-                        .expect("standard deliveries should include feedback")
+                    let (_response, feedback_tx) = sub2_rx.await.unwrap();
+                    feedback_tx
+                        .expect("deliveries should include feedback")
                         .send(false)
                         .unwrap();
                 }
@@ -644,22 +627,19 @@ mod tests {
 
             let (sub1_tx, sub1_rx) = test_subscriber();
             let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request.clone(), vec![sub1_tx, sub2_tx]);
+            actor.pending.insert(request, vec![sub1_tx, sub2_tx]);
 
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
-                    let fetch = sub1_rx.await.unwrap().unwrap();
+                    let fetch = sub1_rx.await.unwrap();
                     drop(fetch);
                 },
                 async {
-                    let fetch = sub2_rx.await.unwrap().unwrap();
-                    fetch
-                        .callback
-                        .expect("standard deliveries should include feedback")
+                    let (_response, feedback_tx) = sub2_rx.await.unwrap();
+                    feedback_tx
+                        .expect("deliveries should include feedback")
                         .send(true)
                         .unwrap();
                 }
@@ -676,7 +656,7 @@ mod tests {
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, _subscriber_rx) = test_subscriber();
-            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+            actor.pending.insert(request, vec![subscriber_tx]);
             actor.pending.remove(&request);
             assert!(!actor.pending.contains_key(&request));
 
@@ -696,11 +676,11 @@ mod tests {
 
             let (stale_tx, stale_rx) = test_subscriber();
             drop(stale_rx);
-            actor.pending.insert(request.clone(), vec![stale_tx]);
+            actor.pending.insert(request, vec![stale_tx]);
 
             let (fresh_tx, _fresh_rx) = test_subscriber();
             let action = actor.handle_mailbox_message(mailbox::Message::GetOperations {
-                request: request.clone(),
+                request,
                 response: fresh_tx,
             });
 
@@ -712,14 +692,36 @@ mod tests {
     }
 
     #[test]
+    fn deliver_rejects_answer_shaped_unlike_its_question() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = Request::Boundary {
+                size: Location::new(1),
+                start: Location::new(0),
+            };
+            let (sub_tx, mut sub_rx) = test_subscriber();
+            actor.pending.insert(request, vec![sub_tx]);
+
+            // An operations-shaped answer to a boundary request decodes but does not match.
+            let (feedback_tx, validity_rx) = oneshot::channel();
+            actor
+                .handle_deliver(request, encoded_fetch_payload(), feedback_tx)
+                .await;
+
+            assert!(!validity_rx.await.unwrap());
+            assert!(actor.pending.contains_key(&request));
+            assert!(sub_rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
     fn cancel_operations_cancels_pruned_request() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
-            let action = actor.handle_mailbox_message(mailbox::Message::CancelOperations {
-                request: request.clone(),
-            });
+            let action =
+                actor.handle_mailbox_message(mailbox::Message::CancelOperations { request });
 
             assert!(matches!(action, MailboxAction::Cancel(ref key) if key == &request));
         });

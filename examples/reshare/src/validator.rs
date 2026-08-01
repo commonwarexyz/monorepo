@@ -31,7 +31,7 @@ use commonware_glue::{
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
-        db::{DatabaseSet, p2p::standard as qmdb_resolver},
+        db::{DatabaseSet, p2p as qmdb_resolver},
     },
 };
 use commonware_macros::boxed;

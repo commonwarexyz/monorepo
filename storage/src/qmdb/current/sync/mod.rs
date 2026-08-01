@@ -62,10 +62,8 @@ use crate::{
             },
         },
         metrics::Metrics as AnyMetrics,
-        operation::{Committable, Key, Operation as _},
-        sync::{
-            Database, DatabaseConfig as Config, compact::ServeError, resolver::fetch_operations,
-        },
+        operation::{Committable, Key},
+        sync::{Database, DatabaseConfig as Config, FeedbackTx, Request, Response},
     },
     translator::Translator,
 };
@@ -75,7 +73,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
 use commonware_utils::{Array, bitmap::Prunable as BitMap, range::NonEmptyRange};
 use core::num::NonZeroUsize;
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -103,7 +101,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
-    apply_batch_size: usize,
+    apply_batch_size: NonZeroU64,
     init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
@@ -136,7 +134,7 @@ where
         merkle,
         log,
         qmdb::hasher::<H>(),
-        apply_batch_size as u64,
+        apply_batch_size.get(),
     )
     .await?;
 
@@ -177,7 +175,7 @@ where
     let grafted_pinned_nodes = {
         let grafted_boundary = Location::<F>::new(pruned_chunks as u64);
         let grafting_height = grafting::height::<N>();
-        let mut pins = Vec::new();
+        let mut pinned_nodes = Vec::new();
         for grafted_pos in F::nodes_to_pin(grafted_boundary) {
             let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, grafting_height);
             let digest = any
@@ -186,9 +184,9 @@ where
                 .get_node(ops_pos)
                 .await?
                 .ok_or(qmdb::Error::<F>::DataCorrupted("missing ops pinned node"))?;
-            pins.push(digest);
+            pinned_nodes.push(digest);
         }
-        pins
+        pinned_nodes
     };
 
     // Build grafted tree.
@@ -279,7 +277,7 @@ macro_rules! impl_current_sync_database {
                 log: Self::Journal,
                 pinned_nodes: Option<Vec<Self::Digest>>,
                 range: NonEmptyRange<Location<F>>,
-                apply_batch_size: usize,
+                apply_batch_size: NonZeroU64,
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let metadata_partition = config.grafted_metadata_partition.clone();
@@ -305,7 +303,11 @@ macro_rules! impl_current_sync_database {
                 .await
             }
 
-            async fn local_boundary_nodes(
+            async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+                Ok(self)
+            }
+
+            async fn local_pinned_nodes(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
@@ -319,14 +321,10 @@ macro_rules! impl_current_sync_database {
 
                 // The inactivity floor is carried by the last commit operation rather than
                 // being the target range's start.
-                let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
-                    journal,
-                    target.range.end(),
-                    |op| op.has_floor(),
-                )
-                .await?;
+                let inactivity_floor =
+                    qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
 
-                qmdb::sync::local_boundary_nodes::<F, _, H, S>(
+                qmdb::sync::local_pinned_nodes::<F, _, H, S>(
                     context,
                     config.merkle_config.clone(),
                     target,
@@ -372,161 +370,29 @@ impl_current_sync_database!(
     OrderedVariableOp<F, K, V>: CodecShared
 );
 
-// --- Resolver implementations ---
-//
-// The resolver for `current` databases serves ops-level proofs (not grafted proofs) from
-// the inner `any` db. The sync engine verifies each batch against the ops root.
+/// A `current` database serves proofs from the `any` database it wraps. The sync engine
+/// operates on the ops root, which is `any`'s root.
+impl<F, E, U, C, I, H, const N: usize, S> crate::qmdb::sync::Source
+    for db::Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    U: Update + Send + Sync + 'static,
+    C: Mutable<Item = Operation<F, U>> + Send + Sync,
+    I: crate::index::Unordered<Value = Location<F>> + Send + Sync,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec + Send,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, U>;
+    type Error = qmdb::Error<F>;
 
-macro_rules! impl_current_resolver {
-    ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
-        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
-            for std::sync::Arc<$db<F, E, K, V, H, T, N, S>>
-        where
-            F: Graftable,
-            E: Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-            $($($where_extra)+)?
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
-
-            async fn get_operations(
-                &self,
-                op_count: Location<F>,
-                start_loc: Location<F>,
-                max_ops: std::num::NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        self.any.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| self.any.pinned_nodes_at(start_loc),
-                )
-                .await
-            }
-        }
-        impl_current_resolver!(@locked AsyncRwLock, $db, $op, $val_bound, $key_bound $(; $($where_extra)+)?);
-        impl_current_resolver!(@locked TracedAsyncRwLock, $db, $op, $val_bound, $key_bound $(; $($where_extra)+)?);
-    };
-    (@locked $lock:ident, $db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
-
-        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
-            for std::sync::Arc<
-                commonware_utils::sync::$lock<
-                    $db<F, E, K, V, H, T, N, S>,
-                >,
-            >
-        where
-            F: Graftable,
-            E: Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-            $($($where_extra)+)?
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = qmdb::Error<F>;
-
-            async fn get_operations(
-                &self,
-                op_count: Location<F>,
-                start_loc: Location<F>,
-                max_ops: std::num::NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
-                let db = self.read().await;
-                fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.any.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.any.pinned_nodes_at(start_loc),
-                )
-                .await
-            }
-        }
-
-        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
-            for std::sync::Arc<
-                commonware_utils::sync::$lock<
-                    Option<$db<F, E, K, V, H, T, N, S>>,
-                >,
-            >
-        where
-            F: Graftable,
-            E: Context,
-            K: $key_bound,
-            V: $val_bound + Send + Sync + 'static,
-            H: Hasher,
-            T: Translator + Send + Sync + 'static,
-            T::Key: Send + Sync,
-            S: Strategy,
-            $($($where_extra)+)?
-        {
-            type Family = F;
-            type Digest = H::Digest;
-            type Op = $op<F, K, V>;
-            type Error = ServeError<F, H::Digest>;
-
-            async fn get_operations(
-                &self,
-                op_count: Location<F>,
-                start_loc: Location<F>,
-                max_ops: std::num::NonZeroU64,
-                include_pinned_nodes: bool,
-            ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
-                let guard = self.read().await;
-                let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                Ok(fetch_operations(
-                    op_count,
-                    start_loc,
-                    max_ops,
-                    include_pinned_nodes,
-                    |op_count, start_loc, max_ops| {
-                        db.any.historical_proof(op_count, start_loc, max_ops)
-                    },
-                    |start_loc| db.any.pinned_nodes_at(start_loc),
-                )
-                .await?)
-            }
-        }
-    };
+    async fn serve(
+        &self,
+        request: Request<F>,
+    ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), qmdb::Error<F>> {
+        self.any.serve(request).await
+    }
 }
-
-// Unordered Fixed
-impl_current_resolver!(CurrentUnorderedFixedDb, UnorderedFixedOp, FixedValue, Array);
-
-// Unordered Variable
-impl_current_resolver!(
-    CurrentUnorderedVariableDb, UnorderedVariableOp, VariableValue, Key;
-    UnorderedVariableOp<F, K, V>: CodecShared,
-);
-
-// Ordered Fixed
-impl_current_resolver!(CurrentOrderedFixedDb, OrderedFixedOp, FixedValue, Array);
-
-// Ordered Variable
-impl_current_resolver!(
-    CurrentOrderedVariableDb, OrderedVariableOp, VariableValue, Key;
-    OrderedVariableOp<F, K, V>: CodecShared,
-);

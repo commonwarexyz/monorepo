@@ -1,12 +1,11 @@
 //! Manages outstanding fetch requests with monotonically increasing request IDs.
 //!
-//! Each request is assigned a unique ID and remembers the tree size it was issued
-//! against, letting the engine reject replies that do not match the requested
-//! historical view. Removing a request aborts its future.
+//! Each request is assigned a unique ID and keeps the request it was issued for, letting
+//! the engine check replies against what was requested. Removing a request aborts its future.
 
 use crate::{
     merkle::{Family, Location},
-    qmdb::sync::engine::IndexedFetchResult,
+    qmdb::sync::{Request, engine::IndexedFetchResult},
 };
 use commonware_cryptography::Digest;
 use commonware_utils::futures::{AbortablePool, Aborter};
@@ -20,18 +19,9 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct Id(u64);
 
-/// Immutable details about a tracked request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct RequestInfo<F: Family> {
-    /// The location of the first requested operation.
-    pub start_loc: Location<F>,
-    /// The database size the request asked the resolver to prove against.
-    pub target_size: Location<F>,
-}
-
 /// Mutable request state kept while the request is still tracked.
 struct TrackedRequest<F: Family> {
-    info: RequestInfo<F>,
+    request: Request<F>,
     _aborter: Aborter,
 }
 
@@ -61,48 +51,42 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         }
     }
 
-    /// Allocate the next request ID. Use with [`Self::insert`] after building
-    /// the future that embeds this ID.
-    pub const fn next_id(&mut self) -> Id {
+    /// Register a request, returning its assigned ID. If a request already exists at the same
+    /// start location, the old one is superseded and aborted.
+    pub fn insert<Fut>(&mut self, request: Request<F>, make: impl FnOnce(Id) -> Fut) -> Id
+    where
+        Fut: Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,
+    {
         let id = Id(self.next_id);
         self.next_id += 1;
-        id
-    }
-
-    /// Register a request with a previously allocated ID. If a request already
-    /// exists at `start_loc`, the old one is superseded and aborted.
-    pub fn insert(
-        &mut self,
-        id: Id,
-        start_loc: Location<F>,
-        target_size: Location<F>,
-        future: impl Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,
-    ) {
-        if let Some(old_id) = self.by_location.insert(start_loc, id) {
+        if let Some(old_id) = self.by_location.insert(request.start(), id) {
             self.tracked.remove(&old_id);
         }
-        let aborter = self.futures.push(future);
+        let aborter = self.futures.push(make(id));
         self.tracked.insert(
             id,
             TrackedRequest {
-                info: RequestInfo {
-                    start_loc,
-                    target_size,
-                },
+                request,
                 _aborter: aborter,
             },
         );
+        id
     }
 
-    /// Complete a request by ID. Returns its metadata if it was tracked.
-    pub fn remove(&mut self, id: Id) -> Option<RequestInfo<F>> {
-        if let Some(TrackedRequest { info, _aborter: _ }) = self.tracked.remove(&id) {
+    /// Complete a request by ID. Returns the request if it was tracked.
+    pub fn remove(&mut self, id: Id) -> Option<Request<F>> {
+        if let Some(TrackedRequest {
+            request,
+            _aborter: _,
+        }) = self.tracked.remove(&id)
+        {
             // Only remove from by_location if it still points to this ID.
             // A newer request may have superseded this location.
-            if self.by_location.get(&info.start_loc) == Some(&id) {
-                self.by_location.remove(&info.start_loc);
+            let start = request.start();
+            if self.by_location.get(&start) == Some(&id) {
+                self.by_location.remove(&start);
             }
-            Some(info)
+            Some(request)
         } else {
             None
         }

@@ -6,11 +6,12 @@
 
 use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait,
+    Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
     merkle::{Family, Location},
@@ -199,14 +200,17 @@ where
     type Merkleized = KeylessUnjournaledMerkleized<F, E, FixedEncoding<V>, H, S, ()>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
-    type SyncTarget = sync::compact::Target<F, H::Digest>;
+    type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        sync::compact::Target::new(initial_root::<F, FixedEncoding<V>, H>(), Location::new(1))
+        sync::CompactTarget {
+            root: initial_root::<F, FixedEncoding<V>, H>(),
+            size: Location::new(1),
+        }
     }
 
     async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
@@ -220,7 +224,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -229,7 +233,7 @@ where
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        Self::prune(self, target.leaf_count).await
+        Self::prune(self, target.size).await
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
@@ -237,7 +241,7 @@ where
     }
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.leaf_count).await?;
+        let db = self.rewind(target.size).await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -262,17 +266,17 @@ where
     type Merkleized = KeylessUnjournaledMerkleized<F, E, VariableEncoding<V>, H, S, C>;
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
-    type SyncTarget = sync::compact::Target<F, H::Digest>;
+    type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        sync::compact::Target::new(
-            initial_root::<F, VariableEncoding<V>, H>(),
-            Location::new(1),
-        )
+        sync::CompactTarget {
+            root: initial_root::<F, VariableEncoding<V>, H>(),
+            size: Location::new(1),
+        }
     }
 
     async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
@@ -286,7 +290,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -295,7 +299,7 @@ where
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        Self::prune(self, target.leaf_count).await
+        Self::prune(self, target.size).await
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
@@ -303,7 +307,7 @@ where
     }
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.leaf_count).await?;
+        let db = self.rewind(target.size).await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -317,34 +321,35 @@ where
 impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::CompactDb<F, E, V, H, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
-    R: sync::compact::Resolver<Family = F, Op = Operation<F, FixedEncoding<V>>, Digest = H::Digest>,
+    R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        _sync_config: SyncEngineConfig,
+        sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync::compact::sync(sync::compact::Config {
+        sync_compact_db(
             context,
-            resolver,
+            config,
+            source,
             target,
-            db_config: config,
-            update_rx: Some(tip_updates),
-            finish_rx: finish,
-            reached_target_tx: reached_target,
-        })
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
         .await
     }
 }
@@ -352,39 +357,36 @@ where
 impl<F, E, V, H, C, S, R> StateSyncDb<E, R> for variable::CompactDb<F, E, V, H, C, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     V: VariableValue + 'static,
     H: Hasher + 'static,
     Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
-    R: sync::compact::Resolver<
-            Family = F,
-            Op = Operation<F, VariableEncoding<V>>,
-            Digest = H::Digest,
-        >,
+    R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        _sync_config: SyncEngineConfig,
+        sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync::compact::sync(sync::compact::Config {
+        sync_compact_db(
             context,
-            resolver,
+            config,
+            source,
             target,
-            db_config: config,
-            update_rx: Some(tip_updates),
-            finish_rx: finish,
-            reached_target_tx: reached_target,
-        })
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
         .await
     }
 }
@@ -396,8 +398,8 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock as _, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic,
+        BufferPooler, Clock as _, Metrics as _, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -421,29 +423,34 @@ mod tests {
     >;
 
     #[derive(Clone)]
-    struct SupersedingCompactResolver {
+    struct SupersedingCompactSource {
         source: Arc<FixedDb>,
-        stale_target: sync::compact::Target<mmr::Family, Digest>,
+        stale_target: sync::CompactTarget<mmr::Family, Digest>,
         stale_request_tx: mpsc::Sender<()>,
     }
 
-    impl sync::compact::Resolver for SupersedingCompactResolver {
+    impl sync::Source for SupersedingCompactSource {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
-        type Error = sync::compact::ServeError<mmr::Family, Digest>;
+        type Error = <Arc<FixedDb> as sync::Source>::Error;
 
-        async fn get_compact_state(
+        async fn serve(
             &self,
-            target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
-        {
-            if target == self.stale_target {
+            request: sync::Request<Self::Family>,
+        ) -> Result<
+            (
+                sync::Response<Self::Family, Self::Op, Self::Digest>,
+                sync::FeedbackTx,
+            ),
+            Self::Error,
+        > {
+            if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
 
-            sync::compact::Resolver::get_compact_state(&self.source, target).await
+            self.source.serve(request).await
         }
     }
 
@@ -488,11 +495,24 @@ mod tests {
     const fn sync_config() -> SyncEngineConfig {
         SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
-            apply_batch_size: 1,
+            apply_batch_size: NZU64!(1),
             max_outstanding_requests: 1,
             update_channel_size: NZUsize!(1),
             max_retained_roots: 0,
         }
+    }
+
+    async fn populated_fixed_db(context: deterministic::Context, suffix: &str) -> FixedDb {
+        let config = fixed_config(&context, suffix);
+        let source = FixedDb::init(context.child("db"), config).await.unwrap();
+        let floor = source.inactivity_floor_loc();
+        let batch = source
+            .new_batch()
+            .append(U64::new(7))
+            .merkleize(&source, Some(U64::new(9)), floor)
+            .await;
+        let (source, _) = source.apply_batch(batch).unwrap();
+        source.sync().await.unwrap()
     }
 
     fn assert_managed_db<T: ManagedDb<deterministic::Context>>() {}
@@ -543,12 +563,12 @@ mod tests {
 
             let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
             assert_eq!(target.root, guard.root());
-            assert_eq!(target.leaf_count, mmr::Location::new(3));
+            assert_eq!(target.size, mmr::Location::new(3));
         });
     }
 
     #[test]
-    fn managed_db_matches_sync_target_rejects_wrong_leaf_count() {
+    fn managed_db_matches_sync_target_rejects_wrong_size() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "matches-sync-target");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
@@ -563,22 +583,22 @@ mod tests {
                 .await
                 .unwrap();
 
-            let valid_target = sync::compact::Target {
+            let valid_target = sync::CompactTarget {
                 root: merkleized.root(),
-                leaf_count: mmr::Location::new(merkleized.bounds().total_size),
+                size: mmr::Location::new(merkleized.bounds().total_size),
             };
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &valid_target,
             ));
 
-            let wrong_leaf_count = sync::compact::Target {
+            let wrong_size = sync::CompactTarget {
                 root: merkleized.root(),
-                leaf_count: mmr::Location::new(merkleized.bounds().total_size - 1),
+                size: mmr::Location::new(merkleized.bounds().total_size - 1),
             };
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
-                &wrong_leaf_count,
+                &wrong_size,
             ));
         });
     }
@@ -586,17 +606,7 @@ mod tests {
     #[test]
     fn state_sync_fetches_fixed_keyless_compact_state() {
         deterministic::Runner::default().start(|context| async move {
-            let source = FixedDb::init(context.child("source"), fixed_config(&context, "source"))
-                .await
-                .unwrap();
-            let floor = source.inactivity_floor_loc();
-            let batch = source
-                .new_batch()
-                .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor)
-                .await;
-            let (source, _) = source.apply_batch(batch).unwrap();
-            let source = source.sync().await.unwrap();
+            let source = populated_fixed_db(context.child("source"), "source").await;
 
             let target = source.target();
             let (_update_tx, update_rx) = mpsc::channel(1);
@@ -619,6 +629,35 @@ mod tests {
     }
 
     #[test]
+    fn state_sync_stops_compact_update_forwarder_after_completion() {
+        deterministic::Runner::default().start(|context| async move {
+            let source = populated_fixed_db(context.child("source"), "source").await;
+
+            let target = source.target();
+            let (_update_tx, update_rx) = mpsc::channel(1);
+            let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
+                context.child("target"),
+                fixed_config(&context, "target"),
+                Arc::new(source),
+                target,
+                update_rx,
+                None,
+                None,
+                sync_config(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                count_running_tasks(&context, "target_compact_updates"),
+                0,
+                "compact target forwarder outlived the completed sync",
+            );
+            drop(synced);
+        });
+    }
+
+    #[test]
     fn state_sync_drains_queued_target_before_reporting_reached() {
         deterministic::Runner::default().start(|context| async move {
             let source = FullFixedDb::init(
@@ -636,9 +675,9 @@ mod tests {
                 .await;
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
-            let first_target = sync::compact::Target {
+            let first_target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
 
             let floor = source.inactivity_floor_loc();
@@ -649,9 +688,9 @@ mod tests {
                 .await;
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
-            let second_target = sync::compact::Target {
+            let second_target = sync::CompactTarget {
                 root: source.root(),
-                leaf_count: source.bounds().end,
+                size: source.bounds().end,
             };
 
             let (update_tx, update_rx) = mpsc::channel(1);
@@ -692,14 +731,14 @@ mod tests {
             let source = source.sync().await.unwrap();
             let target = source.target();
 
-            // A larger target the resolver never serves. Its sync attempt
+            // A larger target the source never serves. Its sync attempt
             // hangs so the test can observe the gauges while they diverge.
-            let unservable_target = sync::compact::Target {
+            let unservable_target = sync::CompactTarget {
                 root: Sha256::hash(&[&[0xFF]]),
-                leaf_count: Location::new(*target.leaf_count + 1),
+                size: Location::new(*target.size + 1),
             };
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
-            let resolver = SupersedingCompactResolver {
+            let superseding_source = SupersedingCompactSource {
                 source: Arc::new(source),
                 stale_target: unservable_target.clone(),
                 stale_request_tx,
@@ -713,7 +752,7 @@ mod tests {
             let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
                 client_context,
                 client_config,
-                resolver,
+                superseding_source,
                 target.clone(),
                 update_rx,
                 Some(finish_rx),
@@ -727,14 +766,14 @@ mod tests {
                 reached = reached_rx.recv() => assert_eq!(reached, Some(target.clone())),
             }
 
-            let synced_leaves = *target.leaf_count;
+            let synced_size = *target.size;
             let encoded = context.encode();
             assert!(
-                encoded.contains(&format!("\nclient_target_leaf_count {synced_leaves}")),
+                encoded.contains(&format!("\nclient_sync_target_size {synced_size}")),
                 "missing compact sync target gauge: {encoded}"
             );
             assert!(
-                encoded.contains(&format!("\nclient_leaf_count {synced_leaves}")),
+                encoded.contains(&format!("\nclient_sync_size {synced_size}")),
                 "missing compact sync progress gauge: {encoded}"
             );
 
@@ -747,14 +786,14 @@ mod tests {
                 request = stale_request_rx.recv() => assert_eq!(request, Some(())),
             }
 
-            let target_leaves = *unservable_target.leaf_count;
+            let target_size_val = *unservable_target.size;
             let encoded = context.encode();
             assert!(
-                encoded.contains(&format!("\nclient_target_leaf_count {target_leaves}")),
+                encoded.contains(&format!("\nclient_sync_target_size {target_size_val}")),
                 "target gauge should advance to the superseding target: {encoded}"
             );
             assert!(
-                encoded.contains(&format!("\nclient_leaf_count {synced_leaves}")),
+                encoded.contains(&format!("\nclient_sync_size {synced_size}")),
                 "synced gauge should still report the reached target: {encoded}"
             );
         });
@@ -791,7 +830,7 @@ mod tests {
             let latest_target = source.target();
 
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
-            let resolver = SupersedingCompactResolver {
+            let superseding_source = SupersedingCompactSource {
                 source: Arc::new(source),
                 stale_target: stale_target.clone(),
                 stale_request_tx,
@@ -802,7 +841,7 @@ mod tests {
                 <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
                     fixed_config(&context, "supersede-target"),
-                    resolver,
+                    superseding_source,
                     stale_target,
                     update_rx,
                     None,
@@ -906,7 +945,7 @@ mod tests {
                 .unwrap();
             assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), targets[1]);
             assert!(matches!(
-                db.rewind(targets[0].leaf_count).await,
+                db.rewind(targets[0].size).await,
                 Err(Error::Merkle(
                     commonware_storage::merkle::Error::RewindBeyondHistory
                 ))
