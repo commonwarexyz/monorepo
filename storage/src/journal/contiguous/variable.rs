@@ -389,11 +389,6 @@ struct Inner<E: Context, V: Codec> {
     /// The readable positions; `bounds.end` is the next append position.
     bounds: Range<u64>,
 
-    /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
-    /// so tests can drop the pending future at that exact point.
-    #[cfg(test)]
-    halt_before_offsets_prune: bool,
-
     /// The number of items per blob.
     ///
     /// # Invariant
@@ -1169,8 +1164,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             blobs,
             offsets,
             bounds,
-            #[cfg(test)]
-            halt_before_offsets_prune: false,
             items_per_blob: cfg.items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
@@ -1233,8 +1226,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             blobs,
             offsets,
             bounds: size..size,
-            #[cfg(test)]
-            halt_before_offsets_prune: false,
             items_per_blob: cfg.items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
@@ -1536,46 +1527,41 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     ) -> Result<(Box<Self>, bool), Error> {
         let items_per_blob = self.items_per_blob.get();
 
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
+        // Cap the target at the physical tail, but never below the adopted boundary's blob.
+        // This handles cancelled rollovers and prune cleanup.
         let target_blob = position_to_blob(min_position, items_per_blob);
-        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
-        let min_blob = target_blob.min(tail_blob);
+        let min_blob = target_blob
+            .min(self.blobs.tail_blob_index())
+            .max(position_to_blob(self.bounds.start, items_per_blob));
 
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok((self, false));
         }
 
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
+        // The max keeps a mid-blob adopted boundary from regressing to its blob's start.
+        let new_boundary = blob_first_position(min_blob, items_per_blob)?.max(self.bounds.start);
 
-        // Make all data durable before removing any: the prune target may be justified by an
-        // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this sync could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The sync also covers unsynced
-        // survivors above the boundary: removal may be interrupted, and recovery truncates at
-        // the first torn item, so an unsynced survivor could discard every synced blob behind
-        // it. Offsets entries for retained items must survive the same crash: recovery rebuilds
-        // offsets that end behind the surviving data's end by replaying data, but offsets that
-        // end behind its start are unrecoverable because the data needed to rebuild the missing
-        // entries is about to be removed. Data is flushed first, matching the ordering every
-        // other durability path maintains.
+        // Make all data durable before the offsets journal commits the boundary that authorizes
+        // removal: the target may be justified by an appended-but-unflushed item, and offsets
+        // entries for retained items must survive the same crash (recovery rebuilds offsets that
+        // end behind the surviving data's end by replaying data, but not offsets that end behind
+        // its start, since that data is about to be removed). `start_sync` joins the tail and its
+        // predecessor (the only blobs that can be unsynced), so awaiting it is a full barrier.
         let data_sync = self.blobs.start_sync().await;
         data_sync.await?;
-        self.offsets = self.offsets.commit().await?;
         self.barrier.mark_durable(self.bounds.end);
 
-        self.blobs.prune(min_blob).await?;
-        self.bounds.start = new_boundary;
-
-        #[cfg(test)]
-        if self.halt_before_offsets_prune {
-            std::future::pending::<()>().await;
-        }
-
-        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
-        // pruning offsets to match.
+        // The offsets journal is the durable prune record. Prune it (persisting the boundary and
+        // removing its stale blobs) before removing data, then mirror the boundary into bounds.
+        // Committing the boundary before removal lets recovery complete an interrupted prune; the
+        // offsets journal's own `halt_prune_removals` parks after that commit for crash tests.
         let (offsets, _) = self.offsets.prune(new_boundary).await?;
         self.offsets = offsets;
+        self.bounds.start = new_boundary;
+
+        // Remove data after the boundary is durable. A crash here leaves data ahead of the
+        // committed offsets boundary; recovery finishes the removal on reopen.
+        self.blobs.prune(min_blob).await?;
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1704,8 +1690,71 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         codec_config: &V::Cfg,
         compressed: bool,
     ) -> Result<(Box<fixed::Inner<E, u64>>, Range<u64>), Error> {
-        // Find the newest item-bearing blob, truncating torn trailing bytes along the way (the
-        // first invalid frame is the end of the journal).
+        // Reconcile pruning before inspecting data: stale prefix blobs are outside
+        // the retained range. A mid-blob boundary is valid within the same blob.
+        let offsets_bounds = offsets.pruning_boundary()..offsets.size();
+        let offsets_start_blob = position_to_blob(offsets_bounds.start, items_per_blob);
+        {
+            let Some(&oldest_blob) = pending.keys().next() else {
+                return Self::align_empty(partition, pending, offsets, items_per_blob).await;
+            };
+            let data_oldest_pos = blob_first_position(oldest_blob, items_per_blob)?;
+
+            // The offsets journal ending before the oldest retained data blob represents an
+            // impossible state under normal crash/prune sequences, indicating external corruption.
+            if offsets_bounds.end < data_oldest_pos {
+                return Err(Error::Corruption(format!(
+                    "offsets journal size {} is behind data oldest position {data_oldest_pos}",
+                    offsets_bounds.end
+                )));
+            }
+            match offsets_start_blob.cmp(&oldest_blob) {
+                std::cmp::Ordering::Less => {
+                    // Pruning removes data blobs only after the offsets boundary is durably
+                    // committed, so data ahead of the boundary means the blobs at and after
+                    // it were lost, not pruned.
+                    return Err(Error::Corruption(format!(
+                        "data blob {offsets_start_blob} at the pruning boundary is missing \
+                         (oldest surviving blob is {oldest_blob})"
+                    )));
+                }
+                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Greater => {
+                    // An interrupted prune preserves its boundary blob. Check before deleting
+                    // the stale prefix so corruption remains detectable on retry.
+                    if !pending.contains_key(&offsets_start_blob) {
+                        return Err(Error::Corruption(format!(
+                            "data blob {offsets_start_blob} at the pruning boundary is missing"
+                        )));
+                    }
+
+                    // The offsets boundary commits a prune before data blobs are removed. Finish
+                    // an interrupted prune by deleting data below it, removing the files
+                    // concurrently; the durable boundary makes removal order irrelevant.
+                    let stale: Vec<u64> = pending
+                        .range(..offsets_start_blob)
+                        .map(|(&blob, _)| blob)
+                        .collect();
+                    if !stale.is_empty() {
+                        warn!(
+                            count = stale.len(),
+                            "crash repair: completing interrupted data prune"
+                        );
+                        for blob in &stale {
+                            drop(pending.remove(blob));
+                        }
+                        try_join_all(stale.into_iter().map(|blob| partition.remove(blob))).await?;
+                    }
+                }
+            }
+        }
+
+        // Find the newest item-bearing retained blob, truncating torn trailing bytes along the
+        // way (the first invalid frame is the end of the journal). Like the fixed journal's
+        // trailing-byte trim, this runs before the recovery watermark is checked, so the
+        // "corruption leaves survivors untouched" guarantee holds for crash-reachable states: a
+        // synced blob has no torn frame, so a retained blob trimmed despite a later corruption
+        // verdict implies external corruption of already-durable data, outside the crash model.
         let scanned: Vec<u64> = pending.keys().rev().copied().collect();
         let mut items_in_newest = 0;
         let mut newest_blob = None;
@@ -1735,11 +1784,19 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         }
 
         // The tail blob (where the next append lands) is one past the newest full blob, the
-        // newest partial blob, or the oldest blob when empty (resolved by `align_empty`). Any
-        // blob above it is an empty crash artifact; the loop below removes them.
+        // newest partial blob, or the oldest blob when empty (resolved by `align_empty`). A
+        // blob the pruning boundary starts within is full at correspondingly fewer items. Any
+        // blob above the tail is an empty crash artifact; the loop below removes them.
         let tail_blob = match newest_blob {
-            Some(blob) if items_in_newest == items_per_blob => blob.saturating_add(1),
-            Some(blob) => blob,
+            Some(blob) => {
+                let newest_start = blob_first_position(blob, items_per_blob)?;
+                let capacity = items_per_blob - offsets_bounds.start.saturating_sub(newest_start);
+                if items_in_newest == capacity {
+                    blob.saturating_add(1)
+                } else {
+                    blob
+                }
+            }
             None => pending.keys().next().copied().unwrap_or(0),
         };
         for &blob in &scanned {
@@ -1754,44 +1811,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let Some(newest_blob) = newest_blob else {
             return Self::align_empty(partition, pending, offsets, items_per_blob).await;
         };
-
-        // Align pruning state at the blob level. After alignment, the offsets journal starts in
-        // the oldest data blob; a mid-blob offsets start (from `init_at_size`) is valid within
-        // the same blob.
-        let oldest_blob = *pending.keys().next().expect("pending is non-empty");
-        let data_oldest_pos = blob_first_position(oldest_blob, items_per_blob)?;
-        {
-            let offsets_bounds = offsets.pruning_boundary()..offsets.size();
-
-            // The offsets journal ending before the oldest retained data blob represents an
-            // impossible state under normal crash/prune sequences, indicating external corruption.
-            if offsets_bounds.end < data_oldest_pos {
-                return Err(Error::Corruption(format!(
-                    "offsets journal size {} is behind data oldest position {data_oldest_pos}",
-                    offsets_bounds.end
-                )));
-            }
-            let offsets_start_blob = position_to_blob(offsets_bounds.start, items_per_blob);
-            match offsets_start_blob.cmp(&oldest_blob) {
-                std::cmp::Ordering::Less => {
-                    warn!("crash repair: pruning offsets journal to {data_oldest_pos}");
-                    let (pruned, _) = offsets.prune(data_oldest_pos).await?;
-                    offsets = pruned;
-                }
-                std::cmp::Ordering::Equal => {}
-                std::cmp::Ordering::Greater => {
-                    // Prune always removes data before offsets, so offsets should never be
-                    // ahead by a blob.
-                    return Err(Error::Corruption(format!(
-                        "offsets start blob {offsets_start_blob} ahead of \
-                         oldest data blob {oldest_blob}"
-                    )));
-                }
-            }
-        }
-
-        // Re-fetch bounds since prune may have been called above.
-        let offsets_bounds = offsets.pruning_boundary()..offsets.size();
 
         // The newest item-bearing blob bounds how far recovery can possibly go. If it is also
         // the oldest retained blob, its logical start may be a mid-blob pruning boundary.
@@ -1830,13 +1849,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             // the only populated blob, so no contiguous data-backed prefix exists). In that case
             // there is no oldest blob to anchor against; otherwise offsets and data must start in
             // the same blob.
-            if !offsets_bounds.is_empty()
-                && position_to_blob(offsets_bounds.start, items_per_blob) != oldest_blob
-            {
-                return Err(Error::Corruption(format!(
-                    "recovered offsets and data start in different blobs: {} != {oldest_blob}",
-                    position_to_blob(offsets_bounds.start, items_per_blob)
-                )));
+            if !offsets_bounds.is_empty() {
+                let oldest_blob = *pending.keys().next().expect("pending is non-empty");
+                if position_to_blob(offsets_bounds.start, items_per_blob) != oldest_blob {
+                    return Err(Error::Corruption(format!(
+                        "recovered offsets and data start in different blobs: {} != {oldest_blob}",
+                        position_to_blob(offsets_bounds.start, items_per_blob)
+                    )));
+                }
             }
 
             // Return bounds.start from offsets as the true boundary.
@@ -1863,13 +1883,23 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     ) -> Result<(Box<fixed::Inner<E, u64>>, Range<u64>), Error> {
         let offsets_bounds = offsets.pruning_boundary()..offsets.size();
 
+        // A watermark past the pruning boundary proves retained items were durable, so their
+        // data blobs were lost, not pruned; a surviving empty tail cannot vouch for them.
+        // Check before any branch or repair so the result is stable across retries.
+        if offsets.recovery_watermark() > offsets_bounds.start {
+            return Err(Error::Corruption(format!(
+                "no item-bearing data blobs survive the committed pruning boundary {}",
+                offsets_bounds.start
+            )));
+        }
+
         let Some(&blob) = pending.keys().next() else {
-            // No data blobs at all: a fresh partition, or a crash after pruning the data blobs
-            // but before pruning the offsets journal. Clear (rather than prune) the offsets so
-            // bounds collapse even when the size is mid-blob.
+            // No data blobs at all: a fresh partition or a journal with no retained durable
+            // items. Clear (rather than prune) the offsets so bounds collapse even when the
+            // size is mid-blob.
             let size = offsets_bounds.end;
             if !offsets_bounds.is_empty() {
-                warn!("crash repair: clearing offsets to {size} (prune-all crash)");
+                warn!("crash repair: clearing offsets to {size} (no data blobs)");
                 offsets = offsets.clear_to_size(size).await?;
             }
             return Ok((offsets, size..size));
@@ -1898,8 +1928,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((offsets, target..target))
     }
 
-    /// Choose the position to rebuild offsets from. A watermark below the pruning boundary is
-    /// stale after a prune, while a watermark beyond retained data indicates corruption.
+    /// Choose the position to rebuild offsets from. A watermark below the pruning boundary is a
+    /// legacy artifact (an older prune left a stale sub-boundary watermark; current prunes record
+    /// a watermark covering the retained range), while a watermark beyond retained data indicates
+    /// corruption.
     fn recovery_anchor(
         offsets: &fixed::Inner<E, u64>,
         offsets_bounds: &Range<u64>,
@@ -2123,26 +2155,29 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 ///
 /// ## 1. Data Blobs are the Source of Truth
 ///
-/// The data blobs are always the source of truth. The offsets journal is an index that may
-/// temporarily diverge during crashes. Divergences are automatically aligned during init():
+/// The data blobs are always the source of truth for item contents. The offsets journal is an
+/// index that may temporarily diverge during crashes. Divergences are automatically aligned
+/// during init():
 /// * If offsets are behind data after the recovery watermark: rebuild missing offsets by replaying
 ///   data from the recovery anchor.
 /// * If offsets are ahead of the retained data prefix but the data still reaches the recovery
 ///   watermark: rewind offsets to match the data-backed size. Retained data ending before the
 ///   watermark is corruption because acknowledged data is missing.
-/// * If offsets.bounds().start < the oldest data blob's start: prune offsets to match (this can
-///   happen if we crash after pruning the data blobs but before pruning the offsets journal).
 ///
-/// Offsets may start after the data's blob-aligned start when both are in the same blob, as in a
-/// mid-blob `init_at_size`. Offsets starting in a later blob imply corruption because we
-/// always prune the data blobs before the offsets journal.
+/// The offsets journal's pruning boundary is the committed prune record: it is durably advanced
+/// before any data blob is removed. Offsets starting in a later blob than the oldest data blob
+/// therefore mark an interrupted prune, which init completes by removing the stale data prefix.
+/// Data starting in a later blob than the offsets boundary means retained blobs were lost, not
+/// pruned, and init reports corruption. Offsets may start after the data's blob-aligned start
+/// when both are in the same blob, as in a mid-blob `init_at_size`.
 ///
 /// ## 2. Offsets Recovery Watermark
 ///
 /// The offsets journal's recovery watermark records a durable lower bound on the journal size and
 /// a preferred point for replaying data to rebuild offset entries after a crash. Fixed-journal
 /// recovery rejects watermarks beyond the recovered offsets size as corruption. A watermark below
-/// the recovered offsets start is stale after a prune, so init falls back to the offsets start. If
+/// the recovered offsets start is a stale legacy watermark (an older prune left a sub-boundary
+/// value), so init falls back to the offsets start. If
 /// retained data exists but ends before the watermark, init returns corruption because acknowledged
 /// data is missing. If no retained data exists, init reconciles both sides to an empty journal.
 /// Replay after a valid anchor stops at the first short data blob and truncates newer blobs so the
@@ -2477,6 +2512,12 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
 
 #[cfg(test)]
 impl<E: Context, V: CodecShared> Journal<E, V> {
+    /// Test helper: park the production prune after the offsets journal's boundary commit,
+    /// before any blob removal, so a test can drop the pending prune future at that point.
+    pub(crate) fn test_halt_offsets_prune_removals(&mut self, halt: bool) {
+        self.0.offsets.halt_prune_removals = halt;
+    }
+
     /// Test helper: Prune the data blobs directly (simulates crash scenario).
     pub(crate) async fn test_prune_data(&mut self, min_blob: u64) -> Result<bool, Error> {
         let min_blob = min_blob.min(self.0.blobs.tail_blob_index());
@@ -3484,15 +3525,10 @@ mod tests {
         });
     }
 
-    /// Test that init aligns state when data is pruned/lost but offsets survives.
-    ///
-    /// This handles both:
-    /// 1. Crash during prune-all (data pruned, offsets not yet)
-    /// 2. External data partition loss
-    ///
-    /// In both cases, we align by pruning offsets to match.
+    /// Losing the data partition while the watermark proves durable retained items is
+    /// corruption that is stable across retries, not a completed prune-all to accept silently.
     #[test_traced]
-    fn test_variable_align_data_offsets_mismatch() {
+    fn test_variable_recovery_rejects_data_partition_loss() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -3504,12 +3540,9 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            // === Setup: Create journal with data ===
             let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-
-            // Append 20 items across 2 blobs
             for i in 0..20u64 {
                 (variable, _) = variable.append(&(i * 100)).await.unwrap();
             }
@@ -3517,38 +3550,111 @@ mod tests {
             let variable = variable.sync().await.unwrap();
             drop(variable);
 
-            // === Simulate data loss: Delete data partition but keep offsets ===
             context
                 .remove(&cfg.data_partition(), None)
                 .await
                 .expect("Failed to remove data partition");
 
-            // === Verify init aligns the mismatch ===
-            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Pruning after unsynced appends makes the retained data durable, so the offsets journal
+    /// (the durable prune record) must commit its boundary with a watermark that covers the
+    /// retained items. Persisting a stale watermark would let recovery accept the loss of that
+    /// just-synced retained data as a completed prune-all. Losing the retained data must be
+    /// reported as corruption.
+    #[test_traced]
+    fn test_variable_recovery_prune_watermark_covers_retained_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-watermark-covers-retained".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
-                .expect("Should align offsets to match empty data");
+                .unwrap();
 
-            // Size should be preserved
-            assert_eq!(journal.size(), 20);
-
-            // But no items remain (both journals pruned)
-            assert!(journal.bounds().is_empty());
-
-            // All reads should fail with ItemPruned
-            for i in 0..20 {
-                assert!(matches!(
-                    journal.read(i).await,
-                    Err(crate::journal::Error::ItemPruned(_))
-                ));
+            // Append 20 items across four blobs without an intervening sync, so the offsets
+            // watermark still lags when the prune runs.
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
 
-            // Can append new data starting at position 20
-            let pos;
-            (journal, pos) = journal.append(&999).await.unwrap();
-            assert_eq!(pos, 20);
-            assert_eq!(journal.read(20).await.unwrap(), 999);
+            // Prune away the first two blobs. The prune syncs all data durable, so the retained
+            // items 10..20 are acknowledged and the committed watermark must record that.
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            drop(journal);
 
-            journal.destroy().await.unwrap();
+            // Lose the data partition. The watermark proves items 10..20 were durable, so their
+            // disappearance is corruption, not a completed prune-all.
+            context
+                .remove(&cfg.data_partition(), None)
+                .await
+                .expect("Failed to remove data partition");
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Companion to the prune-watermark test on the non-empty recovery path: losing only PART of
+    /// the retained data after a prune (a later retained blob) must still be corruption. The
+    /// committed watermark covers the retained range, so `recovery_anchor` rejects a retained data
+    /// end short of it instead of silently truncating.
+    #[test_traced]
+    fn test_variable_recovery_prune_watermark_rejects_partial_retained_loss() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-watermark-partial-loss".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // Prune to 10, making retained items 10..20 (data blobs 2 and 3) durable.
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+
+            // Lose only the newest retained data blob (blob 3, positions 15..20); blob 2 survives.
+            context
+                .remove(&cfg.data_partition(), Some(&3u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove retained data blob");
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
         });
     }
 
@@ -3950,12 +4056,13 @@ mod tests {
         });
     }
 
-    /// Test recovery from crash after data blobs pruned but before offsets journal.
+    /// Data pruned ahead of the committed boundary (the pre-two-phase prune ordering) is
+    /// intentionally unsupported: recovery reports corruption, stable across retries, rather
+    /// than inferring the prune from blob absence.
     #[test_traced]
-    fn test_variable_recovery_prune_crash_offsets_behind() {
+    fn test_variable_recovery_rejects_data_pruned_ahead_of_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery-prune-crash".into(),
                 items_per_section: NZU64!(10),
@@ -3968,8 +4075,6 @@ mod tests {
             let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-
-            // Append 40 items across 4 blobs to both journals
             for i in 0..40u64 {
                 (variable, _) = variable.append(&(i * 100)).await.unwrap();
             }
@@ -3978,46 +4083,29 @@ mod tests {
             let (mut variable, _) = variable.prune(10).await.unwrap();
             assert_eq!(variable.bounds().start, 10);
 
-            // === Simulate crash: Prune data blobs but not offsets journal ===
-            // Manually prune data blobs to blob 2 (position 20)
+            // Remove data blobs past the committed boundary, as a crash under the
+            // pre-two-phase prune ordering could.
             variable.test_prune_data(2).await.unwrap();
-            // Offsets journal still has data from position 10-19
-
             variable.sync().await.unwrap();
 
-            // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
 
-            // Init should auto-repair: offsets journal pruned to match data blobs
-            let bounds = variable.bounds();
-            assert_eq!(bounds.start, 20);
-            assert_eq!(bounds.end, 40);
-
-            // Reads before position 20 should fail (pruned from both journals)
-            assert!(matches!(
-                variable.read(10).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
-
-            // Reads at position 20+ should succeed
-            assert_eq!(variable.read(20).await.unwrap(), 2000);
-            assert_eq!(variable.read(39).await.unwrap(), 3900);
-
-            variable.destroy().await.unwrap();
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
         });
     }
 
-    /// A crash after data pruning but before offsets pruning must remain recoverable even when
-    /// the last durable offsets end is below the new data boundary.
+    /// After a cancelled prune adopted a boundary the physical state has not caught up to,
+    /// a smaller prune request must not move the boundary backward.
     #[test_traced]
-    fn test_variable_recovery_prune_crash_offsets_end_behind() {
+    fn test_variable_prune_boundary_is_monotonic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "recovery-prune-offsets-end-behind".into(),
-                items_per_section: NZU64!(10),
+                partition: "prune-boundary-monotonic".into(),
+                items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -4027,33 +4115,82 @@ mod tests {
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
-
-            // Persist offsets only through position 7, then append enough unsynced items for a
-            // prune to advance the data boundary beyond that durable offsets end.
-            for i in 0..7u64 {
+            for i in 0..15u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
             let mut journal = journal.sync().await.unwrap();
-            for i in 7..12u64 {
-                (journal, _) = journal.append(&(i * 100)).await.unwrap();
-            }
 
-            // Drop the production prune future while it is parked after the data-blob
-            // removal, before offsets.prune has made the appended offsets durable: a
-            // genuine cancellation at that await.
-            journal.0.halt_before_offsets_prune = true;
+            // Cancel a prune parked inside the offsets prune, before any removal: the consuming
+            // future destroys the journal, but boundary 10 is durably committed in the offsets.
+            journal.test_halt_offsets_prune_removals(true);
             {
                 let fut = journal.prune(10);
                 futures::pin_mut!(fut);
                 assert!(
                     futures::poll!(fut.as_mut()).is_pending(),
-                    "prune must park before offsets.prune"
+                    "prune must park before the offsets removals"
                 );
             }
 
+            // Recovery adopts the committed boundary.
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
-                .expect("prune crash must leave a recoverable journal");
+                .expect("journal must reopen with the committed boundary");
+            assert_eq!(journal.bounds(), 10..15);
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+
+            // A smaller request must not lower the recovered boundary: it is a no-op.
+            let (journal, pruned) = journal.prune(5).await.unwrap();
+            assert!(!pruned);
+            assert_eq!(journal.bounds().start, 10);
+
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune future dropped inside the offsets checkpoint persist consumes the journal but can
+    /// leave the boundary durable (the persist's sync completed before the drop). Recovery
+    /// completes the prune from that durable boundary.
+    #[test_traced]
+    fn test_variable_prune_dropped_during_persist_adopts_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-dropped-during-persist".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Drop a prune parked inside the offsets checkpoint persist, after its durable sync:
+            // the consuming future destroys the journal, but the boundary is already durable.
+            journal.0.offsets.test_halt_checkpoint_persist(true);
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park inside the offsets checkpoint persist"
+                );
+            }
+
+            // Recovery completes the prune from the durable boundary.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("journal must reopen after the dropped prune");
             assert_eq!(journal.bounds(), 10..12);
             for i in 10..12u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
@@ -4062,12 +4199,70 @@ mod tests {
         });
     }
 
-    /// Test recovery detects corruption when offsets journal pruned ahead of data blobs.
-    ///
-    /// Simulates an impossible state (offsets journal pruned more than data blobs) which
-    /// should never happen due to write ordering. Verifies that init() returns corruption error.
+    /// Lower-level state test: the logical end can lead the physical tail (the shape a roll-over
+    /// interrupted mid-`seal_tail` leaves), which the borrowed inner append constructs directly
+    /// because the consuming public `append` destroys the journal on such a drop. A prune issued
+    /// then must cap at the physical tail rather than commit a boundary into the never-created
+    /// next blob, and the result stays recoverable.
     #[test_traced]
-    fn test_variable_recovery_offsets_ahead_corruption() {
+    fn test_variable_prune_after_cancelled_seal_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-after-cancelled-seal".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..9u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Drive the borrowed inner append and drop it parked at the tail roll-over,
+            // constructing a state the consuming public `append` cannot leave a live handle in:
+            // the logical end advances to 10 but data blob 2 is never created.
+            journal.0.blobs.halt_seal_tail = true;
+            {
+                let fut = journal.0.append(&900);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "append must park at the tail roll-over"
+                );
+            }
+            journal.0.blobs.halt_seal_tail = false;
+            assert_eq!(journal.size(), 10);
+
+            // Prune to the logical end: the boundary caps at the physical tail, pruning
+            // only blob 0 rather than committing a boundary into the missing blob 2.
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.bounds(), 5..10);
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // The journal remains recoverable.
+            drop(journal);
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("journal must reopen after a capped prune");
+            assert_eq!(journal.bounds(), 5..10);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The offsets boundary commits a prune before data removal. Recovery completes the data
+    /// removal when a crash leaves offsets ahead.
+    #[test_traced]
+    fn test_variable_recovery_completes_offsets_ahead_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
@@ -4089,16 +4284,397 @@ mod tests {
                 (variable, _) = variable.append(&(i * 100)).await.unwrap();
             }
 
-            // Prune offsets journal ahead of data blobs (impossible state)
-            let (mut variable, _) = variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
+            // Persist the offsets prune, then remove only part of the data prefix.
+            variable = variable.test_prune_offsets(20).await.unwrap().0; // Prune to position 20
             variable.test_prune_data(1).await.unwrap(); // Only prune data blobs to blob 1 (position 10)
 
             let variable = variable.sync().await.unwrap();
             drop(variable);
 
-            // === Verify corruption detected ===
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 20..40);
+            for i in 20..40u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A mid-blob journal pruned exactly to the next blob boundary must recover from a crash
+    /// between the offsets prune and the data prune: the stale mid-blob data blob is removed
+    /// and the journal resumes empty at the committed boundary.
+    #[test_traced]
+    fn test_variable_recovery_completes_mid_blob_interrupted_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "mid-blob-interrupted-prune".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // A mid-blob journal: blob 1 holds positions 7..10, blob 2 is the empty tail.
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 7..10u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Commit the offsets boundary without removing any data blob, simulating a prune
+            // that crashed between the offsets prune and the data prune.
+            let (journal, _) = journal.test_prune_offsets(10).await.unwrap();
+            drop(journal);
+
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..10);
+
+            // The interrupted prune completed: the stale mid-blob data blob is gone.
+            let names = context.scan(&cfg.data_partition()).await.unwrap();
+            assert!(!names.contains(&1u64.to_be_bytes().to_vec()));
+
+            // The journal resumes normally at the boundary.
+            let pos;
+            (journal, pos) = journal.append(&1000).await.unwrap();
+            assert_eq!(pos, 10);
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(journal.read(10).await.unwrap(), 1000);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A variable prune future dropped during the offsets prune consumes the journal but has
+    /// already committed the boundary. Recovery adopts it: the reopened journal never reports
+    /// bounds whose offsets were pruned, and retained items stay readable.
+    #[test_traced]
+    fn test_variable_prune_interrupted_removal_keeps_committed_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-interrupted-keeps-boundary".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Drop a prune parked inside the offsets prune, before data removal: the consuming
+            // future destroys the journal, but the offsets boundary is durably committed.
+            journal.test_halt_offsets_prune_removals(true);
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the offsets removals"
+                );
+            }
+
+            // Recovery completes the interrupted prune: bounds agree with the committed boundary,
+            // retained items are readable, and pruned positions are reported as pruned.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("recovery must complete the interrupted prune");
+            assert_eq!(journal.bounds(), 10..15);
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(5))));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A variable prune future dropped during the offsets-blob removal has already committed
+    /// the boundary but removed no blob anywhere. Dropping the future discards the journal
+    /// (mutating methods consume it), and recovery must complete both removal layers of the
+    /// interrupted prune.
+    #[test_traced]
+    fn test_variable_prune_dropped_during_offsets_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-dropped-during-offsets-removal".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Drop the production prune future while it is parked after the offsets
+            // journal's boundary commit, before any blob removal: a genuine cancellation
+            // at the removal await. The journal is consumed with the dropped future; its
+            // durable state holds the committed boundary with every blob still present.
+            journal.test_halt_offsets_prune_removals(true);
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park at the halt before offsets-blob removal"
+                );
+            }
+
+            // Recovery completes both removal layers of the interrupted prune.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("recovery must complete the interrupted prune");
+            assert_eq!(journal.bounds(), 10..15);
+            for i in 10..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            let names = context.scan(&cfg.data_partition()).await.unwrap();
+            assert!(!names.contains(&0u64.to_be_bytes().to_vec()));
+            assert!(!names.contains(&1u64.to_be_bytes().to_vec()));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// If the data blob at the committed pruning boundary is missing, recovery must report
+    /// corruption rather than deleting the surviving suffix and treating its items as pruned.
+    #[test_traced]
+    fn test_variable_recovery_rejects_missing_boundary_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "missing-durable-boundary".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..40u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let (journal, _) = journal.test_prune_offsets(20).await.unwrap();
+            drop(journal);
+
+            let data_partition = cfg.data_partition();
+            context
+                .remove(&data_partition, Some(&2u64.to_be_bytes()))
+                .await
+                .unwrap();
+
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The surviving blobs are left intact for diagnosis or external recovery.
+            let names = context.scan(&data_partition).await.unwrap();
+            assert!(names.contains(&0u64.to_be_bytes().to_vec()));
+            assert!(names.contains(&3u64.to_be_bytes().to_vec()));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// If every data blob at or above the committed pruning boundary is missing while stale
+    /// prefix blobs survive an interrupted prune, recovery must report corruption rather than
+    /// collapsing the retained range to a completed prune-all.
+    #[test_traced]
+    fn test_variable_recovery_rejects_lost_retained_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "lost-retained-range".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..40u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Commit the offsets boundary without removing any data blob, simulating a prune
+            // that crashed before its first data removal.
+            let (journal, _) = journal.test_prune_offsets(20).await.unwrap();
+            drop(journal);
+
+            // Lose every data blob at or above the boundary; the stale prefix survives.
+            let data_partition = cfg.data_partition();
+            for blob in 2u64..5 {
+                let _ = context
+                    .remove(&data_partition, Some(&blob.to_be_bytes()))
+                    .await;
+            }
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Losing the boundary blob after a fully completed prune is corruption, stable across
+    /// retries: with no stale prefix left, the loss surfaces as data ahead of the committed
+    /// boundary rather than as an interrupted prune.
+    #[test_traced]
+    fn test_variable_recovery_rejects_boundary_loss_after_completed_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "completed-prune-boundary-loss".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..40u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let (journal, pruned) = journal.prune(20).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+
+            // Lose the blob at the committed boundary; later blobs survive.
+            let data_partition = cfg.data_partition();
+            context
+                .remove(&data_partition, Some(&2u64.to_be_bytes()))
+                .await
+                .unwrap();
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The surviving suffix is left intact, and the result is stable across retries.
+            let names = context.scan(&data_partition).await.unwrap();
+            assert!(names.contains(&3u64.to_be_bytes().to_vec()));
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Losing every retained blob after a fully completed prune is corruption, stable across
+    /// retries: the watermark proves acknowledged items were lost, not pruned.
+    #[test_traced]
+    fn test_variable_recovery_rejects_retained_loss_after_completed_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "completed-prune-retained-loss".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..40u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let (journal, pruned) = journal.prune(20).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+
+            // Lose every retained blob at or above the boundary.
+            let data_partition = cfg.data_partition();
+            for blob in 2u64..5 {
+                let _ = context
+                    .remove(&data_partition, Some(&blob.to_be_bytes()))
+                    .await;
+            }
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// A surviving empty tail cannot vouch for lost acknowledged blobs: recovery must report
+    /// corruption, stable across retries, rather than adopting the tail's position as the
+    /// pruning boundary.
+    #[test_traced]
+    fn test_variable_recovery_rejects_item_blob_loss_with_surviving_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "item-loss-surviving-tail".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+
+            // Lose the only item-bearing retained blob; the empty tail survives.
+            let data_partition = cfg.data_partition();
+            context
+                .remove(&data_partition, Some(&1u64.to_be_bytes()))
+                .await
+                .unwrap();
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The corruption result is stable across retries.
+            let retry = Journal::<_, u64>::init(context.child("third"), cfg).await;
+            assert!(matches!(retry, Err(Error::Corruption(_))));
         });
     }
 
@@ -5086,69 +5662,6 @@ mod tests {
             assert_eq!(journal.read(20).await.unwrap(), 2000);
 
             journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test recovery from multiple prune operations with crash.
-    #[test_traced]
-    fn test_variable_recovery_multiple_prunes_crash() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // === Setup: Create Variable wrapper with data ===
-            let cfg = Config {
-                partition: "recovery-multiple-prunes".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append 50 items across 5 blobs to both journals
-            for i in 0..50u64 {
-                (variable, _) = variable.append(&(i * 100)).await.unwrap();
-            }
-
-            // Prune to position 10 normally (both data and offsets journals pruned)
-            let (mut variable, _) = variable.prune(10).await.unwrap();
-            assert_eq!(variable.bounds().start, 10);
-
-            // === Simulate crash: Multiple prunes on data blobs, not on offsets journal ===
-            // Manually prune data blobs to blob 3 (position 30)
-            variable.test_prune_data(3).await.unwrap();
-            // Offsets journal still thinks oldest is position 10
-
-            variable.sync().await.unwrap();
-
-            // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Init should auto-repair: offsets journal pruned to match data blobs
-            let bounds = variable.bounds();
-            assert_eq!(bounds.start, 30);
-            assert_eq!(bounds.end, 50);
-
-            // Reads before position 30 should fail (pruned from both journals)
-            assert!(matches!(
-                variable.read(10).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
-            assert!(matches!(
-                variable.read(20).await,
-                Err(crate::journal::Error::ItemPruned(_))
-            ));
-
-            // Reads at position 30+ should succeed
-            assert_eq!(variable.read(30).await.unwrap(), 3000);
-            assert_eq!(variable.read(49).await.unwrap(), 4900);
-
-            variable.destroy().await.unwrap();
         });
     }
 
@@ -6580,67 +7093,6 @@ mod tests {
             for i in 0..8u64 {
                 assert_eq!(journal.read(7 + i).await.unwrap(), 700 + i);
             }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Regression test: data-empty crash repair must preserve mid-blob pruning boundary.
-    #[test_traced]
-    fn test_align_journals_data_empty_mid_blob_pruning_boundary() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "align-journals-mid-blob-pruning-boundary".into(),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            // Phase 1: Create data and offsets, then simulate data-only pruning crash.
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..7u64 {
-                (journal, _) = journal.append(&(100 + i)).await.unwrap();
-            }
-            journal = journal.sync().await.unwrap();
-
-            // Simulate crash after data was cleared but before offsets were pruned.
-            drop(journal);
-            Partition::<deterministic::Context>::remove_all(&context, &cfg.data_partition())
-                .await
-                .unwrap();
-
-            // Phase 2: Init triggers data-empty repair and should treat journal as fully pruned at size 7.
-            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 7);
-            assert!(bounds.is_empty());
-
-            // Append one item at position 7.
-            let pos;
-            (journal, pos) = journal.append(&777).await.unwrap();
-            assert_eq!(pos, 7);
-            assert_eq!(journal.size(), 8);
-            assert_eq!(journal.read(7).await.unwrap(), 777);
-
-            // Sync only the data blobs to simulate a crash before offsets are synced.
-            journal.0.blobs.start_sync().await.await.unwrap();
-            drop(journal);
-
-            // Phase 3: Reopen and verify we did not lose the appended item.
-            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
-                .await
-                .unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 8);
-            assert_eq!(bounds.start, 7);
-            assert_eq!(journal.read(7).await.unwrap(), 777);
 
             journal.destroy().await.unwrap();
         });
