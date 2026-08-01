@@ -13,6 +13,7 @@ use futures::future::Aborted;
 use std::{
     collections::{BTreeMap, HashMap},
     future::Future,
+    ops::Range,
 };
 
 /// Unique identifier for a fetch request.
@@ -101,9 +102,18 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         self.by_location = keep;
     }
 
-    /// Iterate over outstanding request locations in ascending order.
-    pub fn locations(&self) -> impl Iterator<Item = &Location<F>> {
-        self.by_location.keys()
+    /// Iterate over the maximum operation ranges covered by outstanding requests, in ascending
+    /// order.
+    pub fn ranges(&self) -> impl Iterator<Item = Range<Location<F>>> + '_ {
+        self.by_location.values().map(|id| {
+            let request = &self
+                .tracked
+                .get(id)
+                .expect("location index must reference a tracked request")
+                .request;
+            let start = request.start();
+            start..start.checked_add(request.max_ops().get()).unwrap()
+        })
     }
 
     /// Check if a location has an outstanding request.

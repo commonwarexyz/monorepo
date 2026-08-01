@@ -352,8 +352,7 @@ where
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
                 Location::new(log_size)..self.target.range.end(),
                 &operation_counts,
-                self.outstanding_requests.locations(),
-                self.fetch_batch_size,
+                self.outstanding_requests.ranges(),
             ) else {
                 break; // No more gaps to fill
             };
@@ -997,6 +996,22 @@ mod tests {
                 .unwrap();
 
             assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn new_schedules_operations_after_boundary_request() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            config.max_outstanding_requests = 2;
+            config.fetch_batch_size = NZU64!(5);
+
+            let engine = Engine::new(config).await.unwrap();
+            let requests = &engine.outstanding_requests;
+
+            assert_eq!(requests.len(), 2);
+            assert!(requests.contains(&Location::new(5)));
+            assert!(requests.contains(&Location::new(6)));
         });
     }
 

@@ -26,6 +26,10 @@ impl<F: Family, D: Digest> Target<F, D> {
     }
 
     /// Whether this target advances relative to `from`.
+    ///
+    /// Both targets are assumed to describe valid states of the same append-only QMDB. Because
+    /// the root commits to the database size, valid targets at different sizes have distinct
+    /// roots.
     pub fn advances(&self, from: &Self) -> bool {
         self.range.end().is_valid()
             && self.range.end() > from.range.end()
@@ -264,22 +268,23 @@ mod tests {
 
     #[test]
     fn test_advances() {
-        let root = sha256::Digest::from([0; 32]);
-        let current = target(root, 10, 100);
+        let current_root = sha256::Digest::from([0; 32]);
+        let advanced_root = sha256::Digest::from([1; 32]);
+        let current = target(current_root, 10, 100);
 
         // End strictly increases, start does not decrease.
-        assert!(target(root, 10, 101).advances(&current));
-        assert!(target(root, 50, 200).advances(&current));
+        assert!(target(advanced_root, 10, 101).advances(&current));
+        assert!(target(advanced_root, 50, 200).advances(&current));
 
         // Same or smaller end does not advance.
-        assert!(!target(root, 10, 100).advances(&current));
-        assert!(!target(root, 10, 50).advances(&current));
+        assert!(!target(current_root, 10, 100).advances(&current));
+        assert!(!target(current_root, 10, 50).advances(&current));
 
         // A start moving backward does not advance, even with a larger end.
-        assert!(!target(root, 5, 200).advances(&current));
+        assert!(!target(advanced_root, 5, 200).advances(&current));
 
         // An end outside the location domain does not advance.
-        let beyond = target(root, 10, *MmrFamily::MAX_LEAVES + 1);
+        let beyond = target(advanced_root, 10, *MmrFamily::MAX_LEAVES + 1);
         assert!(!beyond.advances(&current));
     }
 
