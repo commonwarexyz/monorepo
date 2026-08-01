@@ -1151,23 +1151,10 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment));
     }
 
-    /// Evicts cached blocks and reconstruction state relative to `through`.
+    /// Evicts cached blocks and reconstruction state through `through`.
     ///
-    /// The production caller has already archived and applied `through`; this cache is not the
-    /// durable source for later use of that block.
-    ///
-    /// Pruning closes assigned-shard and exact-commitment subscriptions for `through` and every
-    /// reconstruction state it retires. Digest subscriptions remain open because another
-    /// commitment may reconstruct the same block digest.
-    ///
-    /// This is not an ingress floor. Queued consensus messages and later-round notifications can
-    /// recreate evicted state.
-    ///
-    /// This is the only place reconstruction state is pruned by round. We
-    /// intentionally avoid pruning on reconstruction success because a
-    /// Byzantine leader can equivocate, producing multiple valid commitments
-    /// in the same round. Both must remain recoverable until finalization
-    /// determines which one is canonical.
+    /// Pruning waits for finalization because a Byzantine leader may produce multiple valid
+    /// commitments in one round.
     fn prune(&mut self, through: Commitment) {
         let cached = self
             .reconstructed_blocks
