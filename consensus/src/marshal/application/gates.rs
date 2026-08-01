@@ -187,7 +187,7 @@ pub(crate) const fn resolve(verdict: Option<bool>, durable: bool) -> Option<bool
 
 /// Forwards `input` while `output` still has a receiver.
 ///
-/// Dropping the output receiver cancels this task and, by ownership, the input operation.
+/// If the output receiver closes first, the input operation is canceled.
 pub(crate) async fn forward<T, U>(
     mut output: oneshot::Sender<T>,
     input: oneshot::Receiver<U>,

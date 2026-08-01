@@ -1140,7 +1140,7 @@ where
         }
     }
 
-    /// Drops subscriptions for an exact commitment that cannot reconstruct a valid block.
+    /// Drops subscriptions whose result is bound to an exact commitment.
     ///
     /// A different commitment can still reconstruct the same block digest.
     /// Digest subscriptions remain open for that later availability.
@@ -1151,10 +1151,17 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment));
     }
 
-    /// Prunes all blocks in the reconstructed block cache that are older than the block
-    /// with the given commitment. Also cleans up stale reconstruction state and
-    /// assigned-shard subscriptions. Pruning is eviction rather than a tombstone,
-    /// so caller-owned block subscriptions survive.
+    /// Evicts cached blocks and reconstruction state relative to `through`.
+    ///
+    /// The production caller has already archived and applied `through`; this cache is not the
+    /// durable source for later use of that block.
+    ///
+    /// Pruning closes assigned-shard and exact-commitment subscriptions for `through` and every
+    /// reconstruction state it retires. Digest subscriptions remain open because another
+    /// commitment may reconstruct the same block digest.
+    ///
+    /// This is not an ingress floor. Queued consensus messages and later-round notifications can
+    /// recreate evicted state.
     ///
     /// This is the only place reconstruction state is pruned by round. We
     /// intentionally avoid pruning on reconstruction success because a
@@ -1171,11 +1178,9 @@ where
                 .retain(|_, entry| entry.block.height() > height);
         }
 
-        // Assigned-shard readiness cannot outlive the reconstruction state
-        // being pruned. Block-availability subscriptions are caller-owned.
-        // They survive cache and state pruning. Event-loop cleanup removes
-        // subscriptions whose receivers have closed.
-        self.assigned_shard_verified_subscriptions.remove(&through);
+        // Finalization makes existing exact-commitment and assigned-shard waits for these states
+        // obsolete. Digest waits are not commitment-specific.
+        self.drop_commitment_subscriptions(through);
         let state_round = self.state.remove(&through).map(|state| state.round());
         let cached_round = cached.map(|(round, _)| round);
         let Some(round) = state_round.or(cached_round) else {
@@ -1191,7 +1196,7 @@ where
             keep
         });
         for pruned in pruned_commitments {
-            self.assigned_shard_verified_subscriptions.remove(&pruned);
+            self.drop_commitment_subscriptions(pruned);
         }
     }
 }
@@ -3046,7 +3051,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_local_proposal_prune_preserves_older_block_subscription() {
+    fn test_local_proposal_prune_clears_older_reconstruction_state() {
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -3074,7 +3079,7 @@ mod tests {
                 let round_b = Round::new(Epoch::zero(), View::new(2));
 
                 peers[2].mailbox.discovered(commitment_a, leader, round_a);
-                let mut block_sub = peers[2].mailbox.subscribe(commitment_a);
+                let block_sub = peers[2].mailbox.subscribe(commitment_a);
 
                 let peer1_index = peers[1].index.get() as u16;
                 let shard_a = block_a.shard(peer1_index).expect("missing shard");
@@ -3100,17 +3105,18 @@ mod tests {
                     "local proposal should be cached before pruning"
                 );
                 peers[2].mailbox.prune(commitment_b);
-                assert!(
-                    peers[2].mailbox.get(commitment_b).await.is_none(),
-                    "pruned local proposal should leave the cache"
-                );
-                assert!(
-                    matches!(
-                        block_sub.try_recv(),
-                        Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
-                    ),
-                    "older block subscription should survive state pruning"
-                );
+
+                select! {
+                    result = block_sub => {
+                        assert!(
+                            result.is_err(),
+                            "older block subscription should close after local-proposal prune"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("older block subscription remained open after local-proposal prune");
+                    },
+                }
 
                 peers[1]
                     .sender
@@ -3125,15 +3131,6 @@ mod tests {
                     !blocked_peer1,
                     "peer1 should not be blocked after older state was pruned"
                 );
-
-                peers[2].mailbox.proposed(round_a, block_a);
-                let reconstructed = select! {
-                    result = block_sub => result.expect("block subscription closed after prune"),
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("preserved block subscription was not satisfied");
-                    },
-                };
-                assert_eq!(reconstructed.commitment(), commitment_a);
             },
         );
     }

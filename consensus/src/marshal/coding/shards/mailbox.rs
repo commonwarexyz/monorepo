@@ -94,7 +94,7 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to prune all caches at and below the given commitment.
+    /// A request to evict cached blocks and reconstruction state relative to a commitment.
     Prune {
         /// Inclusive prune target [`Commitment`].
         through: Commitment,
@@ -324,13 +324,22 @@ where
         receiver
     }
 
-    /// Request to prune reconstruction caches and state at and below the given commitment.
+    /// Request to evict cached blocks and reconstruction state relative to `through`.
     ///
-    /// Pruning only evicts reconstruction state. It does not declare the commitment permanently
-    /// unavailable. A later proposal or discovery can recreate the state. Block-availability
-    /// subscriptions remain registered and can resolve if the block is reconstructed again. Drop
-    /// the receiver to cancel a subscription. Assigned-shard verification subscriptions are tied
-    /// to reconstruction state and close when it is pruned.
+    /// Marshal invokes this after the finalized block is durable and acknowledged by the
+    /// application. Later use of that block can recover it from marshal's archive without relying
+    /// on this reconstruction cache.
+    ///
+    /// Cached blocks are evicted through `through`'s cached height, when present. Reconstruction
+    /// state is evicted through the round recorded for `through` in either the cache or state.
+    ///
+    /// Pruning does not install an ingress floor. Proposal, discovery, and notarization messages may
+    /// already be queued, and peer shards do not carry a round. A later-round notification can
+    /// therefore recreate reconstruction state for an evicted commitment.
+    ///
+    /// Pruning closes assigned-shard and exact-commitment subscriptions for `through` and every
+    /// reconstruction state it retires. Digest subscriptions remain open because another
+    /// commitment may reconstruct the same block digest.
     pub fn prune(&self, through: Commitment) {
         let _ = self.sender.enqueue(Message::Prune { through });
     }
