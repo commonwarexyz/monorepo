@@ -710,15 +710,13 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let test = |partition, bufs: Vec<IoBuf>, context| async move {
+        let test = |partition, bufs: Vec<IoBuf>, options, context| async move {
             // Coalesce the input to test later when reading
             let expected = IoBufs::from(bufs.clone()).coalesce();
             let (blob, _) = storage.open(partition, b"test_blob").await.unwrap();
 
             // Write data
-            blob.write_at(0, bufs, WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(0, bufs, options).await.unwrap();
 
             // Read back the data
             let read = blob.read_at(0, expected.len()).await.unwrap().coalesce();
@@ -732,6 +730,7 @@ pub(crate) mod tests {
                 IoBuf::from(b" "),
                 IoBuf::from(b"world"),
             ],
+            WriteOptions::default(),
             "Vectored write content is incorrect",
         )
         .await;
@@ -745,20 +744,30 @@ pub(crate) mod tests {
                 IoBuf::from(b"def"),
                 IoBuf::default(),
             ],
+            WriteOptions::default(),
             "Vectored write with empties is incorrect",
         )
         .await;
 
-        let chunk_count = 128;
+        // Both filesystem backends cap one submission at 1,024 iovecs.
+        let chunk_count = 1_025;
         let mut bufs = Vec::with_capacity(chunk_count);
         for i in 0..chunk_count {
-            bufs.push(IoBuf::from(vec![i as u8; i]));
+            bufs.push(IoBuf::from(vec![i as u8]));
         }
 
         test(
             "test_vectored_write_many_chunks",
-            bufs,
+            bufs.clone(),
+            WriteOptions::default(),
             "Vectored write over batch size is incorrect",
+        )
+        .await;
+        test(
+            "test_vectored_sync_write_many_chunks",
+            bufs,
+            WriteOptions::SYNC,
+            "Synchronized vectored write over batch size is incorrect",
         )
         .await;
     }

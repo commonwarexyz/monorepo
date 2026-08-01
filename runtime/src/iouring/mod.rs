@@ -172,7 +172,8 @@ use io_uring::{
 };
 pub(crate) use request::Cache;
 use request::{
-    IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest,
+    IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest,
+    WriteAtRequest, WriteAtState,
 };
 use std::{
     collections::VecDeque,
@@ -440,26 +441,27 @@ impl Handle {
         cache: Cache,
     ) -> Result<(), Error> {
         let durable = options.contains(WriteOptions::SYNC);
-        let fused = durable && bufs.chunk_count() <= IOVEC_BATCH_SIZE;
-        let trailing_sync = (durable && !fused).then(|| file.clone());
+        let state = if !durable {
+            WriteAtState::Writing
+        } else if bufs.chunk_count() <= IOVEC_BATCH_SIZE {
+            WriteAtState::WritingSync
+        } else {
+            WriteAtState::WritingBeforeSync
+        };
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
             file,
             offset,
             written: 0,
             write: bufs.into(),
-            sync: fused,
+            state,
             cache,
             result: None,
             sender: tx,
         }))
         .await
         .map_err(|_| Error::WriteFailed)?;
-        rx.await.map_err(|_| Error::WriteFailed)??;
-        if let Some(file) = trailing_sync {
-            self.sync(file).await?;
-        }
-        Ok(())
+        rx.await.map_err(|_| Error::WriteFailed)?
     }
 
     /// Submit a logical fsync request and wait for its completion.
@@ -1158,6 +1160,7 @@ mod tests {
     use crate::{IoBuf, IoBufMut, telemetry::metrics::Registry};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
     use futures::future::{join, join_all};
+    use io_uring::opcode;
     use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
         io::Write,
@@ -1167,6 +1170,7 @@ mod tests {
         },
         time::Duration,
     };
+    use waiter::WaiterState;
 
     #[test]
     fn test_bounded_mpsc_drains_all_buffered_messages_before_disconnected() {
@@ -3158,6 +3162,52 @@ mod tests {
         assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
         assert_eq!(iouring.timeout_wheel.next_deadline(), None);
+    }
+
+    #[tokio::test]
+    async fn test_dropped_multi_submission_sync_write_finishes_datasync() {
+        let mut registry = Registry::default();
+        let (handle, mut iouring) = IoUringLoop::new(Config::default(), &mut registry);
+        let (sock_left, _sock_right) = UnixStream::pair().unwrap();
+        // SAFETY: `sock_left` is a valid owned fd and is transferred into `File`.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let bufs = IoBufs::from(
+            (0..=IOVEC_BATCH_SIZE)
+                .map(|i| IoBuf::from(vec![i as u8]))
+                .collect::<Vec<_>>(),
+        );
+
+        let write = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .write_at(Arc::new(file), 0, bufs, WriteOptions::SYNC, Cache::Enabled)
+                    .await
+            }
+        });
+        let mut request = loop {
+            match iouring.receiver.try_recv() {
+                Ok(request) => break request,
+                Err(TryRecvError::Empty) => tokio::task::yield_now().await,
+                Err(TryRecvError::Disconnected) => panic!("write request channel disconnected"),
+            }
+        };
+
+        write.abort();
+        assert!(write.await.unwrap_err().is_cancelled());
+        assert!(!request.is_orphaned());
+
+        assert!(!request.on_cqe(
+            WaiterState::Active { target_tick: None },
+            IOVEC_BATCH_SIZE as i32,
+        ));
+        assert!(
+            !request.on_cqe(WaiterState::Active { target_tick: None }, 1),
+            "the write must remain active for its trailing data sync"
+        );
+        let sqe = request.build_sqe(WaiterId::new(0, 0));
+        assert_eq!(sqe.get_opcode(), u32::from(opcode::Fsync::CODE));
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
     }
 
     #[tokio::test]

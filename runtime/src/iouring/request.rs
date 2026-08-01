@@ -546,6 +546,48 @@ impl Cache {
     }
 }
 
+/// Progress and durability policy for one positioned write request.
+#[derive(Eq, PartialEq)]
+#[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+pub(super) enum WriteAtState {
+    /// Submit writes without per-write durability.
+    Writing,
+    /// Submit writes with `RWF_DSYNC`.
+    WritingSync,
+    /// Submit plain writes, then issue one trailing data sync.
+    WritingBeforeSync,
+    /// Issue the trailing data sync.
+    Syncing,
+}
+
+/// Build a data-only fsync SQE.
+fn build_datasync_sqe(file: &File) -> SqueueEntry {
+    opcode::Fsync::new(Fd(file.as_raw_fd()))
+        .flags(io_uring::types::FsyncFlags::DATASYNC)
+        .build()
+}
+
+/// Classify one data-sync CQE and store its terminal result.
+fn on_sync_cqe(output: &mut Option<Result<(), Error>>, state: WaiterState, result: i32) -> bool {
+    match CqeResult::from_raw(result, state) {
+        CqeResult::Retry => false,
+        CqeResult::Cancelled => {
+            let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
+            *output = Some(Err(Error::Io(err.into())));
+            true
+        }
+        CqeResult::Error(code) => {
+            let err = std::io::Error::from_raw_os_error(-code);
+            *output = Some(Err(Error::Io(err.into())));
+            true
+        }
+        CqeResult::Zero | CqeResult::Positive(_) => {
+            *output = Some(Ok(()));
+            true
+        }
+    }
+}
+
 /// Logical positioned file write request and its in-loop state.
 pub(super) struct WriteAtRequest {
     /// File used by the current write SQE.
@@ -556,8 +598,8 @@ pub(super) struct WriteAtRequest {
     pub(super) written: usize,
     /// Write cursor and buffers that still need to be written.
     pub(super) write: WriteBuffers,
-    /// Whether the write should be durably persisted before completion.
-    pub(super) sync: bool,
+    /// Current write and durability phase.
+    pub(super) state: WriteAtState,
     /// Page-cache policy for this request.
     pub(super) cache: Cache,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
@@ -569,7 +611,11 @@ pub(super) struct WriteAtRequest {
 impl WriteAtRequest {
     /// Use `RWF_DSYNC` because the write contract does not require timestamp-only metadata.
     fn rw_flags(&mut self) -> i32 {
-        let sync = if self.sync { libc::RWF_DSYNC } else { 0 };
+        let sync = if self.state == WriteAtState::WritingSync {
+            libc::RWF_DSYNC
+        } else {
+            0
+        };
         sync | self.cache.rw_flag()
     }
 
@@ -580,6 +626,10 @@ impl WriteAtRequest {
 
     /// Build the next positioned write SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
+        if self.state == WriteAtState::Syncing {
+            return build_datasync_sqe(&self.file);
+        }
+
         let fd = Fd(self.file.as_raw_fd());
         let offset = self.offset + self.written as u64;
         let rw_flags = self.rw_flags();
@@ -623,6 +673,10 @@ impl WriteAtRequest {
     /// Classify one write CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+        if self.state == WriteAtState::Syncing {
+            return on_sync_cqe(&mut self.result, state, result);
+        }
+
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => false,
             CqeResult::Error(code) if self.retry_cached(code) => false,
@@ -634,8 +688,13 @@ impl WriteAtRequest {
                 self.written += n;
                 self.write.advance(n);
                 if self.write.is_complete() {
-                    self.result = Some(Ok(()));
-                    true
+                    if self.state == WriteAtState::WritingBeforeSync {
+                        self.state = WriteAtState::Syncing;
+                        false
+                    } else {
+                        self.result = Some(Ok(()));
+                        true
+                    }
                 } else {
                     false
                 }
@@ -657,32 +716,13 @@ pub(super) struct SyncRequest {
 impl SyncRequest {
     /// Build the fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
-        let fd = Fd(self.file.as_raw_fd());
-        opcode::Fsync::new(fd)
-            .flags(io_uring::types::FsyncFlags::DATASYNC)
-            .build()
+        build_datasync_sqe(&self.file)
     }
 
     /// Classify one fsync CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
-        match CqeResult::from_raw(result, state) {
-            CqeResult::Retry => false,
-            CqeResult::Cancelled => {
-                let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
-                self.result = Some(Err(Error::Io(err.into())));
-                true
-            }
-            CqeResult::Error(code) => {
-                let err = std::io::Error::from_raw_os_error(-code);
-                self.result = Some(Err(Error::Io(err.into())));
-                true
-            }
-            CqeResult::Zero | CqeResult::Positive(_) => {
-                self.result = Some(Ok(()));
-                true
-            }
-        }
+        on_sync_cqe(&mut self.result, state, result)
     }
 }
 
@@ -1232,7 +1272,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
@@ -1248,7 +1288,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
@@ -1270,7 +1310,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: vectored.into(),
-            sync: false,
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
@@ -1289,7 +1329,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
@@ -1307,7 +1347,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
@@ -1319,15 +1359,15 @@ mod tests {
             Err(Error::WriteFailed)
         ));
 
-        // Synchronous writes use the same logical error surface as regular
-        // writes, `sync` only changes the SQE flags.
+        // Single-submission synchronous writes use the same logical error
+        // surface as regular writes and add `RWF_DSYNC` to the SQE flags.
         let (tx, rx) = oneshot::channel();
         let mut write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: true,
+            state: WriteAtState::WritingSync,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
@@ -1348,7 +1388,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
@@ -1370,7 +1410,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: true,
+            state: WriteAtState::WritingSync,
             cache: Cache::Disabled(dont_cache_supported.clone()),
             result: None,
             sender: tx,
@@ -1529,7 +1569,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
@@ -1615,7 +1655,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            sync: false,
+            state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
             sender: tx,
