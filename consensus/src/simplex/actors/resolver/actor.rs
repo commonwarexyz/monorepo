@@ -1665,10 +1665,7 @@ mod tests {
                 &mut resolver,
             );
 
-            let id = actor
-                .pending_delivery_timeouts
-                .next_completed()
-                .await;
+            let id = actor.pending_delivery_timeouts.next_completed().await;
             actor.expire_pending_delivery(id);
             assert_eq!(receiver.await.unwrap(), DeliveryOutcome::Incomplete);
         });
