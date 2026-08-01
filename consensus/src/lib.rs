@@ -167,10 +167,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// does not infer one. After a restart, however, consensus may request certification for
         /// the same `(round, payload)` again if the result was not durably recorded before shutdown.
         ///
-        /// Consensus may drop the receiver before it resolves when protocol evidence establishes
-        /// success. A notarization for a proposal that names this round as its parent proves that
-        /// honest validators accepted the parent as certified before voting for the child. A
-        /// finalization at this or a later round also makes the local request unnecessary.
+        /// Consensus may drop the receiver before it resolves when a finalization at this or a
+        /// later round makes the local request unnecessary.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that
@@ -183,10 +181,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// does not assume that every request eventually returns. Simplex continues processing
         /// unrelated certification requests while one is pending.
         ///
-        /// A pending request remains consensus-critical until the application returns a verdict, a
-        /// dependent notarization proves success, or finalization makes the request unnecessary.
-        /// While it remains relevant, the validator cannot notarize a later proposal whose ancestry
-        /// depends on it.
+        /// A pending request remains consensus-critical until the application returns a verdict or
+        /// finalization makes the request unnecessary. While it remains relevant, the validator
+        /// cannot notarize a later proposal whose ancestry depends on it.
         ///
         /// If certification does not finish before the certification timeout expires, the
         /// validator times out the current view and issues a nullify vote. This begins timeout
@@ -200,9 +197,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// for shutdown or another condition that prevents the implementation from ever producing
         /// a verdict.
         ///
-        /// Consensus liveness requires enough validators to obtain each relevant verdict or
-        /// protocol evidence that makes it unnecessary. A validator blocked forever on a relevant
-        /// request is unavailable for executions that depend on it.
+        /// Consensus liveness requires enough validators to obtain each relevant verdict. A
+        /// validator blocked forever on a relevant request is unavailable for executions that
+        /// depend on it.
         ///
         /// # Determinism Requirement
         ///

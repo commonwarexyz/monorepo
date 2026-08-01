@@ -51,7 +51,6 @@
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Mark `c` as notarized
-//! * Treat the named parent as certified
 //! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
 //! * Attempt to certify `c` (see [Certification](#certification)), leaving `t_a` armed so a
 //!   stalled certification still times out the view
@@ -85,10 +84,9 @@
 //!
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
 //! enter the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
-//! finalization). A notarization advances its view after the application certifies it or after a
-//! later notarization names it as the parent. This means that a new participant joining consensus
-//! will immediately jump ahead on the previous view's nullification or finalization and begin
-//! participating in consensus at the current view.
+//! finalization). A notarization advances its view after the application certifies it. This means
+//! that a new participant joining consensus will immediately jump ahead on the previous view's
+//! nullification or finalization and begin participating in consensus at the current view.
 //!
 //! ### Certification
 //!
@@ -107,11 +105,9 @@
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
 //! Simplex does not assume every certification request returns. It keeps each response receiver open
-//! until the application returns a verdict, a verified later notarization names the proposal as its
-//! parent, or a finalization at or above that view makes the request obsolete. If none occurs, the
-//! request may remain pending indefinitely. A timeout or nullification does not establish a verdict
-//! or cancel the application request. If dependent evidence arrives first, Simplex still invokes
-//! `certify` for application side effects but does not wait for its result.
+//! until the application returns a verdict or a finalization at or above that view makes the request
+//! obsolete. If neither occurs, the request may remain pending indefinitely. A timeout or
+//! nullification does not establish a verdict or cancel the application request.
 //!
 //! One pending request does not prevent Simplex from processing unrelated certification requests.
 //! Any verdict that does return must be deterministic. While a request remains relevant, it prevents
@@ -442,8 +438,8 @@
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
 //! uncertifiable for that round and also causes a local nullify. Closing `certify` is terminal and
 //! can halt progress because the request is not retried during the same run. Keep it pending while
-//! its verdict depends on temporary data. Simplex drops the receiver after a dependent notarization
-//! establishes success or a finalization makes the request obsolete.
+//! its verdict depends on temporary data. Simplex drops the receiver after a finalization makes the
+//! request obsolete.
 
 pub mod elector;
 pub mod scheme;

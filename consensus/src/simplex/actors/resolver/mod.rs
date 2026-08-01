@@ -59,8 +59,9 @@
 //! Retrying allows another peer to provide a covering nullification while certification remains
 //! pending indefinitely. The original notarization still proceeds through voter certification:
 //! success raises the floor, failure requests nullification repair, and finalization makes the key
-//! obsolete. A dependent notarization can also let the voter infer an exact parent's certification;
-//! that terminal result retires the parent demand independently of the incomplete delivery.
+//! obsolete. A terminal certification result retires the parent demand independently of the
+//! incomplete delivery.
+//!
 //! See the certification section of [the Simplex overview](crate::simplex).
 //!
 //! Local fetch purposes govern retention. They do not affect response validity. A nullification

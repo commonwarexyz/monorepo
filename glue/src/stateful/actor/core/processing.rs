@@ -228,6 +228,10 @@ where
                         &mut invalidations,
                     )
                     .await;
+                    assert!(
+                        self.processor.replays_idle(),
+                        "verification replay remained active after quiescence"
+                    );
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     let prune = async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
@@ -268,6 +272,10 @@ where
                         &mut invalidations,
                     )
                     .await;
+                    assert!(
+                        self.processor.replays_idle(),
+                        "verification replay remained active after quiescence"
+                    );
                     prune
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;

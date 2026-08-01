@@ -18,10 +18,13 @@
 //!   finalized round.
 //!
 //! Verification jobs are polled independently so a request waiting for
-//! ancestry or application data cannot block another. Proposals stop when
-//! their caller drops the response channel. An abandoned verification remains
-//! useful until newer actor work supersedes it. Cancellable paths stop at the
-//! next await point via [`await_or_cancel`].
+//! ancestry or application data cannot block another. Their lazy recovery
+//! coalesces [`Application::apply`] calls by block digest. Proposal recovery
+//! remains independent because proposals are awaited by the actor polling
+//! verification jobs. Proposals stop when their caller drops the response
+//! channel. An abandoned verification remains useful until newer actor work
+//! supersedes it. Cancellable paths stop at the next await point via
+//! [`await_or_cancel`].
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
@@ -62,6 +65,7 @@ type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type DeferredPrune<T> = Option<Prune<T>>;
+type ReplayResult = Result<(), PrepareBatchesError>;
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -105,6 +109,62 @@ where
             databases: self.databases.clone(),
             state: self.state.clone(),
             metrics: self.metrics.clone(),
+        }
+    }
+}
+
+/// Verification-owned replay work indexed by the block being reconstructed.
+#[derive(Clone)]
+struct ReplayFlights<D: Copy + Ord> {
+    entries: Arc<Mutex<BTreeMap<D, Vec<oneshot::Sender<ReplayResult>>>>>,
+}
+
+impl<D: Copy + Ord> Default for ReplayFlights<D> {
+    fn default() -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+}
+
+impl<D: Copy + Ord> ReplayFlights<D> {
+    fn is_empty(&self) -> bool {
+        self.entries.lock().is_empty()
+    }
+}
+
+enum ReplayClaim<D: Copy + Ord> {
+    Ready,
+    Owner(ReplayOwner<D>),
+    Wait(oneshot::Receiver<ReplayResult>),
+}
+
+/// Releases replay ownership and notifies every waiter on completion or drop.
+struct ReplayOwner<D: Copy + Ord> {
+    flights: ReplayFlights<D>,
+    digest: D,
+    result: Option<ReplayResult>,
+}
+
+impl<D: Copy + Ord> ReplayOwner<D> {
+    fn finish(mut self, result: ReplayResult) {
+        debug_assert_ne!(result, Err(PrepareBatchesError::Cancelled));
+        self.result = Some(result);
+    }
+}
+
+impl<D: Copy + Ord> Drop for ReplayOwner<D> {
+    fn drop(&mut self) {
+        let waiters = self
+            .flights
+            .entries
+            .lock()
+            .remove(&self.digest)
+            .expect("replay owner must have an in-flight entry");
+        if let Some(result) = self.result {
+            for waiter in waiters {
+                waiter.send_lossy(result);
+            }
         }
     }
 }
@@ -255,6 +315,7 @@ where
 {
     app: A,
     execution: Execution<E, A>,
+    replays: ReplayFlights<PendingDigest<A, E>>,
     pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
 }
 
@@ -267,6 +328,7 @@ where
 {
     app: A,
     execution: Execution<E, A>,
+    replays: ReplayFlights<PendingDigest<A, E>>,
 }
 
 impl<E, A> Processor<E, A>
@@ -293,6 +355,7 @@ where
                 })),
                 metrics,
             },
+            replays: ReplayFlights::default(),
             pruning: prune_config.map(Pruning::new),
         }
     }
@@ -303,7 +366,13 @@ where
         Verifier {
             app: self.app.clone(),
             execution: self.execution.clone(),
+            replays: self.replays.clone(),
         }
+    }
+
+    /// Returns whether every verification-owned replay has released its owner.
+    pub(super) fn replays_idle(&self) -> bool {
+        self.replays.is_empty()
     }
 
     /// Returns a reference to the database set.
@@ -445,7 +514,7 @@ where
         C: Cancellation,
     {
         self.execution
-            .prepare_batches(&mut self.app, context, marshal, parent, cancellation)
+            .prepare_batches(&mut self.app, context, marshal, parent, cancellation, None)
             .await
     }
 
@@ -472,7 +541,7 @@ where
         C: Cancellation,
     {
         self.execution
-            .rebuild_pending(&mut self.app, context, provider, target, cancellation)
+            .rebuild_pending(&mut self.app, context, provider, target, cancellation, None)
             .await
     }
 
@@ -731,6 +800,7 @@ where
                 marshal.clone(),
                 parent.clone(),
                 verification,
+                Some(&self.replays),
             )
             .await
         {
@@ -869,6 +939,31 @@ where
         );
     }
 
+    fn claim_replay(
+        &self,
+        replays: &ReplayFlights<PendingDigest<A, E>>,
+        digest: PendingDigest<A, E>,
+    ) -> ReplayClaim<PendingDigest<A, E>> {
+        let state = self.state.lock();
+        if state.last_processed.digest == digest || state.pending.contains_key(&digest) {
+            return ReplayClaim::Ready;
+        }
+
+        let mut entries = replays.entries.lock();
+        if let Some(waiters) = entries.get_mut(&digest) {
+            let (sender, receiver) = oneshot::channel();
+            waiters.push(sender);
+            return ReplayClaim::Wait(receiver);
+        }
+
+        assert!(entries.insert(digest, Vec::new()).is_none());
+        ReplayClaim::Owner(ReplayOwner {
+            flights: replays.clone(),
+            digest,
+            result: None,
+        })
+    }
+
     /// Forks batches from a known parent.
     async fn fork_batches(
         &self,
@@ -887,6 +982,96 @@ where
         Ok(self.databases.new_batches().await)
     }
 
+    async fn replay_block<C>(
+        &self,
+        app: &mut A,
+        context: &E,
+        target_digest: PendingDigest<A, E>,
+        block: Arc<A::Block>,
+        cancellation: &mut C,
+    ) -> ReplayResult
+    where
+        C: Cancellation,
+    {
+        let (digest, parent_digest) = (block.digest(), block.parent());
+        let consensus_context = block.context();
+        let round = consensus_context.round();
+
+        let Some(batches) = await_or_cancel(cancellation, self.fork_batches(&parent_digest)).await
+        else {
+            return Err(PrepareBatchesError::Cancelled);
+        };
+        let batches = batches?;
+
+        let Some(merkleized) = await_or_cancel(
+            cancellation,
+            app.apply(
+                (context.child("rebuild_pending_apply"), consensus_context),
+                &block,
+                batches,
+            ),
+        )
+        .await
+        else {
+            return Err(PrepareBatchesError::Cancelled);
+        };
+
+        if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
+            warn!(
+                ?target_digest,
+                block = ?digest,
+                "rebuild replay state root must match block commitments"
+            );
+            return Err(PrepareBatchesError::Invalid);
+        }
+
+        self.cache_pending(digest, parent_digest, round, merkleized);
+        Ok(())
+    }
+
+    async fn replay_block_shared<C>(
+        &self,
+        app: &mut A,
+        context: &E,
+        target_digest: PendingDigest<A, E>,
+        block: Arc<A::Block>,
+        cancellation: &mut C,
+        replays: &ReplayFlights<PendingDigest<A, E>>,
+    ) -> ReplayResult
+    where
+        C: Cancellation,
+    {
+        loop {
+            match self.claim_replay(replays, block.digest()) {
+                ReplayClaim::Ready => return Ok(()),
+                ReplayClaim::Owner(owner) => {
+                    let result = self
+                        .replay_block(
+                            app,
+                            context,
+                            target_digest,
+                            Arc::clone(&block),
+                            cancellation,
+                        )
+                        .await;
+                    if result != Err(PrepareBatchesError::Cancelled) {
+                        owner.finish(result);
+                    }
+                    return result;
+                }
+                ReplayClaim::Wait(completion) => {
+                    let Some(completion) = await_or_cancel(cancellation, completion).await else {
+                        return Err(PrepareBatchesError::Cancelled);
+                    };
+                    match completion {
+                        Ok(Ok(())) | Err(_) => continue,
+                        Ok(Err(error)) => return Err(error),
+                    }
+                }
+            }
+        }
+    }
+
     async fn prepare_batches<S, V, C>(
         &self,
         app: &mut A,
@@ -894,6 +1079,7 @@ where
         marshal: MarshalMailbox<S, V>,
         parent: Arc<A::Block>,
         cancellation: &mut C,
+        replays: Option<&ReplayFlights<PendingDigest<A, E>>>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
         S: Scheme,
@@ -908,7 +1094,7 @@ where
                 || state.pending.contains_key(&parent_digest)
         };
         if !known {
-            self.rebuild_pending(app, context, marshal, parent, cancellation)
+            self.rebuild_pending(app, context, marshal, parent, cancellation, replays)
                 .await?;
         }
 
@@ -925,6 +1111,7 @@ where
         provider: P,
         target: Arc<A::Block>,
         cancellation: &mut C,
+        replays: Option<&ReplayFlights<PendingDigest<A, E>>>,
     ) -> Result<(), PrepareBatchesError>
     where
         P: BlockProvider<Block = A::Block> + Clone,
@@ -1012,40 +1199,13 @@ where
 
         // Replay from oldest to newest and cache intermediate tips.
         for block in replay_path.into_iter().rev() {
-            let (digest, parent_digest) = (block.digest(), block.parent());
-            let consensus_context = block.context();
-            let round = consensus_context.round();
-
-            let Some(batches) =
-                await_or_cancel(cancellation, self.fork_batches(&parent_digest)).await
-            else {
-                return Err(PrepareBatchesError::Cancelled);
-            };
-            let batches = batches?;
-
-            let Some(merkleized) = await_or_cancel(
-                cancellation,
-                app.apply(
-                    (context.child("rebuild_pending_apply"), consensus_context),
-                    &block,
-                    batches,
-                ),
-            )
-            .await
-            else {
-                return Err(PrepareBatchesError::Cancelled);
-            };
-
-            if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
-                warn!(
-                    ?target_digest,
-                    block = ?digest,
-                    "rebuild replay state root must match block commitments"
-                );
-                return Err(PrepareBatchesError::Invalid);
+            if let Some(replays) = replays {
+                self.replay_block_shared(app, context, target_digest, block, cancellation, replays)
+                    .await?;
+            } else {
+                self.replay_block(app, context, target_digest, block, cancellation)
+                    .await?;
             }
-
-            self.cache_pending(digest, parent_digest, round, merkleized);
         }
 
         self.update_pending_metric();
@@ -1148,10 +1308,11 @@ mod tests {
     use commonware_cryptography::{
         Digest as _, Digestible, Hasher, Sha256, Signer as _, ed25519, sha256::Digest,
     };
-    use commonware_macros::boxed;
+    use commonware_macros::{boxed, select};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock as _, ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
@@ -1313,10 +1474,62 @@ mod tests {
         reopened_values: Arc<Mutex<Vec<u64>>>,
     }
 
+    struct ApplyGate {
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    }
+
+    #[derive(Clone)]
+    struct ApplyProbe {
+        target: Digest,
+        calls: Arc<AtomicUsize>,
+        gates: Arc<Mutex<VecDeque<ApplyGate>>>,
+    }
+
+    impl ApplyProbe {
+        fn new(target: Digest, gates: impl IntoIterator<Item = ApplyGate>) -> Self {
+            Self {
+                target,
+                calls: Arc::new(AtomicUsize::new(0)),
+                gates: Arc::new(Mutex::new(gates.into_iter().collect())),
+            }
+        }
+
+        async fn apply(&self, digest: Digest) {
+            if digest != self.target {
+                return;
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let Some(mut gate) = self.gates.lock().pop_front() else {
+                return;
+            };
+            gate.started.send(()).expect("test must await replay");
+            let _ = (&mut gate.release).await;
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    fn apply_gate() -> (ApplyGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        (
+            ApplyGate {
+                started,
+                release: release_rx,
+            },
+            started_rx,
+            release,
+        )
+    }
+
     #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
         finalized_observer: Option<FinalizedObserver>,
+        apply_probe: Option<ApplyProbe>,
     }
 
     impl ExecutionApp {
@@ -1324,6 +1537,7 @@ mod tests {
             Self {
                 genesis: Block::genesis(),
                 finalized_observer: None,
+                apply_probe: None,
             }
         }
 
@@ -1339,6 +1553,7 @@ mod tests {
                 Self {
                     genesis: Block::genesis(),
                     finalized_observer: Some(observer),
+                    apply_probe: None,
                 },
                 reopened_values,
             )
@@ -1421,6 +1636,9 @@ mod tests {
             block: &Self::Block,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            if let Some(probe) = &self.apply_probe {
+                probe.apply(block.digest()).await;
+            }
             Self::execute(block.height(), block.context.round.view(), batches).await
         }
 
@@ -2061,6 +2279,146 @@ mod tests {
                 "target block should be reconstructed",
             );
         });
+    }
+
+    #[test]
+    fn overlapping_rebuilds_share_replay_after_owner_cancellation() {
+        deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
+            |context| async move {
+                let mut harness = Harness::new(context.child("harness")).await;
+                let genesis = Block::genesis();
+                let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+                let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+                let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+                harness.processor.clear_pending();
+                harness.provider.insert(genesis);
+
+                let (first_gate, first_started, mut first_release) = apply_gate();
+                let (retry_gate, retry_started, retry_release) = apply_gate();
+                let (duplicate_gate, mut duplicate_started, _duplicate_release) = apply_gate();
+                let probe =
+                    ApplyProbe::new(block1.digest(), [first_gate, retry_gate, duplicate_gate]);
+                harness.processor.app.apply_probe = Some(probe.clone());
+
+                let first_execution = harness.processor.execution.clone();
+                let second_execution = harness.processor.execution.clone();
+                let third_execution = harness.processor.execution.clone();
+                let mut first_app = harness.processor.app.clone();
+                let mut second_app = harness.processor.app.clone();
+                let mut third_app = harness.processor.app.clone();
+                let first_provider = harness.provider.clone();
+                let second_provider = harness.provider.clone();
+                let third_provider = harness.provider.clone();
+                let first_replays = harness.processor.replays.clone();
+                let second_replays = harness.processor.replays.clone();
+                let third_replays = harness.processor.replays.clone();
+                let (mut first_cancellation, first_live) = oneshot::channel::<bool>();
+                let (mut second_cancellation, second_live) = oneshot::channel::<bool>();
+                let (mut third_cancellation, third_live) = oneshot::channel::<bool>();
+
+                let mut first = Box::pin(first_execution.rebuild_pending(
+                    &mut first_app,
+                    &context,
+                    first_provider,
+                    Arc::new(block2.clone()),
+                    &mut first_cancellation,
+                    Some(&first_replays),
+                ));
+                select! {
+                    result = &mut first => panic!("first rebuild completed before replay gate: {result:?}"),
+                    result = first_started => result.expect("first replay should start"),
+                }
+
+                let mut second = Box::pin(second_execution.rebuild_pending(
+                    &mut second_app,
+                    &context,
+                    second_provider,
+                    Arc::new(block2),
+                    &mut second_cancellation,
+                    Some(&second_replays),
+                ));
+                let mut third = Box::pin(third_execution.rebuild_pending(
+                    &mut third_app,
+                    &context,
+                    third_provider,
+                    Arc::new(block3),
+                    &mut third_cancellation,
+                    Some(&third_replays),
+                ));
+                let mut waiters_registered = false;
+                for _ in 0..100 {
+                    waiters_registered = harness
+                        .processor
+                        .replays
+                        .entries
+                        .lock()
+                        .get(&block1.digest())
+                        .is_some_and(|waiters| waiters.len() == 2);
+                    if waiters_registered {
+                        break;
+                    }
+                    select! {
+                        result = &mut first => panic!("first rebuild completed before cancellation: {result:?}"),
+                        result = &mut second => panic!("second rebuild completed before cancellation: {result:?}"),
+                        result = &mut third => panic!("third rebuild completed before cancellation: {result:?}"),
+                        result = &mut duplicate_started => {
+                            result.expect("duplicate replay signal should remain available");
+                            panic!("overlapping rebuilds executed the same ancestor concurrently");
+                        },
+                        _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+                    }
+                }
+                assert!(
+                    waiters_registered,
+                    "overlapping replays should wait for the current owner"
+                );
+                assert_eq!(probe.calls(), 1);
+
+                drop(first_live);
+                let first_result = select! {
+                    result = &mut first => result,
+                    result = &mut second => panic!("waiter completed before owner cancellation: {result:?}"),
+                    result = &mut third => panic!("waiter completed before owner cancellation: {result:?}"),
+                    _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                        panic!("cancelled replay owner did not stop");
+                    },
+                };
+                assert_eq!(first_result, Err(PrepareBatchesError::Cancelled));
+                first_release.closed().await;
+                select! {
+                    result = &mut second => panic!("waiter completed before retry gate: {result:?}"),
+                    result = &mut third => panic!("waiter completed before retry gate: {result:?}"),
+                    result = retry_started => result.expect("live waiter should acquire replay ownership"),
+                    result = &mut duplicate_started => {
+                        result.expect("duplicate replay signal should remain available");
+                        panic!("multiple waiters acquired replay ownership");
+                    },
+                    _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                        panic!("live waiter did not retry cancelled replay");
+                    },
+                }
+
+                retry_release
+                    .send(())
+                    .expect("retried replay should still be running");
+                let completed = futures::future::join(second, third);
+                let (second_result, third_result) = select! {
+                    result = &mut duplicate_started => {
+                        result.expect("duplicate replay signal should remain available");
+                        panic!("successful replay was not shared with every waiter");
+                    },
+                    result = completed => result,
+                    _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                        panic!("waiting rebuilds did not complete");
+                    },
+                };
+                assert_eq!(second_result, Ok(()));
+                assert_eq!(third_result, Ok(()));
+                assert_eq!(probe.calls(), 2);
+                assert!(harness.processor.replays_idle());
+                drop((second_live, third_live));
+            },
+        );
     }
 
     #[test]

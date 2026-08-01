@@ -820,7 +820,7 @@ where
                 //
                 // Once the optimistic verdict is delivered, the certification
                 // gate owns the deferred work. Nullification keeps that gate
-                // alive, while inferred certification or finalization drops it.
+                // alive, while finalization drops it.
                 let deferred_rx = marshaled
                     .deferred_verify(context, block, parent_request, Stage::Verified)
                     .await;

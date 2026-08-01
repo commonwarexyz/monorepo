@@ -27,10 +27,8 @@ pub struct Leader<P: PublicKey> {
 enum CertifyState {
     /// Ready to attempt certification.
     Ready,
-    /// Application certification request in progress (dropped to abort).
+    /// Certification request in progress (dropped to abort).
     Outstanding(#[allow(dead_code)] Aborter),
-    /// Certification inferred from a dependent notarization (dropped to abort).
-    Inferred(#[allow(dead_code)] Aborter),
     /// Certification completed: true if succeeded, false if automaton declined.
     Certified(bool),
     /// Certification was cancelled due to finalization.
@@ -172,10 +170,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let notarization = self.notarization.as_ref()?;
         match self.certify {
             CertifyState::Ready => {}
-            CertifyState::Outstanding(_)
-            | CertifyState::Inferred(_)
-            | CertifyState::Certified(_)
-            | CertifyState::Aborted => return None,
+            CertifyState::Outstanding(_) | CertifyState::Certified(_) | CertifyState::Aborted => {
+                return None;
+            }
         }
 
         // The proposal must match the notarization's proposal (which
@@ -193,33 +190,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(proposal)
     }
 
-    /// Sets the handle for an application certification request.
-    pub fn set_application_certify_handle(&mut self, handle: Aborter) {
-        assert!(
-            matches!(self.certify, CertifyState::Ready),
-            "only ready certification can be sent to the application"
-        );
+    /// Sets the handle for the certification request.
+    pub fn set_certify_handle(&mut self, handle: Aborter) {
         self.certify = CertifyState::Outstanding(handle);
-    }
-
-    /// Replaces local certification work with a result implied by protocol evidence.
-    pub fn set_inferred_certify_handle(&mut self, handle: Aborter) {
-        assert!(
-            matches!(
-                self.certify,
-                CertifyState::Ready | CertifyState::Outstanding(_)
-            ),
-            "only pending certification can be inferred"
-        );
-        self.certify = CertifyState::Inferred(handle);
-    }
-
-    /// Returns whether a dependent notarization can still determine certification.
-    pub const fn can_infer_certification(&self) -> bool {
-        matches!(
-            self.certify,
-            CertifyState::Ready | CertifyState::Outstanding(_)
-        )
     }
 
     /// Aborts the in-flight certification request.
@@ -379,10 +352,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 assert_eq!(*v, is_success, "certification should not conflict");
                 return;
             }
-            CertifyState::Ready
-            | CertifyState::Outstanding(_)
-            | CertifyState::Inferred(_)
-            | CertifyState::Aborted => {}
+            CertifyState::Ready | CertifyState::Outstanding(_) | CertifyState::Aborted => {}
         }
         self.certify = CertifyState::Certified(is_success);
     }
@@ -1358,7 +1328,7 @@ mod tests {
         // Set a certify handle then mark as certified
         let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
-        round.set_application_certify_handle(handle);
+        round.set_certify_handle(handle);
         round.certified(true);
 
         // Second try_certify should skip - already certified
@@ -1433,7 +1403,7 @@ mod tests {
         // Set a certify handle (simulating in-flight certification)
         let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
-        round.set_application_certify_handle(handle);
+        round.set_certify_handle(handle);
 
         // Second try_certify should skip - handle exists
         assert!(round.try_certify().is_none());
@@ -1471,7 +1441,7 @@ mod tests {
         // Set a certify handle
         let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
-        round.set_application_certify_handle(handle);
+        round.set_certify_handle(handle);
 
         // try_certify blocked by handle
         assert!(round.try_certify().is_none());
@@ -1547,7 +1517,7 @@ mod tests {
         // Set a certify handle (simulating in-flight certification)
         let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
-        round.set_application_certify_handle(handle);
+        round.set_certify_handle(handle);
 
         // Abort certification (simulating finalization arriving first)
         round.abort_certify();

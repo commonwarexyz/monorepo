@@ -78,7 +78,9 @@
 //! to the nearest known ancestor or the finalized tip,
 //! then replays forward via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
-//! partial progress survives timeouts.
+//! partial progress survives timeouts. Overlapping verification recovery
+//! shares replay of the same block; if that request is cancelled, another
+//! live request retries it.
 //!
 //! # Compatibility
 //!
@@ -277,6 +279,10 @@ where
     /// [`verify`](Self::verify) accepted for `block`. The wrapper commits this
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
+    ///
+    /// Concurrent verification requests that need the same missing block share
+    /// one in-progress call. If its request is cancelled, another live request
+    /// retries it.
     ///
     /// This future may be cancelled with its originating request or before
     /// finalization or pruning mutates committed state. Verification recovery
