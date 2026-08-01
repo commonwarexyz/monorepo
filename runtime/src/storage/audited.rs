@@ -107,7 +107,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs).await
     }
 
-    async fn write_at_with(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -120,7 +120,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(offset.to_be_bytes());
             hasher.update_bufs(&bufs);
         });
-        self.inner.write_at_with(offset, bufs, options).await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -200,9 +200,12 @@ mod tests {
 
         let (blob1, _) = storage1.open("partition", b"blob").await.unwrap();
         let (blob2, _) = storage2.open("partition", b"blob").await.unwrap();
-        blob1.write_at(0, b"data").await.unwrap();
+        blob1
+            .write_at(0, b"data", WriteOptions::default())
+            .await
+            .unwrap();
         blob2
-            .write_at_with(0, b"data", WriteOptions::SYNC | WriteOptions::DONT_CACHE)
+            .write_at(0, b"data", WriteOptions::SYNC | WriteOptions::DONT_CACHE)
             .await
             .unwrap();
 
@@ -219,8 +222,14 @@ mod tests {
 
         let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
-        blob1.write_at(0, b"hello world").await.unwrap();
-        blob2.write_at(0, b"hello world").await.unwrap();
+        blob1
+            .write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
+        blob2
+            .write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // `start_sync` must record an auditor event, so the state advances.
         let before = auditor1.state();
@@ -257,8 +266,14 @@ mod tests {
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
-        blob1.write_at(0, b"hello world").await.unwrap();
-        blob2.write_at(0, b"hello world").await.unwrap();
+        blob1
+            .write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
+        blob2
+            .write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
@@ -364,7 +379,7 @@ mod tests {
             unreachable!("not used in test");
         }
 
-        async fn write_at_with(
+        async fn write_at(
             &self,
             _offset: u64,
             bufs: impl Into<IoBufs> + Send,
@@ -407,21 +422,21 @@ mod tests {
             IoBuf::from(b"c".to_vec()),
             IoBuf::from(b"d".to_vec()),
         ]);
-        blob.write_at(0, chunked.clone()).await.unwrap();
-
-        blob.write_at_with(0, chunked, WriteOptions::SYNC)
+        blob.write_at(0, chunked.clone(), WriteOptions::default())
             .await
             .unwrap();
 
+        blob.write_at(0, chunked, WriteOptions::SYNC).await.unwrap();
+
         let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
-        blob.write_at_with(0, IoBuf::from(b"e".to_vec()), options)
+        blob.write_at(0, IoBuf::from(b"e".to_vec()), options)
             .await
             .unwrap();
 
         assert_eq!(
             *writes.lock(),
             vec![
-                (4, WriteOptions::NONE),
+                (4, WriteOptions::default()),
                 (4, WriteOptions::SYNC),
                 (1, options),
             ]

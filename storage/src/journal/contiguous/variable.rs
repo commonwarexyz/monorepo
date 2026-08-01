@@ -3694,7 +3694,7 @@ mod tests {
                 .open(&cfg.data_partition(), &1u64.to_be_bytes())
                 .await
                 .unwrap();
-            blob.write_at_with(0, vec![0xFF; 1], WriteOptions::SYNC)
+            blob.write_at(0, vec![0xFF; 1], WriteOptions::SYNC)
                 .await
                 .unwrap();
 
@@ -5822,9 +5822,7 @@ mod tests {
 
             for partition in [&legacy_partition, &blobs_partition] {
                 let (blob, _) = context.open(partition, &0u64.to_be_bytes()).await.unwrap();
-                blob.write_at_with(0, vec![0], WriteOptions::SYNC)
-                    .await
-                    .unwrap();
+                blob.write_at(0, vec![0], WriteOptions::SYNC).await.unwrap();
             }
 
             let result = Journal::<_, u64>::init_at_size(context.child("storage"), cfg, 7).await;

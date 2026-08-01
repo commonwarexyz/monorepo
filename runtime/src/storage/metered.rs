@@ -180,7 +180,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             options = options.0.traced(),
         )
     )]
-    async fn write_at_with(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -194,7 +194,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             self.metrics.storage_syncs.inc();
         }
         Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at_with(offset, bufs, options).await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     #[tracing::instrument(
@@ -301,7 +301,9 @@ mod tests {
         );
 
         // Write data to the blob
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         let writes = storage.metrics.storage_writes.get();
         let write_bytes = storage.metrics.storage_write_bytes.get();
         assert_eq!(
@@ -336,18 +338,18 @@ mod tests {
         );
 
         // Write and sync in a single call
-        blob.write_at_with(11, b" again", WriteOptions::SYNC)
+        blob.write_at(11, b" again", WriteOptions::SYNC)
             .await
             .unwrap();
         assert_eq!(
             storage.metrics.storage_writes.get(),
             2,
-            "storage_writes metric was not incremented after write_at_with(SYNC)"
+            "storage_writes metric was not incremented after write_at(SYNC)"
         );
         assert_eq!(
             storage.metrics.storage_syncs.get(),
             2,
-            "storage_syncs metric was not incremented after write_at_with(SYNC)"
+            "storage_syncs metric was not incremented after write_at(SYNC)"
         );
 
         // Resize the blob
@@ -377,7 +379,9 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         blob.start_sync().await.await.unwrap();
         assert_eq!(
@@ -457,8 +461,13 @@ mod tests {
         );
 
         // Use the clones for some operations to verify they share metrics
-        blob.write_at(0, b"hello").await.unwrap();
-        clone1.write_at(5, b"world").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        clone1
+            .write_at(5, b"world", WriteOptions::default())
+            .await
+            .unwrap();
         let _ = clone1.read_at(0, 10).await.unwrap();
         let _ = clone2.read_at(0, 10).await.unwrap();
 

@@ -102,7 +102,8 @@ pub async fn run_write_loop(
     while should_continue(deadline, stats.ops) {
         let offset = next_block() * io_size;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.write_at(offset, payload.clone()).await?;
+        blob.write_at(offset, payload.clone(), WriteOptions::default())
+            .await?;
 
         // Record latency before sync so percentiles reflect pure write cost.
         stats.record(io_size, started.map(|s| s.elapsed()));
@@ -143,11 +144,12 @@ pub async fn run_sync_write_loop(
         let started = should_sample_latency(stats.ops).then(Instant::now);
         match sync_method {
             SyncMethod::WriteThenSync => {
-                blob.write_at(offset, payload.clone()).await?;
+                blob.write_at(offset, payload.clone(), WriteOptions::default())
+                    .await?;
                 blob.sync().await?;
             }
             SyncMethod::WriteAndSync => {
-                blob.write_at_with(offset, payload.clone(), WriteOptions::SYNC)
+                blob.write_at(offset, payload.clone(), WriteOptions::SYNC)
                     .await?;
             }
         }

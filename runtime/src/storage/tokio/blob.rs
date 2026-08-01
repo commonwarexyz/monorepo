@@ -13,8 +13,8 @@ use std::{
 };
 use tokio::task;
 
-// Cap vectored I/O batches at Linux IOV_MAX. Larger batches reduce syscall count without adding
-// measurable per-iovec overhead.
+// Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
+// span as few submissions as possible.
 const IOVEC_BATCH_SIZE: usize = 1024;
 
 /// Page-cache policy for one write request.
@@ -32,8 +32,11 @@ impl Cache {
             && matches!(self, Self::Disabled(supported) if supported.load(Ordering::Relaxed))
     }
 
-    /// Record that cache bypass is unsupported and use normal caching when retried.
-    fn fallback(&mut self) -> bool {
+    /// Return whether an unsupported cache-bypass attempt should be retried with normal caching.
+    fn retry_cached(&mut self, err: &std::io::Error, attempted_dont_cache: bool) -> bool {
+        if err.raw_os_error() != Some(libc::EOPNOTSUPP) || !attempted_dont_cache {
+            return false;
+        }
         let Self::Disabled(supported) = std::mem::replace(self, Self::Enabled) else {
             return false;
         };
@@ -159,10 +162,7 @@ impl Blob {
                 }
 
                 // Retry normally and stop requesting an unsupported cache-bypass hint.
-                if err.raw_os_error() == Some(libc::EOPNOTSUPP)
-                    && attempted_dont_cache
-                    && cache.fallback()
-                {
+                if cache.retry_cached(&err, attempted_dont_cache) {
                     continue;
                 }
                 return Err(err.into());
@@ -218,7 +218,7 @@ impl crate::Blob for Blob {
         .map_err(|_| Error::ReadFailed)?
     }
 
-    async fn write_at_with(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -344,14 +344,20 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_bypass_fallback_disables_shared_support() {
+    fn test_cache_bypass_retry_decision() {
         let supported = Arc::new(AtomicBool::new(true));
         let mut cache = Cache::Disabled(supported.clone());
         let sibling = Cache::Disabled(supported.clone());
+        let unsupported = std::io::Error::from_raw_os_error(libc::EOPNOTSUPP);
+        let invalid = std::io::Error::from_raw_os_error(libc::EINVAL);
 
-        assert!(cache.fallback());
+        assert!(!cache.retry_cached(&invalid, true));
+        assert!(supported.load(Ordering::Relaxed));
+        assert!(!cache.retry_cached(&unsupported, false));
+        assert!(supported.load(Ordering::Relaxed));
+        assert!(cache.retry_cached(&unsupported, true));
         assert!(!supported.load(Ordering::Relaxed));
         assert!(!sibling.is_disabled());
-        assert!(!cache.fallback());
+        assert!(!cache.retry_cached(&unsupported, true));
     }
 }

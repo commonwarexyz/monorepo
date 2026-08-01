@@ -261,7 +261,7 @@ fn fuzz(input: FuzzInput) {
                             index_page_integrity_may_be_invalidated = true;
                         }
                         let _ = blob
-                            .write_at_with(offset, data.to_vec(), WriteOptions::SYNC)
+                            .write_at(offset, data.to_vec(), WriteOptions::SYNC)
                             .await;
                     }
                 }
@@ -276,7 +276,7 @@ fn fuzz(input: FuzzInput) {
                     {
                         let offset = (size * (*offset_factor as u64)) / 256;
                         let _ = blob
-                            .write_at_with(offset, data.to_vec(), WriteOptions::SYNC)
+                            .write_at(offset, data.to_vec(), WriteOptions::SYNC)
                             .await;
                     }
                 }
@@ -295,7 +295,7 @@ fn fuzz(input: FuzzInput) {
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
                         let _ = blob
-                            .write_at_with(size, garbage.to_vec(), WriteOptions::SYNC)
+                            .write_at(size, garbage.to_vec(), WriteOptions::SYNC)
                             .await;
                     }
                 }
@@ -304,7 +304,7 @@ fn fuzz(input: FuzzInput) {
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                     {
                         let _ = blob
-                            .write_at_with(size, garbage.to_vec(), WriteOptions::SYNC)
+                            .write_at(size, garbage.to_vec(), WriteOptions::SYNC)
                             .await;
                     }
                 }

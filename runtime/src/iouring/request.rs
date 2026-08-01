@@ -19,8 +19,8 @@ use std::{
     time::Instant,
 };
 
-/// Cap vectored I/O batches at Linux IOV_MAX. Storage writes can span many chunks, and larger
-/// batches reduce submissions without adding measurable per-iovec overhead.
+/// Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
+/// span as few submissions as possible.
 pub(super) const IOVEC_BATCH_SIZE: usize = 1024;
 
 /// Normalized write buffer for [SendRequest] and [WriteAtRequest].
@@ -567,7 +567,7 @@ pub(super) struct WriteAtRequest {
 }
 
 impl WriteAtRequest {
-    /// Use `RWF_DSYNC` because the contract does not require timestamp-only metadata.
+    /// Use `RWF_DSYNC` because the write contract does not require timestamp-only metadata.
     fn rw_flags(&mut self) -> i32 {
         let sync = if self.sync { libc::RWF_DSYNC } else { 0 };
         sync | self.cache.rw_flag()

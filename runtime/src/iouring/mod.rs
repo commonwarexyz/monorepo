@@ -425,11 +425,11 @@ impl Handle {
         })
     }
 
-    /// Submit a positioned write with the provided options.
+    /// Submit a positioned write with the provided options and wait for its completion.
     ///
-    /// Durability is fused into the write (`RWF_DSYNC`) only when the whole write fits one
-    /// submission. Fusing every submission would serialize the batches behind per-SQE durability
-    /// waits. A larger durable write is submitted plain and followed by one data sync.
+    /// A durable write that fits one submission carries `RWF_DSYNC` and is durable on completion.
+    /// A larger write is submitted plain and finished with one data sync, so it performs one
+    /// device flush at the end instead of one per submission.
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub(crate) async fn write_at(
         &self,

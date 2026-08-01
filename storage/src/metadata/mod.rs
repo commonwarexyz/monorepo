@@ -633,7 +633,7 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at_with(0, b"corrupted".to_vec(), WriteOptions::SYNC)
+            blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
                 .await
                 .unwrap();
 
@@ -688,11 +688,11 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at_with(0, b"corrupted".to_vec(), WriteOptions::SYNC)
+            blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
                 .await
                 .unwrap();
             let (blob, _) = context.open("test", b"right").await.unwrap();
-            blob.write_at_with(0, b"corrupted".to_vec(), WriteOptions::SYNC)
+            blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
                 .await
                 .unwrap();
 

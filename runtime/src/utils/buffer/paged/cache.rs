@@ -665,7 +665,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn write_at_with(
+        async fn write_at(
             &self,
             _offset: u64,
             _bufs: impl Into<crate::IoBufs> + Send,
@@ -735,7 +735,7 @@ mod tests {
             }
         }
 
-        async fn write_at_with(
+        async fn write_at(
             &self,
             _offset: u64,
             _bufs: impl Into<crate::IoBufs> + Send,
@@ -872,7 +872,7 @@ mod tests {
                 let record = Checksum::new(PAGE_SIZE.get(), crc);
                 let mut page_data = logical_data;
                 page_data.extend_from_slice(&record.to_bytes());
-                blob.write_at(i * physical_page_size, page_data)
+                blob.write_at(i * physical_page_size, page_data, WriteOptions::default())
                     .await
                     .unwrap();
             }
@@ -930,7 +930,7 @@ mod tests {
                 Ok(IoBufsMut::from(self.page.as_ref().clone()))
             }
 
-            async fn write_at_with(
+            async fn write_at(
                 &self,
                 _offset: u64,
                 _bufs: impl Into<IoBufs> + Send,

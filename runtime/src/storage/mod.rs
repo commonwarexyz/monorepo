@@ -104,7 +104,7 @@ pub(crate) mod tests {
         test_overwrite_data(&storage).await;
         test_read_beyond_bound(&storage).await;
         test_write_at_large_offset(&storage).await;
-        test_write_at_with_sync(&storage).await;
+        test_write_at_sync(&storage).await;
         test_start_sync(&storage).await;
         test_append_data(&storage).await;
         test_vectored_write_at(&storage).await;
@@ -132,7 +132,9 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         let read = blob.read_at(0, 11).await.unwrap();
 
         assert_eq!(
@@ -166,7 +168,9 @@ pub(crate) mod tests {
     {
         let (blob, _) = storage.open("read_after_remove", b"by_name").await.unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         storage
@@ -196,7 +200,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).rev().collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         storage
@@ -223,7 +229,9 @@ pub(crate) mod tests {
             .open("recreate_after_remove", b"name")
             .await
             .unwrap();
-        old.write_at(0, b"old contents").await.unwrap();
+        old.write_at(0, b"old contents", WriteOptions::default())
+            .await
+            .unwrap();
         old.sync().await.unwrap();
 
         storage
@@ -237,7 +245,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(len, 0, "recreated blob must start empty");
-        new.write_at(0, b"new contents").await.unwrap();
+        new.write_at(0, b"new contents", WriteOptions::default())
+            .await
+            .unwrap();
         new.sync().await.unwrap();
 
         let old_read = old.read_at(0, 12).await.unwrap();
@@ -261,7 +271,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read through the handle before removal so the removal crosses an actively-used handle.
         let read = blob.read_at(0, 16).await.unwrap();
@@ -295,7 +307,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
-        first.write_at(0, data.clone()).await.unwrap();
+        first
+            .write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         first.sync().await.unwrap();
         let second = first.clone();
         // Opened independently: a distinct handle to the same blob, not a clone.
@@ -338,7 +353,9 @@ pub(crate) mod tests {
             let (blob, len) = storage.open(partition, b"name").await.unwrap();
             assert_eq!(len, 0, "each recreation must start empty");
             let data = vec![generation; 32];
-            blob.write_at(0, data.clone()).await.unwrap();
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             storage.remove(partition, Some(b"name")).await.unwrap();
             handles.push((blob, data));
@@ -347,7 +364,9 @@ pub(crate) mod tests {
         // Churn the name further with the removed generations still held.
         for _ in 0..5 {
             let (blob, _) = storage.open(partition, b"name").await.unwrap();
-            blob.write_at(0, vec![0xFF; 8]).await.unwrap();
+            blob.write_at(0, vec![0xFF; 8], WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
             storage.remove(partition, Some(b"name")).await.unwrap();
@@ -372,16 +391,25 @@ pub(crate) mod tests {
     {
         let partition = "read_after_remove_partition_multi";
         let (small_a, _) = storage.open(partition, b"a").await.unwrap();
-        small_a.write_at(0, b"alpha").await.unwrap();
+        small_a
+            .write_at(0, b"alpha", WriteOptions::default())
+            .await
+            .unwrap();
         small_a.sync().await.unwrap();
         // Deliberately never synced: partition removal must not lose unsynced bytes either.
         let (small_b, _) = storage.open(partition, b"b").await.unwrap();
-        small_b.write_at(0, b"bravo").await.unwrap();
+        small_b
+            .write_at(0, b"bravo", WriteOptions::default())
+            .await
+            .unwrap();
 
         const LARGE_LEN: usize = 1 << 20;
         let (large, _) = storage.open(partition, b"large").await.unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(LARGE_LEN).collect();
-        large.write_at(0, data.clone()).await.unwrap();
+        large
+            .write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         large.sync().await.unwrap();
 
         storage.remove(partition, None).await.unwrap();
@@ -404,7 +432,10 @@ pub(crate) mod tests {
         // Recreating the partition and a same-named blob yields an independent blob.
         let (fresh, len) = storage.open(partition, b"a").await.unwrap();
         assert_eq!(len, 0, "recreated blob must start empty");
-        fresh.write_at(0, b"fresh").await.unwrap();
+        fresh
+            .write_at(0, b"fresh", WriteOptions::default())
+            .await
+            .unwrap();
         fresh.sync().await.unwrap();
         let read = small_a.read_at(0, 5).await.unwrap();
         assert_eq!(
@@ -448,13 +479,15 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
-        blob.write_at(0, b"concurrent write").await.unwrap();
+        blob.write_at(0, b"concurrent write", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read and write concurrently
         let write_task = tokio::spawn({
             let blob = blob.clone();
             async move {
-                blob.write_at(0, IoBuf::from(b"concurrent write"))
+                blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default())
                     .await
                     .unwrap();
             }
@@ -484,7 +517,9 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
-        blob.write_at(0, large_data.clone()).await.unwrap();
+        blob.write_at(0, large_data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
 
         let read = blob.read_at(0, 10 * 1024 * 1024).await.unwrap().coalesce();
 
@@ -503,10 +538,14 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(0, b"initial data").await.unwrap();
+        blob.write_at(0, b"initial data", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Overwrite part of the data
-        blob.write_at(8, b"overwrite").await.unwrap();
+        blob.write_at(8, b"overwrite", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(0, 17).await.unwrap().coalesce();
@@ -529,7 +568,9 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write some data
-        blob.write_at(0, b"hello").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Attempt to read beyond the written data
         let result = blob.read_at(6, 10).await;
@@ -559,7 +600,9 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write data at a large offset
-        blob.write_at(10_000, b"offset data").await.unwrap();
+        blob.write_at(10_000, b"offset data", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(10_000, 11).await.unwrap().coalesce();
@@ -567,33 +610,33 @@ pub(crate) mod tests {
     }
 
     /// Test writing and syncing data in one operation.
-    async fn test_write_at_with_sync<S>(storage: &S)
+    async fn test_write_at_sync<S>(storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
         let (blob, _) = storage
-            .open("test_write_at_with_sync", b"test_blob")
+            .open("test_write_at_sync", b"test_blob")
             .await
             .unwrap();
 
         // Empty writes should be accepted without extending the blob.
-        blob.write_at_with(1024, Vec::<u8>::new(), WriteOptions::SYNC)
+        blob.write_at(1024, Vec::<u8>::new(), WriteOptions::SYNC)
             .await
             .unwrap();
         drop(blob);
 
         let (blob, len) = storage
-            .open("test_write_at_with_sync", b"test_blob")
+            .open("test_write_at_sync", b"test_blob")
             .await
             .unwrap();
         assert_eq!(len, 0);
 
         // Non-empty writes must be visible after reopen without a separate sync call.
-        blob.write_at_with(0, b"hello", WriteOptions::SYNC)
+        blob.write_at(0, b"hello", WriteOptions::SYNC)
             .await
             .unwrap();
-        blob.write_at_with(
+        blob.write_at(
             5,
             vec![IoBuf::from(b" "), IoBuf::from(b"world")],
             WriteOptions::SYNC,
@@ -605,7 +648,7 @@ pub(crate) mod tests {
         // Reopening a blob in the same process may still observe dirty kernel
         // page-cache state, so this doesn't really prove write durability.
         let (blob, len) = storage
-            .open("test_write_at_with_sync", b"test_blob")
+            .open("test_write_at_sync", b"test_blob")
             .await
             .unwrap();
         assert_eq!(len, 11);
@@ -622,7 +665,9 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         blob.start_sync().await.await.unwrap();
         drop(blob);
 
@@ -645,10 +690,14 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(0, b"first").await.unwrap();
+        blob.write_at(0, b"first", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Append data
-        blob.write_at(5, b"second").await.unwrap();
+        blob.write_at(5, b"second", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(0, 11).await.unwrap().coalesce();
@@ -667,7 +716,9 @@ pub(crate) mod tests {
             let (blob, _) = storage.open(partition, b"test_blob").await.unwrap();
 
             // Write data
-            blob.write_at(0, bufs).await.unwrap();
+            blob.write_at(0, bufs, WriteOptions::default())
+                .await
+                .unwrap();
 
             // Read back the data
             let read = blob.read_at(0, expected.len()).await.unwrap().coalesce();
@@ -731,7 +782,9 @@ pub(crate) mod tests {
         let expected = IoBufs::from(bufs.clone()).coalesce();
 
         // Write vectored data at a large offset
-        blob.write_at(5_000, bufs).await.unwrap();
+        blob.write_at(5_000, bufs, WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob
@@ -760,8 +813,12 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
-        blob.write_at(0, b"first").await.unwrap();
-        blob.write_at(10, b"second").await.unwrap();
+        blob.write_at(0, b"first", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(10, b"second", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(0, 5).await.unwrap().coalesce();
@@ -788,9 +845,13 @@ pub(crate) mod tests {
 
         // Write data in chunks
         for i in 0..num_chunks {
-            blob.write_at((i * chunk_size) as u64, data.clone())
-                .await
-                .unwrap();
+            blob.write_at(
+                (i * chunk_size) as u64,
+                data.clone(),
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
         }
 
         // Read back the data in chunks
@@ -842,8 +903,12 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write overlapping data
-        blob.write_at(0, b"overlap").await.unwrap();
-        blob.write_at(4, b"map").await.unwrap();
+        blob.write_at(0, b"overlap", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(4, b"map", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(0, 7).await.unwrap().coalesce();
@@ -862,7 +927,9 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Write some data
-            blob.write_at(0, b"hello world").await.unwrap();
+            blob.write_at(0, b"hello world", WriteOptions::default())
+                .await
+                .unwrap();
 
             // Resize the blob
             blob.resize(5).await.unwrap();
@@ -1000,7 +1067,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(size, 0);
-        blob.write_at(0, b"hello world".to_vec()).await.unwrap();
+        blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         let read = blob.read_at(0, 11).await.unwrap().coalesce();
         assert_eq!(read.as_ref(), b"hello world");
@@ -1040,7 +1109,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
 
         // read_at with len=0 should succeed and return empty
         let output = blob.read_at(0, 0).await.unwrap();
@@ -1064,7 +1135,9 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write test data
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Test with single buffer - verify same buffer is returned
         let input_buf = IoBufMut::zeroed(11);
@@ -1144,7 +1217,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Single buffer with capacity 5, request 11 bytes
         let buf = IoBufMut::with_capacity(5);
@@ -1178,7 +1253,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Buffer with capacity 64, request only 11 bytes
         let buf = IoBufMut::with_capacity(64);

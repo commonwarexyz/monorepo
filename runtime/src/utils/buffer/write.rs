@@ -23,7 +23,7 @@ use std::num::NonZeroUsize;
 /// flushed data and may not see the latest buffered writes until [Self::sync], [Self::resize], or
 /// an overlapping [Self::write_at] flushes them. Those raw handles must not be used to write,
 /// resize, or otherwise mutate the blob while a [Write] exists. External mutations bypass the
-/// buffer state and [Self::sync] may use [Blob::write_at_with] with [WriteOptions::SYNC], which is
+/// buffer state and [Self::sync] may use [Blob::write_at] with [WriteOptions::SYNC], which is
 /// not a durability barrier for those external mutations.
 ///
 /// # Example
@@ -179,7 +179,7 @@ impl<B: Blob> Write<B> {
                 && let Some((old_buf, old_offset)) = self.buffer.take()
             {
                 self.sync_state
-                    .write_at(&self.blob, old_offset, old_buf)
+                    .write_at(&self.blob, old_offset, old_buf, WriteOptions::default())
                     .await?;
                 if self.buffer.merge(chunk, current_offset) {
                     bufs.advance(chunk_len);
@@ -194,7 +194,7 @@ impl<B: Blob> Write<B> {
             // below. Removing this inefficiency may not be worth the additional complexity.
             let direct = bufs.split_to(chunk_len);
             self.sync_state
-                .write_at(&self.blob, current_offset, direct)
+                .write_at(&self.blob, current_offset, direct, WriteOptions::default())
                 .await?;
             current_offset += chunk_len as u64;
 
@@ -215,7 +215,9 @@ impl<B: Blob> Write<B> {
         //
         // This can only happen if the new size is greater than the current size.
         if let Some((buf, offset)) = self.buffer.resize(len) {
-            self.sync_state.write_at(&self.blob, offset, buf).await?;
+            self.sync_state
+                .write_at(&self.blob, offset, buf, WriteOptions::default())
+                .await?;
         }
 
         self.sync_state.resize(&self.blob, len).await?;
@@ -239,7 +241,10 @@ impl<B: Blob> Write<B> {
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
         if let Some((buf, offset)) = self.buffer.take()
-            && let Err(err) = self.sync_state.write_at(&self.blob, offset, buf).await
+            && let Err(err) = self
+                .sync_state
+                .write_at(&self.blob, offset, buf, WriteOptions::default())
+                .await
         {
             return Handle::ready(Err(err));
         }
@@ -254,7 +259,7 @@ impl<B: Blob> Write<B> {
 
     /// Write bytes to the underlying blob and make them durable.
     ///
-    /// Uses [`Blob::write_at_with`] with [`WriteOptions::SYNC`] when there are no earlier unsynced
+    /// Uses [`Blob::write_at`] with [`WriteOptions::SYNC`] when there are no earlier unsynced
     /// mutations. Otherwise, writes the bytes and then syncs the blob.
     async fn write_blob_sync(
         &mut self,
@@ -262,7 +267,7 @@ impl<B: Blob> Write<B> {
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
         self.sync_state
-            .write_at_with(&self.blob, offset, bufs, WriteOptions::SYNC)
+            .write_at(&self.blob, offset, bufs, WriteOptions::SYNC)
             .await
     }
 

@@ -850,7 +850,7 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Write incomplete table entry (only 10 bytes instead of 24)
-                blob.write_at_with(0, vec![0xFF; 10], WriteOptions::SYNC)
+                blob.write_at(0, vec![0xFF; 10], WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -920,7 +920,7 @@ mod tests {
                 let mut corrupted = entry_data.coalesce();
                 // Corrupt the CRC (last 4 bytes of the entry)
                 corrupted.as_mut()[20] ^= 0xFF;
-                blob.write_at_with(0, corrupted, WriteOptions::SYNC)
+                blob.write_at(0, corrupted, WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -986,7 +986,7 @@ mod tests {
             {
                 let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
-                blob.write_at_with(size, hex!("0xdeadbeef").to_vec(), WriteOptions::SYNC)
+                blob.write_at(size, hex!("0xdeadbeef").to_vec(), WriteOptions::SYNC)
                     .await
                     .unwrap();
             }

@@ -680,16 +680,14 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
-    /// Options that alter one [`Blob::write_at_with`] operation.
+    /// Options that alter one [`Blob::write_at`] operation.
     ///
+    /// [`WriteOptions::default`] applies no options.
     /// Combine options with `|`, such as `WriteOptions::SYNC | WriteOptions::DONT_CACHE`.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct WriteOptions(u8);
 
     impl WriteOptions {
-        /// No write options.
-        pub const NONE: Self = Self(0);
-
         /// Durably persist the submitted bytes before returning.
         ///
         /// This is not a durability barrier for earlier operations.
@@ -776,22 +774,13 @@ stability_scope!(BETA {
             len: usize,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Write `bufs` to the blob at the given offset without additional options.
-        fn write_at(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> impl Future<Output = Result<(), Error>> + Send {
-            self.write_at_with(offset, bufs, WriteOptions::NONE)
-        }
-
         /// Write `bufs` to the blob at the given offset with composable [`WriteOptions`].
         ///
         /// With [`WriteOptions::SYNC`], the submitted bytes are durably persisted before this
         /// operation returns. This is not a durability barrier for previous operations: earlier
         /// writes without [`WriteOptions::SYNC`] and earlier [`Blob::resize`] calls require
         /// [`Blob::sync`] to become durable.
-        fn write_at_with(
+        fn write_at(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
@@ -922,7 +911,9 @@ mod tests {
             options.without(WriteOptions::SYNC),
             WriteOptions::DONT_CACHE
         );
-        assert_eq!(WriteOptions::default(), WriteOptions::NONE);
+        let default = WriteOptions::default();
+        assert!(!default.contains(WriteOptions::SYNC));
+        assert!(!default.contains(WriteOptions::DONT_CACHE));
     }
 
     #[rstest]
@@ -1308,7 +1299,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 
@@ -1391,10 +1382,10 @@ mod tests {
             // Write data at different offsets
             let data1 = b"Hello";
             let data2 = b"World";
-            blob.write_at(0, data1)
+            blob.write_at(0, data1, WriteOptions::default())
                 .await
                 .expect("Failed to write data1");
-            blob.write_at(5, data2)
+            blob.write_at(5, data2, WriteOptions::default())
                 .await
                 .expect("Failed to write data2");
 
@@ -1410,7 +1401,7 @@ mod tests {
 
             // Rewrite data without affecting length
             let data3 = b"Store";
-            blob.write_at(5, data3)
+            blob.write_at(5, data3, WriteOptions::default())
                 .await
                 .expect("Failed to write data3");
 
@@ -1444,7 +1435,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             let data = b"some data";
-            blob.write_at(0, data.to_vec())
+            blob.write_at(0, data.to_vec(), WriteOptions::default())
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
@@ -1508,10 +1499,10 @@ mod tests {
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-                blob.write_at(0, data1)
+                blob.write_at(0, data1, WriteOptions::default())
                     .await
                     .expect("Failed to write data1");
-                blob.write_at(5 + additional as u64, data2)
+                blob.write_at(5 + additional as u64, data2, WriteOptions::default())
                     .await
                     .expect("Failed to write data2");
 
@@ -1562,7 +1553,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!".to_vec();
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 
@@ -1591,7 +1582,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 

@@ -79,7 +79,7 @@ pub enum SyncMethod {
     /// Call `write_at`, then call `sync`.
     #[value(name = "write_then_sync")]
     WriteThenSync,
-    /// Call `write_at_with` with `WriteOptions::SYNC`.
+    /// Call `write_at` with `WriteOptions::SYNC`.
     #[value(name = "write_and_sync")]
     WriteAndSync,
 }

@@ -283,49 +283,6 @@ impl<B: crate::Blob> Blob<B> {
             size: Arc::new(AtomicU64::new(size)),
         }
     }
-
-    async fn write_at_inner(
-        &self,
-        offset: u64,
-        bufs: IoBufs,
-        options: WriteOptions,
-    ) -> Result<(), Error> {
-        let total_bytes = bufs.remaining() as u64;
-        let sync = options.contains(WriteOptions::SYNC);
-        if sync && total_bytes == 0 {
-            return Ok(());
-        }
-
-        let (should_fail, partial_rate) = self.ctx.check_write_fault();
-        if should_fail {
-            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
-                // Partial write: write some bytes, sync, then fail
-                let bufs = bufs.coalesce().slice(..bytes as usize);
-                self.inner.write_at_with(offset, bufs, options).await?;
-                if !sync {
-                    self.inner.sync().await?;
-                }
-                self.size
-                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
-                return Err(injected_io_error().into());
-            }
-            return Err(injected_io_error().into());
-        }
-
-        if sync && self.ctx.should_fail(Op::Sync) {
-            self.inner
-                .write_at_with(offset, bufs, options.without(WriteOptions::SYNC))
-                .await?;
-            self.size
-                .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
-            return Err(injected_io_error().into());
-        }
-
-        self.inner.write_at_with(offset, bufs, options).await?;
-        self.size
-            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
-        Ok(())
-    }
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
@@ -348,13 +305,48 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs.into()).await
     }
 
-    async fn write_at_with(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        self.write_at_inner(offset, bufs.into(), options).await
+        let bufs = bufs.into();
+        let total_bytes = bufs.remaining() as u64;
+        let sync = options.contains(WriteOptions::SYNC);
+        if sync && total_bytes == 0 {
+            return Ok(());
+        }
+
+        let (should_fail, partial_rate) = self.ctx.check_write_fault();
+        if should_fail {
+            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
+                // Partial write: write some bytes, sync, then fail
+                let bufs = bufs.coalesce().slice(..bytes as usize);
+                self.inner.write_at(offset, bufs, options).await?;
+                if !sync {
+                    self.inner.sync().await?;
+                }
+                self.size
+                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
+                return Err(injected_io_error().into());
+            }
+            return Err(injected_io_error().into());
+        }
+
+        if sync && self.ctx.should_fail(Op::Sync) {
+            self.inner
+                .write_at(offset, bufs, options.without(WriteOptions::SYNC))
+                .await?;
+            self.size
+                .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+            return Err(injected_io_error().into());
+        }
+
+        self.inner.write_at(offset, bufs, options).await?;
+        self.size
+            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+        Ok(())
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -443,7 +435,9 @@ mod tests {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
 
         assert!(matches!(blob.sync().await, Err(Error::Io(_))));
     }
@@ -453,7 +447,9 @@ mod tests {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
 
         let result = blob.start_sync().await.await;
         assert!(matches!(result, Err(Error::Io(_))));
@@ -466,33 +462,32 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at(0, b"data".to_vec()).await,
+            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                .await,
             Err(Error::Io(_))
         ));
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_write_at_with_sync_write_always_fails() {
+    async fn test_faulty_storage_write_at_sync_write_always_fails() {
         let h = Harness::new(Config::default().write(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at_with(0, b"data".to_vec(), WriteOptions::SYNC)
-                .await,
+            blob.write_at(0, b"data".to_vec(), WriteOptions::SYNC).await,
             Err(Error::Io(_))
         ));
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_write_at_with_sync_failure_is_not_durable() {
+    async fn test_faulty_storage_write_at_sync_failure_is_not_durable() {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at_with(0, b"data".to_vec(), WriteOptions::SYNC)
-                .await,
+            blob.write_at(0, b"data".to_vec(), WriteOptions::SYNC).await,
             Err(Error::Io(_))
         ));
 
@@ -501,13 +496,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_empty_write_at_with_sync_does_not_sync_prior_write() {
+    async fn test_faulty_storage_empty_write_at_sync_does_not_sync_prior_write() {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
 
-        blob.write_at_with(4, Vec::<u8>::new(), WriteOptions::SYNC)
+        blob.write_at(4, Vec::<u8>::new(), WriteOptions::SYNC)
             .await
             .unwrap();
 
@@ -521,7 +518,9 @@ mod tests {
 
         // Write some data first (no faults)
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Enable read faults
@@ -546,7 +545,9 @@ mod tests {
 
         // Create a blob first
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec()).await.unwrap();
+        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
@@ -567,7 +568,9 @@ mod tests {
         for i in 0..3 {
             let name = format!("blob{i}");
             let (blob, _) = h.storage.open("partition", name.as_bytes()).await.unwrap();
-            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
         }
 
@@ -632,7 +635,9 @@ mod tests {
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let data = b"hello world".to_vec();
-        let result = blob.write_at(0, data.clone()).await;
+        let result = blob
+            .write_at(0, data.clone(), WriteOptions::default())
+            .await;
 
         assert!(matches!(result, Err(Error::Io(_))));
 
@@ -653,7 +658,9 @@ mod tests {
         let h = Harness::new(Config::default().write(1.0).partial_write(0.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        let result = blob.write_at(0, b"hello world".to_vec()).await;
+        let result = blob
+            .write_at(0, b"hello world".to_vec(), WriteOptions::default())
+            .await;
 
         assert!(matches!(result, Err(Error::Io(_))));
 
@@ -669,7 +676,9 @@ mod tests {
         let h = Harness::new(Config::default().write(1.0).partial_write(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        let result = blob.write_at(0, b"x".to_vec()).await;
+        let result = blob
+            .write_at(0, b"x".to_vec(), WriteOptions::default())
+            .await;
 
         assert!(matches!(result, Err(Error::Io(_))));
 
@@ -755,7 +764,9 @@ mod tests {
         let (blob, initial_size) = h.storage.open("partition", b"test").await.unwrap();
         assert_eq!(initial_size, 0);
 
-        blob.write_at(0, vec![0xABu8; 50]).await.unwrap();
+        blob.write_at(0, vec![0xABu8; 50], WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         let (_, size_after_write) = h.inner.open("partition", b"test").await.unwrap();
