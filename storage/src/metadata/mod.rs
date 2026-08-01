@@ -92,7 +92,7 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Metrics as _, Runner, Storage, Supervisor as _, deterministic,
+        Blob, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
             fail_pending_syncs, release_pending_syncs,
@@ -633,7 +633,9 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at_sync(0, b"corrupted".to_vec()).await.unwrap();
+            blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
+                .await
+                .unwrap();
 
             // Reopen the metadata store
             let cfg = Config {
@@ -686,9 +688,13 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at_sync(0, b"corrupted".to_vec()).await.unwrap();
+            blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
+                .await
+                .unwrap();
             let (blob, _) = context.open("test", b"right").await.unwrap();
-            blob.write_at_sync(0, b"corrupted".to_vec()).await.unwrap();
+            blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
+                .await
+                .unwrap();
 
             // Reopen the metadata store
             let cfg = Config {

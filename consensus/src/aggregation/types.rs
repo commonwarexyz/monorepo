@@ -12,7 +12,7 @@ use commonware_cryptography::{
     certificate::{Attestation, Namespace as CertificateNamespace, Scheme, Subject},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{N3f1, channel::oneshot, union};
+use commonware_utils::{channel::oneshot, union};
 use rand_core::CryptoRng;
 use std::hash::Hash;
 
@@ -323,7 +323,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         let attestations = iter
             .filter(|ack| ack.item == item)
             .map(|ack| ack.attestation.clone());
-        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+        let certificate = scheme.assemble(attestations, strategy)?;
 
         Some(Self { item, certificate })
     }
@@ -334,7 +334,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         R: CryptoRng,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D, N3f1>(rng, &self.item, &self.certificate, strategy)
+        scheme.verify_certificate::<_, D>(rng, &self.item, &self.certificate, strategy)
     }
 }
 

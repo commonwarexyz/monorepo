@@ -20,15 +20,17 @@
 //! [`db::Merkleized`], [`db::ManagedDb`]) and a [`db::DatabaseSet`] trait that
 //! groups one or more databases into a single unit.
 //!
-//! The [`db::p2p`] submodule provides P2P resolver actors (a
-//! [`db::p2p::standard`] resolver implementing
-//! [`commonware_storage::qmdb::sync::resolver::Resolver`] and a
-//! [`db::p2p::compact`] resolver implementing
-//! [`commonware_storage::qmdb::sync::compact::Resolver`]) over
+//! The [`db::p2p`] submodule provides a P2P resolver actor
+//! (implementing [`commonware_storage::qmdb::sync::Source`]) over
 //! [`commonware-resolver`](commonware_resolver), enabling databases to fetch
 //! and serve sync operations from peers.
 //!
 //! # Syncing
+//!
+//! State sync operates against a single trusted target at a time. The peers serving operations and
+//! proofs remain untrusted, and their responses are verified against that target. Selecting the
+//! target before the storage boundary lets the sync engines follow strictly advancing updates
+//! instead of reconciling competing targets.
 //!
 //! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
 //! The plan reads the durable state sync state and keeps that metadata handle
@@ -183,6 +185,9 @@ where
     /// Extract per-database sync targets from a finalized block.
     ///
     /// Called by the wrapper for finalized blocks received during state sync.
+    ///
+    /// Target selection occurs before this boundary, so state sync trusts the returned targets
+    /// and only verifies that peer data matches them.
     ///
     /// The returned targets are handed to the state sync coordinator so the
     /// sync engines can track the latest finalized state root and range.

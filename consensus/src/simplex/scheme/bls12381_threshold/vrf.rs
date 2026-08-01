@@ -5,11 +5,27 @@
 //!
 //! # Using the VRF
 //!
-//! A malicious leader (colluding with at least 1 Byzantine validator) can observe the output of the
-//! VRF before deciding whether to publish their block to all participants (they uniquely see `2f` other
-//! partial signatures and can recover the seed by combining their own partial signature). As a result,
-//! it is **not safe** to use a round's randomness to affect execution in that same round (as the leader can
-//! bias execution to their advantage by deciding whether or not to publish their block).
+//! The seed for a round is a threshold signature over the round alone. Every vote cast in a round
+//! carries the same seed partial signature regardless of its type (`notarize` for any block,
+//! `nullify`, or `finalize`). Recovering `seed(v)` therefore takes `2f+1` seed partials but no
+//! agreement: they can be gathered across mutually incompatible votes, so no certificate
+//! (notarization, nullification, or finalization) need ever form.
+//!
+//! An adversary controlling the `f` Byzantine participants of a `3f+1` committee (one of them the
+//! round leader) thus recovers `seed(v)` after seeing only `f+1` honest votes, before the round
+//! resolves. A malicious leader can turn this into front-running: it sends up to `f+1` distinct valid
+//! blocks to `f+1` distinct honest participants and collects their incompatible `notarize` votes,
+//! which together with the `f` Byzantine seed partials recover the seed while no block is yet
+//! notarized. Knowing the seed, the leader picks whichever of the `f+1` candidates (or nullification)
+//! is most favorable and drives it to a certificate using the `f` honest participants it held back.
+//! The leader thus chooses among `f+2` outcomes rather than the binary publish-or-nullify. Only the
+//! chosen block is notarized, so the attack selects which transactions (if any) execute against a
+//! known seed rather than breaking safety. The seed leaks the moment the votes are cast, so detecting
+//! the equivocation never prevents the attack, and because the scheme is non-attributable (see below)
+//! it yields no third-party evidence against the leader.
+//!
+//! It is **not safe** to use a round's randomness to drive
+//! execution in that same round.
 //!
 //! Applications that want to incorporate this embedded VRF into execution should employ a "commit-then-reveal" pattern
 //! and require users to bind to the output of randomness in advance (i.e. `draw(view+k)` means execution uses VRF output
@@ -60,7 +76,10 @@ use commonware_cryptography::{
 };
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, ordered::Set};
+use commonware_utils::{
+    N3f1,
+    ordered::{Quorum, Set},
+};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{
@@ -119,6 +138,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// Returns `None` if the share's public key does not match any participant.
     ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial's participant count or degree does not match the
+    /// committee, or if the share index does not identify a committee participant.
+    ///
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
@@ -133,6 +157,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.required(),
+            participants.quorum::<N3f1>(),
+            "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
         let partial_public = polynomial
@@ -158,6 +187,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial's participant count or degree does not match the
+    /// committee.
+    ///
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
@@ -166,6 +200,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
+        );
+        assert_eq!(
+            polynomial.required(),
+            participants.quorum::<N3f1>(),
+            "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
 
@@ -244,9 +283,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 
     /// Encrypts a message for a target round using Timelock Encryption ([TLE](tle)).
     ///
-    /// The encrypted message can only be decrypted using the seed signature
-    /// from a certificate of the target round (i.e. notarization, finalization,
-    /// or nullification).
+    /// The ciphertext can only be decrypted with the target round's seed signature, which is
+    /// recoverable from any `2f+1` seed partials for that round (every `notarize`, `nullify`, or
+    /// `finalize` vote carries one, regardless of block). Decryption is therefore possible as soon
+    /// as `2f+1` participants have voted in the target round, whether or not their votes form a
+    /// certificate (notarization, nullification, or finalization).
     #[stability(ALPHA)]
     pub fn encrypt<R: CryptoRng>(
         &self,
@@ -267,9 +308,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 
 /// Encrypts a message for a future round using Timelock Encryption ([TLE](tle)).
 ///
-/// The encrypted message can only be decrypted using the seed signature
-/// from a certificate of the target round (i.e. notarization, finalization,
-/// or nullification).
+/// The ciphertext can only be decrypted with the target round's seed signature, which is recoverable
+/// from any `2f+1` seed partials for that round (every `notarize`, `nullify`, or `finalize` vote
+/// carries one, regardless of block). Decryption is therefore possible as soon as `2f+1` participants
+/// have voted in the target round, whether or not their votes form a certificate (notarization,
+/// nullification, or finalization).
 #[stability(ALPHA)]
 pub fn encrypt<R: CryptoRng, V: Variant>(
     rng: &mut R,
@@ -300,7 +343,7 @@ where
     V: Variant,
     R: rand_core::CryptoRng,
 {
-    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _, N3f1>(
         rng,
         namespace,
         n,
@@ -456,8 +499,7 @@ impl<V: Variant> Seed<V> {
     }
 }
 
-/// Decrypts a [TLE](tle) ciphertext using the seed from a certificate (i.e.
-/// notarization, finalization, or nullification).
+/// Decrypts a [TLE](tle) ciphertext using a recovered seed for the target round.
 ///
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
@@ -553,10 +595,11 @@ fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Byte
 
 impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
+    type Faults = N3f1;
     type PublicKey = P;
     type Certificate = Certificate<V>;
 
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Subject<'_, D>,
@@ -566,7 +609,6 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
     where
         R: CryptoRng,
         D: Digest,
-        M: Faults,
     {
         let Some(cert) = certificate.get() else {
             return false;
@@ -586,7 +628,7 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         batch::verify_same_signer::<_, V, _>(rng, identity, entries, strategy).is_ok()
     }
 
-    fn verify_certificates<'a, R, D, I, M>(
+    fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -596,7 +638,6 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
-        M: Faults,
     {
         let identity = self.identity();
         let namespace = self.namespace();
@@ -820,11 +861,10 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    fn assemble<I, M>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
+    fn assemble<I>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
-        M: Faults,
     {
         let (partials, failures) =
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
@@ -849,17 +889,13 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();
 
         let quorum = self.polynomial();
-        if vote_partials.len() < quorum.required::<M>() as usize {
+        if vote_partials.len() < quorum.required() as usize {
             return None;
         }
 
-        let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, M>(
-            quorum,
-            vote_partials.iter(),
-            seed_partials.iter(),
-            strategy,
-        )
-        .ok()?;
+        let (vote_signature, seed_signature) =
+            threshold::recover_pair(quorum, vote_partials.iter(), seed_partials.iter(), strategy)
+                .ok()?;
 
         Some(
             Signature {
@@ -903,7 +939,7 @@ mod tests {
     };
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, NZU32, test_rng};
+    use commonware_utils::{Faults, N3f1, N5f1, NZU32, test_rng};
     use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -996,6 +1032,59 @@ mod tests {
     #[should_panic(expected = "polynomial total must equal participant len")]
     fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
         verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
+    }
+
+    fn signer_validates_polynomial_degree<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = ed25519_participants(&mut rng, 4);
+
+        // For four participants, N5f1 produces a degree 3 polynomial while this
+        // N3f1 scheme requires degree 2.
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+
+        Scheme::<V>::signer(
+            NAMESPACE,
+            participants.keys().clone(),
+            polynomial,
+            shares[0].clone(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_signer_validates_polynomial_degree_min_pk() {
+        signer_validates_polynomial_degree::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_signer_validates_polynomial_degree_min_sig() {
+        signer_validates_polynomial_degree::<MinSig>();
+    }
+
+    fn verifier_validates_polynomial_degree<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = ed25519_participants(&mut rng, 4);
+
+        // For four participants, N5f1 produces a degree 3 polynomial while this
+        // N3f1 scheme requires degree 2.
+        let (polynomial, _) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
+
+        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_verifier_validates_polynomial_degree_min_pk() {
+        verifier_validates_polynomial_degree::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_verifier_validates_polynomial_degree_min_sig() {
+        verifier_validates_polynomial_degree::<MinSig>();
     }
 
     #[test]
@@ -1174,7 +1263,7 @@ mod tests {
             })
             .collect();
 
-        assert!(schemes[0].assemble::<_, N3f1>(votes, &Sequential).is_none());
+        assert!(schemes[0].assemble(votes, &Sequential).is_none());
     }
 
     #[test]
@@ -1201,10 +1290,10 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut test_rng(),
             Subject::Finalize {
                 proposal: &proposal,
@@ -1239,10 +1328,10 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1257,7 +1346,7 @@ mod tests {
             seed_signature: cert.seed_signature,
         }
         .into();
-        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1291,7 +1380,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
         let encoded = certificate.encode();
@@ -1323,7 +1412,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
         let cert = certificate.get().unwrap();
 
@@ -1358,7 +1447,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
         let cert = certificate.get().unwrap();
 
@@ -1462,7 +1551,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
         let certificate_verifier =
@@ -1475,16 +1564,14 @@ mod tests {
                 .is_none(),
             "certificate verifier should not produce votes"
         );
-        assert!(
-            certificate_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
-                &mut test_rng(),
-                Subject::Finalize {
-                    proposal: &proposal,
-                },
-                &certificate,
-                &Sequential,
-            )
-        );
+        assert!(certificate_verifier.verify_certificate::<_, Sha256Digest>(
+            &mut test_rng(),
+            Subject::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+            &Sequential,
+        ));
     }
 
     #[test]
@@ -1544,7 +1631,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
         let cert = certificate.get().unwrap();
 
@@ -1576,7 +1663,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
         let mut encoded = certificate.encode();
@@ -1648,10 +1735,10 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Nullify {
                 round: proposal.round,
@@ -1666,7 +1753,7 @@ mod tests {
             seed_signature: cert.vote_signature,
         }
         .into();
-        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Nullify {
                 round: proposal.round,
@@ -1877,10 +1964,10 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble certificate");
 
-        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal,
@@ -1904,7 +1991,7 @@ mod tests {
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         assert!(
-            !verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+            !verifier.verify_certificate::<_, Sha256Digest>(
                 &mut rng,
                 Subject::Notarize {
                     proposal: &proposal,
@@ -1953,14 +2040,14 @@ mod tests {
             .collect();
 
         let certificate1 = schemes[0]
-            .assemble::<_, N3f1>(votes1, &Sequential)
+            .assemble(votes1, &Sequential)
             .expect("assemble certificate1");
         let certificate2 = schemes[0]
-            .assemble::<_, N3f1>(votes2, &Sequential)
+            .assemble(votes2, &Sequential)
             .expect("assemble certificate2");
 
         assert!(
-            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            verifier.verify_certificates::<_, Sha256Digest, _>(
                 &mut rng,
                 [
                     (
@@ -2006,7 +2093,7 @@ mod tests {
         );
 
         assert!(
-            !verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            !verifier.verify_certificates::<_, Sha256Digest, _>(
                 &mut rng,
                 [
                     (
@@ -2047,7 +2134,7 @@ mod tests {
             .collect();
 
         schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble notarization certificate")
     }
 
@@ -2063,7 +2150,7 @@ mod tests {
             .collect();
 
         schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(votes, &Sequential)
             .expect("assemble finalization certificate")
     }
 
@@ -2075,7 +2162,7 @@ mod tests {
         let finalization_certificate = assemble_finalization_certificate(&schemes, &proposal);
 
         assert!(
-            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            verifier.verify_certificates::<_, Sha256Digest, _>(
                 &mut rng,
                 [
                     (
@@ -2113,7 +2200,7 @@ mod tests {
         let certificate2 = assemble_notarization_certificate(&schemes, &proposal2);
 
         assert!(
-            verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            verifier.verify_certificates::<_, Sha256Digest, _>(
                 &mut rng,
                 [
                     (
@@ -2142,7 +2229,7 @@ mod tests {
         }
         .into();
 
-        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             Subject::Notarize {
                 proposal: &proposal2,
@@ -2166,17 +2253,13 @@ mod tests {
             ),
         ];
 
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
             batch.iter().copied(),
             &Sequential,
         ));
         assert_eq!(
-            verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-                &mut rng,
-                &batch,
-                &Sequential,
-            ),
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &batch, &Sequential,),
             vec![true, false],
         );
     }

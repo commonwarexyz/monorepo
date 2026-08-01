@@ -7,6 +7,8 @@
 //! [lookup] operates under the assumption that peer addresses are known in advance,
 //! and that they can be looked up by their identifiers.
 
+mod channels;
+pub use channels::backlog;
 mod data;
 pub(crate) mod dialing;
 pub mod discovery;
@@ -14,3 +16,4 @@ pub mod lookup;
 mod mailbox;
 pub use mailbox::Mailbox;
 mod relay;
+mod router;

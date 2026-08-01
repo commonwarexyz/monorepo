@@ -21,7 +21,8 @@
     doc = "
 - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
   can be aggregated into a single multi-signature for compact certificates while preserving
-  attribution (signer indices are stored alongside the aggregated signature).
+  attribution (signer indices are stored alongside the aggregated signature). Callers must verify
+  a proof of possession for every BLS signing key before constructing the scheme.
 
 - [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
   certificates that are constant-size regardless of committee size. Requires a trusted
@@ -193,13 +194,17 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// Subject type for certificate verification.
     type Subject<'a, D: Digest>: Subject;
 
+    /// Fault model used to compute certificate quorums.
+    type Faults: Faults;
+
     /// Public key type for participant identity used to order and index the participant set.
     type PublicKey: PublicKey;
+
     /// Certificate assembled from a set of attestations.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
 
     /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -208,11 +213,10 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     ) -> bool
     where
         R: CryptoRng,
-        D: Digest,
-        M: Faults;
+        D: Digest;
 
     /// Verifies a stream of certificates, returning `false` at the first failure.
-    fn verify_certificates<'a, R, D, I, M>(
+    fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -222,10 +226,9 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-        M: Faults,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate::<_, _, M>(rng, subject, certificate, strategy) {
+            if !self.verify_certificate(rng, subject, certificate, strategy) {
                 return false;
             }
         }
@@ -238,7 +241,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// For batchable schemes, attempts batch verification first and bisects
     /// on failure to efficiently identify invalid certificates. For
     /// non-batchable schemes, verifies each certificate individually.
-    fn verify_certificates_bisect<'a, R, D, M>(
+    fn verify_certificates_bisect<'a, R, D>(
         &self,
         rng: &mut R,
         certificates: &[(Self::Subject<'a, D>, &'a Self::Certificate)],
@@ -249,7 +252,6 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         D: Digest,
         Self::Subject<'a, D>: Copy,
         Self::Certificate: 'a,
-        M: Faults,
     {
         let len = certificates.len();
         let mut verified = vec![false; len];
@@ -261,8 +263,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         // since verify_certificates already checks one-by-one.
         if !Self::is_batchable() {
             for (i, (subject, certificate)) in certificates.iter().enumerate() {
-                verified[i] =
-                    self.verify_certificate::<_, _, M>(rng, *subject, certificate, strategy);
+                verified[i] = self.verify_certificate(rng, *subject, certificate, strategy);
             }
             return verified;
         }
@@ -280,11 +281,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         //                    [6..7) pass  [7..8) fail
         let mut stack = vec![(0, len)];
         while let Some((start, end)) = stack.pop() {
-            if self.verify_certificates::<_, D, _, M>(
-                rng,
-                certificates[start..end].iter().copied(),
-                strategy,
-            ) {
+            if self.verify_certificates(rng, certificates[start..end].iter().copied(), strategy) {
                 verified[start..end].fill(true);
             } else if end - start > 1 {
                 let mid = start + (end - start) / 2;
@@ -383,15 +380,10 @@ pub trait Scheme: Verifier {
     ///
     /// Callers must not include duplicate attestations from the same signer. Passing duplicates
     /// is undefined behavior, implementations may panic or produce incorrect results.
-    fn assemble<I, M>(
-        &self,
-        attestations: I,
-        strategy: &impl Strategy,
-    ) -> Option<Self::Certificate>
+    fn assemble<I>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
-        M: Faults;
+        I::IntoIter: Send;
 
     /// Returns whether per-participant fault evidence can be safely exposed.
     ///
@@ -436,10 +428,11 @@ impl<S: Scheme> Scoped<S> {
 
 impl<S: Scheme> Verifier for Scoped<S> {
     type Subject<'a, D: Digest> = S::Subject<'a, D>;
+    type Faults = S::Faults;
     type PublicKey = S::PublicKey;
     type Certificate = S::Certificate;
 
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -449,13 +442,12 @@ impl<S: Scheme> Verifier for Scoped<S> {
     where
         R: CryptoRng,
         D: Digest,
-        M: Faults,
     {
         self.scheme
-            .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
+            .verify_certificate(rng, subject, certificate, strategy)
     }
 
-    fn verify_certificates<'a, R, D, I, M>(
+    fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -465,10 +457,8 @@ impl<S: Scheme> Verifier for Scoped<S> {
         R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-        M: Faults,
     {
-        self.scheme
-            .verify_certificates::<_, D, _, M>(rng, certificates, strategy)
+        self.scheme.verify_certificates(rng, certificates, strategy)
     }
 
     fn is_batchable() -> bool {
@@ -640,7 +630,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, TryCollect, ordered::Set, test_rng};
+    use commonware_utils::{TryCollect, ordered::Set, test_rng};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     #[test]
@@ -696,6 +686,7 @@ mod tests {
 
     mod ed25519_fixture {
         use crate::{certificate::Subject, impl_certificate_ed25519};
+        use commonware_utils::N3f1;
 
         /// Test subject for certificate verification tests.
         #[derive(Copy, Clone, Debug)]
@@ -716,7 +707,7 @@ mod tests {
         }
 
         // Use the macro to generate the test scheme
-        impl_certificate_ed25519!(TestSubject, Vec<u8>);
+        impl_certificate_ed25519!(TestSubject, Vec<u8>, N3f1);
     }
 
     const NAMESPACE: &[u8] = b"test-bisect";
@@ -732,7 +723,7 @@ mod tests {
             .filter_map(|s| s.sign::<Sha256Digest>(TestSubject { message }))
             .collect();
         schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("assembly failed")
     }
 
@@ -756,11 +747,8 @@ mod tests {
     fn test_bisect_empty() {
         let mut rng = test_rng();
         let (_, verifier) = setup_ed25519(4);
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &[],
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &[], &Sequential);
         assert!(result.is_empty());
     }
 
@@ -771,11 +759,8 @@ mod tests {
         let cert = make_certificate(&schemes, MESSAGE);
         let good = TestSubject { message: MESSAGE };
         let pairs: Vec<_> = (0..5).map(|_| (good, &cert)).collect();
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, vec![true; 5]);
     }
 
@@ -799,11 +784,8 @@ mod tests {
             (bad, &cert),
         ];
         let expected = vec![true, false, true, false, true, true, false, false];
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, expected);
     }
 
@@ -816,11 +798,8 @@ mod tests {
             message: BAD_MESSAGE,
         };
         let pairs: Vec<_> = (0..4).map(|_| (bad, &cert)).collect();
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, vec![false; 4]);
     }
 
@@ -830,11 +809,8 @@ mod tests {
         let (schemes, verifier) = setup_ed25519(4);
         let cert = make_certificate(&schemes, MESSAGE);
         let pairs = vec![(TestSubject { message: MESSAGE }, &cert)];
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, vec![true]);
     }
 
@@ -849,11 +825,8 @@ mod tests {
             },
             &cert,
         )];
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, vec![false]);
     }
 
@@ -868,20 +841,20 @@ mod tests {
         let as_scheme = Scoped::scheme(Arc::new(schemes[0].clone()));
 
         // Both scopes verify a valid certificate through the `Verifier` impl.
-        assert!(as_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(as_verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             subject,
             &cert,
             &Sequential,
         ));
-        assert!(as_scheme.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(as_scheme.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             subject,
             &cert,
             &Sequential,
         ));
         let pairs = [(subject, &cert)];
-        assert!(as_verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+        assert!(as_verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
             pairs.iter().copied(),
             &Sequential,

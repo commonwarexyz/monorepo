@@ -2851,7 +2851,7 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum::<N3f1>();
-                let threshold_sig = threshold::recover::<V, _, N3f1>(
+                let threshold_sig = threshold::recover(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                     &Sequential,

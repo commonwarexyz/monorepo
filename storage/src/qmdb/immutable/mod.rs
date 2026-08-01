@@ -90,6 +90,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
@@ -163,7 +164,7 @@ pub struct Immutable<
     C::Item: EncodeShared,
 {
     /// Authenticated journal of operations.
-    pub(crate) journal: authenticated::Journal<F, E, C, H, S>,
+    journal: authenticated::Journal<F, E, C, H, S>,
 
     /// Cached canonical operations root.
     pub(crate) root: H::Digest,
@@ -480,8 +481,7 @@ where
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count, |op| op.has_floor())
-                .await?;
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
 
         Ok(self
             .journal
@@ -558,7 +558,8 @@ where
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
-    /// [`Immutable::sync`].
+    /// [`Immutable::sync`] completes, or until the handle returned by a subsequent
+    /// [`Immutable::start_sync`] completes.
     #[tracing::instrument(name = "qmdb.immutable.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
@@ -668,6 +669,24 @@ where
         Ok(self)
     }
 
+    /// Begin durably persisting the journal state published by prior [`Immutable::apply_batch`]
+    /// calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
+    /// of the deferred durability work surface on the returned handle. A failed data sync also
+    /// fails the next durability operation. A failed recovery-watermark sync is not observed by
+    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
+    /// [Self::sync].
+    #[tracing::instrument(name = "qmdb.immutable.db.start_sync", level = "info", skip_all)]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.metrics.start_sync_calls.inc();
+        let handle;
+        (self.journal, handle) = self.journal.start_sync().await?;
+        Ok((self, handle))
+    }
+
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
     #[tracing::instrument(name = "qmdb.immutable.db.commit", level = "info", skip_all)]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
@@ -730,9 +749,9 @@ where
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the
-    /// journal, but does not durably commit it. Call [`Immutable::commit`] or
-    /// [`Immutable::sync`] to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal,
+    /// but does not durably commit it. Call [`Immutable::commit`] or [`Immutable::sync`], or await
+    /// the handle returned by [`Immutable::start_sync`], to guarantee durability.
     #[tracing::instrument(name = "qmdb.immutable.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -797,6 +816,38 @@ where
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok((self, range))
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> crate::qmdb::sync::Source for Immutable<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    C::Item: EncodeShared,
+    H: Hasher,
+    T: Translator + Send + Sync,
+    T::Key: Send + Sync,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, K, V>;
+    type Error = Error<F>;
+
+    async fn serve(
+        &self,
+        request: crate::qmdb::sync::Request<F>,
+    ) -> Result<
+        (
+            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
+            crate::qmdb::sync::FeedbackTx,
+        ),
+        Self::Error,
+    > {
+        self.journal.serve(request).await
     }
 }
 

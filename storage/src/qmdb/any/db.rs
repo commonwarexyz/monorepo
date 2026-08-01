@@ -12,8 +12,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, bitmap::Shared, delete_known_loc, metrics::Metrics,
-        operation::Operation as OperationTrait, update_known_loc,
+        Error, bitmap::Shared, delete_known_loc, metrics::Metrics, operation::Floored as _,
+        update_known_loc,
     },
 };
 use commonware_codec::{Codec, CodecShared};
@@ -542,10 +542,7 @@ where
         }
 
         let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size, |op| {
-                op.has_floor()
-            })
-            .await?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
         let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
@@ -579,7 +576,8 @@ where
     /// from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
+    /// completes.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -789,12 +787,9 @@ where
                     .checked_sub(1)
                     .ok_or(Error::NoCommitAtSize(Location::new(bounds.end)))?,
             );
-            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &*log,
-                Location::new(bounds.end),
-                |op| op.has_floor(),
-            )
-            .await?;
+            let inactivity_floor_loc =
+                crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
+                    .await?;
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index

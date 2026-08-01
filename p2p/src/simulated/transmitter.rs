@@ -422,7 +422,7 @@ impl<P: PublicKey> State<P> {
 
                 if let Some(duration) = bandwidth::duration(&meta.rate, &meta.remaining) {
                     // Ensure the scheduled event advances by at least the platform precision so
-                    // `SystemTime` actually moves forward on coarse clocks (e.g. Windows).
+                    // `SystemTime` actually moves forward on coarse clocks.
                     let duration = if duration.is_zero() {
                         Duration::ZERO
                     } else {
