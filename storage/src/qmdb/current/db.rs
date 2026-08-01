@@ -677,12 +677,10 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any = self.any.rewind(size).await?;
 
-        let ops_leaves = Location::<F>::try_from(self.any.log.merkle.size())?;
         let (grafted_tree, root) = rebuild_grafted_root::<F, H, S, N>(
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
-            ops_leaves,
             self.any.inactivity_floor_loc,
             self.any.root(),
             &self.strategy,
@@ -1044,14 +1042,13 @@ pub(super) async fn compute_db_root<
 /// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
 /// bitmap.
 ///
-/// Database open and `rewind` must reconstruct identical overlay state for the same committed ops
-/// log, so both go through this single path. `ops_leaves` must be a consistent snapshot of the ops
-/// tree size taken with the bitmap state. Returns the rebuilt grafted tree and the db root.
+/// Database open, `rewind`, and sync-init must reconstruct identical overlay state for the same
+/// committed ops log, so all go through this single path. `ops_leaves` is taken from `ops_tree` so
+/// it always matches the tree being grafted. Returns the rebuilt grafted tree and the db root.
 pub(super) async fn rebuild_grafted_root<F, H, S, const N: usize>(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
-    ops_leaves: Location<F>,
     inactivity_floor: Location<F>,
     ops_root: H::Digest,
     strategy: &S,
@@ -1061,6 +1058,7 @@ where
     H: Hasher,
     S: Strategy,
 {
+    let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
     let grafted_tree =
         build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
             .await?;

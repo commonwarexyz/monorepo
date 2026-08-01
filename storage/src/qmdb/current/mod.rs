@@ -457,13 +457,11 @@ where
 
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
-    // Rebuild the grafted overlay tree and compute the db root (shared with rewind).
-    let ops_leaves = crate::merkle::Location::<F>::try_from(any.log.merkle.size())?;
+    // Rebuild the grafted overlay tree and compute the db root (shared with rewind and sync-init).
     let (grafted_tree, root) = db::rebuild_grafted_root::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
-        ops_leaves,
         any.inactivity_floor_loc,
         any.root(),
         &strategy,

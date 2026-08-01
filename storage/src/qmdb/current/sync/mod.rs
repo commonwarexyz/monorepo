@@ -194,12 +194,10 @@ where
     // Rebuild the grafted overlay tree and compute the canonical root (shared with open and
     // rewind). The root is deterministic from the ops (authenticated by the engine) and the
     // bitmap (deterministic from the ops).
-    let ops_leaves = Location::<F>::try_from(any.log.merkle.size())?;
     let (grafted_tree, root) = db::rebuild_grafted_root::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
-        ops_leaves,
         any.inactivity_floor_loc,
         any.root(),
         &strategy,
