@@ -791,7 +791,7 @@ where
             }));
         }
 
-        Ok(database)
+        Ok(database.persist_sync_result().await?)
     }
 
     /// Run sync to completion, returning the final database when done.

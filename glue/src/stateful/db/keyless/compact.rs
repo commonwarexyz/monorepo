@@ -399,7 +399,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         BufferPooler, Clock as _, Metrics as _, Runner as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic,
+        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -502,6 +502,19 @@ mod tests {
         }
     }
 
+    async fn populated_fixed_db(context: deterministic::Context, suffix: &str) -> FixedDb {
+        let config = fixed_config(&context, suffix);
+        let source = FixedDb::init(context.child("db"), config).await.unwrap();
+        let floor = source.inactivity_floor_loc();
+        let batch = source
+            .new_batch()
+            .append(U64::new(7))
+            .merkleize(&source, Some(U64::new(9)), floor)
+            .await;
+        let (source, _) = source.apply_batch(batch).unwrap();
+        source.sync().await.unwrap()
+    }
+
     fn assert_managed_db<T: ManagedDb<deterministic::Context>>() {}
 
     fn assert_state_sync_db<T, R>()
@@ -593,17 +606,7 @@ mod tests {
     #[test]
     fn state_sync_fetches_fixed_keyless_compact_state() {
         deterministic::Runner::default().start(|context| async move {
-            let source = FixedDb::init(context.child("source"), fixed_config(&context, "source"))
-                .await
-                .unwrap();
-            let floor = source.inactivity_floor_loc();
-            let batch = source
-                .new_batch()
-                .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor)
-                .await;
-            let (source, _) = source.apply_batch(batch).unwrap();
-            let source = source.sync().await.unwrap();
+            let source = populated_fixed_db(context.child("source"), "source").await;
 
             let target = source.target();
             let (_update_tx, update_rx) = mpsc::channel(1);
@@ -622,6 +625,35 @@ mod tests {
 
             assert_eq!(synced.target(), target);
             assert_eq!(synced.get_metadata(), Some(U64::new(9)));
+        });
+    }
+
+    #[test]
+    fn state_sync_stops_compact_update_forwarder_after_completion() {
+        deterministic::Runner::default().start(|context| async move {
+            let source = populated_fixed_db(context.child("source"), "source").await;
+
+            let target = source.target();
+            let (_update_tx, update_rx) = mpsc::channel(1);
+            let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
+                context.child("target"),
+                fixed_config(&context, "target"),
+                Arc::new(source),
+                target,
+                update_rx,
+                None,
+                None,
+                sync_config(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                count_running_tasks(&context, "target_compact_updates"),
+                0,
+                "compact target forwarder outlived the completed sync",
+            );
+            drop(synced);
         });
     }
 

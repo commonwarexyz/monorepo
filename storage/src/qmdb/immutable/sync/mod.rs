@@ -197,7 +197,7 @@ where
         range: NonEmptyRange<Location<F>>,
         _apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
-        let db = crate::qmdb::compact::from_sync_result(
+        crate::qmdb::compact::from_sync_result(
             context,
             config,
             log,
@@ -205,10 +205,11 @@ where
             range,
             Self::init_from_sync,
         )
-        .await?;
-        // The engine verified the operation and pinned nodes against the target root before handing
-        // them over, so the rebuilt state is already authenticated and safe to persist.
-        db.sync().await
+        .await
+    }
+
+    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+        self.sync().await
     }
 
     async fn local_pinned_nodes(

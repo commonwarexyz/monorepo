@@ -80,7 +80,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::{Metrics, Spawner, reschedule};
+use commonware_runtime::{Handle, Metrics, Spawner, reschedule};
 use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
@@ -1490,6 +1490,15 @@ where
     .await
 }
 
+/// Aborts an adapter task when its owning sync future completes or is cancelled.
+struct Forwarder(Handle<()>);
+
+impl Drop for Forwarder {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Sync a database that does not durably persist an operation log.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_compact_db<E, DB, S>(
@@ -1520,7 +1529,8 @@ where
     }
 
     let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
-    context.child("compact_updates").spawn(move |_| async move {
+    // Retain the handle until the engine exits so the adapter is aborted on completion or cancel.
+    let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
         while let Some(update) = tip_updates.recv().await {
             // Ignore malformed updates.
             let Ok(update) = sync::Target::try_from(&update) else {
@@ -1530,7 +1540,7 @@ where
                 break;
             }
         }
-    });
+    }));
 
     let reached_target_tx = reached_target.map(|reached| {
         let (tx, mut rx) = mpsc::channel::<sync::Target<DB::Family, DB::Digest>>(1);
@@ -1548,7 +1558,7 @@ where
         tx
     });
 
-    sync::sync(sync::engine::Config {
+    let result = sync::sync(sync::engine::Config {
         context,
         source,
         target: initial,
@@ -1561,7 +1571,9 @@ where
         finish_rx: finish,
         reached_target_tx,
     })
-    .await
+    .await;
+    drop(update_forwarder);
+    result
 }
 
 #[tracing::instrument(name = "stateful.db.finalize_or_panic", level = "info", skip_all, fields(index = index))]

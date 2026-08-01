@@ -1950,6 +1950,109 @@ mod compact_variable_mmr {
         });
     }
 
+    /// A boundary response can verify against its target while reconstructing a different
+    /// canonical root. Rejecting that import must preserve the destination's durable witness.
+    #[test_traced("WARN")]
+    fn test_compact_sync_root_mismatch_preserves_existing_state() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-keyless-root-mismatch-{}", context.next_u64());
+
+            // Seed the destination partition with durable state that a failed import must not
+            // replace.
+            let client_cfg = client_config(&suffix, &context);
+            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
+                .await
+                .unwrap();
+            let batch = seeded
+                .new_batch()
+                .append(vec![1])
+                .merkleize(&seeded, Some(vec![1]), Location::new(0))
+                .await;
+            let (seeded, _) = seeded.apply_batch(batch).unwrap();
+            let seeded = seeded.sync().await.unwrap();
+            let original_target = seeded.target();
+            drop(seeded);
+
+            // Build a compact boundary response from a valid source state.
+            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                .await
+                .unwrap();
+            let batch = source
+                .new_batch()
+                .append(vec![2])
+                .append(vec![3])
+                .append(vec![4])
+                .append(vec![5])
+                .append(vec![6])
+                .merkleize(&source, Some(vec![9]), Location::new(0))
+                .await;
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.commit().await.unwrap();
+            let size = source.bounds().end;
+            let last_commit_loc = Location::new(*size - 1);
+            let canonical_target = sync::CompactTarget {
+                root: source.root(),
+                size,
+            };
+            let source = Arc::new(source);
+            let (response, _) = fetch_compact_state(&source, canonical_target)
+                .await
+                .unwrap();
+            let sync::Response::Boundary {
+                op, pinned_nodes, ..
+            } = response
+            else {
+                unreachable!("boundary fetch returns a boundary response");
+            };
+
+            // Authenticate the boundary against a root with one inactive peak. The proof is valid
+            // for this target, but the commit's encoded floor reconstructs the source's canonical
+            // root instead, so only the engine's final root check rejects the import.
+            let hasher = qmdb::hasher::<Sha256>();
+            let proof = source
+                .journal
+                .merkle
+                .historical_proof(&hasher, size, last_commit_loc, 1)
+                .await
+                .unwrap();
+            let noncanonical_root = source.journal.merkle.root(&hasher, 1).unwrap();
+            assert_ne!(noncanonical_root, source.root());
+
+            // The rejected reconstruction must remain provisional.
+            let result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource::new(vec![(
+                    sync::Response::Boundary {
+                        proof,
+                        op,
+                        pinned_nodes,
+                    },
+                    None,
+                )]),
+                sync::CompactTarget {
+                    root: noncanonical_root,
+                    size,
+                },
+                client_cfg.clone(),
+            ))
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+            ));
+
+            // Reopening the destination must recover the original durable state.
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+                .await
+                .unwrap();
+            assert_eq!(reopened.target(), original_target);
+
+            reopened.destroy().await.unwrap();
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
     /// Dropping a compact-sync import before its first persist leaves the previous witness
     /// journal untouched.
     #[test_traced("WARN")]
