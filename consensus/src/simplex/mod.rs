@@ -3663,7 +3663,20 @@ mod tests {
         );
     }
 
-    fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, mut fixture: F) -> String
+    fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, fixture: F) -> String
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        slow_and_lossy_links_seeded_with_term::<S, F, L>(L::default(), seed, fixture)
+    }
+
+    fn slow_and_lossy_links_seeded_with_term<S, F, L>(
+        elector: L,
+        seed: u64,
+        mut fixture: F,
+    ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3706,7 +3719,6 @@ mod tests {
             .await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3813,6 +3825,20 @@ mod tests {
     }
 
     test_for_all_fixtures!(slow_and_lossy_links);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_slow_and_lossy_links_stable_leader_optimistic() {
+        slow_and_lossy_links_seeded_with_term::<_, _, RoundRobin>(
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(13),
+                ViewDelta::new(2),
+            ),
+            6,
+            ed25519::fixture,
+        );
+    }
 
     fn determinism<S, F, L>(seed: u64, fixture: F)
     where

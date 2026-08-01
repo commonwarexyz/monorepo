@@ -5503,6 +5503,98 @@ mod tests {
         });
     }
 
+    /// One node's view of a split with a minimal quorum. The other three
+    /// participants notarize views 3 and 4 optimistically while the
+    /// certificate for view 2 never forms, so certification of the chain is
+    /// blocked. A nullification for view 2 from the other half of the split
+    /// skips the term, and we propose around the blocked chain. When view 2's
+    /// notarization finally arrives, certification cascades parent-first, and
+    /// a finalization for the chain tip clears the queue.
+    #[test]
+    fn late_parent_certificate_unblocks_notarized_chain_after_term_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                3,
+                1,
+                20,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(3),
+            );
+            // Every certificate is minted by the other three participants: a
+            // bare quorum that never includes our vote.
+            let others = &schemes[..3];
+            let epoch = Epoch::new(1);
+
+            // Certify view 1 on genesis.
+            let payload_v1 = Sha256Digest::from([1u8; 32]);
+            let proposal_v1 =
+                Proposal::new(Rnd::new(epoch, View::new(1)), GENESIS_VIEW, payload_v1);
+            let notarization_v1 = build_notarization(&verifier, others, &proposal_v1);
+            assert!(state.add_notarization(notarization_v1).0);
+            assert!(state.certified(View::new(1), true).is_some());
+
+            // Views 3 and 4 notarize optimistically; view 2's certificate
+            // never forms, so certification of the whole chain is blocked.
+            let payload_v2 = Sha256Digest::from([2u8; 32]);
+            let proposal_v2 =
+                Proposal::new(Rnd::new(epoch, View::new(2)), View::new(1), payload_v2);
+            let proposal_v3 = Proposal::new(
+                Rnd::new(epoch, View::new(3)),
+                View::new(2),
+                Sha256Digest::from([3u8; 32]),
+            );
+            let proposal_v4 = Proposal::new(
+                Rnd::new(epoch, View::new(4)),
+                View::new(3),
+                Sha256Digest::from([4u8; 32]),
+            );
+            for proposal in [&proposal_v3, &proposal_v4] {
+                let notarization = build_notarization(&verifier, others, proposal);
+                assert!(state.add_notarization(notarization).0);
+            }
+            assert!(state.certify_candidates().is_empty());
+
+            // The other half of the split nullified view 2. Its nullification
+            // covers the rest of the term, and the term-start proposal builds
+            // on certified view 1, around the blocked chain.
+            let nullification =
+                build_nullification(&verifier, others, Rnd::new(epoch, View::new(2)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+            assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
+            let proposal = state
+                .try_propose()
+                .expect("term-start proposal should skip the blocked chain");
+            assert_eq!(proposal.parent, (View::new(1), payload_v1));
+
+            // View 2's notarization finally arrives, and certification
+            // cascades parent-first across the recovered chain.
+            let notarization_v2 = build_notarization(&verifier, others, &proposal_v2);
+            assert!(state.add_notarization(notarization_v2).0);
+            for view in [View::new(2), View::new(3)] {
+                let candidates = state.certify_candidates();
+                assert_eq!(candidates.len(), 1);
+                assert_eq!(candidates[0].round.view(), view);
+                assert!(state.certified(view, true).is_some());
+            }
+
+            // A finalization for the chain tip settles view 4 without waiting
+            // for its pending certification.
+            let finalization = build_finalization(&verifier, others, &proposal_v4);
+            assert!(state.add_finalization(finalization).0);
+            assert!(state.certify_candidates().is_empty());
+            assert_eq!(state.current_view(), View::new(6));
+        });
+    }
+
     #[test]
     fn late_nullification_unblocks_follower_verify() {
         let runtime = deterministic::Runner::default();
