@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, IoBuf, buffer,
+    Blob, Buf, BufMut, BufferPooler, IoBuf, WriteOptions, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -478,7 +478,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             );
             *entry = Entry::new_empty();
             let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
-            blob.write_at(entry_offset, zero_buf).await?;
+            blob.write_at(entry_offset, zero_buf, WriteOptions::default())
+                .await?;
             Ok(true)
         } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
             // Only track max epoch if we're discovering it (not validating against a known epoch)
@@ -617,6 +618,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .write_at(
                 table_offset + start,
                 update.encode_with_pool_mut(pooler.storage_buffer_pool()),
+                WriteOptions::default(),
             )
             .await
             .map_err(Error::Runtime)
@@ -1040,9 +1042,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
         // Put the writes into the table.
         let writes = writes.freeze();
-        let old_write = self.table.write_at(read_offset, writes.clone());
+        let old_write = self
+            .table
+            .write_at(read_offset, writes.clone(), WriteOptions::default());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
-        let new_write = self.table.write_at(new_offset, writes);
+        let new_write = self
+            .table
+            .write_at(new_offset, writes, WriteOptions::default());
         try_join(old_write, new_write).await?;
 
         // Update progress
@@ -1244,7 +1250,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Runner, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner, Storage, Supervisor as _, WriteOptions, buffer::paged::CacheRef, deterministic,
         deterministic::Context,
     };
     use commonware_utils::{
@@ -1390,7 +1396,9 @@ mod tests {
                 corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
                 // Corrupt CRC of second slot (last 4 bytes of second slot)
                 corrupted.as_mut()[Entry::FULL_SIZE - 4] ^= 0xFF;
-                blob.write_at_sync(0, corrupted).await.unwrap();
+                blob.write_at(0, corrupted, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reopen to trigger recovery. The bug would set both cleared entries to
@@ -1730,7 +1738,9 @@ mod tests {
                 let byte = blob.read_at(len - 1, 1).await.unwrap();
                 let mut corrupted = byte.coalesce();
                 corrupted.as_mut()[0] ^= 0xFF;
-                blob.write_at_sync(len - 1, corrupted).await.unwrap();
+                blob.write_at(len - 1, corrupted, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Recovery restores the checkpointed state without probing committed

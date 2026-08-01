@@ -1601,7 +1601,7 @@ mod tests {
     use crate::FutureExt;
     use crate::{
         Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
-        Supervisor as _, deterministic, reschedule,
+        Supervisor as _, WriteOptions, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
@@ -1770,7 +1770,9 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, data, WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
         });
@@ -1815,7 +1817,9 @@ mod tests {
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, data, WriteOptions::default())
+                .await
+                .unwrap();
         });
 
         // Recover the runtime
@@ -2172,7 +2176,9 @@ mod tests {
         let (result, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
                 let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
-                blob.write_at(0, b"data".to_vec()).await.unwrap();
+                blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                    .await
+                    .unwrap();
                 blob.sync().await // This should fail due to fault injection
             });
 
@@ -2189,7 +2195,9 @@ mod tests {
             assert_eq!(len, 0, "unsynced data should be lost after recovery");
 
             // Now we can write and sync successfully
-            blob.write_at(0, b"recovered".to_vec()).await.unwrap();
+            blob.write_at(0, b"recovered".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync()
                 .await
                 .expect("sync should succeed with faults disabled");
@@ -2207,7 +2215,9 @@ mod tests {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
             // Initially no faults - sync should succeed
-            blob.write_at(0, b"initial".to_vec()).await.unwrap();
+            blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.expect("initial sync should succeed");
 
             // Enable sync faults dynamically
@@ -2215,7 +2225,9 @@ mod tests {
             storage_fault_cfg.write().sync_rate = Some(1.0);
 
             // Now sync should fail
-            blob.write_at(0, b"updated".to_vec()).await.unwrap();
+            blob.write_at(0, b"updated".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             let result = blob.sync().await;
             assert!(result.is_err(), "sync should fail with faults enabled");
 
@@ -2292,7 +2304,11 @@ mod tests {
                             let name = format!("task{i}_blob{j}");
                             if let Ok((blob, _)) = ctx.open("partition", name.as_bytes()).await {
                                 successes += 1;
-                                if blob.write_at(0, b"data".to_vec()).await.is_ok() {
+                                if blob
+                                    .write_at(0, b"data".to_vec(), WriteOptions::default())
+                                    .await
+                                    .is_ok()
+                                {
                                     successes += 1;
                                 }
                                 if blob.sync().await.is_ok() {

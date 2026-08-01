@@ -4,7 +4,7 @@ use super::{Contiguous, Many, fixed, variable};
 use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as _, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+    Blob as _, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs},
@@ -35,9 +35,13 @@ pub(super) async fn corrupt_page(
         "corruption target must be an interior page"
     );
     let byte = blob.read_at(offset, 1).await.unwrap().coalesce();
-    blob.write_at(offset, vec![byte.as_ref()[0] ^ 0xFF])
-        .await
-        .unwrap();
+    blob.write_at(
+        offset,
+        vec![byte.as_ref()[0] ^ 0xFF],
+        WriteOptions::default(),
+    )
+    .await
+    .unwrap();
     blob.sync().await.unwrap();
 }
 
