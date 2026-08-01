@@ -1,4 +1,13 @@
 //! Shared sync types and functionality for authenticated databases.
+//!
+//! # Trust Model
+//!
+//! Sources are untrusted, and their responses are verified against the requested target. The
+//! target itself is a trusted input chosen by the caller: sync does not select or authenticate it.
+//!
+//! Target updates form a forward-only sequence. Sync adopts only strictly advancing targets and
+//! discards the rest. Selecting a single target before this boundary lets sync focus on fetching
+//! and verifying its data instead of reconciling competing targets.
 
 use crate::qmdb::sync::engine::Config;
 use commonware_codec::Encode;

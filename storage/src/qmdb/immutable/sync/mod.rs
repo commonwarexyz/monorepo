@@ -138,6 +138,10 @@ where
         db.sync().await
     }
 
+    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+        Ok(self)
+    }
+
     async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,

@@ -106,7 +106,10 @@ where
     pub context: DB::Context,
     /// Source of operations and proofs
     pub source: S,
-    /// Sync target (root digest and operation bounds)
+    /// Trusted sync target (root digest and operation bounds).
+    ///
+    /// The engine only verifies source data against this commitment and does not select or
+    /// authenticate the target.
     pub target: Target<DB::Family, DB::Digest>,
     /// Maximum number of outstanding requests for operation batches
     pub max_outstanding_requests: usize,
@@ -116,7 +119,10 @@ where
     pub apply_batch_size: NonZeroU64,
     /// Database-specific configuration
     pub db_config: DB::Config,
-    /// Channel for receiving sync target updates
+    /// Channel for receiving sync target updates.
+    ///
+    /// The caller selects targets before sending updates. The engine adopts only strictly
+    /// advancing targets and discards the rest.
     pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     ///
@@ -895,6 +901,10 @@ mod tests {
             _apply_batch_size: NonZeroU64,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
             Ok(Self)
+        }
+
+        async fn persist_sync_result(self) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(self)
         }
 
         async fn local_pinned_nodes(

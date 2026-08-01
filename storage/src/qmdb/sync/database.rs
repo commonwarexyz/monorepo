@@ -69,12 +69,10 @@ pub trait Database: Sized + Send {
     /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
     ///
     /// The engine calls this only after [`Self::root`] matches the requested target. Implementations
-    /// with no deferred persistence can use the default no-op.
+    /// that persist everything in [`Self::from_sync_result`] must explicitly return `Ok(self)`.
     fn persist_sync_result(
         self,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send {
-        async { Ok(self) }
-    }
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Return locally available pinned nodes for the target, if persisted local state can
     /// authenticate them.

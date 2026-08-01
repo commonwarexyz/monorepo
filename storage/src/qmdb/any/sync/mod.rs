@@ -168,6 +168,10 @@ macro_rules! impl_sync_database {
                 .await
             }
 
+            async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+                Ok(self)
+            }
+
             async fn local_pinned_nodes(
                 context: Self::Context,
                 config: &Self::Config,

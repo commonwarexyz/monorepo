@@ -27,6 +27,11 @@
 //!
 //! # Syncing
 //!
+//! State sync operates against a single trusted target at a time. The peers serving operations and
+//! proofs remain untrusted, and their responses are verified against that target. Selecting the
+//! target before the storage boundary lets the sync engines follow strictly advancing updates
+//! instead of reconciling competing targets.
+//!
 //! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
 //! The plan reads the durable state sync state and keeps that metadata handle
 //! until [`Stateful`] consumes it, avoiding multiple opens of the same metadata
@@ -179,6 +184,9 @@ where
     /// Extract per-database sync targets from a finalized block.
     ///
     /// Called by the wrapper for finalized blocks received during state sync.
+    ///
+    /// Target selection occurs before this boundary, so state sync trusts the returned targets
+    /// and only verifies that peer data matches them.
     ///
     /// The returned targets are handed to the state sync coordinator so the
     /// sync engines can track the latest finalized state root and range.
