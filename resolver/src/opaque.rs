@@ -19,7 +19,10 @@ use crate::{
 use commonware_actor::{Feedback, mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{MetricsExt as _, status, status::Status},
+};
 use commonware_utils::{
     Span,
     futures::{AbortablePool, Aborter},
@@ -190,7 +193,7 @@ where
 /// Actor that coalesces opaque fetches, retries failures, and delivers accepted values.
 struct Actor<E, F, Con>
 where
-    E: Clock + Spawner,
+    E: Clock + Spawner + Metrics,
     F: Fetcher,
     F::Value: Clone + Send + 'static,
     Con: Consumer<Key = F::Key, Value = F::Value>,
@@ -203,6 +206,7 @@ where
     deliveries: DeliveryTracker<Con, u64>,
     requests: BTreeMap<F::Key, Attempt>,
     subscribers: subscribers::Tracker<F::Key, Con::Subscriber>,
+    fetch: status::Counter,
     retry_schedule: BTreeSet<(SystemTime, F::Key)>,
     fetch_retry_timeout: Duration,
     next_id: u64,
@@ -227,7 +231,7 @@ struct FetchCompletion<K, V> {
 
 impl<E, F, Con> Actor<E, F, Con>
 where
-    E: Clock + Spawner,
+    E: Clock + Spawner + Metrics,
     F: Fetcher + Clone + Send + 'static,
     F::Value: Clone + Send + 'static,
     Con: Consumer<Key = F::Key, Value = F::Value>,
@@ -240,6 +244,7 @@ where
         consumer: Con,
         fetch_retry_timeout: Duration,
     ) -> Self {
+        let fetch = context.family("fetch", "Number of fetches by status");
         Self {
             context: ContextCell::new(context),
             fetcher,
@@ -248,6 +253,7 @@ where
             deliveries: DeliveryTracker::new(consumer),
             requests: BTreeMap::new(),
             subscribers: subscribers::Tracker::new(),
+            fetch,
             retry_schedule: BTreeSet::new(),
             fetch_retry_timeout,
             next_id: 0,
@@ -519,6 +525,10 @@ where
                 }
             }
             Outcome::Ambiguous => {
+                // The fetcher returned one of multiple valid responses, but this response did not
+                // satisfy every subscriber. Discard it and retain the fetch so another response
+                // can be tried.
+                self.fetch.inc(Status::Ambiguous);
                 self.deliveries.discard_response(&key);
                 self.schedule_retry(key);
             }
@@ -902,6 +912,11 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(consumer.len(), 0);
             assert_eq!(fetcher.calls(), 2);
+            assert!(
+                context
+                    .encode()
+                    .contains("resolver_actor_fetch_total{status=\"Ambiguous\"} 1")
+            );
         });
     }
 

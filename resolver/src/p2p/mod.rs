@@ -1016,6 +1016,12 @@ mod tests {
             second_gate_sender.send(()).unwrap();
             assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
             assert!(oracle.blocked().await.unwrap().is_empty());
+
+            let metrics = context.encode();
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
+                1
+            );
         });
     }
 

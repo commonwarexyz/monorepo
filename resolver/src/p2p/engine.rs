@@ -460,10 +460,15 @@ where
                 // The peer served valid data for the wire key, but local
                 // subscribers still need different evidence. Do not cache the
                 // response or penalize the peer; retry the same key.
+                self.metrics.fetch.inc(Status::Ambiguous);
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);
             }
             Outcome::Invalid => {
+                // A previously accepted response is only redelivered locally to subscribers that
+                // joined while validation was pending. A later invalid outcome therefore reflects
+                // conflicting consumer verdicts, not invalid peer data. Retire the fetch without
+                // blocking the peer or retrying the accepted response.
                 if self.inflight.response_accepted(&key) {
                     warn!(
                         ?key,
