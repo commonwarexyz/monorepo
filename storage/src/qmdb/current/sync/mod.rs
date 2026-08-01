@@ -191,7 +191,9 @@ where
         pins
     };
 
-    // Get the grafted tree and its root.
+    // Rebuild the grafted tree and canonical root from the synced `any` state.
+    // The canonical root is deterministic because the engine authenticates the ops and the
+    // bitmap is derived from them.
     let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,

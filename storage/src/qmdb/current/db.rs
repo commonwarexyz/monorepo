@@ -677,6 +677,7 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any = self.any.rewind(size).await?;
 
+        // Rebuild the grafted tree and canonical root from the rewound `any` state.
         let (grafted_tree, root) = rebuild_grafted_tree::<F, H, S, N>(
             self.any.bitmap.as_ref(),
             &pinned_nodes,
