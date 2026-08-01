@@ -137,7 +137,7 @@
 //! * Votes are tracked down to `view_retention` views below the highest finalized view: late
 //!   votes in that window are still reported, even though they are no longer verified or used
 //!   for certificate construction. By default, full vote evidence is released when its certificate
-//!   is constructed or received, so later conflict reporting is best effort;
+//!   is constructed or received. Later conflict reporting is best effort.
 //!   [`Config::historical_conflict_reporting`] preserves the evidence. Votes below the window are
 //!   ignored on arrival, so downstream systems consuming per-vote activity (rewards, slashing)
 //!   never observe them.

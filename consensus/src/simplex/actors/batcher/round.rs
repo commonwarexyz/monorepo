@@ -350,8 +350,11 @@ impl<
         self.verifier.try_verify_finalizes(rng, strategy).await
     }
 
-    /// Returns true if `signer` has a nullify vote in this round.
-    pub fn has_nullify(&self, signer: Participant) -> bool {
+    /// Returns whether `signer` has a retained nullify vote.
+    ///
+    /// Compact state is reached only after the corresponding certificate has
+    /// been forwarded to the voter, so it does not drive the leader fast path.
+    pub fn has_retained_nullify(&self, signer: Participant) -> bool {
         self.votes.has_nullify(signer)
     }
 

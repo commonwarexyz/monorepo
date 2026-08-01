@@ -22,7 +22,6 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
     pub blocker: B,
     pub reporter: Re,
-    /// Whether to retain full votes after recovering their certificate.
     pub retain_recovered_votes: bool,
     pub relay: Rl,
 
