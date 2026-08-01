@@ -349,12 +349,43 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 /// [`durable`](Self::durable), typically on a futures pool. Every outstanding
 /// barrier must also resolve before [`DatabaseSet::prune`] runs (see its
 /// contract).
+///
+/// # Examples
+///
+/// ```
+/// use commonware_glue::stateful::db::Barrier;
+/// use commonware_runtime::Handle;
+///
+/// struct CustomDatabaseSet;
+///
+/// # async fn example() {
+/// let barrier = Barrier::from_handles::<CustomDatabaseSet>([
+///     Handle::ready(Ok(())),
+/// ]);
+/// assert!(barrier.durable().await);
+/// # }
+/// ```
 #[must_use = "deferred flush failures surface only here; await `durable`"]
 pub struct Barrier {
     syncs: Vec<(&'static str, Option<usize>, Handle<()>)>,
 }
 
 impl Barrier {
+    /// Construct a barrier from deferred flush handles owned by `T`.
+    ///
+    /// Failures identify `T` and the handle's zero-based position in the
+    /// provided iteration. An empty barrier is immediately durable.
+    pub fn from_handles<T: ?Sized>(handles: impl IntoIterator<Item = Handle<()>>) -> Self {
+        let db_type = std::any::type_name::<T>();
+        Self {
+            syncs: handles
+                .into_iter()
+                .enumerate()
+                .map(|(index, handle)| (db_type, Some(index), handle))
+                .collect(),
+        }
+    }
+
     /// Resolves `true` once every deferred flush is durable.
     ///
     /// A flush failure panics because the database has already advanced past
@@ -2226,7 +2257,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2260,7 +2294,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2296,7 +2333,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2403,7 +2443,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Err(TestFinalizeError)
         }
 
@@ -2530,7 +2573,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2570,7 +2616,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2606,7 +2655,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2642,7 +2694,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2678,7 +2733,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2714,7 +2772,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2750,7 +2811,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2786,7 +2850,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2822,7 +2889,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -2862,7 +2932,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -3007,7 +3080,10 @@ mod tests {
             true
         }
 
-        async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        async fn finalize(
+            self,
+            _batch: Self::Merkleized,
+        ) -> Result<(Self, Handle<()>), Self::Error> {
             Ok((self, Handle::ready(Ok(()))))
         }
 
@@ -3517,13 +3593,9 @@ mod tests {
                 Shared::new("test", TestDb),
                 Shared::new("test", FailingFinalizeDb),
             );
-            let _ = <(
-                Shared<TestDb>,
-                Shared<FailingFinalizeDb>,
-            ) as DatabaseSet<deterministic::Context>>::finalize(
-                &databases,
-                (TestMerkleized, TestMerkleized),
-            )
+            let _ = <(Shared<TestDb>, Shared<FailingFinalizeDb>) as DatabaseSet<
+                deterministic::Context,
+            >>::finalize(&databases, (TestMerkleized, TestMerkleized))
             .await;
         });
     }

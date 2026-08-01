@@ -960,5 +960,4 @@ mod tests {
                 .expect("flush must succeed once released");
         });
     }
-
 }

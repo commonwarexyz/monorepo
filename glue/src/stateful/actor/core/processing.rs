@@ -23,7 +23,7 @@ use futures::{
     poll,
 };
 use rand_core::Rng;
-use std::sync::mpsc::TryRecvError;
+use std::{sync::mpsc::TryRecvError, task::Poll};
 use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: either a mailbox message to
@@ -73,7 +73,7 @@ where
 
         // Deferred finalize flushes, each releasing its block's marshal
         // acknowledgement once the flush completes (see `Barrier`).
-        let mut syncs = Pool::<()>::default();
+        let mut syncs = Pool::<bool>::default();
         select_loop! {
             self.context,
             on_start => {
@@ -81,7 +81,11 @@ where
                 // acknowledgement) before taking the next unit of work, so
                 // acknowledgements keep flowing even while the mailbox is
                 // never idle.
-                while poll!(syncs.next_completed()).is_ready() {}
+                while let Poll::Ready(durable) = poll!(syncs.next_completed()) {
+                    if !durable {
+                        return;
+                    }
+                }
 
                 // Pruning is non-critical work. We only run it when the mailbox is idle, and
                 // it is never raced against the mailbox due to its internal lock acquisition.
@@ -103,7 +107,11 @@ where
                                         message = mailbox.recv() => {
                                             break message.map(Step::Message);
                                         },
-                                        _ = syncs.next_completed() => {},
+                                        durable = syncs.next_completed() => {
+                                            if !durable {
+                                                return None;
+                                            }
+                                        },
                                     }
                                 }
                             })
@@ -200,9 +208,11 @@ where
                         // false `Barrier::durable` leaves the block
                         // unacknowledged, and marshal redelivers it on restart.
                         syncs.push(async move {
-                            if barrier.durable().await {
+                            let durable = barrier.durable().await;
+                            if durable {
                                 acknowledgement.acknowledge();
                             }
+                            durable
                         });
                         if let Some(prune) = prune {
                             pending_prune = Some(prune);
@@ -218,7 +228,9 @@ where
                     // Observe every deferred flush before pruning can discard
                     // history a restart would need to recover unflushed state.
                     while !syncs.is_empty() {
-                        syncs.next_completed().await;
+                        if !syncs.next_completed().await {
+                            return;
+                        }
                     }
                     prune
                         .run(self.processor.databases_mut(), &self.marshal)
@@ -388,6 +400,54 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert_eq!(control.pruned.lock().clone(), vec![1]);
+        });
+    }
+
+    /// An aborted flush must stop processing before pruning can discard the history needed to
+    /// replay its unflushed block.
+    #[test]
+    fn aborted_flush_prevents_prune() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _marshal) = spawn_processing(
+                &context,
+                "gated-aborted-prune",
+                Some(PruneConfig {
+                    max_pending_acks: NZUsize!(1),
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
+            )
+            .await;
+
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(2, 2)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().len() < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let release = control.flushes.lock().remove(0);
+            let _ = release.send(Ok(()));
+            waiter1.await.expect("durable block acknowledgement");
+
+            drop(control.flushes.lock().remove(0));
+            assert!(
+                waiter2.await.is_err(),
+                "unflushed block must not be acknowledged",
+            );
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(
+                control.pruned.lock().is_empty(),
+                "aborted flush must prevent pruning",
+            );
         });
     }
 

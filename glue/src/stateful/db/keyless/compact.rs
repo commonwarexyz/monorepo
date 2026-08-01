@@ -550,10 +550,9 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
+                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
                 slot.put(database);
                 sync.await.expect("finalize flush failed");
             }
