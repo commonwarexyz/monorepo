@@ -44,6 +44,7 @@ type HeldVerifyRequest<E, A> =
     HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
 
 enum FinalizedHandoff<B> {
+    Covered(B),
     Reflected(B),
     Apply(B),
 }
@@ -53,9 +54,8 @@ enum FinalizedHandoff<B> {
 pub(super) struct PendingRetarget<B> {
     /// Deadline for forwarding the newest buffered block as the next sync target.
     timeout: BoxFuture<'static, ()>,
-    /// Target updates may be coalesced, but each finalized block must still be applied or
-    /// reported. Retain the blocks here to avoid sequential archive reads during handoff.
-    finalized: VecDeque<Arc<B>>,
+    /// Newest target received during this window, if any.
+    newest: Option<Arc<B>>,
 }
 
 pub(super) struct Syncing<E, A, S, V, R>
@@ -109,7 +109,10 @@ where
     /// Highest finalized height covered by durable state-sync recovery metadata.
     pub(super) recovery_frontier: Option<Height>,
 
-    /// Acknowledged finalizations not yet represented by a forwarded sync target.
+    /// Acknowledged finalizations retained for ordered application callbacks at handoff.
+    pub(super) handoff_blocks: VecDeque<Arc<A::Block>>,
+
+    /// Active window for coalescing newer targets.
     pub(super) pending_retarget: Option<PendingRetarget<A::Block>>,
 
     /// Periodic prune configuration.
@@ -149,11 +152,8 @@ where
                 break;
             } => {
                 self.artifact = Some(artifact);
-                let finalized = self
-                    .pending_retarget
-                    .take()
-                    .into_iter()
-                    .flat_map(|pending| pending.finalized);
+                self.pending_retarget = None;
+                let finalized = std::mem::take(&mut self.handoff_blocks);
                 let handoffs = self.prepare_handoffs(finalized);
                 self.transition(handoffs).await;
                 return;
@@ -247,9 +247,10 @@ where
             return (self, None);
         }
         acknowledgement.acknowledge();
+        self.handoff_blocks.push_back(block.clone());
 
         if let Some(pending) = self.pending_retarget.as_mut() {
-            pending.finalized.push_back(block);
+            pending.newest = Some(block);
             return (self, None);
         }
 
@@ -263,7 +264,8 @@ where
             return (self, None);
         }
 
-        let handoffs = self.prepare_handoffs([block]);
+        let finalized = std::mem::take(&mut self.handoff_blocks);
+        let handoffs = self.prepare_handoffs(finalized);
         (self, Some(handoffs))
     }
 
@@ -318,7 +320,7 @@ where
 
         self.pending_retarget = Some(PendingRetarget {
             timeout: Box::pin(self.context.sleep(self.retarget_delay)),
-            finalized: VecDeque::new(),
+            newest: None,
         });
     }
 
@@ -331,17 +333,17 @@ where
             .take()
             .expect("retarget timer requires pending state");
 
-        let Some(newest) = pending.finalized.back() else {
+        let Some(newest) = pending.newest else {
             return (self, None);
         };
-        let newest = newest.clone();
         let observed;
         (self, observed) = self.update_target(&newest).await;
         if !observed {
             return (self, None);
         }
         if self.artifact.is_some() {
-            let handoffs = self.prepare_handoffs(pending.finalized);
+            let finalized = std::mem::take(&mut self.handoff_blocks);
+            let handoffs = self.prepare_handoffs(finalized);
             return (self, Some(handoffs));
         }
 
@@ -367,6 +369,10 @@ where
         let mut handoffs = VecDeque::with_capacity(finalized.size_hint().0);
 
         for block in finalized {
+            if block.height() < artifact.anchor.height {
+                handoffs.push_back(FinalizedHandoff::Covered(block));
+                continue;
+            }
             if block.height() == artifact.anchor.height {
                 assert_eq!(
                     block.digest(),
@@ -411,7 +417,7 @@ where
 
         for handoff in handoffs {
             match handoff {
-                FinalizedHandoff::Reflected(block) => {
+                FinalizedHandoff::Covered(block) | FinalizedHandoff::Reflected(block) => {
                     processor
                         .notify_finalized(self.context.as_present(), block.as_ref())
                         .await;
@@ -587,6 +593,7 @@ mod tests {
                     sync_completed,
                     retarget_delay: TEST_RETARGET_DELAY,
                     recovery_frontier: None,
+                    handoff_blocks: VecDeque::new(),
                     pending_retarget: None,
                     prune_config: None,
                     metrics: StatefulMetrics::new(&context),
@@ -640,6 +647,7 @@ mod tests {
                     sync_completed,
                     retarget_delay: TEST_RETARGET_DELAY,
                     recovery_frontier: None,
+                    handoff_blocks: VecDeque::new(),
                     pending_retarget: None,
                     prune_config: None,
                     metrics: StatefulMetrics::new(&context),
@@ -655,10 +663,20 @@ mod tests {
             assert!(harness.syncing.prepare_handoffs(VecDeque::new()).is_empty());
 
             let mut finalized = VecDeque::new();
-            for (height, digest) in [(u64::MAX - 2, 9), (u64::MAX - 1, 10), (u64::MAX, 11)] {
+            for (height, digest) in [
+                (u64::MAX - 3, 8),
+                (u64::MAX - 2, 9),
+                (u64::MAX - 1, 10),
+                (u64::MAX, 11),
+            ] {
                 finalized.push_back(Arc::new(TestBlock::new(height, digest)));
             }
             let mut handoffs = harness.syncing.prepare_handoffs(finalized);
+            assert!(matches!(
+                handoffs.pop_front(),
+                Some(FinalizedHandoff::Covered(block))
+                    if block.height() == Height::new(u64::MAX - 3)
+            ));
             assert!(matches!(
                 handoffs.pop_front(),
                 Some(FinalizedHandoff::Reflected(block))
@@ -698,13 +716,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ascend consecutively from the sync anchor")]
-    fn below_anchor_block_panics() {
+    fn handoff_classification_retains_block_covered_by_artifact() {
         deterministic::Runner::default().start(|context| async move {
             let harness = TestHarness::new(context, anchor(7, 9)).await;
-            let _ = harness
+            let handoffs = harness
                 .syncing
                 .prepare_handoffs([Arc::new(TestBlock::new(6, 8))]);
+            assert!(matches!(
+                handoffs.front(),
+                Some(FinalizedHandoff::Covered(block)) if block.height() == Height::new(6)
+            ));
         });
     }
 
@@ -1025,12 +1046,17 @@ mod tests {
                 .as_ref()
                 .expect("the first target must arm a sync window");
             assert_eq!(
-                pending
-                    .finalized
+                pending.newest.as_ref().map(|block| block.height()),
+                Some(Height::new(10)),
+            );
+            assert_eq!(
+                harness
+                    .syncing
+                    .handoff_blocks
                     .iter()
                     .map(|block| block.height())
                     .collect::<Vec<_>>(),
-                [Height::new(9), Height::new(10)],
+                [Height::new(8), Height::new(9), Height::new(10)],
             );
             assert!(
                 syncer_receiver.try_recv().is_err(),
@@ -1057,7 +1083,16 @@ mod tests {
                 .pending_retarget
                 .as_ref()
                 .expect("the newest target must receive another sync window");
-            assert!(pending.finalized.is_empty());
+            assert!(pending.newest.is_none());
+            assert_eq!(
+                syncing
+                    .handoff_blocks
+                    .iter()
+                    .map(|block| block.height())
+                    .collect::<Vec<_>>(),
+                [Height::new(8), Height::new(9), Height::new(10)],
+                "target coalescing must not discard application callbacks",
+            );
             assert_eq!(syncing.recovery_frontier, Some(Height::new(10)));
             assert_eq!(
                 syncing.sync_metadata.in_progress_floor(),

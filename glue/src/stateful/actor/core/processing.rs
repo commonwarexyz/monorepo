@@ -215,8 +215,11 @@ where
                     response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
-                    // Flushes may still be pending: pruning never discards
-                    // state a restart would need (see `ManagedDb::prune`).
+                    // Observe every deferred flush before pruning can discard
+                    // history a restart would need to recover unflushed state.
+                    while !syncs.is_empty() {
+                        syncs.next_completed().await;
+                    }
                     prune
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;
@@ -316,11 +319,10 @@ mod tests {
 
     /// The loop keeps applying finalized blocks while earlier flushes are
     /// still pending, acknowledges each block only once its flush completes
-    /// (so marshal's floor never runs ahead of flushed state), and runs a
-    /// deferred prune without waiting on pending flushes (database pruning
-    /// itself provides that barrier).
+    /// (so marshal's floor never runs ahead of flushed state), and waits for
+    /// those flushes before pruning.
     #[test]
-    fn acks_wait_for_flushes_while_prune_runs() {
+    fn acks_and_prune_wait_for_flushes() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
             let (mut mailbox, control, _marshal) = spawn_processing(
@@ -355,13 +357,10 @@ mod tests {
                 "acknowledgements must wait for pending flushes",
             );
 
-            // Block 2 filled the retention window: the deferred prune runs
-            // once the mailbox idles, without waiting on the parked flushes,
-            // and targets the oldest retained sync target.
-            while control.pruned.lock().is_empty() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert_eq!(control.pruned.lock().clone(), vec![1]);
+            // Block 2 filled the retention window, but pruning must remain
+            // blocked behind both parked flushes.
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(control.pruned.lock().is_empty());
             assert!(
                 poll!(&mut waiter1).is_pending() && poll!(&mut waiter2).is_pending(),
                 "acknowledgements must keep waiting for pending flushes",
@@ -371,6 +370,7 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter1.await.expect("block 1 acknowledgement");
+            assert!(control.pruned.lock().is_empty());
             assert!(
                 poll!(&mut waiter2).is_pending(),
                 "block 2 must stay unacknowledged while its flush is pending",
@@ -380,6 +380,13 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
+
+            // Once all flushes are durable, the deferred prune targets the
+            // oldest retained sync target.
+            while control.pruned.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.pruned.lock().clone(), vec![1]);
         });
     }
 

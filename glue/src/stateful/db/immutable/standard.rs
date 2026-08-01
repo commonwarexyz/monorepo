@@ -3,7 +3,7 @@
 //!
 //! Immutable databases support adding new keyed values but not updates or
 //! deletions. The wrapper types here capture a [`Shared`] database handle
-//! so the batch API can read through to applied state.
+//! so the batch API can read through to committed state.
 
 use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
@@ -104,13 +104,13 @@ where
         self
     }
 
-    /// Read a value by key, falling back to applied state.
+    /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
@@ -174,13 +174,13 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
@@ -313,8 +313,7 @@ where
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let db = db.sync().await?;
-        Ok((db, Handle::ready(Ok(()))))
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -406,8 +405,7 @@ where
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let db = db.sync().await?;
-        Ok((db, Handle::ready(Ok(()))))
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {

@@ -11,7 +11,7 @@ use crate::stateful::db::{
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
     merkle::{Family, Location},
@@ -237,9 +237,9 @@ where
         batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -304,9 +304,9 @@ where
         batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -558,11 +558,12 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                slot.put(
+                let (database, sync) =
                     <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
                         .await
-                        .unwrap(),
-                );
+                        .unwrap();
+                slot.put(database);
+                sync.await.expect("finalize flush failed");
             }
 
             let guard = db.read().await;

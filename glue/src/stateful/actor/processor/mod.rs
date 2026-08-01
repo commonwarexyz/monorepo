@@ -1,11 +1,11 @@
 //! Speculative execution engine for the [`Stateful`](super::Stateful) actor.
 //!
-//! The [`Processor`] owns the in-memory pending-tip DAG and the applied
+//! The [`Processor`] owns the in-memory pending-tip DAG and the committed
 //! database set. It is the workhorse behind the actor's `Processing` mode,
 //! handling three operations:
 //!
 //! - Propose/Verify: fork unmerkleized batches from a parent's pending
-//!   state (or from applied state), delegate to the [`Application`], and
+//!   state (or from committed state), delegate to the [`Application`], and
 //!   cache the resulting merkleized batches keyed by block digest.
 //!
 //! - Lazy recovery: when a parent's pending state is missing (e.g. after
@@ -101,10 +101,10 @@ pub(super) struct Prune<T> {
 impl<T> Prune<T> {
     /// Run database and marshal pruning.
     ///
-    /// Database pruning never discards state a restart would need (see
-    /// [`DatabaseSet::prune`]), and the durable commit justifying its target
-    /// sits at or above the oldest retained block, so the marshal prune that
-    /// follows retains every block a restart could replay.
+    /// The caller first observes every outstanding finalize barrier (see
+    /// [`DatabaseSet::prune`]). The durable commit justifying this target sits
+    /// at or above the oldest retained block, so the marshal prune that follows
+    /// retains every block a restart could replay.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &mut DBs, marshal: &MarshalMailbox<S, V>)
     where
         E: Rng + Spawner + Metrics + Clock,
@@ -851,7 +851,7 @@ where
     }
 }
 
-/// Returns true when `block` is already covered by applied state.
+/// Returns true when `block` is already covered by committed state.
 #[tracing::instrument(
     name = "stateful.processor.is_already_processed",
     level = "info",

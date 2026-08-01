@@ -267,14 +267,6 @@ where
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
-    /// Return the range of locations this db can prove.
-    ///
-    /// This is [`Self::bounds`] narrowed to what the Merkle structure still retains, which a sync
-    /// can leave ahead of the operations log's own pruning boundary.
-    pub(crate) fn provable_bounds(&self) -> std::ops::Range<Location<F>> {
-        self.journal.provable_start()..Location::new(self.journal.bounds().end)
-    }
-
     /// Update state gauges from the current database state.
     fn update_metrics(&self) {
         let bounds = self.journal.bounds();
@@ -346,7 +338,7 @@ where
     ///   >= `op_count` or `op_count` > number of operations.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
     ///   been pruned.
-    /// - Returns [`Error::NoCommitAtSize`] if `op_count - 1` is retained but is not a commit
+    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
     ///   op.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -405,17 +397,6 @@ where
                 loc,
                 self.inactivity_floor_loc,
             ));
-        }
-        if loc <= Location::new(self.journal.bounds().start) {
-            return Ok(self);
-        }
-
-        // Recovery rewinds to the last durable commit, which may sit below the boundary
-        // while the floor-declaring commit is unflushed (pruning it away would leave the
-        // journal unopenable). Commit first so recovery always lands at or above the
-        // boundary.
-        if self.journal.durable().end <= *self.last_commit_loc {
-            self.journal = self.journal.commit().await?;
         }
         (self.journal, _) = self.journal.prune(loc).await?;
         self.update_metrics();
@@ -1017,16 +998,7 @@ pub(crate) mod tests {
             .append(V::Value::make(3))
             .merkleize(&db, None, second_commit_loc)
             .await;
-        let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
-
-        let durable = db.journal.durable();
-        let retained_start = db.bounds().start;
-        db = db.prune(retained_start).await.unwrap();
-        assert_eq!(
-            db.journal.durable(),
-            durable,
-            "a no-op prune must not commit an unsynced tip",
-        );
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
         // Valid prune: up to the floor (previous commit location).
         let root = db.root();

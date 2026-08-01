@@ -6,7 +6,7 @@
 //! bookkeeping:
 //!
 //! 1. Before each `propose` or `verify`, the actor forks unmerkleized batches
-//!    from the parent block's pending state (or from applied database state
+//!    from the parent block's pending state (or from committed database state
 //!    if the parent has been finalized).
 //! 2. The application executes against those batches and returns merkleized
 //!    results, which the actor stores as a new pending tip keyed by the
@@ -297,9 +297,8 @@ where
     /// state sync are reported without reapplying them.
     ///
     /// During peer state sync, finalizations are acknowledged once durable recovery metadata
-    /// covers them. Their target changes may be coalesced. If sync completes before a queued
-    /// target is recorded, the affected blocks are reported during handoff after the database
-    /// set is ready.
+    /// covers them. Their target changes may be coalesced, but every block remains buffered and
+    /// is reported or applied during handoff after the database set is ready.
     ///
     /// Inherited from marshal's reporter stream, this is an at-least-once notification:
     /// a crash after this hook runs but before the block's flush and the marshal

@@ -1,7 +1,7 @@
 //! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to applied state. This module provides wrapper types
+//! read-through to committed state. This module provides wrapper types
 //! that capture a [`Shared`] database handle alongside the raw batch so the
 //! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
 //! traits can be implemented without a DB parameter.
@@ -107,13 +107,13 @@ where
         self
     }
 
-    /// Read a value by key, falling back to applied state.
+    /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
@@ -357,13 +357,13 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
@@ -459,10 +459,10 @@ where
 ///
 /// `new_batch` captures the [`Shared`] database handle in the returned
 /// wrapper so that `get()` and `merkleize()` can read through to
-/// applied state.
+/// committed state.
 ///
-/// `finalize` applies the merkleized batch's changeset and starts syncing
-/// it to disk, reporting durability on the returned handle.
+/// `finalize` applies the merkleized batch's changeset and starts
+/// committing it to disk, reporting durability on the returned handle.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -778,7 +778,6 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
-    use futures::{FutureExt as _, pin_mut};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type UnorderedFixedDb =
@@ -962,51 +961,4 @@ mod tests {
         });
     }
 
-    /// `prune` must not complete while the target's finalize flush remains pending.
-    #[test]
-    fn prune_waits_for_pending_finalize_flush() {
-        deterministic::Runner::default().start(|context| async move {
-            let pending = PendingSyncs::default();
-            let delayed = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let config = fixed_config("unordered-fixed-prune-barrier", &delayed);
-            let db = drive_pending_syncs(
-                &pending,
-                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
-            )
-            .await
-            .unwrap();
-
-            let key = Sha256::hash(&[b"key"]);
-            let value = Sha256::hash(&[b"value"]);
-            let db = Shared::new("test", db);
-            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
-                .write(key, Some(value));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
-            let (slot, database) = db.write().await;
-            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                .await
-                .unwrap();
-
-            let target = <DelayedFixedDb as ManagedDb<_>>::sync_target(&database);
-            let prune = <DelayedFixedDb as ManagedDb<_>>::prune(database, &target);
-            pin_mut!(prune);
-            assert!(
-                prune.as_mut().now_or_never().is_none(),
-                "prune must wait for the parked flush",
-            );
-
-            release_pending_syncs(&pending);
-            let database = drive_pending_syncs(&pending, prune).await.unwrap();
-            slot.put(database);
-            drive_pending_syncs(&pending, sync)
-                .await
-                .expect("flush must succeed once released");
-        });
-    }
 }

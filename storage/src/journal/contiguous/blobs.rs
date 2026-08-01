@@ -130,49 +130,6 @@ impl<E: Context> Partition<E> {
     }
 }
 
-/// A sync whose outcome has not yet been observed. Cleared only on success, so a failure
-/// keeps failing every later operation that checks the slot.
-#[derive(Default)]
-struct SyncSlot(Option<SyncCompletion>);
-
-impl SyncSlot {
-    /// Track `completion` until its outcome is observed.
-    fn record(&mut self, completion: SyncCompletion) {
-        self.0 = Some(completion);
-    }
-
-    /// The tracked completion, if any.
-    fn get(&self) -> Option<SyncCompletion> {
-        self.0.clone()
-    }
-
-    /// Whether a sync is being tracked.
-    const fn is_some(&self) -> bool {
-        self.0.is_some()
-    }
-
-    /// Wait out the tracked sync.
-    async fn drain(&mut self) -> Result<(), Error> {
-        let Some(completion) = self.0.clone() else {
-            return Ok(());
-        };
-        completion.await?;
-        self.0 = None;
-        Ok(())
-    }
-
-    /// Surface a completed sync's failure without waiting on one in flight.
-    fn observe(&mut self) -> Result<(), Error> {
-        if let Some(completion) = &self.0
-            && let Some(result) = completion.clone().now_or_never()
-        {
-            result?;
-            self.0 = None;
-        }
-        Ok(())
-    }
-}
-
 /// A journal's blobs: contiguous sealed blobs ending in one writable tail.
 pub(super) struct Writable<E: Context> {
     partition: Partition<E>,
@@ -191,10 +148,10 @@ pub(super) struct Writable<E: Context> {
     sealed_snapshot: Option<Arc<[Sealed<E::Blob>]>>,
 
     /// Sync of the tail's predecessor.
-    tail_predecessor_sync: SyncSlot,
+    tail_predecessor_sync: Option<SyncCompletion>,
 
-    /// Sync of the live tail.
-    tail_sync: SyncSlot,
+    /// Sync of the live tail. Kept on failure so later operations keep failing.
+    tail_sync: Option<SyncCompletion>,
 }
 
 impl<E: Context> Writable<E> {
@@ -262,8 +219,8 @@ impl<E: Context> Writable<E> {
             tail,
             sealed,
             sealed_snapshot: None,
-            tail_predecessor_sync: SyncSlot::default(),
-            tail_sync: SyncSlot::default(),
+            tail_predecessor_sync: None,
+            tail_sync: None,
         })
     }
 
@@ -310,10 +267,10 @@ impl<E: Context> Writable<E> {
 
     /// Seal the tail, start syncing it, and open the next blob as the new tail.
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
-        self.tail_predecessor_sync.drain().await?;
+        self.drain_tail_predecessor_sync().await?;
         // seal() waits only for syncs the writer started: a commit whose flush failed before its
         // sync began is retained solely in the tail sync slot, so it must be drained here too.
-        self.tail_sync.drain().await?;
+        self.drain_tail_sync().await?;
 
         // Open the next tail first so a failure leaves the current tail untouched.
         let next_blob = self
@@ -327,9 +284,9 @@ impl<E: Context> Writable<E> {
         self.metrics.synced.inc();
         self.sealed.push(sealed);
         self.sealed_snapshot = None;
-        assert!(!self.tail_predecessor_sync.is_some());
-        assert!(!self.tail_sync.is_some());
-        self.tail_predecessor_sync.record(handle.boxed().shared());
+        debug_assert!(self.tail_predecessor_sync.is_none());
+        debug_assert!(self.tail_sync.is_none());
+        self.tail_predecessor_sync = Some(handle.boxed().shared());
         Ok(())
     }
 
@@ -342,18 +299,8 @@ impl<E: Context> Writable<E> {
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
     pub(super) async fn prune(&mut self, min_blob: u64) -> Result<(), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
-
-        // In-flight syncs live only on the tail and the blob sealed at the last rollover.
-        // The tail always survives a prune, and removing other blobs cannot affect an
-        // in-flight sync on it, so only a sync on the sealed predecessor must be waited
-        // out, and only when its blob is about to be removed. Completed failures still
-        // surface in every case.
-        if min_blob == self.tail_blob_index() {
-            self.tail_predecessor_sync.drain().await?;
-        } else {
-            self.tail_predecessor_sync.observe()?;
-        }
-        self.tail_sync.observe()?;
+        self.drain_tail_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
@@ -379,8 +326,8 @@ impl<E: Context> Writable<E> {
         let current_bytes = self.tail.size();
         assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
-            self.tail_predecessor_sync.drain().await?;
-            self.tail_sync.drain().await?;
+            self.drain_tail_predecessor_sync().await?;
+            self.drain_tail_sync().await?;
             self.tail.resize(byte_offset).await?;
         }
         Ok(())
@@ -397,8 +344,8 @@ impl<E: Context> Writable<E> {
         blob: u64,
         byte_offset: u64,
     ) -> Result<(), Error> {
-        self.tail_predecessor_sync.drain().await?;
-        self.tail_sync.drain().await?;
+        self.drain_tail_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
 
         let idx = blob
             .checked_sub(self.oldest_blob_index)
@@ -438,8 +385,8 @@ impl<E: Context> Writable<E> {
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
-        self.tail_predecessor_sync.drain().await?;
-        self.tail_sync.drain().await?;
+        self.drain_tail_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
 
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
             self.partition.remove(blob).await?;
@@ -453,20 +400,40 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
+    /// Drain predecessor sync. Clear only on success.
+    async fn drain_tail_predecessor_sync(&mut self) -> Result<(), Error> {
+        let Some(predecessor) = self.tail_predecessor_sync.clone() else {
+            return Ok(());
+        };
+        predecessor.await?;
+        self.tail_predecessor_sync = None;
+        Ok(())
+    }
+
+    /// Drain tail sync. Clear only on success.
+    async fn drain_tail_sync(&mut self) -> Result<(), Error> {
+        let Some(tail) = self.tail_sync.clone() else {
+            return Ok(());
+        };
+        tail.await?;
+        self.tail_sync = None;
+        Ok(())
+    }
+
     /// Start syncing the tail, returning a handle that completes once both the tail and its
     /// predecessor are durable.
     pub(super) async fn start_sync(&mut self) -> Handle<()> {
         // Keep at most one tail sync in flight. A pending predecessor sync is not awaited here:
         // the returned handle joins it, so handles from consecutive calls can be pending at once.
-        if let Some(prior) = self.tail_sync.get()
+        if let Some(prior) = self.tail_sync.clone()
             && let Err(err) = prior.await
         {
             return Handle::ready(Err(err));
         }
         let tail = self.tail.start_sync().await.boxed().shared();
         self.metrics.synced.inc();
-        self.tail_sync.record(tail.clone());
-        let predecessor = self.tail_predecessor_sync.get();
+        self.tail_sync = Some(tail.clone());
+        let predecessor = self.tail_predecessor_sync.clone();
         Handle::from_future(async move {
             if let Some(predecessor) = predecessor {
                 let (predecessor, tail) = future::join(predecessor, tail).await;
@@ -480,8 +447,8 @@ impl<E: Context> Writable<E> {
 
     /// Remove every blob and the partition itself.
     pub(super) async fn destroy(mut self) -> Result<(), Error> {
-        self.tail_predecessor_sync.drain().await?;
-        self.tail_sync.drain().await?;
+        self.drain_tail_predecessor_sync().await?;
+        self.drain_tail_sync().await?;
 
         let tail_blob = self.tail_blob_index();
         drop(self.tail);

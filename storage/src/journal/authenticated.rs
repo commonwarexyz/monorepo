@@ -583,9 +583,6 @@ where
 
     /// Prune both the Merkle structure and journal to the given location.
     ///
-    /// Callers must ensure `prune_loc` is justified by durable data (see
-    /// [`crate::journal::contiguous::Mutable::prune`]).
-    ///
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
     #[boxed]
@@ -598,24 +595,22 @@ where
         mut self,
         prune_loc: Location<F>,
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
-        // Family position conversion requires an in-domain location.
-        let prune_loc = Location::new((*prune_loc).min(self.journal.bounds().end));
         if self.merkle.size() == 0 {
             // DB is empty, nothing to prune.
             let boundary = Location::new(self.journal.bounds().start);
             return Ok((self, boundary, false));
         }
 
-        // Sync the Merkle structure before pruning the journal, otherwise its last element
-        // could end up behind the journal's first element after a crash, and there would be
-        // no way to replay the items between the structure's last element and the journal's
-        // first element. A Merkle barrier at or past `prune_loc`'s position guarantees the
-        // recovered leaf count covers the boundary (delayed-merge parents above the barrier
-        // are recomputed during replay), so the sync is skipped. The backing journal defends
-        // its own barrier inside `prune`.
-        if self.merkle.durable().end < F::location_to_position(prune_loc) {
-            self.merkle = self.merkle.sync().await?;
-        }
+        // Sync the Merkle structure before pruning the journal, otherwise its last element could
+        // end up behind the journal's first element after a crash, and there would be no way to
+        // replay the items between the structure's last element and the journal's first element.
+        // Commit the journal alongside: the prune target may be justified by a buffered append
+        // (e.g. a commit operation), and pruning does not guarantee buffered appends are durable.
+        (self.journal, self.merkle) = try_join!(
+            self.journal.commit().map_err(Error::Journal),
+            self.merkle.sync().map_err(Error::Merkle)
+        )?;
+
         let journal_pruned;
         (self.journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();
@@ -639,18 +634,6 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Oldest location this journal can prove.
-    ///
-    /// Sync places the Merkle structure's boundary exactly at the sync range's start while the
-    /// operations log prunes on section boundaries, so the log can retain operations whose Merkle
-    /// nodes are already gone. Proofs are available only at or above the later of the two.
-    pub(crate) fn provable_start(&self) -> Location<F> {
-        std::cmp::max(
-            Location::new(self.journal.bounds().start),
-            self.merkle.bounds().start,
-        )
-    }
-
     /// Generate a proof of inclusion for items starting at `start_loc`.
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
@@ -995,15 +978,16 @@ where
     }
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {
+        let prune_to = {
+            let bounds = self.journal.bounds();
+            min_position.min(bounds.end)
+        };
+
         let (journal, _, pruned) = self
-            .prune_inner(Location::new(min_position))
+            .prune_inner(Location::new(prune_to))
             .await
             .map_err(Self::map_error)?;
         Ok((journal, pruned))
-    }
-
-    fn durable(&mut self) -> Range<u64> {
-        self.journal.durable()
     }
 
     async fn rewind(self, size: u64) -> Result<Self, JournalError> {
@@ -1069,11 +1053,11 @@ mod tests {
         deterministic::{self, Context},
         mocks::{
             DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
-            next_pending_sync, release_pending_syncs,
+            next_pending_sync,
         },
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use futures::StreamExt as _;
     use std::{
         future::Future,
@@ -2224,112 +2208,6 @@ mod tests {
         });
     }
 
-    /// With the barrier covering the target, `prune` completes without starting (or
-    /// waiting on) any sync, even while a newer sync is still in flight.
-    #[test_traced("INFO")]
-    fn test_prune_skips_sync_when_barrier_covers_target() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pending = PendingSyncs::default();
-            // Build two durably synced blobs, driving the parked rollover syncs.
-            let mut journal = drive_pending_syncs(&pending, async {
-                let mut journal =
-                    open_delayed_journal(&context, "first", "prune_barrier_fast", &pending)
-                        .await
-                        .unwrap();
-                for i in 0..13 {
-                    (journal, _) = journal
-                        .append(&create_operation::<mmr::Family>(i))
-                        .await
-                        .unwrap();
-                }
-                (journal, _) = journal
-                    .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
-                    .await
-                    .unwrap();
-                journal.sync().await.unwrap()
-            })
-            .await;
-
-            // Park a newer sync covering fresh appends.
-            for i in 14..17 {
-                (journal, _) = journal
-                    .append(&create_operation::<mmr::Family>(i))
-                    .await
-                    .unwrap();
-            }
-            (journal, _) = journal
-                .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
-                .await
-                .unwrap();
-            let handle;
-            (journal, handle) = journal.start_sync().await.unwrap();
-
-            // The barrier covers the boundary, so the prune must neither start a new sync
-            // nor wait on the parked one.
-            let starts_before = pending.starts();
-            let (journal, boundary) = journal.prune(Location::new(7)).await.unwrap();
-            assert_eq!(*boundary, 7);
-            assert_eq!(pending.starts(), starts_before);
-            assert_eq!(journal.bounds().start, 7);
-
-            release_pending_syncs(&pending);
-            drive_pending_syncs(&pending, handle).await.unwrap();
-            drop(journal);
-
-            // The pruned boundary and the released appends both survive reopen.
-            let open = open_delayed_journal(&context, "second", "prune_barrier_fast", &pending);
-            let journal = drive_pending_syncs(&pending, open).await.unwrap();
-            assert_eq!(journal.bounds(), 7..18);
-        });
-    }
-
-    /// With the barrier behind the boundary, `prune` performs its durability pass.
-    #[test_traced("INFO")]
-    fn test_prune_syncs_when_barrier_behind() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pending = PendingSyncs::default();
-            // Appends drive only the parked rollover syncs, so nothing beyond recovery has
-            // been proven durable when the prune begins.
-            let journal = drive_pending_syncs(&pending, async {
-                let mut journal =
-                    open_delayed_journal(&context, "first", "prune_barrier_slow", &pending)
-                        .await
-                        .unwrap();
-                for i in 0..13 {
-                    (journal, _) = journal
-                        .append(&create_operation::<mmr::Family>(i))
-                        .await
-                        .unwrap();
-                }
-                (journal, _) = journal
-                    .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
-                    .await
-                    .unwrap();
-                journal
-            })
-            .await;
-
-            // Nothing beyond recovery is durable, so the prune must run the durability pass.
-            let starts_before = pending.starts();
-            let prune = journal.prune(Location::new(7));
-            let (journal, boundary) = drive_pending_syncs(&pending, prune).await.unwrap();
-            assert_eq!(*boundary, 7);
-            assert!(
-                pending.starts() > starts_before,
-                "fallback must run the durability pass",
-            );
-            assert_eq!(journal.bounds().start, 7);
-            drop(journal);
-
-            // The pruned boundary and the appends its pass covered survive reopen.
-            let open = open_delayed_journal(&context, "second", "prune_barrier_slow", &pending);
-            let journal = drive_pending_syncs(&pending, open).await.unwrap();
-            assert_eq!(journal.bounds(), 7..14);
-        });
-    }
-
     /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
     /// returned handle and the next durability operation.
     #[test_traced("INFO")]
@@ -2442,78 +2320,6 @@ mod tests {
     fn test_prune_empty_journal_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_prune_empty_journal_inner::<mmb::Family>);
-    }
-
-    async fn test_prune_caps_out_of_domain_location_inner<F: Family + PartialEq>(context: Context) {
-        let journal =
-            create_journal_with_ops::<F>(context.child("inherent"), "prune-max-inherent", 20).await;
-        let size = journal.bounds().end;
-        let (journal, boundary) = journal.prune(Location::<F>::new(u64::MAX)).await.unwrap();
-        assert_eq!(journal.bounds().end, size);
-        assert_eq!(boundary, Location::<F>::new(journal.bounds().start));
-        assert_eq!(boundary, journal.merkle.bounds().start);
-        journal.destroy().await.unwrap();
-    }
-
-    #[test_traced("INFO")]
-    fn test_prune_caps_out_of_domain_location_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_prune_caps_out_of_domain_location_inner::<mmr::Family>);
-    }
-
-    #[test_traced("INFO")]
-    fn test_prune_caps_out_of_domain_location_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_prune_caps_out_of_domain_location_inner::<mmb::Family>);
-    }
-
-    /// Sync places the Merkle boundary exactly at the sync range's start while the operations log
-    /// prunes on section boundaries, so the log can retain operations the Merkle structure can no
-    /// longer prove. `provable_start` must report the later of the two boundaries.
-    async fn test_provable_start_follows_merkle_boundary_inner<F: Family + PartialEq>(
-        context: Context,
-    ) {
-        let suffix = "provable-start";
-        let journal = create_journal_with_ops::<F>(context.child("build"), suffix, 20).await;
-        drop(journal);
-
-        // Reopen the components the way sync does: the Merkle structure is initialized at the
-        // range start while the operations log keeps everything it already had.
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
-            context.child("merkle"),
-            crate::merkle::full::SyncConfig {
-                config: merkle_config(suffix, &context),
-                range: non_empty_range!(Location::<F>::new(9), Location::<F>::new(20)),
-                pinned_nodes: None,
-            },
-        )
-        .await
-        .unwrap();
-        let log = ContiguousJournal::<Context, TestOp<F>>::init(
-            context.child("log"),
-            journal_config(suffix, &context),
-        )
-        .await
-        .unwrap();
-        let journal = TestJournal::<F>::from_components(merkle, log, hasher, APPLY_BATCH_SIZE)
-            .await
-            .unwrap();
-
-        assert_eq!(journal.bounds().start, 0);
-        assert_eq!(journal.provable_start(), Location::<F>::new(9));
-    }
-
-    #[test_traced("INFO")]
-    fn test_provable_start_follows_merkle_boundary_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_provable_start_follows_merkle_boundary_inner::<mmr::Family>);
-    }
-
-    #[test_traced("INFO")]
-    fn test_provable_start_follows_merkle_boundary_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_provable_start_follows_merkle_boundary_inner::<mmb::Family>);
     }
 
     /// Verify that pruning to a specific location works correctly.

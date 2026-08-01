@@ -256,6 +256,7 @@ where
             sync_completed,
             retarget_delay: self.retarget_delay.get(),
             recovery_frontier: None,
+            handoff_blocks: Default::default(),
             pending_retarget: None,
             prune_config: self.prune_config,
             metrics,

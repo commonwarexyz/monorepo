@@ -88,7 +88,9 @@ where
             let loc = bounds
                 .end
                 .checked_sub(1)
-                .ok_or(qmdb::Error::NoCommitAtSize(Location::new(bounds.end)))?;
+                .ok_or(qmdb::Error::HistoricalFloorPruned(Location::new(
+                    bounds.end,
+                )))?;
             let floor =
                 qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end)).await?;
             (Location::new(loc), floor)
