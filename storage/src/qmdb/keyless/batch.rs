@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds},
+        batch_chain::{self, Bounds, CommitId},
     },
 };
 use commonware_codec::EncodeShared;
@@ -39,12 +39,9 @@ where
     /// Parent batch in the chain. `None` for batches created directly from the DB.
     parent: Option<MerkleizedParent<F, H, V, S>>,
 
-    /// Total operation count before this batch (committed DB + prior batches).
-    /// This batch's i-th operation lands at location `base_size + i`.
-    base_size: u64,
-
-    /// The database size when this batch was created, used to detect stale batches.
-    db_size: u64,
+    /// The committed state immediately before this batch's operations (committed DB + prior
+    /// batches). This batch's i-th operation lands at location `base.size + i`.
+    base: CommitId<F, H::Digest>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -57,14 +54,11 @@ where
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, V>, S>>,
 
-    /// Cached operations root after applying this batch.
-    pub(super) root: D,
-
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
 
     /// Position and floor bounds for this batch chain.
-    pub(super) bounds: batch_chain::Bounds<F>,
+    pub(super) bounds: batch_chain::Bounds<F, D>,
 }
 
 impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
@@ -74,6 +68,11 @@ where
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
     pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+    }
+
+    /// The [`CommitId`] this batch commits to.
+    pub(super) const fn commit_id(&self) -> CommitId<F, D> {
+        self.bounds.tip_commit
     }
 }
 
@@ -115,7 +114,10 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
-    pub(super) fn new<E, C>(keyless: &Keyless<F, E, V, C, H, S>, journal_size: u64) -> Self
+    pub(super) fn new<E, C>(
+        keyless: &Keyless<F, E, V, C, H, S>,
+        commit: CommitId<F, H::Digest>,
+    ) -> Self
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
@@ -124,14 +126,22 @@ where
             journal_batch: keyless.journal.new_batch(),
             appends: Vec::new(),
             parent: None,
-            base_size: journal_size,
-            db_size: journal_size,
+            base: commit,
         }
     }
 
     /// The location that the next appended value will be placed at.
-    pub const fn size(&self) -> Location<F> {
-        Location::new(self.base_size + self.appends.len() as u64)
+    pub fn size(&self) -> Location<F> {
+        self.base.size + self.appends.len() as u64
+    }
+
+    /// The database's committed state at the base of this batch chain.
+    ///
+    /// Derived: a DB-created batch's base is the DB commit; a child's is its parent's `db_commit`.
+    fn db_commit(&self) -> CommitId<F, H::Digest> {
+        self.parent
+            .as_ref()
+            .map_or(self.base, |parent| parent.bounds.db_commit)
     }
 
     /// Append a value.
@@ -155,8 +165,8 @@ where
         let loc_val = *loc;
 
         // Check this batch's pending appends.
-        if loc_val >= self.base_size {
-            let idx = (loc_val - self.base_size) as usize;
+        if loc_val >= self.base.size {
+            let idx = (loc_val - *self.base.size) as usize;
             return if idx < self.appends.len() {
                 Ok(Some(self.appends[idx].clone()))
             } else {
@@ -167,7 +177,7 @@ where
         // Check parent operation chain. If the ancestor was freed, read_chain_op returns None
         // and we fall through to the DB.
         if let Some(parent) = self.parent.as_ref()
-            && loc_val >= self.db_size
+            && loc_val >= parent.bounds.db_commit.size
             && let Some(op) = read_chain_op(parent, loc_val)
         {
             return Ok(op.into_value());
@@ -205,8 +215,8 @@ where
             let loc_val = *loc;
 
             // Check this batch's pending appends.
-            if loc_val >= self.base_size {
-                let idx = (loc_val - self.base_size) as usize;
+            if loc_val >= self.base.size {
+                let idx = (loc_val - *self.base.size) as usize;
                 results.push(if idx < self.appends.len() {
                     Some(self.appends[idx].clone())
                 } else {
@@ -217,7 +227,7 @@ where
 
             // Check parent operation chain.
             if let Some(parent) = self.parent.as_ref()
-                && loc_val >= self.db_size
+                && loc_val >= parent.bounds.db_commit.size
                 && let Some(op) = read_chain_op(parent, loc_val)
             {
                 results.push(op.into_value());
@@ -257,6 +267,9 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        // Capture the DB boundary before `self` is consumed below.
+        let db_commit = self.db_commit();
+
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
@@ -264,11 +277,8 @@ where
         }
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
-        let total_size = self.base_size + ops.len() as u64;
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(total_size)),
-            inactivity_floor,
-        );
+        let total_size = self.base.size + ops.len() as u64;
+        let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job on the
         // strategy instead of occupying the calling task (see `Journal::merkleize`).
@@ -284,17 +294,16 @@ where
         let ancestors = batch_chain::collect_ancestor_bounds(
             ancestors,
             |batch| batch.bounds.inactivity_floor,
-            |batch| batch.bounds.total_size,
+            |batch| batch.commit_id(),
         );
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
-            root,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: batch_chain::Bounds {
-                base_size: self.base_size,
-                db_size: self.db_size,
-                total_size,
+                base_commit: self.base,
+                db_commit,
+                tip_commit: CommitId::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -308,11 +317,11 @@ where
 {
     /// Return the speculative root.
     pub const fn root(&self) -> D {
-        self.root
+        self.bounds.tip_commit.root
     }
 
     /// Return the [`Bounds`] of the batch.
-    pub const fn bounds(&self) -> &Bounds<F> {
+    pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
     }
 
@@ -331,7 +340,7 @@ where
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
         // freed, fall through to the committed DB.
-        if loc_val >= self.bounds.db_size
+        if loc_val >= self.bounds.db_commit.size
             && let Some(op) = read_chain_op(self, loc_val)
         {
             return Ok(op.into_value());
@@ -369,7 +378,7 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc_val >= self.bounds.db_size
+            if loc_val >= self.bounds.db_commit.size
                 && let Some(op) = read_chain_op(self, loc_val)
             {
                 results.push(op.into_value());
@@ -404,8 +413,7 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.bounds.total_size,
-            db_size: self.bounds.db_size,
+            base: self.commit_id(),
         }
     }
 }

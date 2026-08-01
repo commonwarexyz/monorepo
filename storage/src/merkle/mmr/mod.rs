@@ -895,7 +895,7 @@ mod tests {
 
     #[test]
     fn test_inactive_peaks() {
-        let size = Family::location_to_position(Location::new(11));
+        let size = Location::new(11);
 
         // At 11 leaves, MMR has 3 peaks:
         // - Height 3 covering leaves 0..8 (capacity 8)

@@ -118,10 +118,8 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(*last_commit_loc + 1)),
-            inactivity_floor_loc,
-        );
+        let inactive_peaks =
+            F::inactive_peaks(Location::new(*last_commit_loc + 1), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);

@@ -267,7 +267,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip_commit.size),
             payload,
         };
         Some(Proposed { block, merkleized })

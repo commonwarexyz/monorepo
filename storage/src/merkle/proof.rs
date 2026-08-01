@@ -170,7 +170,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     /// from `size` and `inactivity_floor`.
     pub fn matches_canonical_inactive_peaks(
         &self,
-        size: Position<F>,
+        size: Location<F>,
         inactivity_floor: Location<F>,
     ) -> bool {
         self.inactive_peaks == F::inactive_peaks(size, inactivity_floor)

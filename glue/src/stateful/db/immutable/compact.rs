@@ -234,7 +234,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == batch.bounds().tip_commit.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -301,7 +301,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == batch.bounds().tip_commit.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {

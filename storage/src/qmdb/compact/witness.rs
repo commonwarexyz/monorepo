@@ -566,7 +566,7 @@ where
     merkle.with_mem(|mem| {
         let size = mem.leaves();
         let last_commit_loc = Location::new(*size - 1);
-        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = mem.root(&hasher, inactive_peaks)?;
         let pinned_nodes = F::nodes_to_pin(last_commit_loc)
             .map(|pos| *mem.get_node_unchecked(pos))

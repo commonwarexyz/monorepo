@@ -80,8 +80,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, build_snapshot_from_log, metrics::Metrics, operation::Key,
-        single_operation_root,
+        Error, any::ValueEncoding, batch_chain, build_snapshot_from_log, metrics::Metrics,
+        operation::Key, single_operation_root,
     },
     translator::Translator,
 };
@@ -269,10 +269,8 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(*last_commit_loc + 1)),
-            inactivity_floor_loc,
-        );
+        let inactive_peaks =
+            F::inactive_peaks(Location::new(*last_commit_loc + 1), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -615,7 +613,7 @@ where
 
         self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
-        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
+        let inactive_peaks = F::inactive_peaks(size, rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
         self.update_metrics();
 
@@ -685,11 +683,15 @@ where
         Ok(self.journal.destroy().await?)
     }
 
+    /// The [`CommitId`](batch_chain::CommitId) committed by the database's current state.
+    pub(crate) fn commit_id(&self) -> batch_chain::CommitId<F, H::Digest> {
+        batch_chain::CommitId::new(self.last_commit_loc + 1, self.root)
+    }
+
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V, S> {
-        let journal_size = *self.last_commit_loc + 1;
-        batch::UnmerkleizedBatch::new(self, journal_size)
+        batch::UnmerkleizedBatch::new(self, self.commit_id())
     }
 
     /// Check that `batch` can be applied to the database in its current state, without
@@ -703,7 +705,7 @@ where
     ) -> Result<(), Error<F>> {
         batch
             .bounds
-            .validate_apply_to(*self.last_commit_loc + 1, self.inactivity_floor_loc)
+            .validate_apply_to(self.commit_id(), self.inactivity_floor_loc)
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
@@ -743,8 +745,7 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
-        let db_size = *self.last_commit_loc + 1;
-        let start_loc = Location::new(db_size);
+        let db_size = self.last_commit_loc + 1;
 
         // Apply journal.
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
@@ -755,7 +756,11 @@ where
         // `seen` is only consulted when at least one ancestor diff will be applied, so it is
         // skipped entirely otherwise.
         let bounds = self.journal.bounds();
-        let track_shadow = batch.bounds.ancestors.iter().any(|a| a.end > db_size);
+        let track_shadow = batch
+            .bounds
+            .ancestors
+            .iter()
+            .any(|a| a.state.size > db_size);
         let seen_cap = if track_shadow {
             batch.diff.len()
                 + batch
@@ -763,7 +768,7 @@ where
                     .ancestors
                     .iter()
                     .zip(&batch.ancestor_diffs)
-                    .filter(|(a, _)| a.end > db_size)
+                    .filter(|(a, _)| a.state.size > db_size)
                     .map(|(_, d)| d.len())
                     .sum::<usize>()
         } else {
@@ -778,7 +783,7 @@ where
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.bounds.ancestors[i].end <= db_size {
+            if batch.bounds.ancestors[i].state.size <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
@@ -790,10 +795,10 @@ where
         }
 
         // Update state.
-        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.last_commit_loc = batch.bounds.tip_commit.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        self.root = batch.root;
-        let range = start_loc..Location::new(batch.bounds.total_size);
+        self.root = batch.root();
+        let range = db_size..batch.bounds.tip_commit.size;
         self.update_metrics();
         self.metrics
             .operations_applied
@@ -2404,7 +2409,7 @@ pub(super) mod test {
 
         // Apply the second -- should fail because the DB was modified.
         let result = db.apply_batch(batch_b).await;
-        assert!(matches!(result, Err(Error::StaleBatch { .. })));
+        assert!(matches!(result, Err(Error::StaleBatch)));
 
         // The rejection mutated nothing: reopening recovers the committed state.
         let db = open_db(context.child("reopen")).await;
@@ -2432,31 +2437,50 @@ pub(super) mod test {
         let key2 = Sha256::hash(&[&[2]]);
         let key3 = Sha256::hash(&[&[3]]);
 
-        // Parent batch.
-        let parent_m = db
+        let common_parent = db
+            .new_batch()
+            .set(Sha256::hash(&[&[10]]), Sha256::fill(10u8))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let sibling_a = common_parent
+            .new_batch::<Sha256>()
+            .set(Sha256::hash(&[&[11]]), Sha256::fill(11u8))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let sibling_b = common_parent
+            .new_batch::<Sha256>()
+            .set(Sha256::hash(&[&[12]]), Sha256::fill(12u8))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let (db, _) = db.apply_batch(sibling_a).await.unwrap();
+        assert!(matches!(
+            db.validate_batch(&sibling_b),
+            Err(Error::StaleBatch)
+        ));
+
+        // Build equal-size sibling parents, then extend only one sibling.
+        let parent_a = db
             .new_batch()
             .set(key1, Sha256::fill(1u8))
             .merkleize(&db, None, Location::new(0))
             .await;
-
-        // Fork two children from the same parent.
-        let child_a = parent_m
-            .new_batch::<Sha256>()
+        let parent_b = db
+            .new_batch()
             .set(key2, Sha256::fill(2u8))
             .merkleize(&db, None, Location::new(0))
             .await;
-        let child_b = parent_m
+        let child_b = parent_b
             .new_batch::<Sha256>()
             .set(key3, Sha256::fill(3u8))
             .merkleize(&db, None, Location::new(0))
             .await;
 
-        // Apply child A.
-        let (db, _) = db.apply_batch(child_a).await.unwrap();
-
-        // Child B is stale.
-        let result = db.apply_batch(child_b).await;
-        assert!(matches!(result, Err(Error::StaleBatch { .. })));
+        let (db, _) = db.apply_batch(parent_a).await.unwrap();
+        assert!(matches!(
+            db.validate_batch(&child_b),
+            Err(Error::StaleBatch)
+        ));
+        db.destroy().await.unwrap();
     }
 
     #[boxed]
@@ -2632,7 +2656,7 @@ pub(super) mod test {
 
         // Parent is stale.
         let result = db.apply_batch(parent_m).await;
-        assert!(matches!(result, Err(Error::StaleBatch { .. })));
+        assert!(matches!(result, Err(Error::StaleBatch)));
     }
 
     /// to_batch() creates an owned snapshot whose root matches the committed DB.

@@ -1369,7 +1369,7 @@ pub mod tests {
             panic!("expected StaleBatch error");
         };
         assert!(
-            matches!(err, Error::StaleBatch { .. }),
+            matches!(err, Error::StaleBatch),
             "expected StaleBatch error, got {err:?}"
         );
 

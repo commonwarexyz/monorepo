@@ -215,7 +215,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip_commit.size),
         };
         Some(Proposed { block, merkleized })
     }
@@ -231,8 +231,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
         if merkleized.root() != tip.state_root
-            || non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
-                != tip.range
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip_commit.size) != tip.range
         {
             return None;
         }

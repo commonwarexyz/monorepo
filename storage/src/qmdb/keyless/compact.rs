@@ -32,7 +32,7 @@ use crate::{
     qmdb::{
         self, Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds},
+        batch_chain::{self, Bounds, CommitId},
         compact::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
@@ -60,6 +60,7 @@ where
     C: Clone + Send + Sync + 'static,
 {
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
+    root: H::Digest,
     last_commit_loc: Location<F>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
@@ -97,8 +98,7 @@ where
     merkle_batch: compact_merkle::UnmerkleizedBatch<F, H::Digest, S>,
     appends: Vec<V::Value>,
     parent: Option<Arc<MerkleizedBatch<F, H::Digest, V, S>>>,
-    base_size: u64,
-    db_size: u64,
+    base: batch_chain::CommitId<F, H::Digest>,
 }
 
 /// A speculative batch whose root digest has been computed.
@@ -108,10 +108,9 @@ where
     Operation<F, V>: EncodeShared,
 {
     pub(super) merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
-    pub(super) root: D,
     pub(super) commit_metadata: Option<V::Value>,
     pub(super) parent: Option<Weak<Self>>,
-    pub(super) bounds: batch_chain::Bounds<F>,
+    pub(super) bounds: batch_chain::Bounds<F, D>,
 }
 
 impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
@@ -122,13 +121,18 @@ where
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
+    /// The [`CommitId`] this batch commits to.
+    pub(super) const fn commit_id(&self) -> CommitId<F, D> {
+        self.bounds.tip_commit
+    }
+
     /// Return the root digest after this batch is applied.
     pub const fn root(&self) -> D {
-        self.root
+        self.bounds.tip_commit.root
     }
 
     /// Return the [`Bounds`] of the batch.
-    pub const fn bounds(&self) -> &Bounds<F> {
+    pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
     }
 
@@ -141,8 +145,7 @@ where
             merkle_batch: compact_merkle::UnmerkleizedBatch::wrap(self.merkle_batch.new_batch()),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.bounds.total_size,
-            db_size: self.bounds.db_size,
+            base: self.commit_id(),
         }
     }
 }
@@ -155,7 +158,10 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    pub(super) fn new<E, C>(db: &Db<F, E, V, H, C, S>, committed_size: u64) -> Self
+    pub(super) fn new<E, C>(
+        db: &Db<F, E, V, H, C, S>,
+        commit: batch_chain::CommitId<F, H::Digest>,
+    ) -> Self
     where
         E: Context,
         C: Clone + Send + Sync + 'static,
@@ -165,9 +171,17 @@ where
             merkle_batch: db.merkle.new_batch(),
             appends: Vec::new(),
             parent: None,
-            base_size: committed_size,
-            db_size: committed_size,
+            base: commit,
         }
+    }
+
+    /// The database's committed state at the base of this batch chain.
+    ///
+    /// Derived: a DB-created batch's base is the DB commit; a child's is its parent's `db_commit`.
+    fn db_commit(&self) -> CommitId<F, H::Digest> {
+        self.parent
+            .as_ref()
+            .map_or(self.base, |parent| parent.bounds.db_commit)
     }
 
     pub fn append(mut self, value: V::Value) -> Self {
@@ -199,17 +213,17 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
+        // Capture the DB boundary before `self` is consumed below.
+        let db_commit = self.db_commit();
+
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
             ops.push(Operation::Append(value));
         }
         ops.push(Operation::Commit(metadata.clone(), inactivity_floor));
 
-        let total_size = self.base_size + ops.len() as u64;
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(total_size)),
-            inactivity_floor,
-        );
+        let total_size = self.base.size + ops.len() as u64;
+        let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
         let (merkle, root) = compact_batch::merkleize_ops::<F, H, S, _>(
             &db.merkle,
             self.merkle_batch,
@@ -224,18 +238,17 @@ where
         let ancestors = batch_chain::collect_ancestor_bounds(
             ancestors,
             |batch| batch.bounds.inactivity_floor,
-            |batch| batch.bounds.total_size,
+            |batch| batch.commit_id(),
         );
 
         Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
-            root,
             commit_metadata: metadata,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: batch_chain::Bounds {
-                base_size: self.base_size,
-                db_size: self.db_size,
-                total_size,
+                base_commit: self.base,
+                db_commit,
+                tip_commit: CommitId::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -287,8 +300,10 @@ where
         merkle.prune_to_frontier();
 
         let witness = witness::Store::from_import(journal, imported);
+        let root = witness.with(|w| w.root);
         Ok(Self {
             merkle,
+            root,
             last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
@@ -328,9 +343,11 @@ where
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
         let last_commit_loc = Location::new(*witness.with(|w| w.size()) - 1);
+        let root = witness.with(|w| w.root);
 
         Ok(Self {
             merkle,
+            root,
             last_commit_loc,
             last_commit_metadata,
             inactivity_floor_loc,
@@ -340,18 +357,8 @@ where
     }
 
     /// Return the root of the db.
-    pub fn root(&self) -> H::Digest
-    where
-        F: Family,
-    {
-        let hasher = qmdb::hasher::<H>();
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(*self.last_commit_loc + 1)),
-            self.inactivity_floor_loc,
-        );
-        self.merkle
-            .root(&hasher, inactive_peaks)
-            .expect("compact Merkle root should not fail")
+    pub const fn root(&self) -> H::Digest {
+        self.root
     }
 
     /// Return a reference to the merkleization strategy.
@@ -371,7 +378,7 @@ where
 
     /// Return the location of the next operation appended to this db.
     pub fn size(&self) -> Location<F> {
-        Location::new(*self.last_commit_loc + 1)
+        self.last_commit_loc + 1
     }
 
     /// Get the metadata associated with the last commit.
@@ -389,10 +396,14 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
+    /// The [`CommitId`] committed by the database's current state.
+    pub(crate) fn commit_id(&self) -> batch_chain::CommitId<F, H::Digest> {
+        batch_chain::CommitId::new(self.last_commit_loc + 1, self.root())
+    }
+
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, V, S> {
-        let committed_size = *self.last_commit_loc + 1;
-        UnmerkleizedBatch::new(self, committed_size)
+        UnmerkleizedBatch::new(self, self.commit_id())
     }
 
     /// Create an owned merkleized batch representing the current applied state.
@@ -400,19 +411,11 @@ where
     where
         F: Family,
     {
-        let committed_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
-            root: self.root(),
             commit_metadata: self.last_commit_metadata.clone(),
             parent: None,
-            bounds: batch_chain::Bounds {
-                base_size: committed_size,
-                db_size: committed_size,
-                total_size: committed_size,
-                ancestors: Vec::new(),
-                inactivity_floor: self.inactivity_floor_loc,
-            },
+            bounds: batch_chain::Bounds::from_db(self.commit_id(), self.inactivity_floor_loc),
         })
     }
 
@@ -427,7 +430,7 @@ where
     ) -> Result<(), Error<F>> {
         batch
             .bounds
-            .validate_apply_to(*self.last_commit_loc + 1, self.inactivity_floor_loc)
+            .validate_apply_to(self.commit_id(), self.inactivity_floor_loc)
     }
 
     /// Apply a merkleized batch to the database.
@@ -453,10 +456,11 @@ where
 
         let start_loc = self.last_commit_loc + 1;
         self.merkle.apply_batch(&batch.merkle_batch)?;
-        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.root = batch.root();
+        self.last_commit_loc = batch.bounds.tip_commit.size - 1;
         self.last_commit_metadata = batch.commit_metadata.clone();
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        Ok((self, start_loc..Location::new(batch.bounds.total_size)))
+        Ok((self, start_loc..batch.bounds.tip_commit.size))
     }
 
     /// Begin durably persisting the current db state to disk.
@@ -544,6 +548,7 @@ where
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
         self.last_commit_loc = Location::new(*target - 1);
+        self.root = self.witness.with(|w| w.root);
         Ok(self)
     }
 
@@ -1305,10 +1310,7 @@ mod tests {
             let expected_root = batch_a.root();
             let (db, _) = db.apply_batch(batch_a).unwrap();
             assert_eq!(db.root(), expected_root);
-            assert!(matches!(
-                db.apply_batch(batch_b),
-                Err(Error::StaleBatch { .. })
-            ));
+            assert!(matches!(db.apply_batch(batch_b), Err(Error::StaleBatch)));
         });
     }
 
@@ -1359,27 +1361,49 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-chained-stale").await;
             let floor = db.inactivity_floor_loc();
 
-            let parent = db
+            let common_parent = db
+                .new_batch()
+                .append(U64::new(10))
+                .merkleize(&db, Some(U64::new(110)), floor)
+                .await;
+            let sibling_a = common_parent
+                .new_batch::<Sha256>()
+                .append(U64::new(11))
+                .merkleize(&db, Some(U64::new(111)), floor)
+                .await;
+            let sibling_b = common_parent
+                .new_batch::<Sha256>()
+                .append(U64::new(12))
+                .merkleize(&db, Some(U64::new(112)), floor)
+                .await;
+            let (db, _) = db.apply_batch(sibling_a).unwrap();
+            assert!(matches!(
+                db.validate_batch(&sibling_b),
+                Err(Error::StaleBatch)
+            ));
+
+            let parent_a = db
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
                 .await;
-            let child_a = parent
-                .new_batch::<Sha256>()
+            let parent_b = db
+                .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, Some(U64::new(22)), floor)
                 .await;
-            let child_b = parent
+            let child_b = parent_b
                 .new_batch::<Sha256>()
                 .append(U64::new(3))
                 .merkleize(&db, Some(U64::new(33)), floor)
                 .await;
 
-            let (db, _) = db.apply_batch(child_a).unwrap();
+            let (db, _) = db.apply_batch(parent_a).unwrap();
             assert!(matches!(
-                db.apply_batch(child_b),
-                Err(Error::StaleBatch { .. })
+                db.validate_batch(&child_b),
+                Err(Error::StaleBatch)
             ));
+            db.destroy().await.unwrap();
         });
     }
 
@@ -1402,10 +1426,7 @@ mod tests {
                 .await;
 
             let (db, _) = db.apply_batch(child).unwrap();
-            assert!(matches!(
-                db.apply_batch(parent),
-                Err(Error::StaleBatch { .. })
-            ));
+            assert!(matches!(db.apply_batch(parent), Err(Error::StaleBatch)));
         });
     }
 
@@ -2389,10 +2410,7 @@ mod tests {
 
             // After rewind, mem.size reflects post-commit-A, but the held batch starts after
             // post-commit-B. Apply must be rejected with StaleBatch.
-            assert!(matches!(
-                db.apply_batch(held),
-                Err(Error::StaleBatch { .. })
-            ));
+            assert!(matches!(db.apply_batch(held), Err(Error::StaleBatch)));
         });
     }
 

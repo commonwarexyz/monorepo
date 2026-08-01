@@ -12,8 +12,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, bitmap::Shared, delete_known_loc, metrics::Metrics, operation::Floored as _,
-        update_known_loc,
+        Error, batch_chain::CommitId, bitmap::Shared, delete_known_loc, metrics::Metrics,
+        operation::Floored as _, update_known_loc,
     },
 };
 use commonware_codec::{Codec, CodecShared};
@@ -181,13 +181,18 @@ where
         self.root
     }
 
+    /// The [`CommitId`] committed by the database's current state.
+    pub(crate) fn commit_id(&self) -> CommitId<F, H::Digest> {
+        CommitId::new(self.last_commit_loc + 1, self.root)
+    }
+
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.
     pub(crate) fn inactive_peaks(
         &self,
         leaves: Location<F>,
         inactivity_floor: Location<F>,
     ) -> usize {
-        F::inactive_peaks(F::location_to_position(leaves), inactivity_floor)
+        F::inactive_peaks(leaves, inactivity_floor)
     }
 
     /// Return a reference to the merkleization strategy.
@@ -806,10 +811,7 @@ where
             ));
         }
 
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(log.merkle.leaves()),
-            inactivity_floor_loc,
-        );
+        let inactive_peaks = F::inactive_peaks(log.merkle.leaves(), inactivity_floor_loc);
         let root = log.root(inactive_peaks)?;
 
         let db = Self {

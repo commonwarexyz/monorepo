@@ -265,15 +265,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
             parent: parent.digest(),
             height,
             root_a: merkleized_a.root(),
-            range_a: non_empty_range!(
-                bounds_a.inactivity_floor,
-                Location::new(bounds_a.total_size)
-            ),
+            range_a: non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip_commit.size),
             root_b: merkleized_b.root(),
-            range_b: non_empty_range!(
-                bounds_b.inactivity_floor,
-                Location::new(bounds_b.total_size)
-            ),
+            range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip_commit.size),
         };
         Some(Proposed {
             block,
@@ -293,15 +287,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let matches_a = merkleized_a.root() == tip.root_a
-            && non_empty_range!(
-                bounds_a.inactivity_floor,
-                Location::new(bounds_a.total_size)
-            ) == tip.range_a;
+            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip_commit.size) == tip.range_a;
         let matches_b = merkleized_b.root() == tip.root_b
-            && non_empty_range!(
-                bounds_b.inactivity_floor,
-                Location::new(bounds_b.total_size)
-            ) == tip.range_b;
+            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip_commit.size) == tip.range_b;
         if !matches_a || !matches_b {
             return None;
         }

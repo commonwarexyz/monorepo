@@ -181,10 +181,8 @@ where
                 .expect("last operation should be a commit with floor");
             (last_commit_loc, inactivity_floor_loc)
         };
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(*last_commit_loc + 1)),
-            inactivity_floor_loc,
-        );
+        let inactive_peaks =
+            F::inactive_peaks(Location::new(*last_commit_loc + 1), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
@@ -458,7 +456,7 @@ where
         self.journal = self.journal.rewind(rewind_size).await?;
         self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
-        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
+        let inactive_peaks = F::inactive_peaks(size, rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
         self.update_metrics();
         Ok(self)
@@ -508,26 +506,22 @@ where
         Ok(self.journal.destroy().await?)
     }
 
+    /// The [`CommitId`](batch_chain::CommitId) committed by the database's current state.
+    pub(crate) fn commit_id(&self) -> batch_chain::CommitId<F, H::Digest> {
+        batch_chain::CommitId::new(self.last_commit_loc + 1, self.root)
+    }
+
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, V, S> {
-        let journal_size = *self.last_commit_loc + 1;
-        batch::UnmerkleizedBatch::new(self, journal_size)
+        batch::UnmerkleizedBatch::new(self, self.commit_id())
     }
 
     /// Create an initial [`batch::MerkleizedBatch`] from the committed DB state.
     pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V, S>> {
-        let journal_size = *self.last_commit_loc + 1;
         Arc::new(batch::MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
-            root: self.root,
             parent: None,
-            bounds: batch_chain::Bounds {
-                base_size: journal_size,
-                db_size: journal_size,
-                total_size: journal_size,
-                ancestors: Vec::new(),
-                inactivity_floor: self.inactivity_floor_loc,
-            },
+            bounds: batch_chain::Bounds::from_db(self.commit_id(), self.inactivity_floor_loc),
         })
     }
 
@@ -542,7 +536,7 @@ where
     ) -> Result<(), Error<F>> {
         batch
             .bounds
-            .validate_apply_to(*self.last_commit_loc + 1, self.inactivity_floor_loc)
+            .validate_apply_to(self.commit_id(), self.inactivity_floor_loc)
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
@@ -583,10 +577,10 @@ where
 
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
 
-        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.last_commit_loc = batch.bounds.tip_commit.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        self.root = batch.root;
-        let end_loc = Location::new(batch.bounds.total_size);
+        self.root = batch.root();
+        let end_loc = batch.bounds.tip_commit.size;
         debug!(size = ?end_loc, "applied batch");
         let range = start_loc..end_loc;
         self.update_metrics();
@@ -1309,7 +1303,7 @@ pub(crate) mod tests {
         let last_commit_loc = db.last_commit_loc();
 
         let result = db.apply_batch(batch_b).await;
-        assert!(matches!(result, Err(Error::StaleBatch { .. })));
+        assert!(matches!(result, Err(Error::StaleBatch)));
 
         // The rejection mutated nothing: reopening recovers the committed state.
         let db = reopen(context.child("reopen")).await;
@@ -1999,27 +1993,49 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
-        let parent = db
+        let common_parent = db
+            .new_batch()
+            .append(V::Value::make(10))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let sibling_a = common_parent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(11))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let sibling_b = common_parent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(12))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (db, _) = db.apply_batch(sibling_a).await.unwrap();
+        assert!(matches!(
+            db.validate_batch(&sibling_b),
+            Err(Error::StaleBatch)
+        ));
+
+        let parent_a = db
             .new_batch()
             .append(V::Value::make(1))
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await;
-        let child_a = parent
-            .new_batch::<Sha256>()
+        let parent_b = db
+            .new_batch()
             .append(V::Value::make(2))
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await;
-        let child_b = parent
+        let child_b = parent_b
             .new_batch::<Sha256>()
             .append(V::Value::make(3))
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await;
 
-        let (db, _) = db.apply_batch(child_a).await.unwrap();
+        let (db, _) = db.apply_batch(parent_a).await.unwrap();
         assert!(matches!(
-            db.apply_batch(child_b).await,
-            Err(Error::StaleBatch { .. })
+            db.validate_batch(&child_b),
+            Err(Error::StaleBatch)
         ));
+        db.destroy().await.unwrap();
     }
 
     #[boxed]
@@ -2074,7 +2090,7 @@ pub(crate) mod tests {
         let (db, _) = db.apply_batch(child).await.unwrap();
         assert!(matches!(
             db.apply_batch(parent).await,
-            Err(Error::StaleBatch { .. })
+            Err(Error::StaleBatch)
         ));
     }
 
