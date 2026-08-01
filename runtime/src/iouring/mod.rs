@@ -440,8 +440,7 @@ impl Handle {
         options: WriteOptions,
         cache: Cache,
     ) -> Result<(), Error> {
-        let durable = options.contains(WriteOptions::SYNC);
-        let state = if !durable {
+        let state = if !options.contains(WriteOptions::SYNC) {
             WriteAtState::Writing
         } else if bufs.chunk_count() <= IOVEC_BATCH_SIZE {
             WriteAtState::WritingSync
