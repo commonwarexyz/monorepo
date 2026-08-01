@@ -677,7 +677,7 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any = self.any.rewind(size).await?;
 
-        let (grafted_tree, root) = rebuild_grafted_root::<F, H, S, N>(
+        let (grafted_tree, root) = rebuild_grafted_tree::<F, H, S, N>(
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
@@ -1040,12 +1040,8 @@ pub(super) async fn compute_db_root<
 }
 
 /// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
-/// bitmap.
-///
-/// Database open, `rewind`, and sync-init must reconstruct identical overlay state for the same
-/// committed ops log, so all go through this single path. `ops_leaves` is taken from `ops_tree` so
-/// it always matches the tree being grafted. Returns the rebuilt grafted tree and the db root.
-pub(super) async fn rebuild_grafted_root<F, H, S, const N: usize>(
+/// bitmap. Returns the rebuilt grafted tree and the db root.
+pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,

@@ -191,10 +191,8 @@ where
         pins
     };
 
-    // Rebuild the grafted overlay tree and compute the canonical root (shared with open and
-    // rewind). The root is deterministic from the ops (authenticated by the engine) and the
-    // bitmap (deterministic from the ops).
-    let (grafted_tree, root) = db::rebuild_grafted_root::<F, H, S, N>(
+    // Get the grafted tree and its root.
+    let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
