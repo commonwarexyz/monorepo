@@ -517,42 +517,37 @@ where
                 let parent_request =
                     parent_request.expect("non-reproposal has a parent subscription");
 
-                // Start the candidate store immediately: it depends on neither the
-                // parent fetch (which may hit the network) nor the verdict below.
-                // Storing before validation is intentional: these caches provide
-                // candidate availability/recovery, not a validity decision. The
-                // notarize vote follows the app verdict, while certify independently
-                // awaits the registered durability gate.
-                //
-                // The verify future below aborts when consensus drops its receiver
-                // (the view exited via nullification or finalization), even though
-                // certification can still fire for a nullified view. That is
-                // deliberate: inline certification does not need the local app
-                // verdict (a notarization implies f+1 honest validators already
-                // verified), and the store still completes through the join.
+                // Admit the candidate only after its fetched parent proves the
+                // block's structural relationship.
+                let parent = match await_and_validate_parent(
+                    context.parent.1,
+                    block.as_ref(),
+                    parent_request,
+                    &mut tx,
+                )
+                .await
+                {
+                    Some(ParentCheck::Valid(parent)) => parent,
+                    Some(ParentCheck::Invalid) => {
+                        tx.send_lossy(false);
+                        durable_tx.send_lossy(GateOutcome::Recover);
+                        return;
+                    }
+                    None => {
+                        durable_tx.send_lossy(GateOutcome::Recover);
+                        return;
+                    }
+                };
+
+                // Once admitted, durability overlaps application verification.
+                // Certification can still await this store independently of the
+                // local application verdict.
                 let store = async {
                     if marshal.verified(round, Arc::clone(&block)).await {
                         durable_tx.send_lossy(GateOutcome::Ready(true));
                     }
                 };
                 let verify_then_vote = async {
-                    // Non-reproposal path: validate the parent we already started
-                    // fetching.
-                    let parent = match await_and_validate_parent(
-                        context.parent.1,
-                        block.as_ref(),
-                        parent_request,
-                        &mut tx,
-                    )
-                    .await
-                    {
-                        Some(ParentCheck::Valid(parent)) => parent,
-                        Some(ParentCheck::Invalid) => {
-                            tx.send_lossy(false);
-                            return Some(false);
-                        }
-                        None => return None,
-                    };
                     let valid = run_app_verify(
                         runtime_context,
                         context,
@@ -1568,9 +1563,9 @@ mod tests {
     /// Inline analog of the deferred equivocation test. A proposal that names
     /// the certified view-1 parent for a block built on the view-2 block
     /// fails structural parent validation and is rejected for voting. The
-    /// candidate is nevertheless stored durably, and certification of the
-    /// honest notarization for the same `(round, digest)` must use that
-    /// durability result rather than the context-scoped verification verdict.
+    /// candidate is not admitted, and certification of the honest notarization
+    /// for the same `(round, digest)` must recover it independently rather than
+    /// reuse the context-scoped verification verdict.
     #[test_traced("WARN")]
     fn test_certify_not_poisoned_by_equivocating_parent_verify() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));

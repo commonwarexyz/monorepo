@@ -266,44 +266,39 @@ where
             async move {
                 let round = context.round;
 
-                // Start the candidate store immediately: it depends on neither the
-                // parent fetch (which may hit the network) nor the verdict below.
-                // Storing before validation is intentional: these caches provide
-                // candidate availability/recovery, not a validity decision. This
-                // task gates the finalize vote by resolving true only after both
-                // app verification succeeds and the store is durable.
-                let store = stage.store(&marshal, round, Arc::clone(&block));
-                let verify = async {
-                    // Validate the parent we already started fetching.
-                    let parent = match await_and_validate_parent(
-                        context.parent.1,
-                        block.as_ref(),
-                        parent_request,
-                        &mut tx,
-                    )
-                    .await
-                    {
-                        Some(ParentCheck::Valid(parent)) => parent,
-                        Some(ParentCheck::Invalid) => return Some(false),
-                        None => return None,
-                    };
-                    run_app_verify(
-                        runtime_context,
-                        context,
-                        Arc::clone(&block),
-                        parent,
-                        &mut application,
-                        &marshal,
-                        &mut tx,
-                        ancestor_fetch_duration,
-                    )
-                    .await
+                // Admit the candidate only after its fetched parent proves the
+                // block's structural relationship.
+                let parent = match await_and_validate_parent(
+                    context.parent.1,
+                    block.as_ref(),
+                    parent_request,
+                    &mut tx,
+                )
+                .await
+                {
+                    Some(ParentCheck::Valid(parent)) => parent,
+                    Some(ParentCheck::Invalid) => {
+                        tx.send_lossy(GateOutcome::Ready(false));
+                        return;
+                    }
+                    None => return,
                 };
+                // The durable store can overlap application verification once
+                // the candidate is structurally admitted.
+                let store = stage.store(&marshal, round, Arc::clone(&block));
+                let verify = run_app_verify(
+                    runtime_context,
+                    context,
+                    Arc::clone(&block),
+                    parent,
+                    &mut application,
+                    &marshal,
+                    &mut tx,
+                    ancestor_fetch_duration,
+                );
                 let (verdict, durable) = futures::join!(verify, store);
 
-                // Publish only when the block is both valid and durable. App-invalid
-                // candidates may already be in the cache from the concurrent store above,
-                // so the gate verdict is the authority for consensus progress.
+                // Publish only when the block is both valid and durable.
                 if let Some(application_valid) = gates::resolve(verdict, durable) {
                     tx.send_lossy(GateOutcome::Ready(application_valid));
                 }

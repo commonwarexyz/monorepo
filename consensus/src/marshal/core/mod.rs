@@ -53,8 +53,9 @@ mod floor;
 mod stream;
 
 mod mailbox;
-pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
+pub use mailbox::{CommitmentFallback, DescendantCursor, DigestFallback, Mailbox};
 
 mod subscriptions;
+pub(crate) mod tree;
 mod variant;
 pub use variant::{Buffer, Variant};

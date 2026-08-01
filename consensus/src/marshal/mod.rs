@@ -34,6 +34,16 @@
 //! only concerns itself with verifying a valid finalization exists for a block, not that a specific finalization
 //! exists. This means different Marshals may have different finalizations for the same block persisted to disk._
 //!
+//! ## Ancestry
+//!
+//! The actor maintains an in-memory tree of all candidate forks above the last finalized block,
+//! pruned each time a new finalization is learned and rebuilt from the prunable caches on startup.
+//! Combined with the finalized block archive, this makes the locally known ancestry of any tip
+//! addressable: [`ancestry::AncestorStream`] walks a chain backward toward genesis (fetching
+//! missing parents), and any [`ancestry::Ancestry`] can be flipped forward with
+//! [`ancestry::Ancestry::descendants`], iterating the same chain from any height or digest within
+//! it up to the ancestry's tip.
+//!
 //! ## Backfill
 //!
 //! The actor provides a backfill mechanism for missing blocks. If the actor notices a gap in its
@@ -94,7 +104,34 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 pub mod mocks;
 
+/// An identifier for a block within a chain's ancestry.
+///
+/// Unlike [Identifier], a [BlockID] always names a specific block: ancestry
+/// walks have no notion of "latest".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockID<D: Digest> {
+    /// The height of the block.
+    Height(Height),
+    /// The digest of the block.
+    Digest(D),
+}
+
+// Allows using heights directly for convenience.
+impl<D: Digest> From<Height> for BlockID<D> {
+    fn from(src: Height) -> Self {
+        Self::Height(src)
+    }
+}
+
+// Allows using &Digest directly for convenience.
+impl<D: Digest> From<&D> for BlockID<D> {
+    fn from(src: &D) -> Self {
+        Self::Digest(*src)
+    }
+}
+
 /// An identifier for a block request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Identifier<D: Digest> {
     /// The height of the block to retrieve.
     Height(Height),

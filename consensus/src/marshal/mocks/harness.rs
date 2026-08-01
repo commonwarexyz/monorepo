@@ -7,13 +7,13 @@ use crate::{
     Heightable, Reporter,
     marshal::{
         Identifier,
-        ancestry::BlockProvider,
+        ancestry::{Ancestry, DescendantProvider, DescendantRequest},
         coding::{
             Coding, shards,
             types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
-        core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Variant},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -59,6 +59,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    ops::RangeInclusive,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -3894,7 +3895,10 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 
 /// Regression test: commitment-fetched blocks must wake subscribers and cache by
 /// decoded height even when the local pruning hint is far ahead.
-pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() {
+pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>()
+where
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
+{
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         let Fixture {
@@ -3979,6 +3983,18 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
             .await
             .expect("height-hint-mismatched fetch should cache by decoded height");
         assert_eq!(cached.height(), actual_height);
+        assert!(
+            DescendantProvider::get_descendants(
+                &victim_handle.mailbox,
+                DescendantRequest::Start {
+                    start: actual_height.into(),
+                    tip: (&received.digest()).into(),
+                },
+            )
+            .await
+            .is_none(),
+            "height-hint-mismatched fetch must not enter the fork tree"
+        );
     });
 }
 
@@ -5006,7 +5022,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 /// Test ancestry stream.
 pub fn ancestry_stream<H: TestHarness>()
 where
-    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
 {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
@@ -5072,15 +5088,13 @@ where
             "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
             Buckets::LOCAL,
         ));
-        let ancestry = handle
-            .mailbox
-            .ancestry(
-                Arc::new(context.child("ancestor_stream")),
-                (DigestFallback::Wait, commitment),
-                fetch_duration,
-            )
-            .await
-            .unwrap();
+        let ancestry = ancestry_at::<H>(
+            &handle,
+            &Arc::new(context.child("ancestor_stream")),
+            &fetch_duration,
+            commitment,
+        )
+        .await;
         let blocks = ancestry.collect::<Vec<_>>().await;
 
         // Ensure correct delivery order: 5,4,3,2,1
@@ -5088,6 +5102,402 @@ where
         (0..5).for_each(|i| {
             assert_eq!(blocks[i].height().get(), 5 - i as u64);
         });
+    })
+}
+
+/// Asserts that `stream` yields exactly `expected` in order, comparing digests.
+async fn assert_stream_yields<H: TestHarness>(
+    stream: impl futures::Stream<Item = Arc<H::ApplicationBlock>> + Unpin,
+    expected: &[&H::TestBlock],
+) {
+    let collected = stream.collect::<Vec<_>>().await;
+    assert_eq!(collected.len(), expected.len());
+    for (block, expected) in collected.iter().zip(expected) {
+        assert_eq!(block.height(), H::height(expected));
+        assert_eq!(block.digest(), H::digest(expected));
+    }
+}
+
+/// Builds an ancestry stream anchored at the locally available block `tip`,
+/// as an application would receive it.
+async fn ancestry_at<H: TestHarness>(
+    handle: &ValidatorHandle<H>,
+    clock: &Arc<deterministic::Context>,
+    fetch_duration: &Timed,
+    tip: D,
+) -> impl Ancestry<H::ApplicationBlock>
+where
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
+{
+    let block = handle.mailbox.get_block(&tip).await.expect("tip block");
+    handle.mailbox.ancestor_stream(
+        clock.clone(),
+        [<H::Variant as Variant>::owned_into_inner_shared(block)],
+        fetch_duration.clone(),
+    )
+}
+
+/// Waits until `mailbox` holds a finalization at `height`.
+async fn wait_for_finalization<H: TestHarness>(
+    context: &deterministic::Context,
+    mailbox: &Mailbox<S, H::Variant>,
+    height: Height,
+) {
+    while mailbox.get_finalization(height).await.is_none() {
+        context.sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Proposes a chain of candidate blocks over `heights` on `parent`, offsetting
+/// timestamps by `seed` and views by `view_offset`.
+async fn propose_chain<H: TestHarness>(
+    handle: &mut ValidatorHandle<H>,
+    (mut parent, mut parent_commitment): (D, H::Commitment),
+    heights: RangeInclusive<u64>,
+    seed: u64,
+    view_offset: u64,
+    participants: u16,
+) -> Vec<H::TestBlock> {
+    let mut blocks = Vec::new();
+    for i in heights {
+        let block = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(i),
+            seed + i,
+            participants,
+        );
+        H::propose(
+            handle,
+            Round::new(Epoch::zero(), View::new(view_offset + i)),
+            &block,
+        )
+        .await;
+        parent = H::digest(&block);
+        parent_commitment = H::commitment(&block);
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// Proposes and finalizes a chain of blocks over `heights` on `parent`,
+/// waiting until the last finalization is locally available.
+async fn finalize_chain<H: TestHarness>(
+    context: &deterministic::Context,
+    handle: &mut ValidatorHandle<H>,
+    schemes: &[S],
+    (mut parent, mut parent_commitment): (D, H::Commitment),
+    heights: RangeInclusive<u64>,
+    participants: u16,
+) -> Vec<H::TestBlock> {
+    let mut blocks = Vec::new();
+    let end = *heights.end();
+    for i in heights {
+        let block = H::make_test_block(parent, parent_commitment, Height::new(i), i, participants);
+        let round = Round::new(Epoch::zero(), View::new(i));
+        H::propose(handle, round, &block).await;
+        context.sleep(LINK.latency).await;
+
+        let proposal = Proposal {
+            round,
+            parent: View::new(i - 1),
+            payload: H::commitment(&block),
+        };
+        let finalization = H::make_finalization(proposal, schemes, QUORUM);
+        H::report_finalization(&mut handle.mailbox, finalization).await;
+
+        parent = H::digest(&block);
+        parent_commitment = H::commitment(&block);
+        blocks.push(block);
+    }
+    wait_for_finalization::<H>(context, &handle.mailbox, Height::new(end)).await;
+    blocks
+}
+
+/// Test forward ancestry iteration across finalized storage and fork candidates.
+pub fn ancestry_from_stream<H: TestHarness>()
+where
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
+{
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        let me = participants[0].clone();
+        let setup = H::setup_validator(
+            context.child("validator").with_attribute("index", 0),
+            &mut oracle,
+            me,
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        // Finalize blocks at heights 1-5.
+        let genesis = (
+            Sha256::hash(&[b""]),
+            H::genesis_parent_commitment(participants.len() as u16),
+        );
+        let blocks = finalize_chain::<H>(
+            &context,
+            &mut handle,
+            &schemes,
+            genesis,
+            1..=5,
+            participants.len() as u16,
+        )
+        .await;
+
+        // Build two competing forks above the finalized tip: fork A is long
+        // enough to cross the descendant page boundary, while fork B remains
+        // a short sibling. Both extend block 5.
+        let tip = (H::digest(&blocks[4]), H::commitment(&blocks[4]));
+        let fork_a =
+            propose_chain::<H>(&mut handle, tip, 6..=70, 0, 0, participants.len() as u16).await;
+        let fork_b =
+            propose_chain::<H>(&mut handle, tip, 6..=7, 100, 10, participants.len() as u16).await;
+
+        let clock = Arc::new(context.child("descendant_stream"));
+        let fetch_duration = Timed::new(context.histogram(
+            "descendant_fetch_duration",
+            "Histogram of time taken to fetch a block via the descendant stream, in seconds",
+            Buckets::LOCAL,
+        ));
+
+        // Anchor an ancestry at each tip, as an application would hold them.
+        let fork_a_ancestry = ancestry_at::<H>(
+            &handle,
+            &clock,
+            &fetch_duration,
+            H::digest(fork_a.last().unwrap()),
+        )
+        .await;
+        let fork_b_ancestry =
+            ancestry_at::<H>(&handle, &clock, &fetch_duration, H::digest(&fork_b[1])).await;
+        let finalized_ancestry =
+            ancestry_at::<H>(&handle, &clock, &fetch_duration, H::digest(&blocks[3])).await;
+
+        // The provider bounds the combined finalized and candidate portions
+        // of every page and continues from a candidate snapshot.
+        let mut request = DescendantRequest::Start {
+            start: Height::new(1).into(),
+            tip: (&H::digest(fork_a.last().unwrap())).into(),
+        };
+        let mut page_sizes = Vec::new();
+        loop {
+            let page = DescendantProvider::get_descendants(&handle.mailbox, request)
+                .await
+                .expect("descendant page");
+            page_sizes.push(page.blocks.len());
+            assert!(page.blocks.len() <= 64);
+            let Some(cursor) = page.cursor else {
+                break;
+            };
+            request = DescendantRequest::Continue(cursor);
+        }
+        assert_eq!(page_sizes, vec![64, 6]);
+
+        // Walk the full chain from height 1 to fork A's tip.
+        let stream = fork_a_ancestry
+            .descendants(Height::new(1).into())
+            .await
+            .expect("full walk to fork A");
+        let expected: Vec<_> = blocks.iter().chain(fork_a.iter()).collect();
+        assert_stream_yields::<H>(stream, &expected).await;
+
+        // Walk from a finalized height to fork B's tip.
+        let stream = fork_b_ancestry
+            .descendants(Height::new(3).into())
+            .await
+            .expect("walk to fork B");
+        let expected: Vec<_> = blocks[2..].iter().chain(fork_b.iter()).collect();
+        assert_stream_yields::<H>(stream, &expected).await;
+
+        // Start from a finalized digest.
+        let stream = fork_a_ancestry
+            .descendants((&H::digest(&blocks[3])).into())
+            .await
+            .expect("digest start");
+        let expected: Vec<_> = blocks[3..].iter().chain(fork_a.iter()).collect();
+        assert_stream_yields::<H>(stream, &expected).await;
+
+        // A digest on a sibling fork is not on fork A's chain.
+        assert!(
+            fork_a_ancestry
+                .descendants((&H::digest(&fork_b[0])).into())
+                .await
+                .is_none()
+        );
+
+        // Start at the last finalized block in the tip's ancestry.
+        let stream = fork_a_ancestry
+            .descendants(Height::new(5).into())
+            .await
+            .expect("finalized boundary start");
+        let expected: Vec<_> = blocks[4..].iter().chain(fork_a.iter()).collect();
+        assert_stream_yields::<H>(stream, &expected).await;
+
+        // A finalized block works as the tip.
+        let stream = finalized_ancestry
+            .descendants(Height::new(2).into())
+            .await
+            .expect("finalized tip");
+        assert_stream_yields::<H>(stream, &blocks[1..4].iter().collect::<Vec<_>>()).await;
+
+        // A start above the tip resolves to nothing, as does an unknown tip
+        // at the provider.
+        assert!(
+            fork_a_ancestry
+                .descendants(Height::new(100).into())
+                .await
+                .is_none()
+        );
+        assert!(
+            DescendantProvider::get_descendants(
+                &handle.mailbox,
+                DescendantRequest::Start {
+                    start: Height::new(1).into(),
+                    tip: (&Sha256::hash(&[b"unknown"])).into(),
+                },
+            )
+            .await
+            .is_none()
+        );
+
+        // Finalizing fork A's first block prunes fork B.
+        let proposal = Proposal {
+            round: Round::new(Epoch::zero(), View::new(6)),
+            parent: View::new(5),
+            payload: H::commitment(&fork_a[0]),
+        };
+        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+        H::report_finalization(&mut handle.mailbox, finalization).await;
+        wait_for_finalization::<H>(&context, &handle.mailbox, Height::new(6)).await;
+        assert!(
+            fork_b_ancestry
+                .descendants(Height::new(6).into())
+                .await
+                .is_none()
+        );
+        let stream = fork_a_ancestry
+            .descendants(Height::new(6).into())
+            .await
+            .expect("fork A after finalization");
+        let expected: Vec<_> = fork_a.iter().collect();
+        assert_stream_yields::<H>(stream, &expected).await;
+    })
+}
+
+/// Test that the fork tree is rebuilt from cached candidates on startup.
+pub fn ancestry_from_rebuild<H: TestHarness>()
+where
+    Mailbox<S, H::Variant>: DescendantProvider<Block = H::ApplicationBlock>,
+{
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        let me = participants[0].clone();
+        let setup = H::setup_validator(
+            context.child("validator").with_attribute("index", 0),
+            &mut oracle,
+            me.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        // Finalize blocks at heights 1-3.
+        let genesis = (
+            Sha256::hash(&[b""]),
+            H::genesis_parent_commitment(participants.len() as u16),
+        );
+        let blocks = finalize_chain::<H>(
+            &context,
+            &mut handle,
+            &schemes,
+            genesis,
+            1..=3,
+            participants.len() as u16,
+        )
+        .await;
+
+        // Persist competing candidates above the finalized tip: fork A at
+        // heights 4-5 and fork B at height 4.
+        let tip = (H::digest(&blocks[2]), H::commitment(&blocks[2]));
+        let fork_a =
+            propose_chain::<H>(&mut handle, tip, 4..=5, 0, 0, participants.len() as u16).await;
+        let fork_b =
+            propose_chain::<H>(&mut handle, tip, 4..=4, 100, 10, participants.len() as u16)
+                .await
+                .remove(0);
+
+        // Crash the actor and restart it over the same storage.
+        setup.actor_handle.abort();
+        let _ = setup.actor_handle.await;
+        let restarted = H::setup_validator(
+            context
+                .child("validator")
+                .with_attribute("index", 0)
+                .with_attribute("restart", 1),
+            &mut oracle,
+            me,
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let handle = ValidatorHandle::<H> {
+            mailbox: restarted.mailbox,
+            extra: restarted.extra,
+        };
+
+        let clock = Arc::new(context.child("descendant_stream"));
+        let fetch_duration = Timed::new(context.histogram(
+            "descendant_fetch_duration",
+            "Histogram of time taken to fetch a block via the descendant stream, in seconds",
+            Buckets::LOCAL,
+        ));
+
+        // The rebuilt tree serves both forks without re-ingesting them.
+        let stream = ancestry_at::<H>(&handle, &clock, &fetch_duration, H::digest(&fork_a[1]))
+            .await
+            .descendants(Height::new(2).into())
+            .await
+            .expect("fork A after restart");
+        let expected: Vec<_> = blocks[1..].iter().chain(fork_a.iter()).collect();
+        assert_stream_yields::<H>(stream, &expected).await;
+
+        let stream = ancestry_at::<H>(&handle, &clock, &fetch_duration, H::digest(&fork_b))
+            .await
+            .descendants(Height::new(3).into())
+            .await
+            .expect("fork B after restart");
+        assert_stream_yields::<H>(stream, &[&blocks[2], &fork_b]).await;
     })
 }
 

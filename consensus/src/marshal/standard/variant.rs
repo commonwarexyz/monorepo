@@ -6,8 +6,8 @@
 use crate::{
     Block,
     marshal::{
-        ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, Mailbox, Variant},
+        ancestry::{BlockProvider, DescendantPage, DescendantProvider, DescendantRequest},
+        core::{Buffer, CommitmentFallback, DescendantCursor, Mailbox, Variant},
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
@@ -139,5 +139,21 @@ where
             )
         });
         async move { receiver?.await.ok() }
+    }
+}
+
+impl<S, B> DescendantProvider for Mailbox<S, Standard<B>>
+where
+    S: Scheme,
+    B: Block,
+{
+    type Cursor = DescendantCursor<Standard<B>>;
+
+    fn get_descendants(
+        &self,
+        request: DescendantRequest<<Self::Block as Digestible>::Digest, Self::Cursor>,
+    ) -> impl Future<Output = Option<DescendantPage<Self::Block, Self::Cursor>>> + Send + 'static
+    {
+        self.resolve_descendants(request)
     }
 }

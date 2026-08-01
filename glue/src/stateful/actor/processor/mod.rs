@@ -31,7 +31,7 @@ use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
     marshal::{
         Identifier,
-        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
+        ancestry::{Ancestry, BlockProvider},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
     types::{Height, Round},
@@ -248,7 +248,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        mut ancestry: impl Ancestry<A::Block>,
+        ancestry: impl Ancestry<A::Block>,
         input: Input<A::Input, A::Provider>,
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
@@ -257,8 +257,9 @@ where
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
         let timer = self.metrics.propose_duration.timer(context);
+        let mut inspection = ancestry.clone();
 
-        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
+        let parent = match fetch_ancestor(&mut response, &mut inspection).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 response.send_lossy(None);
@@ -270,7 +271,7 @@ where
             }
         };
         let parent_digest = parent.digest();
-        let ancestry = marshal_ancestry::with_prefix([Arc::clone(&parent)], ancestry);
+        drop(inspection);
 
         let round = consensus_context.round();
         let batches = match self
@@ -339,7 +340,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        mut ancestry: impl Ancestry<A::Block>,
+        ancestry: impl Ancestry<A::Block>,
         mut response: oneshot::Sender<bool>,
     ) where
         S: Scheme,
@@ -347,8 +348,9 @@ where
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
         let timer = self.metrics.verify_duration.timer(context);
+        let mut inspection = ancestry.clone();
 
-        let block = match fetch_ancestor(&mut response, &mut ancestry).await {
+        let block = match fetch_ancestor(&mut response, &mut inspection).await {
             Some(Some(block)) => block,
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
@@ -419,7 +421,7 @@ where
         }
 
         let round = consensus_context.round();
-        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
+        let parent = match fetch_ancestor(&mut response, &mut inspection).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 debug!(
@@ -438,6 +440,7 @@ where
             }
         };
         let parent_digest = parent.digest();
+        drop(inspection);
         let batches = match self
             .prepare_batches(context, marshal, parent.clone(), &mut response)
             .await
@@ -472,7 +475,6 @@ where
             }
         };
 
-        let ancestry = marshal_ancestry::with_prefix([block.clone(), parent], ancestry);
         let verified = match await_or_cancel(
             &mut response,
             self.app
