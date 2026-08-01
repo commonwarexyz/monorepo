@@ -74,16 +74,16 @@ impl<V> Certification<V> {
     /// Buffers a vote for verification (or, if already verified, for
     /// certificate recovery). Dropped once complete.
     fn add(&mut self, vote: V, is_verified: bool) {
-        // Verified votes and pending votes for batchable schemes may accumulate to
-        // quorum. A non-batchable pending buffer is consumed after each vote.
-        let initial_capacity = if is_verified || self.batchable {
-            self.quorum
-        } else {
-            1
-        };
-
         // Completed certifications drop subsequent votes without allocating.
         if let State::Incomplete { pending, verified } = &mut self.state {
+            // Verified votes may accumulate to quorum. A batchable pending buffer
+            // only needs the remaining unverified slots, while a non-batchable
+            // pending buffer is consumed after each vote.
+            let initial_capacity = if is_verified || self.batchable {
+                self.quorum.saturating_sub(verified.len()).max(1)
+            } else {
+                1
+            };
             let votes = if is_verified { verified } else { pending };
             if votes.capacity() == 0 {
                 votes.reserve_exact(initial_capacity);
@@ -731,6 +731,29 @@ mod tests {
         assert!(
             pending < quorum,
             "a single eagerly verified vote should not reserve a quorum-sized buffer"
+        );
+    }
+
+    #[test_async]
+    async fn test_batchable_certification_reserves_only_remaining_quorum() {
+        let quorum = 64;
+        let mut certification = Certification::new(quorum, true);
+        for vote in 0..quorum {
+            certification.add(vote, false);
+        }
+        certification
+            .try_verify(|mut pending, _| async move {
+                pending.pop().expect("quorum batch must be non-empty");
+                (pending, Vec::new())
+            })
+            .await
+            .expect("a quorum of pending votes must trigger batch verification");
+
+        certification.add(quorum, false);
+        let (pending, _) = certification.capacities();
+        assert!(
+            pending < quorum,
+            "one replacement vote should not reserve a quorum-sized buffer"
         );
     }
 
