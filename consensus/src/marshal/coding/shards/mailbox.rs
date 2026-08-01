@@ -324,22 +324,10 @@ where
         receiver
     }
 
-    /// Request to evict cached blocks and reconstruction state relative to `through`.
+    /// Evict cached blocks and reconstruction state through `through`.
     ///
-    /// Marshal invokes this after the finalized block is durable and acknowledged by the
-    /// application. Later use of that block can recover it from marshal's archive without relying
-    /// on this reconstruction cache.
-    ///
-    /// Cached blocks are evicted through `through`'s cached height, when present. Reconstruction
-    /// state is evicted through the round recorded for `through` in either the cache or state.
-    ///
-    /// Pruning does not install an ingress floor. Proposal, discovery, and notarization messages may
-    /// already be queued, and peer shards do not carry a round. A later-round notification can
-    /// therefore recreate reconstruction state for an evicted commitment.
-    ///
-    /// Pruning closes assigned-shard and exact-commitment subscriptions for `through` and every
-    /// reconstruction state it retires. Digest subscriptions remain open because another
-    /// commitment may reconstruct the same block digest.
+    /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
+    /// subscriptions remain open, and later consensus notifications may recreate state.
     pub fn prune(&self, through: Commitment) {
         let _ = self.sender.enqueue(Message::Prune { through });
     }
