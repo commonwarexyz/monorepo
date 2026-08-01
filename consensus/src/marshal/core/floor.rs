@@ -34,11 +34,6 @@ pub(super) enum FetchAdmission {
 }
 
 impl FetchAdmission {
-    #[cfg(test)]
-    pub(super) const fn denied(self) -> bool {
-        matches!(self, Self::Denied)
-    }
-
     pub(super) const fn ignore(self) {}
 }
 
@@ -273,36 +268,31 @@ mod tests {
         let floor = floor();
         let mut resolver = TestResolver::default();
 
-        assert!(
-            floor
-                .fetch_if_permitted(&mut resolver, Request::finalized(Height::new(5)))
-                .denied()
-        );
-        assert!(
-            floor
-                .fetch_if_permitted(
-                    &mut resolver,
-                    Request::finalized_block_by_height(digest(1), Height::new(4)),
-                )
-                .denied()
-        );
-        assert!(
-            floor
-                .fetch_if_permitted(&mut resolver, Request::notarized(round(5)))
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::new(5))),
+            FetchAdmission::Denied
+        ));
+        assert!(matches!(
+            floor.fetch_if_permitted(
+                &mut resolver,
+                Request::finalized_block_by_height(digest(1), Height::new(4)),
+            ),
+            FetchAdmission::Denied
+        ));
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(5))),
+            FetchAdmission::Denied
+        ));
         assert!(resolver.fetches().is_empty());
 
-        assert!(
-            !floor
-                .fetch_if_permitted(&mut resolver, Request::finalized(Height::new(6)))
-                .denied()
-        );
-        assert!(
-            !floor
-                .fetch_if_permitted(&mut resolver, Request::notarized(round(6)))
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::new(6))),
+            FetchAdmission::Issued
+        ));
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(6))),
+            FetchAdmission::Issued
+        ));
 
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 2);
@@ -339,26 +329,24 @@ mod tests {
         let mut rng = commonware_utils::test_rng();
         let target = crypto_ed25519::PrivateKey::random(&mut rng).public_key();
 
-        assert!(
-            floor
-                .fetch_targeted_if_permitted(
-                    &mut resolver,
-                    Request::finalized(Height::new(5)),
-                    NonEmptyVec::new(target.clone()),
-                )
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_targeted_if_permitted(
+                &mut resolver,
+                Request::finalized(Height::new(5)),
+                NonEmptyVec::new(target.clone()),
+            ),
+            FetchAdmission::Denied
+        ));
         assert!(resolver.targeted().is_empty());
 
-        assert!(
-            !floor
-                .fetch_targeted_if_permitted(
-                    &mut resolver,
-                    Request::finalized(Height::new(6)),
-                    NonEmptyVec::new(target),
-                )
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_targeted_if_permitted(
+                &mut resolver,
+                Request::finalized(Height::new(6)),
+                NonEmptyVec::new(target),
+            ),
+            FetchAdmission::Issued
+        ));
         assert_eq!(
             resolver.targeted(),
             vec![Key::Finalized {
@@ -372,19 +360,18 @@ mod tests {
         let floor = floor();
         let mut resolver = TestResolver::default();
 
-        assert!(
-            !floor
-                .fetch_all_if_permitted(
-                    &mut resolver,
-                    vec![
-                        Request::finalized(Height::new(5)),
-                        Request::finalized(Height::new(6)),
-                        Request::notarized(round(5)),
-                        Request::notarized(round(6)),
-                    ],
-                )
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_all_if_permitted(
+                &mut resolver,
+                vec![
+                    Request::finalized(Height::new(5)),
+                    Request::finalized(Height::new(6)),
+                    Request::notarized(round(5)),
+                    Request::notarized(round(6)),
+                ],
+            ),
+            FetchAdmission::Issued
+        ));
 
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 2);
@@ -394,17 +381,16 @@ mod tests {
         );
 
         let mut resolver = TestResolver::default();
-        assert!(
-            floor
-                .fetch_all_if_permitted(
-                    &mut resolver,
-                    vec![
-                        Request::finalized(Height::new(5)),
-                        Request::notarized(round(5)),
-                    ],
-                )
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_all_if_permitted(
+                &mut resolver,
+                vec![
+                    Request::finalized(Height::new(5)),
+                    Request::notarized(round(5)),
+                ],
+            ),
+            FetchAdmission::Denied
+        ));
         assert!(resolver.fetches().is_empty());
     }
 
@@ -413,11 +399,10 @@ mod tests {
         let floor = Floor::<TestScheme, TestDigest>::resolved(None, round(5));
         let mut resolver = TestResolver::default();
 
-        assert!(
-            !floor
-                .fetch_if_permitted(&mut resolver, Request::finalized(Height::zero()))
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::zero())),
+            FetchAdmission::Issued
+        ));
 
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 1);
