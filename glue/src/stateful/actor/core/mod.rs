@@ -356,6 +356,7 @@ mod tests {
     struct VerifyGate {
         started: oneshot::Sender<()>,
         release: oneshot::Receiver<()>,
+        spawn_result: Option<oneshot::Sender<bool>>,
         finished: oneshot::Sender<()>,
     }
 
@@ -408,7 +409,7 @@ mod tests {
 
         async fn verify(
             &mut self,
-            _context: (deterministic::Context, Self::Context),
+            context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
@@ -424,6 +425,12 @@ mod tests {
                 .expect("unexpected verification");
             gate.started.send(()).expect("test must await execution");
             let _ = (&mut gate.release).await;
+            if let Some(spawn_result) = gate.spawn_result {
+                let handle = context.0.child("retained_child").spawn(|_| async move {});
+                spawn_result
+                    .send(handle.await.is_ok())
+                    .expect("test must await spawned work");
+            }
             gate.finished.send(()).expect("test must await completion");
             Some(TestMerkleized)
         }
@@ -454,6 +461,7 @@ mod tests {
             VerifyGate {
                 started,
                 release: release_rx,
+                spawn_result: None,
                 finished,
             },
             started_rx,
@@ -781,7 +789,9 @@ mod tests {
     #[test]
     fn dropped_verify_finishes_and_caches_state() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (gate, started_rx, mut release_tx, finished_rx) = verify_gate();
+            let (mut gate, started_rx, mut release_tx, finished_rx) = verify_gate();
+            let (spawn_result_tx, spawn_result_rx) = oneshot::channel();
+            gate.spawn_result = Some(spawn_result_tx);
             let (app, _calls) = GatedApp::new([gate]);
             let (marshal, marshal_actor, _resolver_handler) =
                 init_marshal_mailbox(context.child("marshal")).await;
@@ -817,6 +827,10 @@ mod tests {
             release_tx
                 .send(())
                 .expect("retained verification should still be running");
+            assert!(
+                spawn_result_rx.await.expect("spawn result missing"),
+                "retained verification should keep a usable runtime context",
+            );
             finished_rx
                 .await
                 .expect("retained verification should finish");

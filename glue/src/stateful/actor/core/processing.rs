@@ -309,6 +309,8 @@ where
         let (invalidate, invalidated) = oneshot::channel();
         assert!(invalidations.insert(id, invalidate).is_none());
 
+        // Abandoned verification can outlive its caller, so application work remains under the
+        // actor's supervision tree.
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
         let mut verifier = self.processor.verifier();
         let actor_context = self.context.as_present().child("verify");
@@ -317,7 +319,7 @@ where
             async move {
                 let ancestry = request.ancestry.clone();
                 let attempt_context = (
-                    request.context.0.child("verify_attempt"),
+                    actor_context.child("application"),
                     request.context.1.clone(),
                 );
                 let result = select! {
