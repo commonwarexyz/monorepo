@@ -3826,7 +3826,6 @@ mod tests {
         assert!(iter.next().is_none());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_vote_tracker_clears_compacted_state() {
         let mut rng = test_rng();
@@ -3882,7 +3881,49 @@ mod tests {
         ));
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_vote_tracker_insert_and_accessors() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 2);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let proposal = Proposal::new(round, View::zero(), sample_digest(1));
+        let scheme = &fixture.schemes[0];
+        let signer = Participant::new(0);
+        let notarize = Notarize::sign(scheme, proposal.clone()).unwrap();
+        let nullify = Nullify::sign::<Sha256>(scheme, round).unwrap();
+        let finalize = Finalize::sign(scheme, proposal.clone()).unwrap();
+        let mut tracker = VoteTracker::new(2, false);
+
+        assert!(tracker.insert_notarize(notarize.clone()));
+        assert!(tracker.insert_nullify(nullify.clone()));
+        assert!(tracker.insert_finalize(finalize.clone()));
+        assert_eq!(tracker.len_notarizes(), 1);
+        assert_eq!(tracker.len_nullifies(), 1);
+        assert_eq!(tracker.len_finalizes(), 1);
+        assert!(tracker.has_notarize(signer));
+        assert!(tracker.has_nullify(signer));
+        assert!(tracker.has_finalize(signer));
+
+        tracker.release_notarizes(&proposal);
+        tracker.release_nullifies();
+        tracker.release_finalizes(&proposal);
+        assert_eq!(tracker.len_notarizes(), 0);
+        assert_eq!(tracker.len_nullifies(), 0);
+        assert_eq!(tracker.len_finalizes(), 0);
+        assert!(!tracker.has_notarize(signer));
+        assert!(!tracker.has_nullify(signer));
+        assert!(!tracker.has_finalize(signer));
+        assert!(tracker.iter_notarizes().next().is_none());
+        assert!(tracker.iter_nullifies().next().is_none());
+        assert!(tracker.iter_finalizes().next().is_none());
+        assert!(!tracker.insert_notarize(notarize));
+        assert!(!tracker.insert_nullify(nullify));
+        assert!(!tracker.insert_finalize(finalize));
+
+        // Releasing a compacted phase is idempotent.
+        tracker.release_notarizes(&proposal);
+    }
+
     #[test]
     fn test_vote_tracker_retention_policy() {
         let mut rng = test_rng();
