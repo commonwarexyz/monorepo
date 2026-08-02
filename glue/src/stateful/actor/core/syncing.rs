@@ -326,6 +326,7 @@ where
             artifact.anchor,
             self.metrics,
             self.prune_config,
+            self.marshal.max_pending_acks(),
         );
 
         let mut pending_prune = None;
@@ -728,7 +729,6 @@ mod tests {
             let mut harness =
                 TestHarness::new_on(context.child("harness"), delayed, anchor(7, 9)).await;
             harness.syncing.prune_config = Some(PruneConfig {
-                max_pending_acks: NZUsize!(1),
                 maintenance_interval: NZUsize!(1),
                 retained_marshal_blocks: 0,
                 retained_qmdb_blocks: 0,

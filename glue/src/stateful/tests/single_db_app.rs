@@ -516,7 +516,6 @@ impl EngineDefinition for SingleDbEngine {
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
-                    max_pending_acks,
                     maintenance_interval: NZUsize!(5),
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,

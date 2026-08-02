@@ -317,6 +317,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             prune_config,
+            marshal.mailbox.max_pending_acks(),
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -343,7 +344,6 @@ mod tests {
                 &context,
                 "gated-prune",
                 Some(PruneConfig {
-                    max_pending_acks: NZUsize!(1),
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 0,
                     retained_qmdb_blocks: 0,
@@ -413,7 +413,6 @@ mod tests {
                 &context,
                 "gated-aborted-prune",
                 Some(PruneConfig {
-                    max_pending_acks: NZUsize!(1),
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 0,
                     retained_qmdb_blocks: 0,

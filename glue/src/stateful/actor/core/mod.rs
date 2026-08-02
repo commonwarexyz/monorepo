@@ -67,11 +67,6 @@ impl Drop for Deferred {
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneConfig {
-    /// Marshal's ack window. Must match the marshal config used to construct the marshal
-    /// mailbox: pruning retains at least the last `max_pending_acks + 1` finalized blocks so
-    /// that any state a restart may need to rewind to is never pruned.
-    pub max_pending_acks: NonZeroUsize,
-
     /// Prune databases and marshal every `maintenance_interval` finalized blocks.
     ///
     /// This controls only how often pruning runs, not how much history is retained. Each prune
@@ -79,14 +74,15 @@ pub struct PruneConfig {
     /// prunes more frequently but never below those floors.
     pub maintenance_interval: NonZeroUsize,
 
-    /// Finalized blocks to retain in marshal beyond `max_pending_acks + 1`.
+    /// Finalized blocks to retain in marshal beyond its acknowledgement window plus one.
     ///
     /// This should generally be set to a large enough number of blocks to facilitate downtime
     /// on a validator that has completed state sync. If marshal retains too few blocks, a rebooted
     /// node may fail to recover due to peers being unable to serve the blocks it needs to catch up.
     pub retained_marshal_blocks: usize,
 
-    /// Finalized blocks' worth of operations to retain in QMDB beyond `max_pending_acks + 1`.
+    /// Finalized blocks' worth of operations to retain in QMDB beyond marshal's
+    /// acknowledgement window plus one.
     ///
     /// This value is generally safe to set to 0, as QMDB operations below the active range are only
     /// needed to serve state sync requests for lagging peers. Some network topologies may benefit from
@@ -205,11 +201,6 @@ where
     pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
         if let Some(prune_config) = config.prune_config {
             prune_config.assert_valid();
-            assert_eq!(
-                prune_config.max_pending_acks.get(),
-                config.marshal.max_pending_acks(),
-                "stateful pruning and marshal must use the same pending acknowledgement window",
-            );
         }
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -310,6 +301,7 @@ where
             anchor,
             metrics,
             self.prune_config,
+            self.marshal.max_pending_acks(),
         );
         Processing {
             context: self.context,
