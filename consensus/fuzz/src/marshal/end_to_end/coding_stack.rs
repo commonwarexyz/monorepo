@@ -297,6 +297,7 @@ pub(crate) async fn start_engine_coding<EC>(
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
             forwarding,
+            track_historical_votes: false,
         },
     );
     engine.start(vote, certificate, resolver);

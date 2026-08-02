@@ -357,6 +357,7 @@ where
             ),
             strategy: Sequential,
             forwarding: input.forwarding,
+            track_historical_votes: false,
         };
         Engine::new(primary_context.child("engine"), engine_cfg).start(
             (vote_sender_primary, vote_receiver_primary),
@@ -415,6 +416,7 @@ where
             ),
             strategy: Sequential,
             forwarding: input.forwarding,
+            track_historical_votes: false,
         };
         Engine::new(secondary_context.child("engine"), engine_cfg).start(
             (vote_sender_secondary, vote_receiver_secondary),
