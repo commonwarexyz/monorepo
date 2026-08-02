@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::dkg::{
-    Registrar, ReshareBlock, SecretStore, orchestrator,
+    ParticipantsProvider, Registrar, ReshareBlock, SecretStore, orchestrator, reshare,
     types::{Payload, SchemeInfo},
 };
 use bytes::{Buf, BufMut};
@@ -11,9 +11,13 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Automaton, Block, CertifiableAutomaton, Heightable, Relay, Reporter,
-    marshal::{Update, core::Mailbox as MarshalMailbox, standard::Standard},
+    marshal::{
+        self, Start as MarshalStart, Update,
+        core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+        standard::Standard,
+    },
     simplex::{self, Plan, elector::RoundRobin, mocks::scheme, types::Context},
-    types::{Epoch, Height, Round, View, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
     Digest, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
@@ -24,7 +28,7 @@ use commonware_cryptography::{
             variant::{MinPk, Variant},
         },
     },
-    certificate::ConstantProvider,
+    certificate::{ConstantProvider, Verifier as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     transcript::Summary,
@@ -35,15 +39,17 @@ use commonware_p2p::{
     utils::mux,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::deterministic;
+use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_storage::archive::immutable;
 use commonware_utils::{
-    Acknowledgement, NZU16, NZUsize,
+    Acknowledgement, NZU16, NZU64, NZUsize, acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
+    ordered::Set,
     sync::Mutex,
 };
 use std::{
     collections::{BTreeMap, HashSet},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64},
     sync::Arc,
     time::Duration,
 };
@@ -75,6 +81,32 @@ pub(crate) type TestActor = orchestrator::Actor<
     TestElector,
     TestStrategy,
 >;
+pub(crate) type TestReshareActor = reshare::Actor<
+    deterministic::Context,
+    TestBlock,
+    TestBlsVariant,
+    TestSigner,
+    TestManager,
+    TestBlocker,
+    StaticParticipants,
+    MemorySecretStore,
+    Sequential,
+    commonware_cryptography::ed25519::Batch,
+    TestScheme,
+    TestMarshalVariant,
+    MockConsumer,
+>;
+
+#[derive(Clone)]
+pub(crate) struct StaticParticipants(pub(crate) Set<TestPublicKey>);
+
+impl ParticipantsProvider for StaticParticipants {
+    type PublicKey = TestPublicKey;
+
+    async fn participants(&mut self, _epoch: Epoch) -> Set<Self::PublicKey> {
+        self.0.clone()
+    }
+}
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_ORCHESTRATOR_TEST";
 
@@ -483,6 +515,92 @@ pub(crate) fn genesis_block(leader: TestPublicKey) -> TestBlock {
         parent: (View::zero(), digest),
     };
     TestBlock::new::<Sha256>(context, digest, Height::zero(), 0)
+}
+
+/// Builds a marshal mailbox whose actor is dropped before it starts.
+///
+/// Reads through the returned mailbox resolve as unavailable, which is useful
+/// for phase tests that need a marshal handle but drive finalized blocks
+/// directly.
+pub(crate) async fn closed_marshal_mailbox(
+    context: deterministic::Context,
+    signer: &TestSigner,
+    scheme: TestScheme,
+    partition_prefix: &str,
+    blocks_per_epoch: NonZeroU64,
+) -> TestMarshalMailbox {
+    let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+    let finalizations_by_height =
+        immutable::Archive::init(context.child("finalizations_by_height"), {
+            let _: () = TestScheme::certificate_codec_config_unbounded();
+            archive_config(
+                partition_prefix,
+                "finalizations",
+                page_cache.clone(),
+                (),
+            )
+        })
+        .await
+        .expect("finalizations archive");
+    let finalized_blocks = immutable::Archive::init(
+        context.child("finalized_blocks"),
+        archive_config(partition_prefix, "blocks", page_cache.clone(), ()),
+    )
+    .await
+    .expect("blocks archive");
+
+    let (actor, mailbox, _) = MarshalActor::<_, _, _, _, _, _, _, Exact>::init(
+        context.child("marshal"),
+        finalizations_by_height,
+        finalized_blocks,
+        marshal::Config {
+            provider: TestProvider::new(scheme),
+            epocher: FixedEpocher::new(blocks_per_epoch),
+            start: MarshalStart::Genesis(genesis_block(signer.public_key())),
+            partition_prefix: format!("{partition_prefix}-marshal"),
+            mailbox_size: NZUsize!(16),
+            view_retention: ViewDelta::new(8),
+            prunable_items_per_section: NZU64!(10),
+            page_cache,
+            replay_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
+            block_codec_config: (),
+            max_repair: NZUsize!(4),
+            max_pending_acks: NZUsize!(4),
+            strategy: Sequential,
+        },
+    )
+    .await;
+    drop(actor);
+    mailbox
+}
+
+fn archive_config<C>(
+    prefix: &str,
+    name: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+) -> immutable::Config<C> {
+    immutable::Config {
+        metadata_partition: format!("{prefix}-{name}-metadata"),
+        freezer_table_partition: format!("{prefix}-{name}-freezer-table"),
+        freezer_table_initial_size: 64,
+        freezer_table_resize_frequency: 10,
+        freezer_table_resize_chunk_size: 10,
+        freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
+        freezer_key_page_cache: page_cache,
+        freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
+        freezer_value_target_size: 1024,
+        freezer_value_compression: None,
+        ordinal_partition: format!("{prefix}-{name}-ordinal"),
+        items_per_section: NZU64!(10),
+        codec_config,
+        replay_buffer: NZUsize!(1024),
+        freezer_key_write_buffer: NZUsize!(1024),
+        freezer_value_write_buffer: NZUsize!(1024),
+        ordinal_write_buffer: NZUsize!(1024),
+    }
 }
 
 pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {

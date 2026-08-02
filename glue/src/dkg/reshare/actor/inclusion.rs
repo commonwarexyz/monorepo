@@ -1132,20 +1132,45 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::tests::mocks::{TestBlock, TestBlsVariant};
-    use commonware_cryptography::{
-        Signer,
-        bls12381::{
-            dkg::feldman_desmedt::Dealer as CryptoDealer, primitives::sharing::Mode as SharingMode,
-        },
-        ed25519::{PrivateKey, PublicKey},
+    use crate::dkg::{
+        fence::Fence,
+        reshare::actor::{Config, DkgConfig},
+        state_sync::Plan as StateSyncPlan,
+        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant},
     };
+    use commonware_actor::Feedback;
+    use commonware_consensus::{Reporter, marshal};
+    use commonware_cryptography::{
+        Digestible as _, Signer,
+        bls12381::{
+            dkg::feldman_desmedt::{Dealer as CryptoDealer, Verdict},
+            primitives::sharing::Mode as SharingMode,
+        },
+        ed25519::{self, PrivateKey, PublicKey},
+        sha256::Sha256,
+    };
+    use commonware_p2p::simulated::{Config as NetworkConfig, Network};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-    use commonware_utils::{N3f1, NZU32, NZU64, channel::oneshot, ordered::Set, test_rng};
+    use commonware_utils::{
+        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, acknowledgement::Exact,
+        channel::oneshot, ordered::Set, test_rng,
+    };
     use futures::{FutureExt, stream};
-    use std::sync::Arc;
+    use std::{marker::PhantomData, sync::Arc, time::Duration};
+
+    const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST";
 
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
+    struct DropNotifier(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropNotifier {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 
     fn signers() -> Vec<PrivateKey> {
         (0..4).map(PrivateKey::from_seed).collect()
@@ -1157,7 +1182,7 @@ mod tests {
 
     fn info() -> Info<TestBlsVariant, PublicKey> {
         Info::new::<N3f1>(
-            b"_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST",
+            TEST_NAMESPACE,
             0,
             None,
             SharingMode::NonZeroCounter,
@@ -1191,6 +1216,196 @@ mod tests {
         let signed = dealer.finalize::<N3f1>();
         let (public_key, log) = signed.check(&info).expect("dealer log should be valid");
         BTreeMap::from([(public_key, log)])
+    }
+
+    #[test]
+    fn dropping_verification_aborts_active_task() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (dropped_tx, dropped_rx) = oneshot::channel();
+            let task = context.child("active").spawn(|_| async move {
+                let _notifier = DropNotifier(Some(dropped_tx));
+                let _ = started_tx.send(());
+                futures::future::pending::<VerifiedLogs<TestBlsVariant, PrivateKey>>().await
+            });
+            let mut verification = Verification::new(dealer_logs(0));
+            verification.start(task);
+            started_rx.await.expect("task should start");
+
+            drop(verification);
+
+            dropped_rx.await.expect("task should be aborted");
+        });
+    }
+
+    #[test]
+    fn inclusion_serves_retargeted_waiter_before_canonical_dkg_failure() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let public_key = signer.public_key();
+            let participants = Set::from_iter_dedup([public_key.clone()]);
+            let info = Info::new::<N3f1>(
+                TEST_NAMESPACE,
+                0,
+                None,
+                SharingMode::NonZeroCounter,
+                participants.clone(),
+                participants.clone(),
+            )
+            .expect("valid singleton info");
+            let secret_store = MemorySecretStore::default();
+            let mut store = Store::init(
+                context.child("store"),
+                "inclusion-actor-store",
+                NZU32!(16),
+                secret_store.clone(),
+            )
+            .await;
+
+            let seed = store.seed_or_random(Epoch::zero(), test_rng()).await;
+            let mut dealer = store
+                .create_dealer::<PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    signer.clone(),
+                    info.clone(),
+                    None,
+                    seed,
+                )
+                .expect("dealer");
+            let mut player = store
+                .create_player::<PrivateKey, N3f1>(Epoch::zero(), signer.clone(), info.clone())
+                .expect("player");
+            let (recipient, public, private) = dealer
+                .shares_to_distribute()
+                .next()
+                .expect("self dealing");
+            assert_eq!(recipient, public_key);
+            let Verdict::Valid(ack) = player
+                .handle(
+                    &mut store,
+                    Epoch::zero(),
+                    public_key.clone(),
+                    public,
+                    private,
+                )
+                .await
+            else {
+                panic!("valid self dealing");
+            };
+            assert!(matches!(
+                dealer
+                    .handle(&mut store, Epoch::zero(), public_key.clone(), ack)
+                    .await,
+                Verdict::Valid(())
+            ));
+            assert!(dealer.finalize::<N3f1>());
+            let signed_log = dealer.finalized().expect("signed dealer log");
+
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let marshal = mocks::closed_marshal_mailbox(
+                context.child("marshal"),
+                &signer,
+                fixture.schemes[0].clone(),
+                "inclusion-actor",
+                NZU64!(4),
+            )
+            .await;
+            let (_network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                vec![public_key.clone()],
+            )
+            .await;
+            let (fence, _gate) = Fence::new(Epoch::zero());
+            let (mut actor, mut mailbox) = mocks::TestReshareActor::new_dkg(
+                context.child("actor"),
+                Config {
+                    signer: signer.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    participants_provider: mocks::StaticParticipants(participants.clone()),
+                    secret_store,
+                    strategy: Sequential,
+                    registrar: mocks::MockConsumer::default(),
+                    marshal,
+                    state_sync: StateSyncPlan::disabled(),
+                    fence,
+                    namespace: TEST_NAMESPACE,
+                    sharing_mode: SharingMode::NonZeroCounter,
+                    mailbox_size: NZUsize!(16),
+                    partition_prefix: "inclusion-actor".into(),
+                    max_participants: NZU32!(16),
+                    blocks_per_epoch: NZU64!(4),
+                    batch_verifier: PhantomData::<ed25519::Batch>,
+                },
+                DkgConfig {
+                    participants: participants.clone(),
+                    completion: Box::new(|_| {}),
+                },
+            );
+
+            let genesis = mocks::genesis_block(public_key);
+            let pending_block = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(2),
+                2,
+            )
+            .with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                NZU32!(16),
+                Payload::DealerLog(signed_log),
+            );
+            let final_block = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                pending_block.digest(),
+                Height::new(3),
+                3,
+            );
+            let inclusion = context.child("inclusion").spawn(|_| async move {
+                let result = actor
+                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .await;
+                (result, store)
+            });
+
+            assert!(matches!(
+                mailbox.epoch_info(stream::empty()).await,
+                EpochInfoResponse::Available(None)
+            ));
+
+            let mut request_mailbox = mailbox.clone();
+            let pending = request_mailbox.epoch_info(stream::iter([Arc::new(pending_block)]));
+            futures::pin_mut!(pending);
+            assert!(pending.as_mut().now_or_never().is_none());
+
+            let (ack, ack_waiter) = Exact::handle();
+            assert_eq!(
+                mailbox.report(marshal::Update::Block(Arc::new(final_block), ack)),
+                Feedback::Ok
+            );
+
+            let EpochInfoResponse::Available(Some(Payload::EpochInfo(artifact))) = pending.await
+            else {
+                panic!("pending log should produce a DKG artifact");
+            };
+            assert_eq!(artifact.outcome, EpochOutcome::Success);
+            assert_eq!(artifact.epoch, Epoch::zero());
+            assert_eq!(artifact.output.dealers(), &participants);
+            assert_eq!(artifact.output.players(), &participants);
+            assert_eq!(artifact.players, participants);
+            assert!(artifact.next_players.is_empty());
+
+            ack_waiter.await.expect("final block should be acknowledged");
+            let (result, store) = inclusion.await.expect("inclusion should finish");
+            assert!(result.is_continue());
+            assert!(store.current().is_none());
+        });
     }
 
     #[test]
