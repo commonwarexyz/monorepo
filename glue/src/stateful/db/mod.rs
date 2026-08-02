@@ -1841,8 +1841,9 @@ mod tests {
         time::Duration,
     };
 
-    mod initial_sync_targets {
-        use super::ManagedDb;
+    mod managed_db_lifecycle {
+        use super::{ManagedDb, Shared};
+        use crate::stateful::db::Unmerkleized;
         use commonware_cryptography::{Sha256, sha256::Digest};
         use commonware_parallel::Sequential;
         use commonware_runtime::{
@@ -2157,14 +2158,26 @@ mod tests {
             }
         }
 
-        async fn assert_initial_sync_target<T>(context: Context, config: T::Config)
+        async fn assert_initial_sync_target_and_finalize<T>(context: Context, config: T::Config)
         where
-            T: ManagedDb<Context>,
+            T: ManagedDb<Context> + 'static,
+            T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
+            <T::Unmerkleized as Unmerkleized>::Error: Debug,
             T::SyncTarget: Debug,
         {
             let initial = T::initial_sync_target();
             let db = T::init(context, config).await.unwrap();
             assert_eq!(initial, db.sync_target());
+            let db = Shared::new("test", db);
+            let batch = T::new_batch(&db)
+                .await
+                .merkleize()
+                .await
+                .expect("empty batch must merkleize");
+            let (slot, database) = db.write().await;
+            let (database, sync) = T::finalize(database, batch).await.unwrap();
+            slot.put(database);
+            sync.await.expect("empty batch finalize flush failed");
         }
 
         #[rstest]
@@ -2209,16 +2222,18 @@ mod tests {
             PhantomData::<KeylessCompactVariable>,
             keyless_compact_variable_config
         )]
-        fn initial_sync_target_matches_initialized_database<T>(
+        fn initial_sync_target_and_empty_finalize_match_initialized_database<T>(
             #[case] _db: PhantomData<T>,
             #[case] config: fn(&Context, &str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
+            T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
+            <T::Unmerkleized as Unmerkleized>::Error: Debug,
             T::SyncTarget: Debug,
         {
             deterministic::Runner::default().start(|context| async move {
                 let config = config(&context, "db");
-                assert_initial_sync_target::<T>(context.child("db"), config).await;
+                assert_initial_sync_target_and_finalize::<T>(context.child("db"), config).await;
             });
         }
     }
@@ -3601,19 +3616,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "database finalize flush failed (index 1, type db1)")]
+    #[should_panic(
+        expected = "database finalize flush failed (index 1, type commonware_glue::stateful::db::tests::TestDb)"
+    )]
     fn barrier_panics_on_flush_failure() {
         deterministic::Runner::default().start(|_context| async move {
-            let barrier = Barrier {
-                syncs: vec![
-                    ("db0", Some(0), Handle::ready(Ok(()))),
-                    (
-                        "db1",
-                        Some(1),
-                        Handle::ready(Err(RuntimeError::WriteFailed)),
-                    ),
-                ],
-            };
+            let barrier = Barrier::from_handles::<TestDb>([
+                Handle::ready(Ok(())),
+                Handle::ready(Err(RuntimeError::WriteFailed)),
+            ]);
             let _ = barrier.durable().await;
         });
     }
@@ -3889,6 +3900,9 @@ mod tests {
                 },
             );
 
+            // Let the coordinator finish its initial queue drain so the update
+            // below exercises the live select arm.
+            context.sleep(Duration::from_millis(1)).await;
             let (update, observed) = TipUpdate::with_observation(anchor(9), 7);
             let _ = tip_tx.send(update).await;
             observed

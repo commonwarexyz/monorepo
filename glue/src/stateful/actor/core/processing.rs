@@ -17,7 +17,7 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt, futures::Pool};
+use commonware_utils::{channel::fallible::OneshotExt, futures::Pool};
 use futures::{
     future::{Either, ready},
     poll,
@@ -274,8 +274,8 @@ mod tests {
         Reporter as _, marshal::Update, simplex::mocks::scheme as scheme_mocks, types::Height,
     };
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Runner as _, Spawner as _, Supervisor as _,
-        deterministic,
+        Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
+        Supervisor as _, deterministic,
     };
     use commonware_utils::{
         NZUsize,
@@ -285,8 +285,8 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
-    /// mailbox, the flush controls, and a guard keeping the (never-started)
-    /// marshal actor's mailbox open.
+    /// mailbox, flush controls, a guard keeping the (never-started) marshal
+    /// actor's mailbox open, and the processing actor handle.
     async fn spawn_processing(
         context: &deterministic::Context,
         prefix: &str,
@@ -295,6 +295,7 @@ mod tests {
         Mailbox<deterministic::Context, TestApp>,
         FlushControl,
         Box<dyn std::any::Any>,
+        Handle<()>,
     ) {
         let mut signing = context.child("signing");
         let scheme_fixture = scheme_mocks::fixture(&mut signing, b"gated", 1);
@@ -326,8 +327,8 @@ mod tests {
             processor,
             skip_finalized_until: None,
         };
-        context.child("loop").spawn(move |_| processing.start());
-        (Mailbox::new(sender), control, marshal.guards)
+        let actor = context.child("loop").spawn(move |_| processing.start());
+        (Mailbox::new(sender), control, marshal.guards, actor)
     }
 
     /// The loop keeps applying finalized blocks while earlier flushes are
@@ -338,7 +339,7 @@ mod tests {
     fn acks_and_prune_wait_for_flushes() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
-            let (mut mailbox, control, _marshal) = spawn_processing(
+            let (mut mailbox, control, _marshal, _actor) = spawn_processing(
                 &context,
                 "gated-prune",
                 Some(PruneConfig {
@@ -408,7 +409,7 @@ mod tests {
     #[test]
     fn aborted_flush_prevents_prune() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal) = spawn_processing(
+            let (mut mailbox, control, _marshal, actor) = spawn_processing(
                 &context,
                 "gated-aborted-prune",
                 Some(PruneConfig {
@@ -425,7 +426,7 @@ mod tests {
                 Arc::new(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
-            let (acknowledgement, waiter2) = Exact::handle();
+            let (acknowledgement, mut waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(2, 2)),
                 acknowledgement,
@@ -439,11 +440,11 @@ mod tests {
             waiter1.await.expect("durable block acknowledgement");
 
             drop(control.flushes.lock().remove(0));
+            actor.await.expect("processing actor should stop");
             assert!(
-                waiter2.await.is_err(),
-                "unflushed block must not be acknowledged",
+                poll!(&mut waiter2).is_pending(),
+                "aborted flush must leave its acknowledgement pending",
             );
-            context.sleep(Duration::from_millis(50)).await;
             assert!(
                 control.pruned.lock().is_empty(),
                 "aborted flush must prevent pruning",
@@ -457,7 +458,7 @@ mod tests {
     #[test]
     fn idle_acks_follow_flush_outcome() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal) =
+            let (mut mailbox, control, _marshal, actor) =
                 spawn_processing(&context, "gated-idle", None).await;
 
             // Park the loop idle with block 1's flush pending.
@@ -477,7 +478,7 @@ mod tests {
             // without displacing the new message.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
-            let (acknowledgement, waiter2) = Exact::handle();
+            let (acknowledgement, mut waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(2, 2)),
                 acknowledgement,
@@ -486,14 +487,72 @@ mod tests {
             while control.flushes.lock().is_empty() {
                 context.sleep(Duration::from_millis(10)).await;
             }
+            context.sleep(Duration::from_millis(50)).await;
 
             // Dropping block 2's release resolves its flush as shutdown. The
             // acknowledgement must be withheld so marshal's floor cannot pass
             // unflushed state.
             drop(control.flushes.lock().remove(0));
+            actor.await.expect("processing actor should stop");
             assert!(
-                waiter2.await.is_err(),
-                "unflushed block must not be acknowledged",
+                poll!(&mut waiter2).is_pending(),
+                "unflushed block acknowledgement must remain pending",
+            );
+        });
+    }
+
+    #[test]
+    fn ready_aborted_flush_stops_processing() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _marshal, actor) =
+                spawn_processing(&context, "gated-ready-abort", None).await;
+
+            let (acknowledgement, mut waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let (acknowledgement, mut waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(2, 2)),
+                acknowledgement,
+            ));
+            drop(control.flushes.lock().remove(0));
+
+            actor.await.expect("processing actor should stop");
+            assert_eq!(control.flushes.lock().len(), 1);
+            assert!(
+                poll!(&mut waiter1).is_pending() && poll!(&mut waiter2).is_pending(),
+                "unflushed acknowledgements must remain pending",
+            );
+        });
+    }
+
+    /// Stopping processing with a flush in flight must not cancel marshal's acknowledgement.
+    #[test]
+    fn shutdown_keeps_pending_flush_ack_pending() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _marshal, actor) =
+                spawn_processing(&context, "gated-shutdown", None).await;
+
+            let (acknowledgement, mut waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            drop(mailbox);
+            actor.await.expect("processing actor should stop");
+            assert!(
+                poll!(&mut waiter).is_pending(),
+                "shutdown must leave in-flight acknowledgements pending",
             );
         });
     }
@@ -504,7 +563,7 @@ mod tests {
     #[should_panic(expected = "database finalize flush failed (type")]
     fn flush_failure_panics_processing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal) =
+            let (mut mailbox, control, _marshal, _actor) =
                 spawn_processing(&context, "gated-failure", None).await;
 
             let (acknowledgement, _waiter) = Exact::handle();

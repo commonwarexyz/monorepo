@@ -1,6 +1,6 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::Application;
+use crate::stateful::{Application, actor::core::Deferred};
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -14,7 +14,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
-use commonware_utils::{acknowledgement::Exact, channel::oneshot};
+use commonware_utils::channel::oneshot;
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::{Span, info_span};
@@ -46,7 +46,7 @@ where
     Finalized {
         span: Span,
         block: Arc<A::Block>,
-        acknowledgement: Exact,
+        acknowledgement: Deferred,
     },
 
     /// Requests the attached database set.
@@ -272,7 +272,7 @@ where
                 Message::Finalized {
                     span,
                     block,
-                    acknowledgement,
+                    acknowledgement: acknowledgement.into(),
                 }
             }
         };

@@ -1993,6 +1993,19 @@ mod tests {
     }
 
     #[test]
+    fn execution_finalize_identical_duplicate_returns_false() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            assert!(harness.finalize(canonical.clone()).await);
+            assert!(!harness.finalize(canonical).await);
+            assert_eq!(harness.counter_value().await, Some(1));
+        });
+    }
+
+    #[test]
     fn execution_finalization_persists_state_to_db() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context.child("harness")).await;
