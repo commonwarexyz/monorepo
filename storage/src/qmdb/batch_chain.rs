@@ -3,8 +3,8 @@
 //! A batch chain is a linked sequence of in-memory batches built on top of a DB state. Each batch
 //! records its state via [`Bounds`] (where its operations sit in the log, and the root at each
 //! applicable boundary) and the inactivity floor declared by its commit. Older batches in the chain
-//! are tracked as [`AncestorBounds`] in newest-first order; some may already be on disk and others
-//! may not.
+//! are tracked as [`AncestorBounds`] in newest-first order. Some may already be applied to the
+//! database while others may not.
 //!
 //! Before applying a batch to the DB, the internal validation checks two things shared across QMDB
 //! variants (any, immutable, keyless):
@@ -12,8 +12,9 @@
 //! - The batch is not stale: the current DB state must match either the batch's recorded DB state
 //!   or one of its ancestor states.
 //! - Commit floors are monotonically non-decreasing along the chain, and no floor exceeds
-//!   its own commit location. Ancestors already on disk are skipped (their floors were
-//!   validated when they were first applied); the rest of the chain and the tip are checked.
+//!   its own commit location. Ancestors already applied to the database are skipped because their
+//!   floors were validated when they were first applied. The rest of the chain and the tip are
+//!   checked.
 //!
 //! Internal helpers walk the chain via weak parent references and snapshot ancestor bounds into a
 //! `Vec` for storage on a merkleized batch.
@@ -29,7 +30,7 @@ use std::sync::{Arc, Weak};
 /// Identifies a QMDB state by its operation `size` and authenticated `root`.
 #[derive(Clone, Copy, Debug)]
 pub struct Commitment<F: Family, D: Digest> {
-    /// Number of operations committed by the state.
+    /// Number of operations in the state.
     pub size: Location<F>,
     /// Root committing to those operations.
     pub root: D,
@@ -66,12 +67,12 @@ pub struct AncestorBounds<F: Family, D: Digest> {
 pub struct Bounds<F: Family, D: Digest> {
     /// [`Commitment`] immediately before this batch's own operations.
     pub base_commit: Commitment<F, D>,
-    /// [`Commitment`] at the boundary between committed DB operations and operations kept in
+    /// [`Commitment`] at the boundary between applied database operations and operations kept in
     /// this batch chain.
     ///
-    /// Usually this is the committed DB state when the batch chain was created.
+    /// Usually this is the database state when the batch chain was created.
     pub db_commit: Commitment<F, D>,
-    /// [`Commitment`] committed by this batch (its tip): the state after all its operations.
+    /// This batch's tip [`Commitment`]: the state after all its operations.
     pub tip_commit: Commitment<F, D>,
     /// Ancestor bounds in newest-first order.
     pub ancestors: Vec<AncestorBounds<F, D>>,
@@ -80,7 +81,7 @@ pub struct Bounds<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> Bounds<F, D> {
-    /// Create initial bounds for a batch built directly from a committed database state.
+    /// Create initial bounds for a batch built directly from the current database state.
     ///
     /// The base, DB boundary, and tip all coincide at `commit`, with no ancestors.
     pub(crate) const fn from_db(commit: Commitment<F, D>, inactivity_floor: Location<F>) -> Self {
