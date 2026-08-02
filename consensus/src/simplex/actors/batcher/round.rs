@@ -6,7 +6,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize, Kind,
-            NullifyFinalize, Outcome, Proposal, Vote, VoteTracker,
+            NullifyFinalize, ObservedVote, Outcome, Proposal, Vote, VoteTracker,
         },
     },
     types::{Participant, Round as Rnd},
@@ -153,7 +153,7 @@ impl<
     /// certification. When extended conflict reporting is disabled, compact
     /// state preserves duplicate suppression and proposal forwarding without
     /// reallocating the released vote map.
-    fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> Outcome {
+    pub(super) fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> Outcome {
         if constructed && let Vote::Finalize(finalize) = &message {
             // The voter only constructs a finalize after independently
             // authenticating the proposal.
@@ -174,7 +174,10 @@ impl<
                 }
                 return Outcome::Duplicate { retained };
             }
-            Outcome::Conflicting => return Outcome::Conflicting,
+            Outcome::Conflicting => {
+                assert!(!constructed, "conflicting constructed vote");
+                return Outcome::Conflicting;
+            }
         };
 
         // A compacted phase already has its certificate. Report newly observed signer
@@ -190,14 +193,6 @@ impl<
             self.verifier.add(message, constructed);
         }
         Outcome::Added { retained }
-    }
-
-    /// Adds a durable locally constructed vote.
-    pub fn add_constructed(&mut self, message: Vote<S, D>) {
-        assert!(
-            !matches!(self.accept_vote(message, true), Outcome::Conflicting),
-            "conflicting constructed vote"
-        );
     }
 
     /// Makes an independently authenticated proposal authoritative, restoring
@@ -271,8 +266,8 @@ impl<
                 }
 
                 // Check if finalized
-                if self.votes.saw_finalize(index) {
-                    if let Some(previous) = self.votes.finalize(index) {
+                if let Some(previous) = self.votes.saw_finalize(index) {
+                    if let ObservedVote::Retained(previous) = previous {
                         let activity = NullifyFinalize::new(nullify, previous.clone());
                         self.reporter.report(Activity::NullifyFinalize(activity));
                     }
@@ -305,8 +300,8 @@ impl<
                 }
 
                 // Check if nullified
-                if self.votes.saw_nullify(index) {
-                    if let Some(previous) = self.votes.nullify(index) {
+                if let Some(previous) = self.votes.saw_nullify(index) {
+                    if let ObservedVote::Retained(previous) = previous {
                         let activity = NullifyFinalize::new(previous.clone(), finalize);
                         self.reporter.report(Activity::NullifyFinalize(activity));
                     }

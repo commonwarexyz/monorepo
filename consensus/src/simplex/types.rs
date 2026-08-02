@@ -260,6 +260,15 @@ pub(crate) enum Outcome {
     Conflicting,
 }
 
+/// A recorded vote that may no longer be retained in full.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum ObservedVote<'a, T> {
+    /// The full vote remains available.
+    Retained(&'a T),
+    /// Only compact signer state remains.
+    Compacted,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     const NOTARIZE_SEEN: u8 = 1 << 0;
@@ -429,14 +438,27 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
     }
 
-    /// Returns whether `signer` previously nullified, including compact state.
-    pub(crate) fn saw_nullify(&self, signer: Participant) -> bool {
-        self.nullify(signer).is_some() || self.remembered(signer, Self::NULLIFY_SEEN)
+    /// Returns a previously observed nullify vote, including compact state.
+    pub(crate) fn saw_nullify(&self, signer: Participant) -> Option<ObservedVote<'_, Nullify<S>>> {
+        self.nullify(signer)
+            .map(ObservedVote::Retained)
+            .or_else(|| {
+                self.remembered(signer, Self::NULLIFY_SEEN)
+                    .then_some(ObservedVote::Compacted)
+            })
     }
 
-    /// Returns whether `signer` previously finalized, including compact state.
-    pub(crate) fn saw_finalize(&self, signer: Participant) -> bool {
-        self.finalize(signer).is_some() || self.remembered(signer, Self::FINALIZE_SEEN)
+    /// Returns a previously observed finalize vote, including compact state.
+    pub(crate) fn saw_finalize(
+        &self,
+        signer: Participant,
+    ) -> Option<ObservedVote<'_, Finalize<S, D>>> {
+        self.finalize(signer)
+            .map(ObservedVote::Retained)
+            .or_else(|| {
+                self.remembered(signer, Self::FINALIZE_SEEN)
+                    .then_some(ObservedVote::Compacted)
+            })
     }
 
     /// Returns whether `signer` is known to have the authoritative proposal from notarizing it.
@@ -3847,7 +3869,10 @@ mod tests {
             Outcome::Added { retained: false }
         ));
         assert!(tracker.has_notarize_for(signer, &proposal));
-        assert!(tracker.saw_nullify(signer));
+        assert!(matches!(
+            tracker.saw_nullify(signer),
+            Some(ObservedVote::Compacted)
+        ));
         assert!(tracker.has_finalize_for(signer, &proposal));
 
         tracker.clear_notarizes();
@@ -3858,7 +3883,7 @@ mod tests {
         ));
 
         tracker.clear_nullifies();
-        assert!(!tracker.saw_nullify(signer));
+        assert!(tracker.saw_nullify(signer).is_none());
         assert!(matches!(
             tracker.record(&nullify, Some(&proposal)),
             Outcome::Added { retained: true }
