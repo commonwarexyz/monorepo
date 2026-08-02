@@ -213,7 +213,7 @@ fn fuzz_any<F: Graftable>(input: &FuzzInput, family: &str) {
                         context: context
                             .child("destination")
                             .with_attribute("instance", syncs),
-                        resolver: source_arc.clone(),
+                        source: source_arc.clone(),
                         target,
                         max_outstanding_requests: outstanding,
                         fetch_batch_size: NZU64!(fetch),
@@ -301,7 +301,7 @@ fn fuzz_current<F: Graftable>(input: &FuzzInput, family: &str) {
                         context: context
                             .child("destination")
                             .with_attribute("instance", syncs),
-                        resolver: source_arc.clone(),
+                        source: source_arc.clone(),
                         target,
                         max_outstanding_requests: outstanding,
                         fetch_batch_size: NZU64!(fetch),
@@ -390,7 +390,7 @@ fn fuzz_immutable<F: Graftable>(input: &FuzzInput, family: &str) {
                         context: context
                             .child("destination")
                             .with_attribute("instance", syncs),
-                        resolver: source_arc.clone(),
+                        source: source_arc.clone(),
                         target,
                         max_outstanding_requests: outstanding,
                         fetch_batch_size: NZU64!(fetch),
@@ -472,7 +472,7 @@ fn fuzz_keyless<F: Graftable>(input: &FuzzInput, family: &str) {
                         context: context
                             .child("destination")
                             .with_attribute("instance", syncs),
-                        resolver: source_arc.clone(),
+                        source: source_arc.clone(),
                         target,
                         max_outstanding_requests: outstanding,
                         fetch_batch_size: NZU64!(fetch),

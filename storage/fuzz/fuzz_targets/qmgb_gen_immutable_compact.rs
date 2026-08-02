@@ -14,7 +14,7 @@ use commonware_storage::{
             fixed::{CompactConfig as FixedConfig, CompactDb as FixedDb},
             variable::{CompactConfig as VariableConfig, CompactDb as VariableDb},
         },
-        sync::compact,
+        sync,
     },
 };
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize};
@@ -219,7 +219,7 @@ fn fuzz_fixed<F: Family>(input: &FuzzInput, name: &str) {
                 }
                 Operation::Target => {
                     let target = db.target();
-                    assert!(target.validate().is_ok());
+                    assert!(sync::Target::try_from(&target).is_ok());
                     assert_eq!(target.root, db.root());
                 }
                 Operation::CompactSync => {
@@ -228,14 +228,19 @@ fn fuzz_fixed<F: Family>(input: &FuzzInput, name: &str) {
                     let source = Arc::new(db);
                     let client_config = fixed_config(&format!("{name}-client-{sync_id}"), &context);
                     let client: FixedDb<F, _, Digest, Digest, Sha256, Sequential> =
-                        compact::sync(compact::Config {
+                        sync::sync(sync::engine::Config {
                             context: context.child("client"),
-                            resolver: source.clone(),
-                            target: target.clone(),
+                            source: source.clone(),
+                            target: sync::Target::try_from(&target)
+                                .expect("compact target should be valid"),
+                            max_outstanding_requests: 1,
+                            fetch_batch_size: NZU64!(1),
+                            apply_batch_size: NZU64!(1024),
                             db_config: client_config,
                             update_rx: None,
                             finish_rx: None,
                             reached_target_tx: None,
+                            max_retained_roots: 1,
                         })
                         .await
                         .expect("compact-sync fixed immutable db");
@@ -374,7 +379,7 @@ fn fuzz_variable<F: Family>(input: &FuzzInput, name: &str) {
                 }
                 Operation::Target => {
                     let target = db.target();
-                    assert!(target.validate().is_ok());
+                    assert!(sync::Target::try_from(&target).is_ok());
                     assert_eq!(target.root, db.root());
                 }
                 Operation::CompactSync => {
@@ -391,10 +396,14 @@ fn fuzz_variable<F: Family>(input: &FuzzInput, name: &str) {
                         Sha256,
                         VariableCodec,
                         Sequential,
-                    > = compact::sync(compact::Config {
+                    > = sync::sync(sync::engine::Config {
                         context: context.child("client"),
-                        resolver: source.clone(),
-                        target: target.clone(),
+                        source: source.clone(),
+                        target: sync::Target::try_from(&target)
+                            .expect("compact target should be valid"),
+                        max_outstanding_requests: 1,
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1024),
                         db_config: client_config,
                         update_rx: None,
                         finish_rx: None,

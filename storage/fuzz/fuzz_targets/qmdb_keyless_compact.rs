@@ -12,7 +12,7 @@ use commonware_storage::{
     qmdb::{
         Error,
         keyless::variable::{CompactConfig, CompactDb},
-        sync::compact as compact_sync,
+        sync,
     },
 };
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize};
@@ -483,7 +483,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                 Operation::Target => {
                     let target = db.target();
                     let expected = synced.last().unwrap();
-                    assert_eq!(target.leaf_count.as_u64(), expected.size);
+                    assert_eq!(target.size.as_u64(), expected.size);
                     assert_eq!(target.root, expected.root);
                 }
 
@@ -514,14 +514,18 @@ fn fuzz_family<F: Family, S: Strategy>(
         let target = db.target();
         let source = Arc::new(db);
         let client_cfg = test_config(&format!("{suffix}-client"), &context, strategy.clone());
-        let client: Db<F, S> = compact_sync::sync(compact_sync::Config {
+        let client: Db<F, S> = sync::sync(sync::engine::Config {
             context: context.child("client"),
-            resolver: source.clone(),
-            target: target.clone(),
+            source: source.clone(),
+            target: sync::Target::try_from(&target).expect("compact target should be valid"),
+            max_outstanding_requests: 1,
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: NZU64!(1024),
             db_config: client_cfg.clone(),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
+            max_retained_roots: 1,
         })
         .await
         .expect("Compact sync should not fail");
