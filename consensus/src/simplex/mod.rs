@@ -5831,6 +5831,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(
                     context
@@ -6114,6 +6115,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(
                     context
@@ -6403,6 +6405,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(
                     context
