@@ -506,14 +506,14 @@ where
         Ok(self.journal.destroy().await?)
     }
 
-    /// The [`CommitId`](batch_chain::CommitId) committed by the database's current state.
-    pub(crate) fn commit_id(&self) -> batch_chain::CommitId<F, H::Digest> {
-        batch_chain::CommitId::new(self.last_commit_loc + 1, self.root)
+    /// The [`Commitment`](batch_chain::Commitment) committed by the database's current state.
+    pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
+        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, V, S> {
-        batch::UnmerkleizedBatch::new(self, self.commit_id())
+        batch::UnmerkleizedBatch::new(self, self.commitment())
     }
 
     /// Create an initial [`batch::MerkleizedBatch`] from the committed DB state.
@@ -521,7 +521,7 @@ where
         Arc::new(batch::MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
             parent: None,
-            bounds: batch_chain::Bounds::from_db(self.commit_id(), self.inactivity_floor_loc),
+            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 
@@ -536,7 +536,7 @@ where
     ) -> Result<(), Error<F>> {
         batch
             .bounds
-            .validate_apply_to(self.commit_id(), self.inactivity_floor_loc)
+            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.

@@ -32,7 +32,7 @@ use crate::{
     qmdb::{
         self, Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, CommitId},
+        batch_chain::{self, Bounds, Commitment},
         compact::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
@@ -98,7 +98,7 @@ where
     merkle_batch: compact_merkle::UnmerkleizedBatch<F, H::Digest, S>,
     appends: Vec<V::Value>,
     parent: Option<Arc<MerkleizedBatch<F, H::Digest, V, S>>>,
-    base: batch_chain::CommitId<F, H::Digest>,
+    base: batch_chain::Commitment<F, H::Digest>,
 }
 
 /// A speculative batch whose root digest has been computed.
@@ -121,8 +121,8 @@ where
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
-    /// The [`CommitId`] this batch commits to.
-    pub(super) const fn commit_id(&self) -> CommitId<F, D> {
+    /// The [`Commitment`] this batch commits to.
+    pub(super) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip_commit
     }
 
@@ -145,7 +145,7 @@ where
             merkle_batch: compact_merkle::UnmerkleizedBatch::wrap(self.merkle_batch.new_batch()),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
-            base: self.commit_id(),
+            base: self.commitment(),
         }
     }
 }
@@ -160,7 +160,7 @@ where
 {
     pub(super) fn new<E, C>(
         db: &Db<F, E, V, H, C, S>,
-        commit: batch_chain::CommitId<F, H::Digest>,
+        commit: batch_chain::Commitment<F, H::Digest>,
     ) -> Self
     where
         E: Context,
@@ -178,7 +178,7 @@ where
     /// The database's committed state at the base of this batch chain.
     ///
     /// Derived: a DB-created batch's base is the DB commit; a child's is its parent's `db_commit`.
-    fn db_commit(&self) -> CommitId<F, H::Digest> {
+    fn db_commit(&self) -> Commitment<F, H::Digest> {
         self.parent
             .as_ref()
             .map_or(self.base, |parent| parent.bounds.db_commit)
@@ -238,7 +238,7 @@ where
         let ancestors = batch_chain::collect_ancestor_bounds(
             ancestors,
             |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commit_id(),
+            |batch| batch.commitment(),
         );
 
         Arc::new(MerkleizedBatch {
@@ -248,7 +248,7 @@ where
             bounds: batch_chain::Bounds {
                 base_commit: self.base,
                 db_commit,
-                tip_commit: CommitId::new(total_size, root),
+                tip_commit: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -396,14 +396,14 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// The [`CommitId`] committed by the database's current state.
-    pub(crate) fn commit_id(&self) -> batch_chain::CommitId<F, H::Digest> {
-        batch_chain::CommitId::new(self.last_commit_loc + 1, self.root())
+    /// The [`Commitment`] committed by the database's current state.
+    pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
+        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root())
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, V, S> {
-        UnmerkleizedBatch::new(self, self.commit_id())
+        UnmerkleizedBatch::new(self, self.commitment())
     }
 
     /// Create an owned merkleized batch representing the current applied state.
@@ -415,7 +415,7 @@ where
             merkle_batch: self.merkle.to_batch(),
             commit_metadata: self.last_commit_metadata.clone(),
             parent: None,
-            bounds: batch_chain::Bounds::from_db(self.commit_id(), self.inactivity_floor_loc),
+            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 
@@ -430,7 +430,7 @@ where
     ) -> Result<(), Error<F>> {
         batch
             .bounds
-            .validate_apply_to(self.commit_id(), self.inactivity_floor_loc)
+            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
     }
 
     /// Apply a merkleized batch to the database.

@@ -15,7 +15,7 @@ use crate::{
             operation::{Operation, update},
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
         },
-        batch_chain::{self, Bounds, CommitId},
+        batch_chain::{self, Bounds, Commitment},
         bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
@@ -202,7 +202,7 @@ where
 {
     /// Created from the DB via `db.new_batch()`.
     Db {
-        state: CommitId<F, D>,
+        state: Commitment<F, D>,
         inactivity_floor_loc: Location<F>,
         active_keys: usize,
     },
@@ -214,18 +214,18 @@ impl<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy> Base<F,
 where
     Operation<F, U>: Send + Sync,
 {
-    /// The [CommitId] for the state off which this batch was created.
-    fn base_state(&self) -> CommitId<F, D> {
+    /// The [Commitment] for the state off which this batch was created.
+    fn base_state(&self) -> Commitment<F, D> {
         match self {
             Self::Db { state, .. } => *state,
-            Self::Child(parent) => parent.commit_id(),
+            Self::Child(parent) => parent.commitment(),
         }
     }
 
-    /// The [CommitId] at the boundary between committed DB operations and the batch chain.
+    /// The [Commitment] at the boundary between committed DB operations and the batch chain.
     /// For `Db`, this is the committed DB state. For `Child`, it is inherited from the parent
     /// (which may be higher than the original DB size if ancestors were dropped before merkleize).
-    fn db_commit(&self) -> CommitId<F, D> {
+    fn db_commit(&self) -> Commitment<F, D> {
         match self {
             Self::Db { state, .. } => *state,
             Self::Child(parent) => parent.bounds.db_commit,
@@ -440,8 +440,8 @@ where
 {
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, U>, S>,
     ancestors: Vec<AncestorBatch<F, H::Digest, U, S>>,
-    base_commit: CommitId<F, H::Digest>,
-    db_commit: CommitId<F, H::Digest>,
+    base_commit: Commitment<F, H::Digest>,
+    db_commit: Commitment<F, H::Digest>,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
 }
@@ -1321,7 +1321,7 @@ where
             .iter()
             .map(|a| batch_chain::AncestorBounds {
                 floor: a.bounds.inactivity_floor,
-                state: a.commit_id(),
+                state: a.commitment(),
             })
             .collect();
 
@@ -1335,7 +1335,7 @@ where
             bounds: batch_chain::Bounds {
                 base_commit: self.base_commit,
                 db_commit: self.db_commit,
-                tip_commit: CommitId::new(commit_loc + 1, root),
+                tip_commit: Commitment::new(commit_loc + 1, root),
                 ancestors,
                 inactivity_floor: floor,
             },
@@ -2628,8 +2628,8 @@ where
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
-    /// The [`CommitId`] this batch commits to.
-    pub(crate) const fn commit_id(&self) -> CommitId<F, D> {
+    /// The [`Commitment`] this batch commits to.
+    pub(crate) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip_commit
     }
 }
@@ -2759,7 +2759,7 @@ where
             journal_batch: self.log.new_batch(),
             mutations: BTreeMap::new(),
             base: Base::Db {
-                state: self.commit_id(),
+                state: self.commitment(),
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 active_keys: self.active_keys,
             },
@@ -2789,7 +2789,7 @@ where
     ) -> Result<(), crate::qmdb::Error<F>> {
         batch
             .bounds
-            .validate_apply_to(self.commit_id(), self.inactivity_floor_loc)
+            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
     }
 
     /// Apply a batch to the database, returning the range of written operations.
@@ -2921,7 +2921,7 @@ where
             parent: None,
             total_active_keys: self.active_keys,
             ancestor_diffs: Vec::new(),
-            bounds: batch_chain::Bounds::from_db(self.commit_id(), self.inactivity_floor_loc),
+            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 }

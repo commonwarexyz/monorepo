@@ -28,15 +28,15 @@ use std::sync::{Arc, Weak};
 
 /// Identifies a QMDB state by its operation `size` and authenticated `root`.
 #[derive(Clone, Copy, Debug)]
-pub struct CommitId<F: Family, D: Digest> {
+pub struct Commitment<F: Family, D: Digest> {
     /// Number of operations committed by the state.
     pub size: Location<F>,
     /// Root committing to those operations.
     pub root: D,
 }
 
-impl<F: Family, D: Digest> CommitId<F, D> {
-    /// Create a [`CommitId`] from an operation `size` and its committing `root` digest.
+impl<F: Family, D: Digest> Commitment<F, D> {
+    /// Create a [`Commitment`] from an operation `size` and its committing `root` digest.
     pub(crate) const fn new(size: Location<F>, root: D) -> Self {
         Self { size, root }
     }
@@ -44,35 +44,35 @@ impl<F: Family, D: Digest> CommitId<F, D> {
 
 // `Family` is not `PartialEq`, so deriving would demand `F: PartialEq` at every call site.
 // Compare the fields directly, which needs only `Location<F>: PartialEq` and `D: Eq`.
-impl<F: Family, D: Digest> PartialEq for CommitId<F, D> {
+impl<F: Family, D: Digest> PartialEq for Commitment<F, D> {
     fn eq(&self, other: &Self) -> bool {
         self.size == other.size && self.root == other.root
     }
 }
 
-impl<F: Family, D: Digest> Eq for CommitId<F, D> {}
+impl<F: Family, D: Digest> Eq for Commitment<F, D> {}
 
 /// Bounds declared by an ancestor batch's commit.
 #[derive(Clone)]
 pub struct AncestorBounds<F: Family, D: Digest> {
     /// Inactivity floor declared by the ancestor commit.
     pub floor: Location<F>,
-    /// [`CommitId`] after the ancestor batch.
-    pub state: CommitId<F, D>,
+    /// [`Commitment`] after the ancestor batch.
+    pub state: Commitment<F, D>,
 }
 
 /// Position and inactivity-floor state for a merkleized QMDB batch.
 #[derive(Clone)]
 pub struct Bounds<F: Family, D: Digest> {
-    /// [`CommitId`] immediately before this batch's own operations.
-    pub base_commit: CommitId<F, D>,
-    /// [`CommitId`] at the boundary between committed DB operations and operations kept in
+    /// [`Commitment`] immediately before this batch's own operations.
+    pub base_commit: Commitment<F, D>,
+    /// [`Commitment`] at the boundary between committed DB operations and operations kept in
     /// this batch chain.
     ///
     /// Usually this is the committed DB state when the batch chain was created.
-    pub db_commit: CommitId<F, D>,
-    /// [`CommitId`] committed by this batch (its tip): the state after all its operations.
-    pub tip_commit: CommitId<F, D>,
+    pub db_commit: Commitment<F, D>,
+    /// [`Commitment`] committed by this batch (its tip): the state after all its operations.
+    pub tip_commit: Commitment<F, D>,
     /// Ancestor bounds in newest-first order.
     pub ancestors: Vec<AncestorBounds<F, D>>,
     /// Inactivity floor declared by this batch's commit.
@@ -83,7 +83,7 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     /// Create initial bounds for a batch built directly from a committed database state.
     ///
     /// The base, DB boundary, and tip all coincide at `commit`, with no ancestors.
-    pub(crate) const fn from_db(commit: CommitId<F, D>, inactivity_floor: Location<F>) -> Self {
+    pub(crate) const fn from_db(commit: Commitment<F, D>, inactivity_floor: Location<F>) -> Self {
         Self {
             base_commit: commit,
             db_commit: commit,
@@ -96,7 +96,7 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     /// Validate that this batch can be applied to the current database state.
     pub(crate) fn validate_apply_to(
         &self,
-        current: CommitId<F, D>,
+        current: Commitment<F, D>,
         current_floor: Location<F>,
     ) -> Result<(), Error<F>> {
         validate_batch_applicable(current, self.db_commit, &self.ancestors)?;
@@ -157,7 +157,7 @@ where
     D: Digest,
     I: IntoIterator<Item = Arc<T>>,
     L: Fn(&T) -> Location<F>,
-    C: Fn(&T) -> CommitId<F, D>,
+    C: Fn(&T) -> Commitment<F, D>,
 {
     ancestors
         .into_iter()
@@ -168,14 +168,14 @@ where
         .collect()
 }
 
-/// Validate that a batch can be applied to the database at the given [`CommitId`].
+/// Validate that a batch can be applied to the database at the given [`Commitment`].
 ///
 /// A batch is applicable if the database has not advanced since the batch was created, if all
 /// ancestors are already committed, or if the database has advanced to one of the batch's ancestor
-/// [`CommitId`]s.
+/// [`Commitment`]s.
 pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
-    current: CommitId<F, D>,
-    batch_db: CommitId<F, D>,
+    current: Commitment<F, D>,
+    batch_db: Commitment<F, D>,
     ancestors: &[AncestorBounds<F, D>],
 ) -> Result<(), Error<F>> {
     // A separate base check is unnecessary: a direct batch's base is `batch_db`, while a child
@@ -244,8 +244,8 @@ mod tests {
         Location::new(n)
     }
 
-    fn state(size: u64, marker: u8) -> CommitId<F, D> {
-        CommitId::new(Location::new(size), D::from([marker; 32]))
+    fn state(size: u64, marker: u8) -> Commitment<F, D> {
+        Commitment::new(Location::new(size), D::from([marker; 32]))
     }
 
     fn ancestor(floor: Location<F>, end: u64, marker: u8) -> AncestorBounds<F, D> {

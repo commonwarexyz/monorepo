@@ -12,7 +12,7 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, batch_chain::CommitId, bitmap::Shared, delete_known_loc, metrics::Metrics,
+        Error, batch_chain::Commitment, bitmap::Shared, delete_known_loc, metrics::Metrics,
         operation::Floored as _, update_known_loc,
     },
 };
@@ -181,9 +181,9 @@ where
         self.root
     }
 
-    /// The [`CommitId`] committed by the database's current state.
-    pub(crate) fn commit_id(&self) -> CommitId<F, H::Digest> {
-        CommitId::new(self.last_commit_loc + 1, self.root)
+    /// The [`Commitment`] committed by the database's current state.
+    pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
+        Commitment::new(self.last_commit_loc + 1, self.root)
     }
 
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.

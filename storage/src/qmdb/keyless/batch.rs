@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, CommitId},
+        batch_chain::{self, Bounds, Commitment},
     },
 };
 use commonware_codec::EncodeShared;
@@ -41,7 +41,7 @@ where
 
     /// The committed state immediately before this batch's operations (committed DB + prior
     /// batches). This batch's i-th operation lands at location `base.size + i`.
-    base: CommitId<F, H::Digest>,
+    base: Commitment<F, H::Digest>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -70,8 +70,8 @@ where
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
-    /// The [`CommitId`] this batch commits to.
-    pub(super) const fn commit_id(&self) -> CommitId<F, D> {
+    /// The [`Commitment`] this batch commits to.
+    pub(super) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip_commit
     }
 }
@@ -116,7 +116,7 @@ where
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, C>(
         keyless: &Keyless<F, E, V, C, H, S>,
-        commit: CommitId<F, H::Digest>,
+        commit: Commitment<F, H::Digest>,
     ) -> Self
     where
         E: Context,
@@ -138,7 +138,7 @@ where
     /// The database's committed state at the base of this batch chain.
     ///
     /// Derived: a DB-created batch's base is the DB commit; a child's is its parent's `db_commit`.
-    fn db_commit(&self) -> CommitId<F, H::Digest> {
+    fn db_commit(&self) -> Commitment<F, H::Digest> {
         self.parent
             .as_ref()
             .map_or(self.base, |parent| parent.bounds.db_commit)
@@ -294,7 +294,7 @@ where
         let ancestors = batch_chain::collect_ancestor_bounds(
             ancestors,
             |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commit_id(),
+            |batch| batch.commitment(),
         );
 
         Arc::new(MerkleizedBatch {
@@ -303,7 +303,7 @@ where
             bounds: batch_chain::Bounds {
                 base_commit: self.base,
                 db_commit,
-                tip_commit: CommitId::new(total_size, root),
+                tip_commit: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -413,7 +413,7 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
-            base: self.commit_id(),
+            base: self.commitment(),
         }
     }
 }

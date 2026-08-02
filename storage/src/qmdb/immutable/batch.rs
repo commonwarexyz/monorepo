@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
-        batch_chain::{self, Bounds, CommitId},
+        batch_chain::{self, Bounds, Commitment},
         immutable::operation::Operation,
         operation::Key,
     },
@@ -55,7 +55,7 @@ where
 
     /// The committed state immediately before this batch's operations (committed DB + prior
     /// batches). This batch's i-th operation lands at location `base.size + i`.
-    base: CommitId<F, H::Digest>,
+    base: Commitment<F, H::Digest>,
 }
 
 /// Merkleized authenticated-journal batch wrapping an [`Operation`] payload.
@@ -95,7 +95,7 @@ where
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, C, T>(
         immutable: &Immutable<F, E, K, V, C, H, T, S>,
-        commit: CommitId<F, H::Digest>,
+        commit: Commitment<F, H::Digest>,
     ) -> Self
     where
         E: Context,
@@ -114,7 +114,7 @@ where
     /// The database's committed state at the base of this batch chain.
     ///
     /// Derived: a DB-created batch's base is the DB commit; a child's is its parent's `db_commit`.
-    fn db_commit(&self) -> CommitId<F, H::Digest> {
+    fn db_commit(&self) -> Commitment<F, H::Digest> {
         self.parent
             .as_ref()
             .map_or(self.base, |parent| parent.bounds.db_commit)
@@ -284,7 +284,7 @@ where
             ancestor_diffs.push(Arc::clone(&batch.diff));
             ancestors.push(batch_chain::AncestorBounds {
                 floor: batch.bounds.inactivity_floor,
-                state: batch.commit_id(),
+                state: batch.commitment(),
             });
         }
 
@@ -296,7 +296,7 @@ where
             bounds: batch_chain::Bounds {
                 base_commit: self.base,
                 db_commit,
-                tip_commit: CommitId::new(total_size, root),
+                tip_commit: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -323,8 +323,8 @@ where
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
-    /// The [`CommitId`] this batch commits to.
-    pub(super) const fn commit_id(&self) -> CommitId<F, D> {
+    /// The [`Commitment`] this batch commits to.
+    pub(super) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip_commit
     }
 
@@ -425,7 +425,7 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
-            base: self.commit_id(),
+            base: self.commitment(),
         }
     }
 }
@@ -449,7 +449,7 @@ where
             diff: Arc::new(Vec::new()),
             parent: None,
             ancestor_diffs: Vec::new(),
-            bounds: batch_chain::Bounds::from_db(self.commit_id(), self.inactivity_floor_loc),
+            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 }
