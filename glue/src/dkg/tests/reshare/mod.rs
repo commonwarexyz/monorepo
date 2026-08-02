@@ -126,9 +126,10 @@ fn state_sync_next_player_plan_starting_at(
     let delayed = engine.participants[delayed_index].clone();
     let configured_floor = engine.state_sync_floor();
     let sync_floor = configured_floor.unwrap_or_else(|| {
-        start_height
-            .previous()
-            .expect("start height must have a sync floor")
+        // Entering the delayed round does not prove the preceding height is finalized.
+        FixedEpocher::new(EPOCH_LENGTH)
+            .first(next_player_epoch)
+            .expect("test epoch should be supported")
     });
     let max_sync_floor = configured_floor.unwrap_or_else(|| final_height(next_player_epoch.get()));
     let registrations = engine.registrations.clone();
