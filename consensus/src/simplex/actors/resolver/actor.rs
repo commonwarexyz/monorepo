@@ -64,6 +64,10 @@ struct PendingDeliveries {
 }
 
 impl PendingDeliveries {
+    /// Registers a delivery and its timeout under a never-reused ID.
+    ///
+    /// A timeout may complete after its delivery resolves. Never reusing IDs
+    /// prevents that stale completion from removing a newer delivery.
     fn push(
         &mut self,
         requested: View,
@@ -90,25 +94,32 @@ impl PendingDeliveries {
         });
     }
 
+    /// Removes the delivery associated with an expired timeout.
+    ///
+    /// Returns `None` when the delivery resolved before its timeout completed.
     fn remove(&mut self, id: u64) -> Option<PendingDelivery> {
         let index = self.entries.iter().position(|delivery| delivery.id == id)?;
         Some(self.entries.swap_remove(index))
     }
 
+    /// Drains active deliveries while reserving capacity to requeue unresolved ones.
     fn take(&mut self) -> Vec<PendingDelivery> {
         let entries = std::mem::take(&mut self.entries);
         self.entries.reserve(entries.len());
         entries
     }
 
+    /// Requeues an unresolved delivery without replacing or extending its timeout.
     fn requeue(&mut self, delivery: PendingDelivery) {
         self.entries.push(delivery);
     }
 
+    /// Waits for the next timeout and returns its associated delivery ID.
     fn next_completed(&mut self) -> impl Future<Output = u64> + '_ {
         self.timeouts.next_completed()
     }
 
+    /// Returns all live timeout futures, including those for resolved deliveries.
     #[cfg(test)]
     fn timeout_count(&self) -> usize {
         self.timeouts.len()
