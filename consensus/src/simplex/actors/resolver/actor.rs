@@ -35,6 +35,7 @@ use commonware_utils::{
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     num::NonZeroUsize,
     time::Duration,
 };
@@ -48,6 +49,70 @@ struct PendingDelivery {
     certification: View,
     purposes: NonEmptyVec<Purpose>,
     response: oneshot::Sender<Outcome>,
+}
+
+/// Owns deferred deliveries and their independent certification deadlines.
+///
+/// Timeout futures intentionally run to completion after a delivery resolves:
+/// some clocks retain registered alarms until their deadline, and removing the
+/// future would leave those alarms without a task to wake.
+#[derive(Default)]
+struct PendingDeliveries {
+    entries: Vec<PendingDelivery>,
+    timeouts: Pool<u64>,
+    next_id: u64,
+}
+
+impl PendingDeliveries {
+    fn push(
+        &mut self,
+        requested: View,
+        certification: View,
+        purposes: NonEmptyVec<Purpose>,
+        response: oneshot::Sender<Outcome>,
+        timeout: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("pending delivery ID overflow");
+        self.timeouts.push(async move {
+            timeout.await;
+            id
+        });
+        self.entries.push(PendingDelivery {
+            id,
+            requested,
+            certification,
+            purposes,
+            response,
+        });
+    }
+
+    fn remove(&mut self, id: u64) -> Option<PendingDelivery> {
+        let index = self.entries.iter().position(|delivery| delivery.id == id)?;
+        Some(self.entries.swap_remove(index))
+    }
+
+    fn take(&mut self) -> Vec<PendingDelivery> {
+        let entries = std::mem::take(&mut self.entries);
+        self.entries.reserve(entries.len());
+        entries
+    }
+
+    fn requeue(&mut self, delivery: PendingDelivery) {
+        self.entries.push(delivery);
+    }
+
+    fn next_completed(&mut self) -> impl Future<Output = u64> + '_ {
+        self.timeouts.next_completed()
+    }
+
+    #[cfg(test)]
+    fn timeout_count(&self) -> usize {
+        self.timeouts.len()
+    }
 }
 
 /// Requests are made concurrently to multiple peers.
@@ -85,15 +150,8 @@ pub struct Actor<
     /// Terminal certification outcomes retained until covering finalization.
     certification_outcomes: BTreeMap<View, bool>,
 
-    /// Deliveries independently waiting for certification. Each is bounded by
-    /// `certification_timeout`, so one unresolved application request cannot
-    /// block unrelated resolver work.
-    pending_deliveries: Vec<PendingDelivery>,
-    /// Timeout futures run to completion after a delivery resolves because
-    /// some clocks retain registered alarms until their deadline. Expiration
-    /// is a no-op when the delivery ID is no longer pending.
-    pending_delivery_timeouts: Pool<u64>,
-    next_pending_delivery: u64,
+    /// Deliveries independently waiting for bounded local certification.
+    pending: PendingDeliveries,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
@@ -124,9 +182,7 @@ impl<
                 last_finalized: View::zero(),
                 known_nullifications: BTreeSet::new(),
                 certification_outcomes: BTreeMap::new(),
-                pending_deliveries: Vec::new(),
-                pending_delivery_timeouts: Pool::default(),
-                next_pending_delivery: 0,
+                pending: PendingDeliveries::default(),
 
                 mailbox_receiver: receiver,
             },
@@ -186,7 +242,7 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
-            delivery = self.pending_delivery_timeouts.next_completed() => {
+            delivery = self.pending.next_completed() => {
                 self.expire_pending_delivery(delivery);
             },
             Some(message) = self.mailbox_receiver.recv() else break => {
@@ -227,17 +283,18 @@ impl<
 
     /// Releases a delivery whose bounded certification wait has elapsed.
     fn expire_pending_delivery(&mut self, id: u64) {
-        let Some(index) = self
-            .pending_deliveries
-            .iter()
-            .position(|delivery| delivery.id == id)
-        else {
+        // A response may resolve before its sleeper. The sleeper is retained
+        // to keep the runtime alarm live, so a missing delivery is expected.
+        let Some(delivery) = self.pending.remove(id) else {
             return;
         };
-        let delivery = self.pending_deliveries.swap_remove(index);
         if delivery.response.is_closed() {
             return;
         }
+
+        // Re-check all purposes at the deadline because certificates handled
+        // after deferral may have completed the delivery. Otherwise the valid
+        // response is ambiguous and must remain eligible for resolver retry.
         let outcome = if delivery
             .purposes
             .iter()
@@ -254,22 +311,27 @@ impl<
     /// certification result releases deliveries that were waiting on that
     /// exact certification even when another purpose remains unresolved.
     fn resolve_pending_deliveries(&mut self, certified: Option<View>) {
-        let pending = std::mem::take(&mut self.pending_deliveries);
-        self.pending_deliveries.reserve(pending.len());
-        for delivery in pending {
+        for delivery in self.pending.take() {
+            // Closed consumers need no verdict. Their sleepers still run to
+            // completion so registered runtime alarms remain well-formed.
             if delivery.response.is_closed() {
                 continue;
             }
+
             let resolved = delivery
                 .purposes
                 .iter()
                 .all(|purpose| self.purpose_satisfied(delivery.requested, *purpose));
+
+            // Complete only when every subscriber purpose is satisfied. A
+            // terminal verdict for the exact certification makes any still-
+            // unresolved purpose ambiguous rather than worth waiting longer.
             if resolved {
                 delivery.response.send_lossy(Outcome::Complete);
             } else if certified == Some(delivery.certification) {
                 delivery.response.send_lossy(Outcome::Ambiguous);
             } else {
-                self.pending_deliveries.push(delivery);
+                self.pending.requeue(delivery);
             }
         }
     }
@@ -282,6 +344,9 @@ impl<
         certification: View,
         purposes: &NonEmptyVec<Purpose>,
     ) -> bool {
+        // Certification can satisfy any backfill subscriber, but a parent
+        // subscriber requires this exact view. A notarization can never
+        // satisfy a nullification subscriber.
         !self.certification_outcomes.contains_key(&certification)
             && purposes.iter().all(|purpose| {
                 self.purpose_satisfied(requested, *purpose)
@@ -302,24 +367,12 @@ impl<
         purposes: NonEmptyVec<Purpose>,
         response: oneshot::Sender<Outcome>,
     ) {
-        let id = self.next_pending_delivery;
-        self.next_pending_delivery = self
-            .next_pending_delivery
-            .checked_add(1)
-            .expect("pending delivery ID overflow");
-        let deadline = self.context.current() + self.certification_timeout;
-        let timeout = self.context.sleep_until(deadline);
-        self.pending_delivery_timeouts.push(async move {
-            timeout.await;
-            id
-        });
-        self.pending_deliveries.push(PendingDelivery {
-            id,
-            requested,
-            certification,
-            purposes,
-            response,
-        });
+        // Awaiting this sleep here would block unrelated resolver work. The
+        // persistent pool gives each delivery one fixed deadline while the
+        // actor continues processing certificates and certification verdicts.
+        let timeout = self.context.sleep(self.certification_timeout);
+        self.pending
+            .push(requested, certification, purposes, response, timeout);
     }
 
     /// Records a certificate and applies its resolver lifecycle effects.
@@ -370,10 +423,16 @@ impl<
         view: View,
         success: bool,
     ) {
+        // A terminal outcome is a tombstone for delayed targeted work. Views
+        // covered by finalization need no tombstone because finalization is the
+        // global retirement boundary.
         if view > self.last_finalized {
             self.certification_outcomes.insert(view, success);
         }
 
+        // Exact parent demand is terminal regardless of the verdict. Apply
+        // state effects before releasing deliveries so success can advance the
+        // floor and failure can schedule nullification repair first.
         self.retire(resolver, Purpose::Parent, view, view);
         let effects = self.state.handle_certified(view, success);
         self.apply_effects(resolver, effects);
@@ -1596,7 +1655,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(actor.pending_delivery_timeouts.len(), 1);
+            assert_eq!(actor.pending.timeout_count(), 1);
             let mut receiver = receiver;
             select! {
                 outcome = &mut receiver => {
@@ -1621,7 +1680,7 @@ mod tests {
                 &mut resolver,
             );
             assert_eq!(other_receiver.await.unwrap(), Outcome::Complete);
-            assert_eq!(actor.pending_delivery_timeouts.len(), 1);
+            assert_eq!(actor.pending.timeout_count(), 1);
             assert!(matches!(
                 receiver.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
@@ -1694,7 +1753,7 @@ mod tests {
                 &mut resolver,
             );
 
-            let id = actor.pending_delivery_timeouts.next_completed().await;
+            let id = actor.pending.next_completed().await;
             actor.expire_pending_delivery(id);
             assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous);
         });
@@ -1730,7 +1789,7 @@ mod tests {
             );
 
             // Poll the timeout once so it is registered with the runtime.
-            let mut pending_timeout = actor.pending_delivery_timeouts.next_completed();
+            let mut pending_timeout = actor.pending.next_completed();
             select! {
                 result = &mut pending_timeout => {
                     panic!("delivery timed out early: {result:?}");
@@ -1744,7 +1803,7 @@ mod tests {
 
             // Drive the timeout pool once more, then cross the original
             // deadline. Cleanup must not strand the deterministic clock.
-            let _ = actor.pending_delivery_timeouts.next_completed().await;
+            let _ = actor.pending.next_completed().await;
             context.sleep(Duration::from_secs(2)).await;
         });
     }
