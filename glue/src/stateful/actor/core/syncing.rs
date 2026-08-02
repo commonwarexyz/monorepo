@@ -3,7 +3,7 @@ use crate::stateful::{
     actor::{
         core::{Deferred, mailbox::Message, processing::Processing},
         metrics::Metrics as StatefulMetrics,
-        processor::{Applied, Processor, PruningConfig},
+        processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -101,8 +101,8 @@ where
     /// Unacknowledged finalizations retained until the window retargets or sync completes.
     pub(super) pending_finalizations: VecDeque<PendingFinalization<Arc<A::Block>>>,
 
-    /// Periodic prune configuration.
-    pub(super) prune_config: Option<PruningConfig>,
+    /// Periodic pruning state.
+    pub(super) pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
 
     /// Metrics shared across syncing and processing.
     pub(super) metrics: StatefulMetrics,
@@ -327,7 +327,7 @@ where
             artifact.databases,
             artifact.anchor,
             self.metrics,
-            self.prune_config,
+            self.pruning,
         );
 
         let mut pending_prune = None;
@@ -419,7 +419,7 @@ mod tests {
         PruneConfig,
         actor::{
             metrics::Metrics as StatefulMetrics,
-            processor::PruningConfig,
+            processor::Pruning,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
         db::{Anchor, AttachableResolver, Shared},
@@ -584,7 +584,7 @@ mod tests {
                     resolvers: NoopResolver,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
-                    prune_config: None,
+                    pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
             };
@@ -641,7 +641,7 @@ mod tests {
                     resolvers: NoopResolver,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
-                    prune_config: None,
+                    pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
             }
@@ -732,7 +732,7 @@ mod tests {
             };
             let mut harness =
                 TestHarness::new_on(context.child("harness"), delayed, anchor(7, 9)).await;
-            harness.syncing.prune_config = Some(PruningConfig::fixed(
+            harness.syncing.pruning = Some(Pruning::fixed(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 0,

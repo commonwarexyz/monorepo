@@ -56,7 +56,8 @@ use tracing::{debug, info_span, warn};
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
-type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+pub(super) type PendingSyncTargets<A, E> =
+    <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
@@ -117,15 +118,15 @@ impl<T> Prune<T> {
 
 /// Tracks the configured prune cadence and finalized sync targets needed to
 /// make pruning safe.
-#[derive(Clone, Copy)]
-pub(super) struct PruningConfig {
+pub(super) struct Pruning<T> {
     maintenance_interval: u64,
     maintenance_offset: u64,
     marshal_retention_window: usize,
     qmdb_retention_window: usize,
+    retained_targets: VecDeque<(Height, T)>,
 }
 
-impl PruningConfig {
+impl<T: Clone> Pruning<T> {
     pub(super) fn random(config: PruneConfig, max_pending_acks: usize, rng: &mut impl Rng) -> Self {
         let interval = u64::try_from(config.maintenance_interval.get())
             .expect("prune interval should fit in u64");
@@ -155,6 +156,7 @@ impl PruningConfig {
             maintenance_offset,
             marshal_retention_window,
             qmdb_retention_window,
+            retained_targets: VecDeque::new(),
         }
     }
 
@@ -165,26 +167,6 @@ impl PruningConfig {
         maintenance_offset: u64,
     ) -> Self {
         Self::build(config, max_pending_acks, maintenance_offset)
-    }
-}
-
-struct Pruning<T> {
-    maintenance_interval: u64,
-    maintenance_offset: u64,
-    marshal_retention_window: usize,
-    qmdb_retention_window: usize,
-    retained_targets: VecDeque<(Height, T)>,
-}
-
-impl<T: Clone> Pruning<T> {
-    const fn new(config: PruningConfig) -> Self {
-        Self {
-            maintenance_interval: config.maintenance_interval,
-            maintenance_offset: config.maintenance_offset,
-            marshal_retention_window: config.marshal_retention_window,
-            qmdb_retention_window: config.qmdb_retention_window,
-            retained_targets: VecDeque::new(),
-        }
     }
 
     /// Observe a newly finalized block and decide whether pruning should run.
@@ -258,7 +240,7 @@ where
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: StatefulMetrics,
-        prune_config: Option<PruningConfig>,
+        pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
     ) -> Self {
         Self {
             app,
@@ -266,7 +248,7 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
-            pruning: prune_config.map(Pruning::new),
+            pruning,
         }
     }
 
@@ -962,8 +944,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Applied, PrepareBatchesError, Processor, Prune, Pruning, PruningConfig, await_or_cancel,
-        fetch_ancestor,
+        Applied, PrepareBatchesError, Processor, Prune, Pruning, await_or_cancel, fetch_ancestor,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -1621,7 +1602,7 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::new(PruningConfig::fixed(config, 2, 0));
+        let mut pruning = Pruning::fixed(config, 2, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1643,7 +1624,7 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::new(PruningConfig::fixed(config, 1, 0));
+        let mut pruning = Pruning::fixed(config, 1, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1672,7 +1653,7 @@ mod tests {
             retained_marshal_blocks: 3,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::new(PruningConfig::fixed(config, 1, 0));
+        let mut pruning = Pruning::fixed(config, 1, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None);
@@ -1696,7 +1677,7 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 0,
         };
-        let mut pruning = Pruning::new(PruningConfig::fixed(config, 1, 2));
+        let mut pruning = Pruning::fixed(config, 1, 2);
 
         for height in 1..=6 {
             assert_eq!(
@@ -1765,7 +1746,7 @@ mod tests {
                     digest: Block::genesis().digest(),
                 },
                 StatefulMetrics::new(harness.context_cell.as_present()),
-                Some(PruningConfig::fixed(
+                Some(Pruning::fixed(
                     PruneConfig {
                         maintenance_interval: NZUsize!(1),
                         retained_marshal_blocks: 1,

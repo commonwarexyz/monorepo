@@ -9,7 +9,7 @@ use crate::stateful::{
     actor::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
-        processor::{Processor, PruningConfig},
+        processor::{PendingSyncTargets, Processor, Pruning},
         syncer::{self, SyncPlan, SyncResult},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
@@ -179,8 +179,8 @@ where
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
 
-    /// Periodic prune configuration.
-    prune_config: Option<PruningConfig>,
+    /// Periodic pruning state.
+    pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -198,12 +198,8 @@ where
     /// This only wires dependencies and allocates the mailbox. The actor does
     /// not process messages until [`Stateful::start`] is called.
     pub fn init(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
-        let prune_config = config.prune_config.map(|prune_config| {
-            PruningConfig::random(
-                prune_config,
-                config.marshal.max_pending_acks(),
-                &mut context,
-            )
+        let pruning = config.prune_config.map(|prune_config| {
+            Pruning::random(prune_config, config.marshal.max_pending_acks(), &mut context)
         });
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -218,7 +214,7 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
-                prune_config,
+                pruning,
             },
             Mailbox::new(sender),
         )
@@ -271,7 +267,7 @@ where
             resolvers: self.resolvers,
             sync_completed,
             pending_finalizations: Default::default(),
-            prune_config: self.prune_config,
+            pruning: self.pruning,
             metrics,
         };
         let _ = join!(syncer.start(), syncing.start());
@@ -303,7 +299,7 @@ where
             databases,
             anchor,
             metrics,
-            self.prune_config,
+            self.pruning,
         );
         Processing {
             context: self.context,

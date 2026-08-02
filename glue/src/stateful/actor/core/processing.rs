@@ -283,7 +283,7 @@ mod tests {
         actor::{
             core::mailbox::Mailbox,
             metrics::Metrics as StatefulMetrics,
-            processor::{Processor, PruningConfig},
+            processor::{Processor, Pruning},
         },
         db::Shared,
         tests::{
@@ -333,14 +333,14 @@ mod tests {
 
         let control = FlushControl::default();
         let databases = Shared::new("test", TestDb::gated(control.clone()));
-        let prune_config = prune_config
-            .map(|config| PruningConfig::fixed(config, marshal.mailbox.max_pending_acks(), 0));
+        let pruning = prune_config
+            .map(|config| Pruning::fixed(config, marshal.mailbox.max_pending_acks(), 0));
         let processor = Processor::new(
             TestApp,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
-            prune_config,
+            pruning,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
