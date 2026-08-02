@@ -307,7 +307,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip_commit.size
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -399,7 +399,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip_commit.size
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {

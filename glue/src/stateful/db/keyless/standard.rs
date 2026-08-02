@@ -277,7 +277,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip_commit.size
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -362,7 +362,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip_commit.size
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -582,7 +582,7 @@ mod tests {
                 merkleized.root(),
                 non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip_commit.size
+                    merkleized.bounds().tip.size
                 ),
             );
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
@@ -592,7 +592,7 @@ mod tests {
 
             let wrong_start = AnySyncTarget::new(
                 merkleized.root(),
-                non_empty_range!(mmr::Location::new(0), merkleized.bounds().tip_commit.size),
+                non_empty_range!(mmr::Location::new(0), merkleized.bounds().tip.size),
             );
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
@@ -603,7 +603,7 @@ mod tests {
                 merkleized.root(),
                 non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip_commit.size - 1
+                    merkleized.bounds().tip.size - 1
                 ),
             );
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(

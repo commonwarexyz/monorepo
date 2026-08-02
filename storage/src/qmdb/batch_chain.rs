@@ -66,14 +66,14 @@ pub struct AncestorBounds<F: Family, D: Digest> {
 #[derive(Clone)]
 pub struct Bounds<F: Family, D: Digest> {
     /// [`Commitment`] immediately before this batch's own operations.
-    pub base_commit: Commitment<F, D>,
+    pub base: Commitment<F, D>,
     /// [`Commitment`] at the boundary between applied database operations and operations kept in
     /// this batch chain.
     ///
     /// Usually this is the database state when the batch chain was created.
-    pub db_commit: Commitment<F, D>,
+    pub db: Commitment<F, D>,
     /// This batch's tip [`Commitment`]: the state after all its operations.
-    pub tip_commit: Commitment<F, D>,
+    pub tip: Commitment<F, D>,
     /// Ancestor bounds in newest-first order.
     pub ancestors: Vec<AncestorBounds<F, D>>,
     /// Inactivity floor declared by this batch's commit.
@@ -83,12 +83,12 @@ pub struct Bounds<F: Family, D: Digest> {
 impl<F: Family, D: Digest> Bounds<F, D> {
     /// Create initial bounds for a batch built directly from the current database state.
     ///
-    /// The base, DB boundary, and tip all coincide at `commit`, with no ancestors.
-    pub(crate) const fn from_db(commit: Commitment<F, D>, inactivity_floor: Location<F>) -> Self {
+    /// The base, DB boundary, and tip all coincide at `state`, with no ancestors.
+    pub(crate) const fn from_db(state: Commitment<F, D>, inactivity_floor: Location<F>) -> Self {
         Self {
-            base_commit: commit,
-            db_commit: commit,
-            tip_commit: commit,
+            base: state,
+            db: state,
+            tip: state,
             ancestors: Vec::new(),
             inactivity_floor,
         }
@@ -100,13 +100,13 @@ impl<F: Family, D: Digest> Bounds<F, D> {
         current: Commitment<F, D>,
         current_floor: Location<F>,
     ) -> Result<(), Error<F>> {
-        validate_batch_applicable(current, self.db_commit, &self.ancestors)?;
+        validate_batch_applicable(current, self.db, &self.ancestors)?;
         validate_commit_floors(
             current_floor,
             current.size,
             &self.ancestors,
             self.inactivity_floor,
-            self.tip_commit
+            self.tip
                 .size
                 .checked_sub(1)
                 .expect("merkleized batch includes a commit"),
@@ -151,7 +151,7 @@ where
 pub(crate) fn collect_ancestor_bounds<T, F, D, I, L, C>(
     ancestors: I,
     floor: L,
-    commit: C,
+    state: C,
 ) -> Vec<AncestorBounds<F, D>>
 where
     F: Family,
@@ -164,7 +164,7 @@ where
         .into_iter()
         .map(|batch| AncestorBounds {
             floor: floor(&batch),
-            state: commit(&batch),
+            state: state(&batch),
         })
         .collect()
 }
@@ -284,9 +284,9 @@ mod tests {
         let grandparent = Arc::new(TestBatch {
             id: 1,
             bounds: Bounds {
-                base_commit: state(0, 0),
-                db_commit: state(0, 0),
-                tip_commit: state(5, 5),
+                base: state(0, 0),
+                db: state(0, 0),
+                tip: state(5, 5),
                 ancestors: Vec::new(),
                 inactivity_floor: loc(3),
             },
@@ -295,9 +295,9 @@ mod tests {
         let parent = Arc::new(TestBatch {
             id: 2,
             bounds: Bounds {
-                base_commit: state(5, 5),
-                db_commit: state(0, 0),
-                tip_commit: state(7, 7),
+                base: state(5, 5),
+                db: state(0, 0),
+                tip: state(7, 7),
                 ancestors: vec![ancestor(loc(3), 5, 5)],
                 inactivity_floor: loc(6),
             },
@@ -316,9 +316,9 @@ mod tests {
         let parent = Arc::new(TestBatch {
             id: 1,
             bounds: Bounds {
-                base_commit: state(0, 0),
-                db_commit: state(0, 0),
-                tip_commit: state(12, 12),
+                base: state(0, 0),
+                db: state(0, 0),
+                tip: state(12, 12),
                 ancestors: Vec::new(),
                 inactivity_floor: loc(10),
             },
@@ -327,9 +327,9 @@ mod tests {
         let grandparent = Arc::new(TestBatch {
             id: 2,
             bounds: Bounds {
-                base_commit: state(0, 0),
-                db_commit: state(0, 0),
-                tip_commit: state(8, 8),
+                base: state(0, 0),
+                db: state(0, 0),
+                tip: state(8, 8),
                 ancestors: Vec::new(),
                 inactivity_floor: loc(6),
             },
@@ -339,12 +339,7 @@ mod tests {
         let bounds = collect_ancestor_bounds(
             vec![Arc::clone(&parent), Arc::clone(&grandparent)],
             |batch| batch.bounds.inactivity_floor,
-            |batch| {
-                state(
-                    *batch.bounds.tip_commit.size,
-                    *batch.bounds.tip_commit.size as u8,
-                )
-            },
+            |batch| state(*batch.bounds.tip.size, *batch.bounds.tip.size as u8),
         );
 
         assert_eq!(bounds.len(), 2);
@@ -357,9 +352,9 @@ mod tests {
     #[test]
     fn bounds_validates_apply_to_current_state() {
         let bounds = Bounds::<F, D> {
-            base_commit: state(10, 1),
-            db_commit: state(10, 1),
-            tip_commit: state(14, 14),
+            base: state(10, 1),
+            db: state(10, 1),
+            tip: state(14, 14),
             ancestors: vec![ancestor(loc(10), 12, 12)],
             inactivity_floor: loc(11),
         };

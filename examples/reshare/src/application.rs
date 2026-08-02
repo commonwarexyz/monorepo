@@ -79,7 +79,7 @@ where
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip_commit.size),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             payload,
         };
         Some(Proposed { block, merkleized })

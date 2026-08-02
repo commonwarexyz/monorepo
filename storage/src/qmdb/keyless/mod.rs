@@ -576,10 +576,10 @@ where
 
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
 
-        self.last_commit_loc = batch.bounds.tip_commit.size - 1;
+        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
-        let end_loc = batch.bounds.tip_commit.size;
+        let end_loc = batch.bounds.tip.size;
         debug!(size = ?end_loc, "applied batch");
         let range = start_loc..end_loc;
         self.update_metrics();

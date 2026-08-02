@@ -72,7 +72,7 @@ where
 
     /// The [`Commitment`] this batch commits to.
     pub(super) const fn commitment(&self) -> Commitment<F, D> {
-        self.bounds.tip_commit
+        self.bounds.tip
     }
 }
 
@@ -116,7 +116,7 @@ where
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, C>(
         keyless: &Keyless<F, E, V, C, H, S>,
-        commit: Commitment<F, H::Digest>,
+        base: Commitment<F, H::Digest>,
     ) -> Self
     where
         E: Context,
@@ -126,7 +126,7 @@ where
             journal_batch: keyless.journal.new_batch(),
             appends: Vec::new(),
             parent: None,
-            base: commit,
+            base,
         }
     }
 
@@ -135,13 +135,13 @@ where
         self.base.size + self.appends.len() as u64
     }
 
-    /// The database's committed state at the base of this batch chain.
+    /// The database boundary for this batch chain.
     ///
-    /// Derived: a DB-created batch's base is the DB commit; a child's is its parent's `db_commit`.
-    fn db_commit(&self) -> Commitment<F, H::Digest> {
+    /// A batch created from the database uses its base. A child inherits its parent's `db`.
+    fn db(&self) -> Commitment<F, H::Digest> {
         self.parent
             .as_ref()
-            .map_or(self.base, |parent| parent.bounds.db_commit)
+            .map_or(self.base, |parent| parent.bounds.db)
     }
 
     /// Append a value.
@@ -177,7 +177,7 @@ where
         // Check parent operation chain. If the ancestor was freed, read_chain_op returns None
         // and we fall through to the DB.
         if let Some(parent) = self.parent.as_ref()
-            && loc_val >= parent.bounds.db_commit.size
+            && loc_val >= parent.bounds.db.size
             && let Some(op) = read_chain_op(parent, loc_val)
         {
             return Ok(op.into_value());
@@ -227,7 +227,7 @@ where
 
             // Check parent operation chain.
             if let Some(parent) = self.parent.as_ref()
-                && loc_val >= parent.bounds.db_commit.size
+                && loc_val >= parent.bounds.db.size
                 && let Some(op) = read_chain_op(parent, loc_val)
             {
                 results.push(op.into_value());
@@ -268,7 +268,7 @@ where
         C: Mutable<Item = Operation<F, V>>,
     {
         // Capture the DB boundary before `self` is consumed below.
-        let db_commit = self.db_commit();
+        let boundary = self.db();
 
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
@@ -301,9 +301,9 @@ where
             journal_batch: journal,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: batch_chain::Bounds {
-                base_commit: self.base,
-                db_commit,
-                tip_commit: Commitment::new(total_size, root),
+                base: self.base,
+                db: boundary,
+                tip: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -317,7 +317,7 @@ where
 {
     /// Return the speculative root.
     pub const fn root(&self) -> D {
-        self.bounds.tip_commit.root
+        self.bounds.tip.root
     }
 
     /// Return the [`Bounds`] of the batch.
@@ -340,7 +340,7 @@ where
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
         // freed, fall through to the committed DB.
-        if loc_val >= self.bounds.db_commit.size
+        if loc_val >= self.bounds.db.size
             && let Some(op) = read_chain_op(self, loc_val)
         {
             return Ok(op.into_value());
@@ -378,7 +378,7 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc_val >= self.bounds.db_commit.size
+            if loc_val >= self.bounds.db.size
                 && let Some(op) = read_chain_op(self, loc_val)
             {
                 results.push(op.into_value());

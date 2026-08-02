@@ -95,7 +95,7 @@ where
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, C, T>(
         immutable: &Immutable<F, E, K, V, C, H, T, S>,
-        commit: Commitment<F, H::Digest>,
+        base: Commitment<F, H::Digest>,
     ) -> Self
     where
         E: Context,
@@ -107,17 +107,17 @@ where
             journal_batch: immutable.journal.new_batch(),
             mutations: BTreeMap::new(),
             parent: None,
-            base: commit,
+            base,
         }
     }
 
-    /// The database's committed state at the base of this batch chain.
+    /// The database boundary for this batch chain.
     ///
-    /// Derived: a DB-created batch's base is the DB commit; a child's is its parent's `db_commit`.
-    fn db_commit(&self) -> Commitment<F, H::Digest> {
+    /// A batch created from the database uses its base. A child inherits its parent's `db`.
+    fn db(&self) -> Commitment<F, H::Digest> {
         self.parent
             .as_ref()
-            .map_or(self.base, |parent| parent.bounds.db_commit)
+            .map_or(self.base, |parent| parent.bounds.db)
     }
 
     /// Set a key to a value.
@@ -248,7 +248,7 @@ where
         let base = self.base.size;
 
         // Capture the DB boundary before `self` is consumed below.
-        let db_commit = self.db_commit();
+        let boundary = self.db();
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
@@ -294,9 +294,9 @@ where
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_diffs,
             bounds: batch_chain::Bounds {
-                base_commit: self.base,
-                db_commit,
-                tip_commit: Commitment::new(total_size, root),
+                base: self.base,
+                db: boundary,
+                tip: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -310,7 +310,7 @@ where
 {
     /// Return the speculative root.
     pub const fn root(&self) -> D {
-        self.bounds.tip_commit.root
+        self.bounds.tip.root
     }
 
     /// Return the [`Bounds`] of the batch.
@@ -325,7 +325,7 @@ where
 
     /// The [`Commitment`] this batch commits to.
     pub(super) const fn commitment(&self) -> Commitment<F, D> {
-        self.bounds.tip_commit
+        self.bounds.tip
     }
 
     /// Read through: local diff -> ancestor diffs -> committed DB.

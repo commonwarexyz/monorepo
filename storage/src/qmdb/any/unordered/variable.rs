@@ -770,7 +770,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // B has more ops than A.
-            assert!(batch_b.bounds.tip_commit.size > batch_a.bounds.tip_commit.size);
+            assert!(batch_b.bounds.tip.size > batch_a.bounds.tip.size);
 
             // Apply A, then B must be stale.
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
@@ -1517,8 +1517,8 @@ pub(crate) mod test {
 
             // With a's Weak reference gone, c's effective DB boundary moves forward from the
             // chain's original DB state to b's base: the authenticated state committed by a.
-            assert_eq!(c.bounds().db_commit.size, *db.bounds().end);
-            assert_eq!(c.bounds().db_commit.root, db.root());
+            assert_eq!(c.bounds().db.size, *db.bounds().end);
+            assert_eq!(c.bounds().db.root, db.root());
 
             // Commit b (skip_ancestors path since a is committed).
             let (db, _) = db.apply_batch(b).await.unwrap();

@@ -760,7 +760,7 @@ where
     Operation<F, U>: Codec,
 {
     let batch_len = inner.journal_batch.items().len();
-    let batch_base = *inner.bounds.tip_commit.size - batch_len as u64;
+    let batch_base = *inner.bounds.tip.size - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
     let overlay = build_chunk_overlay::<F, U, _, N>(
@@ -777,7 +777,7 @@ where
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
     // sees this many ops). Thread it through `graftable_chunks` derivation and root computation.
-    let overlay_ops_leaves = inner.bounds.tip_commit.size;
+    let overlay_ops_leaves = inner.bounds.tip.size;
 
     // Distinguish three counters:
     //   - new_complete_chunks: chunks with all bits filled in the post-batch bitmap
@@ -1045,7 +1045,7 @@ where
         // inactivity floor when pruning has not run.
         super::db::sync_boundary::<F, N>(
             *self.inner.bounds().inactivity_floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
-            *self.inner.bounds().tip_commit.size,
+            *self.inner.bounds().tip.size,
         )
     }
 }

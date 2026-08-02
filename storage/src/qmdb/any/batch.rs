@@ -222,13 +222,14 @@ where
         }
     }
 
-    /// The [Commitment] at the boundary between committed DB operations and the batch chain.
-    /// For `Db`, this is the committed DB state. For `Child`, it is inherited from the parent
+    /// The database boundary for this batch chain.
+    ///
+    /// For `Db`, this is its state. For `Child`, it is inherited from the parent
     /// (which may be higher than the original DB size if ancestors were dropped before merkleize).
-    fn db_commit(&self) -> Commitment<F, D> {
+    fn db(&self) -> Commitment<F, D> {
         match self {
             Self::Db { state, .. } => *state,
-            Self::Child(parent) => parent.bounds.db_commit,
+            Self::Child(parent) => parent.bounds.db,
         }
     }
 
@@ -440,8 +441,8 @@ where
 {
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, U>, S>,
     ancestors: Vec<AncestorBatch<F, H::Digest, U, S>>,
-    base_commit: Commitment<F, H::Digest>,
-    db_commit: Commitment<F, H::Digest>,
+    base_state: Commitment<F, H::Digest>,
+    db_state: Commitment<F, H::Digest>,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
 }
@@ -808,14 +809,12 @@ where
     ) -> Option<Operation<F, U>> {
         let loc = *loc;
 
-        if loc >= self.base_commit.size {
-            return Some(batch_ops[(loc - *self.base_commit.size) as usize].clone());
+        if loc >= self.base_state.size {
+            return Some(batch_ops[(loc - *self.base_state.size) as usize].clone());
         }
 
-        if loc >= self.db_commit.size {
-            return Some(
-                read_op_from_ancestors(&self.ancestors, loc, *self.db_commit.size).clone(),
-            );
+        if loc >= self.db_state.size {
+            return Some(read_op_from_ancestors(&self.ancestors, loc, *self.db_state.size).clone());
         }
 
         None
@@ -827,7 +826,7 @@ where
         locations.is_sorted_by(|a, b| a < b)
             && locations
                 .last()
-                .is_some_and(|last| **last < self.db_commit.size)
+                .is_some_and(|last| **last < self.db_state.size)
     }
 
     /// Read multiple operations by location, preserving the caller's order and permitting
@@ -1055,7 +1054,7 @@ where
             // Floor raise: advance the inactivity floor by `total_steps` active operations.
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
             let strategy = db.strategy();
-            let fixed_tip = *self.base_commit.size + ops.len() as u64;
+            let fixed_tip = *self.base_state.size + ops.len() as u64;
             let mut moved = 0u64;
             let mut scan_from = floor;
             floor_diff.reserve(total_steps as usize);
@@ -1233,7 +1232,7 @@ where
                     match outcome {
                         FloorOutcome::Inactive => continue,
                         FloorOutcome::MoveExisting { idx, base_old_loc } => {
-                            let new_loc = self.base_commit.size + ops.len() as u64;
+                            let new_loc = self.base_state.size + ops.len() as u64;
                             let value = extract_update_value(&op);
                             ops.push(op);
                             diff[idx].1 = DiffEntry::Active {
@@ -1244,7 +1243,7 @@ where
                         }
                         FloorOutcome::MoveNew { base_old_loc } => {
                             let key = op.key().cloned().expect("moved op has a key");
-                            let new_loc = self.base_commit.size + ops.len() as u64;
+                            let new_loc = self.base_state.size + ops.len() as u64;
                             let value = extract_update_value(&op);
                             ops.push(op);
                             floor_diff.push((
@@ -1265,7 +1264,7 @@ where
             }
         } else {
             // DB is empty after this batch; raise floor to tip.
-            floor = self.base_commit.size + ops.len() as u64;
+            floor = self.base_state.size + ops.len() as u64;
             debug!(tip = ?floor, "db is empty, raising floor to tip");
         }
 
@@ -1294,7 +1293,7 @@ where
         }
 
         // CommitFloor operation.
-        let commit_loc = self.base_commit.size + ops.len() as u64;
+        let commit_loc = self.base_state.size + ops.len() as u64;
         ops.push(Operation::CommitFloor(metadata, floor));
 
         // Merkleize the journal batch.
@@ -1302,7 +1301,7 @@ where
         // parent already contains all prior batches' Merkle state, so we only
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
-        let leaves = self.base_commit.size + ops.len() as u64;
+        let leaves = self.base_state.size + ops.len() as u64;
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job on the
@@ -1333,9 +1332,9 @@ where
             total_active_keys: total_active_keys as usize,
             ancestor_diffs,
             bounds: batch_chain::Bounds {
-                base_commit: self.base_commit,
-                db_commit: self.db_commit,
-                tip_commit: Commitment::new(commit_loc + 1, root),
+                base: self.base_state,
+                db: self.db_state,
+                tip: Commitment::new(commit_loc + 1, root),
                 ancestors,
                 inactivity_floor: floor,
             },
@@ -1365,14 +1364,13 @@ where
             v.extend(parent.ancestors());
             v
         });
-        // The DB boundary is the inherited committed state, unless older ancestors were committed
-        // and freed (truncating the Weak parent chain): then the oldest live ancestor's base is the
-        // true boundary, and its recorded `base_commit` names that state directly. Example: chain
-        // A -> B -> C with A committed and dropped, `ancestors()` yields [B]; B's items start at A's
-        // size, so B's `base_commit` (== A's committed state) is the boundary.
-        let inherited = self.base.db_commit();
-        let db_commit = ancestors.last().map_or(inherited, |oldest| {
-            let oldest_base = oldest.bounds.base_commit;
+        // The DB boundary is inherited unless older ancestors were applied and freed, truncating
+        // the weak parent chain. The oldest live ancestor's base then names the boundary directly.
+        // For A -> B -> C with A applied and dropped, `ancestors()` yields [B]. B's items start at
+        // A's size, so B's `base` is the boundary.
+        let inherited = self.base.db();
+        let db_state = ancestors.last().map_or(inherited, |oldest| {
+            let oldest_base = oldest.bounds.base;
             if oldest_base.size > inherited.size {
                 oldest_base
             } else {
@@ -1382,8 +1380,8 @@ where
         let m = Merkleizer {
             journal_batch: self.journal_batch,
             ancestors,
-            base_commit: self.base.base_state(),
-            db_commit,
+            base_state: self.base.base_state(),
+            db_state,
             base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
             base_active_keys: self.base.active_keys(),
         };
@@ -2049,7 +2047,7 @@ where
         // Write a user mutation at the next batch location, preserving the previous committed
         // location of the key it supersedes.
         let mut emit = |key: K, base_old_loc: Option<Location<F>>, mutation: Option<V::Value>| {
-            let new_loc = m.base_commit.size + ops.len() as u64;
+            let new_loc = m.base_state.size + ops.len() as u64;
             superseded_locs.extend(base_old_loc);
             match mutation {
                 Some(value) => {
@@ -2091,7 +2089,7 @@ where
         // key in the ancestor's traveling diff and supersedes its entry's location instead.
         let staged_base_old_loc = |sloc: StagedLoc<F>| match sloc {
             StagedLoc::Committed(loc) => Some(loc),
-            StagedLoc::Ancestor { loc, .. } if *loc < m.db_commit.size => Some(loc),
+            StagedLoc::Ancestor { loc, .. } if *loc < m.db_state.size => Some(loc),
             StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
         };
         let mut cached = staged_updates.into_iter().peekable();
@@ -2151,7 +2149,7 @@ where
         db.strategy()
             .sort_by(&mut creates, |(a, _, _), (b, _, _)| a.cmp(b));
         for (key, value, base_old_loc) in creates {
-            let new_loc = m.base_commit.size + ops.len() as u64;
+            let new_loc = m.base_state.size + ops.len() as u64;
             superseded_locs.extend(base_old_loc);
             ops.push(Operation::Update(update::Unordered(
                 key.clone(),
@@ -2489,7 +2487,7 @@ where
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut next_idx = 0;
         for (key, value, old_loc) in &updated {
-            let new_loc = m.base_commit.size + ops.len() as u64;
+            let new_loc = m.base_state.size + ops.len() as u64;
             let next_key = find_next_key_ascending(key, &next_candidates, &mut next_idx);
             ops.push(Operation::Update(update::Ordered {
                 key: key.clone(),
@@ -2515,7 +2513,7 @@ where
         // Process creates.
         let mut next_idx = 0;
         for (key, value, base_old_loc) in &created {
-            let new_loc = m.base_commit.size + ops.len() as u64;
+            let new_loc = m.base_state.size + ops.len() as u64;
             let next_key = find_next_key_ascending(key, &next_candidates, &mut next_idx);
             ops.push(Operation::Update(update::Ordered {
                 key: key.clone(),
@@ -2562,7 +2560,7 @@ where
                 let prev_value = prev_value
                     .as_ref()
                     .expect("staged-resolved keys are skipped as updated");
-                let prev_new_loc = m.base_commit.size + ops.len() as u64;
+                let prev_new_loc = m.base_state.size + ops.len() as u64;
                 let prev_next_key = find_next_key(prev_key, &next_candidates);
                 ops.push(Operation::Update(update::Ordered {
                     key: prev_key.clone(),
@@ -2614,7 +2612,7 @@ where
 {
     /// Return the speculative root.
     pub const fn root(&self) -> D {
-        self.bounds.tip_commit.root
+        self.bounds.tip.root
     }
 
     /// Return the [`Bounds`] of the batch.
@@ -2630,7 +2628,7 @@ where
 
     /// The [`Commitment`] this batch commits to.
     pub(crate) const fn commitment(&self) -> Commitment<F, D> {
-        self.bounds.tip_commit
+        self.bounds.tip
     }
 }
 
@@ -2648,8 +2646,8 @@ where
         level = "debug",
         skip_all,
         fields(
-            base_size = *self.bounds.base_commit.size,
-            total_size = *self.bounds.tip_commit.size,
+            base_size = *self.bounds.base.size,
+            total_size = *self.bounds.tip.size,
             ancestor_batches = self.ancestor_diffs.len() as u64,
         ),
     )]
@@ -2807,8 +2805,8 @@ where
         level = "info",
         skip_all,
         fields(
-            batch_total_size = *batch.bounds.tip_commit.size,
-            batch_base_size = *batch.bounds.base_commit.size,
+            batch_total_size = *batch.bounds.tip.size,
+            batch_base_size = *batch.bounds.base.size,
             db_size = *self.last_commit_loc + 1,
             ancestor_batches = batch.ancestor_diffs.len() as u64,
         ),
@@ -2829,7 +2827,7 @@ where
         // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
         {
             let mut bitmap = self.bitmap.write();
-            bitmap.extend_to(*batch.bounds.tip_commit.size);
+            bitmap.extend_to(*batch.bounds.tip.size);
 
             if batch.ancestor_diffs.is_empty() {
                 // Fast path: no ancestors to merge, no fixups to look up.
@@ -2871,13 +2869,13 @@ where
             // set the new; earlier ancestor commits between them are already 0 from
             // `extend_to`.
             bitmap.set_bit(*self.last_commit_loc, false);
-            bitmap.set_bit(*batch.bounds.tip_commit.size - 1, true);
+            bitmap.set_bit(*batch.bounds.tip.size - 1, true);
         }
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        self.last_commit_loc = batch.bounds.tip_commit.size - 1;
+        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.root = batch.root();
 
         // Return range of operations that were written to the log.
@@ -4419,7 +4417,7 @@ mod tests {
                 .write(key_current, Some(value_current));
             let (_mutations, merkleizer) = child.into_parts();
 
-            let current_loc = merkleizer.base_commit.size;
+            let current_loc = merkleizer.base_state.size;
             let batch_ops = vec![Operation::Update(update::Unordered(
                 key_current,
                 value_current,

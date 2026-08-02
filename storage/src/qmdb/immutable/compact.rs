@@ -133,12 +133,12 @@ where
 
     /// The [`Commitment`] this batch commits to.
     pub(super) const fn commitment(&self) -> Commitment<F, D> {
-        self.bounds.tip_commit
+        self.bounds.tip
     }
 
     /// Return the root digest after this batch is applied.
     pub const fn root(&self) -> D {
-        self.bounds.tip_commit.root
+        self.bounds.tip.root
     }
 
     /// Return the [`Bounds`] of the batch.
@@ -171,7 +171,7 @@ where
 {
     pub(super) fn new<E, C>(
         db: &Db<F, E, K, V, H, C, S>,
-        commit: batch_chain::Commitment<F, H::Digest>,
+        base: batch_chain::Commitment<F, H::Digest>,
     ) -> Self
     where
         E: Context,
@@ -182,17 +182,17 @@ where
             merkle_batch: db.merkle.new_batch(),
             mutations: BTreeMap::new(),
             parent: None,
-            base: commit,
+            base,
         }
     }
 
-    /// The database's committed state at the base of this batch chain.
+    /// The database boundary for this batch chain.
     ///
-    /// Derived: a DB-created batch's base is the DB commit; a child's is its parent's `db_commit`.
-    fn db_commit(&self) -> Commitment<F, H::Digest> {
+    /// A batch created from the database uses its base. A child inherits its parent's `db`.
+    fn db(&self) -> Commitment<F, H::Digest> {
         self.parent
             .as_ref()
-            .map_or(self.base, |parent| parent.bounds.db_commit)
+            .map_or(self.base, |parent| parent.bounds.db)
     }
 
     pub fn set(mut self, key: K, value: V::Value) -> Self {
@@ -225,7 +225,7 @@ where
         Operation<F, K, V>: Read<Cfg = C>,
     {
         // Capture the DB boundary before `self` is consumed below.
-        let db_commit = self.db_commit();
+        let boundary = self.db();
 
         let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
         for (key, value) in self.mutations {
@@ -257,9 +257,9 @@ where
             commit_metadata: metadata,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: batch_chain::Bounds {
-                base_commit: self.base,
-                db_commit,
-                tip_commit: Commitment::new(total_size, root),
+                base: self.base,
+                db: boundary,
+                tip: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -477,10 +477,10 @@ where
         let start_loc = self.last_commit_loc + 1;
         self.merkle.apply_batch(&batch.merkle_batch)?;
         self.root = batch.root();
-        self.last_commit_loc = batch.bounds.tip_commit.size - 1;
+        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.last_commit_metadata = batch.commit_metadata.clone();
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        Ok((self, start_loc..batch.bounds.tip_commit.size))
+        Ok((self, start_loc..batch.bounds.tip.size))
     }
 
     /// Begin durably persisting the current db state to disk.

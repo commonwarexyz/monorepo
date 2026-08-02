@@ -794,10 +794,10 @@ where
         }
 
         // Update state.
-        self.last_commit_loc = batch.bounds.tip_commit.size - 1;
+        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
-        let range = db_size..batch.bounds.tip_commit.size;
+        let range = db_size..batch.bounds.tip.size;
         self.update_metrics();
         self.metrics
             .operations_applied
