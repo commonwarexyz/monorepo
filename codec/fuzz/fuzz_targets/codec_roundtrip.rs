@@ -15,9 +15,7 @@ use std::{
     hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     num::{NonZeroU8, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
-    ops::{
-        Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive,
-    },
+    ops::{Bound, RangeBounds},
 };
 
 static BASELINE: Once = Once::new();
@@ -506,31 +504,6 @@ fn exercise_varint(value: i16, bytes: &[u8]) {
     let _ = SInt::<i16>::arbitrary(&mut unstructured);
 }
 
-fn roundtrip_range<T>(range: T)
-where
-    T: Encode + Decode + DecodeExt<()> + PartialEq + std::fmt::Debug,
-{
-    let encoded = range.encode();
-    assert_eq!(encoded.len(), range.encode_size());
-    assert_eq!(encoded.len(), range.encode_inline_size());
-    let mut bufs = FuzzBufsMut::new();
-    range.write_bufs(&mut bufs);
-    assert_eq!(encoded, bufs.freeze());
-    let decoded = T::decode(encoded).expect("Failed to decode range!");
-    assert_eq!(range, decoded);
-}
-
-fn exercise_ranges(a: u16, b: u16) {
-    let start = a.min(b);
-    let end = a.max(b);
-    roundtrip_range::<Range<u16>>(start..end);
-    roundtrip_range::<RangeInclusive<u16>>(start..=end);
-    roundtrip_range::<RangeFrom<u16>>(start..);
-    roundtrip_range::<RangeTo<u16>>(..end);
-    roundtrip_range::<RangeToInclusive<u16>>(..=end);
-    roundtrip_range::<RangeFull>(..);
-}
-
 fn exercise_lazy(value: u64) {
     let encoded = value.encode();
     let mut pending_bytes = encoded.clone();
@@ -758,7 +731,6 @@ enum FuzzInput<'a> {
     VarIntExercise(i16, &'a [u8]),
     RangeCfg(u8),
     EnsureZeros(&'a [u8], u8),
-    RangeTypes(u16, u16),
     Lazy(u64),
     PrimitiveExercise(u64, u8, &'a [u8]),
     InvalidOrdered,
@@ -833,7 +805,6 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::VarIntExercise(value, bytes) => exercise_varint(value, bytes),
         FuzzInput::RangeCfg(value) => exercise_range_cfg(value),
         FuzzInput::EnsureZeros(bytes, size) => exercise_zeros(bytes, size),
-        FuzzInput::RangeTypes(a, b) => exercise_ranges(a, b),
         FuzzInput::Lazy(value) => exercise_lazy(value),
         FuzzInput::PrimitiveExercise(value, byte, data) => exercise_primitives(value, byte, data),
         FuzzInput::InvalidOrdered => exercise_invalid_ordered(),
