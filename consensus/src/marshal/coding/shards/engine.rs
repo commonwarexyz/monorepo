@@ -1177,16 +1177,16 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment));
     }
 
-    /// Prunes cached blocks and reconstruction state after finalization.
+    /// Prunes cached blocks and reconstruction state after durable application progress.
     ///
-    /// Pruning waits for finalization because a Byzantine leader may produce multiple valid
+    /// Pruning waits for durable progress because a Byzantine leader may produce multiple valid
     /// commitments in one round.
     fn prune(&mut self, round: Round, finalized: Commitment) {
-        // Finalization makes existing exact-commitment and assigned-shard waits for these states
-        // obsolete. Digest waits are not commitment-specific.
+        // Durable processing makes existing exact-commitment and assigned-shard waits for these
+        // states obsolete. Digest waits are not commitment-specific.
         self.drop_commitment_subscriptions(finalized);
 
-        // Evict the finalized block and blocks last observed no later than its finalization round.
+        // Evict the processed block and blocks last observed no later than the retirement floor.
         // Blocks observed in later rounds may still be needed for certification.
         self.reconstructed_blocks
             .retain(|commitment, entry| *commitment != finalized && entry.round > round);
@@ -1202,7 +1202,6 @@ where
             keep
         });
 
-        // Close exact subscriptions after `retain` releases the mutable borrow.
         for pruned in pruned_commitments {
             self.drop_commitment_subscriptions(pruned);
         }
@@ -2318,12 +2317,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_durable_prune_uses_consensus_round() {
+    fn test_prune_uses_inclusive_retirement_floor() {
         let fixture = Fixture::<C>::default();
         fixture.start(|_, context, _, mut peers, _, coding_config| async move {
-            // The commitment was cached in its original proposal round and later
-            // finalized by a re-proposal. A malicious candidate arrived in between.
-            let finalized = CodedBlock::<B, C, H>::new(
+            // The processed commitment was re-proposed above the retirement floor. A malicious
+            // candidate was observed below it.
+            let processed = CodedBlock::<B, C, H>::new(
                 B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
                 coding_config,
                 &STRATEGY,
@@ -2333,72 +2332,184 @@ mod tests {
                 coding_config,
                 &STRATEGY,
             );
+            let equal = CodedBlock::<B, C, H>::new(
+                B::new::<H>((), Sha256Digest::EMPTY, Height::new(3), 100),
+                coding_config,
+                &STRATEGY,
+            );
             let later = CodedBlock::<B, C, H>::new(
                 B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let finalized_commitment = finalized.commitment();
+            let processed_commitment = processed.commitment();
             let malicious_commitment = malicious.commitment();
+            let equal_commitment = equal.commitment();
             let later_commitment = later.commitment();
 
             // Cache all blocks via `proposed`.
             let peer = &mut peers[0];
-            peer.mailbox.proposed(
-                Round::new(Epoch::zero(), View::new(1)),
-                finalized,
-            );
-            peer.mailbox.proposed(
-                Round::new(Epoch::zero(), View::new(2)),
-                malicious,
-            );
-            peer.mailbox.proposed(
-                Round::new(Epoch::zero(), View::new(1)),
-                later,
-            );
-            // A later notarization makes the same canonical block live in a
-            // newer round while the application still processes older blocks.
-            peer.mailbox.notarized(
-                later_commitment,
-                Round::new(Epoch::zero(), View::new(4)),
-            );
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(1)), processed.clone());
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(2)), malicious);
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(3)), equal);
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(1)), later.clone());
+            // Re-proposals refresh ownership independently of the commitment's
+            // original context round.
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(5)), processed);
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(4)), later);
             context.sleep(Duration::from_millis(10)).await;
 
             // Verify all blocks are in the cache.
             assert!(
-                peer.mailbox.get(finalized_commitment).await.is_some(),
-                "finalized block should be cached"
+                peer.mailbox.get(processed_commitment).await.is_some(),
+                "processed block should be cached"
             );
             assert!(
                 peer.mailbox.get(malicious_commitment).await.is_some(),
                 "malicious block should be cached"
             );
             assert!(
+                peer.mailbox.get(equal_commitment).await.is_some(),
+                "equal-round block should be cached"
+            );
+            assert!(
                 peer.mailbox.get(later_commitment).await.is_some(),
                 "later block should be cached"
             );
 
-            // The authoritative finalization round retires every earlier candidate,
-            // regardless of its height or the target's original cache round.
+            // The authoritative retirement floor removes every earlier candidate and the exact
+            // processed commitment, even when that commitment was observed above the floor.
             peer.mailbox.prune(
                 Round::new(Epoch::zero(), View::new(3)),
-                finalized_commitment,
+                processed_commitment,
             );
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(
-                peer.mailbox.get(finalized_commitment).await.is_none(),
-                "finalized block should be pruned"
+                peer.mailbox.get(processed_commitment).await.is_none(),
+                "exact processed block should be pruned above the floor"
             );
             assert!(
                 peer.mailbox.get(malicious_commitment).await.is_none(),
                 "earlier malicious block should be pruned"
             );
-
+            assert!(
+                peer.mailbox.get(equal_commitment).await.is_none(),
+                "block observed at the retirement floor should be pruned"
+            );
             assert!(
                 peer.mailbox.get(later_commitment).await.is_some(),
-                "later-round block should still be cached"
+                "non-target block observed above the floor should remain cached"
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_unseen_commitment_applies_floor() {
+        let fixture = Fixture::<C>::default();
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(id), id),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let cached_old = make_block(1);
+            let cached_equal = make_block(2);
+            let cached_later = make_block(3);
+            let state_old = make_block(4).commitment();
+            let state_equal = make_block(5).commitment();
+            let state_later = make_block(6).commitment();
+            let unseen = make_block(7).commitment();
+            let cached_old_commitment = cached_old.commitment();
+            let cached_equal_commitment = cached_equal.commitment();
+            let cached_later_commitment = cached_later.commitment();
+            let old_round = Round::new(Epoch::zero(), View::new(2));
+            let floor = Round::new(Epoch::zero(), View::new(3));
+            let later_round = Round::new(Epoch::zero(), View::new(4));
+            let leader = peers[1].public_key.clone();
+            let peer = &mut peers[0];
+
+            peer.mailbox.proposed(old_round, cached_old);
+            peer.mailbox.proposed(floor, cached_equal);
+            peer.mailbox.proposed(later_round, cached_later);
+            peer.mailbox
+                .discovered(state_old, leader.clone(), old_round);
+            peer.mailbox.discovered(state_equal, leader.clone(), floor);
+            peer.mailbox
+                .discovered(state_later, leader.clone(), old_round);
+            peer.mailbox.discovered(state_later, leader, later_round);
+            let mut state_old_sub = peer.mailbox.subscribe(state_old);
+            let mut state_equal_sub = peer.mailbox.subscribe(state_equal);
+            let mut state_later_sub = peer.mailbox.subscribe(state_later);
+            context.sleep(Duration::from_millis(10)).await;
+
+            peer.mailbox.prune(floor, unseen);
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(peer.mailbox.get(cached_old_commitment).await.is_none());
+            assert!(peer.mailbox.get(cached_equal_commitment).await.is_none());
+            assert!(peer.mailbox.get(cached_later_commitment).await.is_some());
+            assert!(matches!(
+                state_old_sub.try_recv(),
+                Err(TryRecvError::Closed)
+            ));
+            assert!(matches!(
+                state_equal_sub.try_recv(),
+                Err(TryRecvError::Closed)
+            ));
+            assert!(matches!(
+                state_later_sub.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_local_reproposal_refreshes_existing_reconstruction_state() {
+        let fixture = Fixture::<C>::default();
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let live = CodedBlock::<B, C, H>::new(
+                B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let unseen = CodedBlock::<B, C, H>::new(
+                B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                coding_config,
+                &STRATEGY,
+            )
+            .commitment();
+            let live_commitment = live.commitment();
+            let leader = peers[0].public_key.clone();
+            let original_round = Round::new(Epoch::zero(), View::new(1));
+            let floor = Round::new(Epoch::zero(), View::new(3));
+            let reproposal_round = Round::new(Epoch::zero(), View::new(4));
+            let peer = &mut peers[0];
+
+            peer.mailbox
+                .discovered(live_commitment, leader, original_round);
+            peer.mailbox.proposed(reproposal_round, live);
+            assert!(peer.mailbox.get(live_commitment).await.is_some());
+
+            let mut shard_sub = peer
+                .mailbox
+                .subscribe_assigned_shard_verified(live_commitment);
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)));
+
+            peer.mailbox.prune(floor, unseen);
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(peer.mailbox.get(live_commitment).await.is_some());
+            assert!(matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)));
         });
     }
 
@@ -3119,10 +3230,9 @@ mod tests {
 
                 // The same commitment becomes live in a later round while the application
                 // still has an older finalization to acknowledge.
-                peers[receiver_idx].mailbox.notarized(
-                    live_commitment,
-                    Round::new(Epoch::zero(), View::new(4)),
-                );
+                peers[receiver_idx]
+                    .mailbox
+                    .notarized(live_commitment, Round::new(Epoch::zero(), View::new(4)));
                 context.sleep(Duration::from_millis(10)).await;
                 peers[receiver_idx].mailbox.prune(
                     Round::new(Epoch::zero(), View::new(3)),
@@ -3265,6 +3375,16 @@ mod tests {
                     matches!(discovered_sub.try_recv(), Err(TryRecvError::Empty)),
                     "cached discovery should keep reconstruction state live"
                 );
+                for &receiver_idx in &receivers {
+                    assert!(
+                        peers[receiver_idx]
+                            .mailbox
+                            .get(live_commitment)
+                            .await
+                            .is_some(),
+                        "cached observation should keep the reconstructed block live"
+                    );
+                }
 
                 for (&receiver_idx, receiver) in receivers.iter().zip(&receiver_keys) {
                     let leader_shard = live

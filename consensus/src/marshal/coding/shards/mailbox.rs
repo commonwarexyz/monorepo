@@ -94,11 +94,12 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to prune cached blocks and reconstruction state after finalization.
+    /// A request to retire cached blocks and reconstruction state after durable application
+    /// progress.
     Prune {
-        /// The finalized consensus round.
+        /// The inclusive consensus-round retirement floor.
         round: Round,
-        /// The finalized [`Commitment`].
+        /// The commitment through which application processing advanced.
         commitment: Commitment,
     },
 }
@@ -326,10 +327,11 @@ where
         receiver
     }
 
-    /// Prune cached blocks and reconstruction state after finalization.
+    /// Retire cached blocks and reconstruction state after durable application progress.
     ///
-    /// The finalized commitment and entries last associated with `round` or earlier are retired.
-    /// The round is supplied separately because a re-proposal retains its original commitment.
+    /// `commitment` is retired exactly. `round` is an inclusive retirement floor for every other
+    /// entry and is supplied separately because sparse finalization certificates and re-proposals
+    /// may associate it with a different block context.
     ///
     /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
     /// subscriptions remain open, and later consensus notifications may recreate state.
