@@ -231,15 +231,25 @@ impl merkle::Family for Family {
 impl Graftable for Family {
     type PendingChunk<D: Digest> = Option<D>;
 
-    fn peak_birth_size(pos: Position, height: u32) -> u64 {
+    fn subtree_root_birth_size(leaf_start: Location, height: u32) -> u64 {
+        let width = 1u64.checked_shl(height).expect("height excessively large");
+        if leaf_start.as_u64() & (width - 1) != 0 {
+            return Self::MAX_LEAVES
+                .as_u64()
+                .checked_add(1)
+                .expect("MAX_LEAVES must permit an unreachable sentinel");
+        }
         if height == 0 {
             // Leaves have no merge delay; born as soon as appended.
-            return *<Self as Graftable>::leftmost_leaf(pos, 0) + 1;
+            return leaf_start
+                .as_u64()
+                .checked_add(1)
+                .expect("birth size overflow");
         }
 
-        let width = 1u64.checked_shl(height).expect("height excessively large");
         // `base` is the leaf count at which all leaves in the subtree have been appended.
-        let base = <Self as Graftable>::leftmost_leaf(pos, height)
+        let base = leaf_start
+            .as_u64()
             .checked_add(width)
             .expect("birth size overflow");
 
@@ -250,7 +260,11 @@ impl Graftable for Family {
             .checked_shl(height - 1)
             .and_then(|v| v.checked_sub(1))
             .expect("height excessively large");
-        *base.checked_add(delay).expect("birth size overflow")
+        base.checked_add(delay).expect("birth size overflow")
+    }
+
+    fn peak_birth_size(pos: Position, height: u32) -> u64 {
+        Self::subtree_root_birth_size(Self::leftmost_leaf(pos, height), height)
     }
 
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
@@ -397,6 +411,16 @@ mod tests {
     use super::*;
     use crate::{merkle::Bagging::ForwardFold, mmb::mem::Mmb};
     use commonware_cryptography::Sha256;
+
+    const MAX_LEAVES: Location = <Family as crate::merkle::Family>::MAX_LEAVES;
+
+    #[test]
+    fn test_subtree_root_birth_size_rejects_unaligned_start() {
+        assert!(
+            Family::subtree_root_birth_size(Location::new(1), 1) > *MAX_LEAVES,
+            "a subtree without a canonical root must be unreachable"
+        );
+    }
 
     /// Verify the MMB merge schedule via `Family::parent_heights`.
     #[test]

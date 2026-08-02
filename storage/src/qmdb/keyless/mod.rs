@@ -395,7 +395,7 @@ where
                 self.inactivity_floor_loc,
             ));
         }
-        (self.journal, _) = self.journal.prune(loc).await?;
+        (self.journal, _) = self.journal.prune_with_commit(loc).await?;
         self.update_metrics();
         Ok(self)
     }

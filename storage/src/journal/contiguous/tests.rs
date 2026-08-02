@@ -101,12 +101,46 @@ where
     test_rewind_zero_then_append(&indexed_factory).await;
     test_rewind_after_prune(&indexed_factory).await;
     test_section_boundary_behavior(&indexed_factory).await;
+    test_durable_prefix(&indexed_factory).await;
     test_destroy_and_reinit(&indexed_factory).await;
     test_append_many_empty(&indexed_factory).await;
     test_append_many_basic(&indexed_factory).await;
     test_append_many_across_sections(&indexed_factory).await;
     test_append_many_then_append(&indexed_factory).await;
     test_append_many_single_item(&indexed_factory).await;
+}
+
+/// The reported durable range is always a retained prefix, including when its end trails readable
+/// state across a prune.
+async fn test_durable_prefix<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = factory("durable-prefix".into()).await.unwrap();
+
+    let bounds = journal.bounds();
+    assert_eq!(journal.durable(), bounds.start..bounds.start);
+
+    for i in 0..25u64 {
+        (journal, _) = journal.append(&i).await.unwrap();
+    }
+    let bounds = journal.bounds();
+    let durable = journal.durable();
+    assert_eq!(durable.start, bounds.start);
+    assert!(durable.end >= bounds.start && durable.end <= bounds.end);
+
+    journal = journal.sync().await.unwrap();
+    assert_eq!(journal.durable(), journal.bounds());
+
+    for i in 25..27u64 {
+        (journal, _) = journal.append(&i).await.unwrap();
+    }
+    (journal, _) = journal.prune(20).await.unwrap();
+    assert_eq!(journal.bounds(), 20..27);
+    assert_eq!(journal.durable(), 20..25);
+
+    journal.destroy().await.unwrap();
 }
 
 /// Test that an empty journal has empty bounds (start == end == 0).
@@ -1685,6 +1719,116 @@ fn test_variable_start_sync_overlaps_work() {
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;
+    });
+}
+
+/// A prune whose boundary is justified by the in-memory barrier need not advance the recovery
+/// watermark, so a crash can reopen with that watermark behind the pruning boundary.
+/// [Mutable::durable] must stay well-formed in that state.
+#[test]
+fn test_fixed_durable_range_well_formed_after_prune_crash() {
+    let executor = deterministic::Runner::default();
+    let ((), checkpoint) = executor.start_and_recover(|context| async move {
+        let cfg = fixed_overlap_cfg(&context, "fixed-durable-clamp");
+        let mut journal = fixed::Journal::<_, u64>::init(context, cfg).await.unwrap();
+        for i in 0..20u64 {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        // Commit proves the appends durable and advances the in-memory barrier without
+        // persisting the recovery watermark.
+        journal = journal.commit().await.unwrap();
+        // The barrier covers the boundary, so the prune does not advance the watermark.
+        (journal, _) = journal.prune(10).await.unwrap();
+        drop(journal);
+    });
+    let executor = deterministic::Runner::from(checkpoint);
+    executor.start(|context| async move {
+        let cfg = fixed_overlap_cfg(&context, "fixed-durable-clamp");
+        let mut journal = fixed::Journal::<_, u64>::init(context, cfg).await.unwrap();
+        let durable = Mutable::durable(&mut journal);
+        assert_eq!(
+            durable,
+            10..10,
+            "recovered watermark behind the pruning boundary must clamp, not invert"
+        );
+        journal.destroy().await.unwrap();
+    });
+}
+
+/// A non-empty variable journal aligns its offsets during reopen, preserving a durable range
+/// whose watermark covers the barrier without clamping.
+#[test]
+fn test_variable_durable_range_well_formed_after_prune_crash() {
+    let executor = deterministic::Runner::default();
+    let ((), checkpoint) = executor.start_and_recover(|context| async move {
+        let cfg = variable_overlap_cfg(&context, "variable-durable-clamp");
+        let mut journal = variable::Journal::<_, u64>::init(context, cfg)
+            .await
+            .unwrap();
+        for i in 0..10u64 {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        for i in 10..30u64 {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        let handle;
+        (journal, handle) = journal.start_sync().await.unwrap();
+        handle.await.unwrap();
+        // The barrier covers the boundary, so the prune does not advance the watermark.
+        (journal, _) = journal.prune(20).await.unwrap();
+        drop(journal);
+    });
+    let executor = deterministic::Runner::from(checkpoint);
+    executor.start(|context| async move {
+        let cfg = variable_overlap_cfg(&context, "variable-durable-clamp");
+        let mut journal = variable::Journal::<_, u64>::init(context, cfg)
+            .await
+            .unwrap();
+        let durable = Mutable::durable(&mut journal);
+        assert_eq!(
+            durable,
+            20..30,
+            "the variable watermark must keep covering the barrier across a prune crash"
+        );
+        journal.destroy().await.unwrap();
+    });
+}
+
+/// A prune that collapses the journal persists no watermark, and an empty-aligned reopen
+/// skips the offsets sync that would heal it: the recovered barrier must clamp to the
+/// pruning boundary rather than invert.
+#[test]
+fn test_variable_durable_range_well_formed_after_collapsing_prune_crash() {
+    let executor = deterministic::Runner::default();
+    let ((), checkpoint) = executor.start_and_recover(|context| async move {
+        let cfg = variable_overlap_cfg(&context, "variable-durable-collapse");
+        let mut journal = variable::Journal::<_, u64>::init(context, cfg)
+            .await
+            .unwrap();
+        for i in 0..30u64 {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        // Commit syncs the data blobs without persisting the offsets watermark.
+        journal = journal.commit().await.unwrap();
+        // The commit covered the data barrier, so the prune commits only the offsets journal
+        // without advancing the watermark before removing every item-bearing blob.
+        (journal, _) = journal.prune(30).await.unwrap();
+        drop(journal);
+    });
+    let executor = deterministic::Runner::from(checkpoint);
+    executor.start(|context| async move {
+        let cfg = variable_overlap_cfg(&context, "variable-durable-collapse");
+        let mut journal = variable::Journal::<_, u64>::init(context, cfg)
+            .await
+            .unwrap();
+        let durable = Mutable::durable(&mut journal);
+        assert_eq!(
+            durable,
+            30..30,
+            "recovered watermark behind the pruning boundary must clamp, not invert"
+        );
+        journal.destroy().await.unwrap();
     });
 }
 

@@ -284,6 +284,20 @@ pub trait Graftable: Family {
     /// `pos` and `height` results in arithmetic underflow/overflow.
     fn leftmost_leaf(pos: Position<Self>, height: u32) -> Location<Self>;
 
+    /// Return the minimum leaf count at which the root of the subtree starting at
+    /// `leaf_start` with `height` is born.
+    ///
+    /// The result exceeds [`Family::MAX_LEAVES`] when the root can never be materialized by this
+    /// family, including when `leaf_start` is not aligned to the subtree width. This permits
+    /// callers to reason about candidate subtrees near the end of the supported domain without
+    /// first constructing a virtual position. Implementations must account for any
+    /// family-specific merge delay.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height >= 64` or if arithmetic overflows.
+    fn subtree_root_birth_size(leaf_start: Location<Self>, height: u32) -> u64;
+
     /// Return the minimum leaf count at which the node at `pos` with `height` exists in the
     /// structure.
     ///
@@ -300,9 +314,7 @@ pub trait Graftable: Family {
     ///
     /// Panics if `height` is excessively large (e.g., `>= 63`), or if arithmetic overflows.
     fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
-        let leftmost = *Self::leftmost_leaf(pos, height);
-        let width = 1u64.checked_shl(height).expect("height excessively large");
-        leftmost.checked_add(width).expect("birth size overflow")
+        Self::subtree_root_birth_size(Self::leftmost_leaf(pos, height), height)
     }
 }
 

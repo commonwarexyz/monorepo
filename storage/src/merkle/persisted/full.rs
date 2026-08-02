@@ -18,7 +18,7 @@ use crate::{
     journal::{
         Error as JError,
         contiguous::{
-            Contiguous, Many,
+            Contiguous, Many, Mutable,
             fixed::{Config as JConfig, Journal},
         },
     },
@@ -143,6 +143,51 @@ pub struct SyncConfig<F: Family, D: Digest, S: Strategy> {
     pub pinned_nodes: Option<Vec<D>>,
 }
 
+struct MetadataPruneHalt {
+    #[cfg(test)]
+    state: Option<Arc<MetadataPruneState>>,
+}
+
+impl MetadataPruneHalt {
+    const fn idle() -> Self {
+        Self {
+            #[cfg(test)]
+            state: None,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MetadataPruneState {
+    reached: std::sync::atomic::AtomicBool,
+    durable_before_metadata: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(test)]
+impl MetadataPruneHalt {
+    fn armed(state: Arc<MetadataPruneState>) -> Self {
+        Self { state: Some(state) }
+    }
+
+    fn observe_before_metadata(&self, durable_end: u64) {
+        if let Some(state) = &self.state {
+            state
+                .durable_before_metadata
+                .store(durable_end, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    async fn wait_after_metadata(&self) {
+        if let Some(state) = &self.state {
+            state
+                .reached
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// A Merkle structure backed by a fixed-item-length journal.
 pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// A memory resident Merkle structure used to build the structure and cache updates. It caches
@@ -167,7 +212,7 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
-    /// True while the journal may contain flushed nodes that have not yet been made durable.
+    /// True after this instance appends journal nodes that have not yet been made durable.
     pub(crate) journal_dirty: bool,
 
     /// The strategy to use for parallelization.
@@ -199,6 +244,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return the total number of leaves in the structure.
     pub fn leaves(&self) -> Location<F> {
         self.mem.leaves()
+    }
+
+    /// The positions of durably persisted nodes.
+    pub(crate) fn durable(&mut self) -> std::ops::Range<Position<F>> {
+        let durable = self.journal.durable();
+        Position::new(durable.start)..Position::new(durable.end)
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -445,6 +496,14 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// 3. **Error**: existing_size > range.end
     ///    - Returns [crate::journal::Error::ItemOutOfRange]
     pub async fn init_sync(context: E, cfg: SyncConfig<F, D, S>) -> Result<Self, Error<F>> {
+        Self::init_sync_inner(context, cfg, MetadataPruneHalt::idle()).await
+    }
+
+    async fn init_sync_inner(
+        context: E,
+        cfg: SyncConfig<F, D, S>,
+        _halt: MetadataPruneHalt,
+    ) -> Result<Self, Error<F>> {
         let prune_pos = Position::try_from(cfg.range.start())?;
         let end_pos = Position::try_from(cfg.range.end())?;
         let journal_cfg = JConfig {
@@ -499,15 +558,31 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // structure size, so we validate against `nodes_to_pin(prune_loc)` alone.
         let prune_loc = Location::try_from(prune_pos)?;
         let journal_leaves = Location::try_from(journal_size)?;
-        if let Some(pinned_nodes) = cfg.pinned_nodes {
-            // Use caller-provided pinned nodes.
-            let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
-            if pinned_nodes.len() != nodes_to_pin_persisted.len() {
-                return Err(Error::<F>::InvalidPinnedNodes);
+        let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
+        let pinned_nodes = match cfg.pinned_nodes {
+            Some(pinned_nodes) => {
+                // Use caller-provided pinned nodes.
+                if pinned_nodes.len() != nodes_to_pin_persisted.len() {
+                    return Err(Error::<F>::InvalidPinnedNodes);
+                }
+                pinned_nodes
             }
-            for (pos, digest) in nodes_to_pin_persisted.into_iter().zip(pinned_nodes.iter()) {
-                metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
+            None => {
+                // Preserve locally available pins before pruning can remove their journal blobs.
+                let mut pinned_nodes = Vec::with_capacity(nodes_to_pin_persisted.len());
+                for &pos in &nodes_to_pin_persisted {
+                    pinned_nodes
+                        .push(Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?);
+                }
+                pinned_nodes
             }
+        };
+        let persisted_pins: BTreeMap<_, _> = nodes_to_pin_persisted
+            .into_iter()
+            .zip(pinned_nodes)
+            .collect();
+        for (&pos, digest) in &persisted_pins {
+            metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
         }
 
         // Create the in-memory structure with the pinned nodes required for its size. This must be
@@ -516,7 +591,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
-            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            let digest = match persisted_pins.get(&pos) {
+                Some(digest) => *digest,
+                None => Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?,
+            };
             mem_pinned_nodes.push(digest);
         }
         let mut mem = Mem::init(MemConfig {
@@ -528,11 +606,25 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         // This must also be done before pruning.
         if prune_pos < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, prune_pos).await?;
+            mem.add_pinned_nodes(persisted_pins);
         }
+
+        // The metadata boundary is a durable recovery promise, so every journal node below it
+        // must be proven durable before that boundary is published.
+        if journal.durable().end < *prune_pos {
+            journal = journal.sync().await?;
+        }
+        let durable_end = journal.durable().end;
+        debug_assert!(durable_end >= *prune_pos);
+
+        #[cfg(test)]
+        _halt.observe_before_metadata(durable_end);
 
         // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
         let metadata = metadata.sync().await?;
+
+        #[cfg(test)]
+        _halt.wait_after_metadata().await;
 
         // Prune the journal to range.start.
         (journal, _) = journal.prune(*prune_pos).await?;
@@ -616,9 +708,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_internal().await?;
 
-        // Sync the journal to ensure durability before returning. This covers nodes appended by
-        // the flush above as well as nodes left non-durable by earlier [Self::flush] calls.
-        if self.journal_dirty {
+        // A recovered journal can contain a tail beyond its durability barrier even though this
+        // instance has not appended anything. Sync whenever either source indicates pending data.
+        let journal_size = self.journal.size();
+        let durable_end = self.journal.durable().end;
+        if self.journal_dirty || durable_end < journal_size {
             self.journal = self.journal.sync().await?;
             self.journal_dirty = false;
         }
@@ -693,11 +787,20 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Prune all nodes up to but not including the given leaf location and update the pinned nodes.
     ///
     /// This implementation ensures that no failure can leave the structure in an unrecoverable
-    /// state, requiring it sync the structure to write any potential unsynced updates.
+    /// state, syncing the structure first unless the barrier already covers the prune
+    /// position. Unsynced nodes above the barrier are not guaranteed to survive a crash.
     ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
-    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(self, loc: Location<F>) -> Result<Self, Error<F>> {
+        self.prune_inner(loc, MetadataPruneHalt::idle()).await
+    }
+
+    async fn prune_inner(
+        mut self,
+        loc: Location<F>,
+        _halt: MetadataPruneHalt,
+    ) -> Result<Self, Error<F>> {
         let pos = Position::try_from(loc)?;
         if loc > self.mem.leaves() {
             return Err(Error::LeafOutOfBounds(loc));
@@ -706,13 +809,24 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Ok(self);
         }
 
-        // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        self = self.sync().await?;
+        // Sync unless the durable journal prefix covers the metadata boundary written below.
+        // Nodes beyond the durable end remain cached and are not guaranteed to survive a crash.
+        if self.durable().end < pos {
+            self = self.sync().await?;
+        }
+        let durable_end = self.durable().end;
+        debug_assert!(durable_end >= pos);
+
+        #[cfg(test)]
+        _halt.observe_before_metadata(*durable_end);
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
         let pinned_nodes;
         (self, pinned_nodes) = self.update_metadata(pos).await?;
+
+        #[cfg(test)]
+        _halt.wait_after_metadata().await;
 
         (self.journal, _) = self.journal.prune(*pos).await?;
         Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
@@ -1084,12 +1198,13 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic, reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::prefixed_u64::U64};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
+        sync::{Arc, atomic::Ordering},
     };
 
     fn test_digest(v: usize) -> Digest {
@@ -1578,6 +1693,182 @@ mod tests {
     #[test_traced]
     fn test_full_flush_then_sync_crash_recovery_mmb() {
         full_flush_then_sync_crash_inner::<mmb::Family>();
+    }
+
+    /// Build and reopen a valid eleven-node structure whose conservative durability barrier stops
+    /// at eight.
+    async fn full_reopen_lagging_barrier<F: Family>(
+        context: &deterministic::Context,
+        hasher: &Standard<Sha256>,
+    ) -> (
+        Merkle<F, deterministic::Context, Digest, Sequential>,
+        Config<Sequential>,
+        (Position<F>, Digest),
+    ) {
+        let cfg = Config {
+            items_per_blob: NZU64!(8),
+            ..test_config(context)
+        };
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("first"), hasher, cfg.clone())
+                .await
+                .unwrap();
+
+        // Seven leaves form a valid eleven-node structure for both MMR and MMB.
+        let mut batch = merkle.new_batch();
+        for i in 0..7 {
+            batch = batch.add(hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
+        merkle = merkle.apply_batch(&batch).unwrap().sync().await.unwrap();
+        let expected = (merkle.size(), merkle.root(hasher, 0).unwrap());
+        assert_eq!(expected.0, Position::new(11));
+
+        // Model a recovered journal whose conservative barrier trails readable data.
+        merkle.journal = merkle.journal.test_set_recovery_watermark(8).await.unwrap();
+        drop(merkle);
+
+        // Reopening preserves the readable tail without advancing its durability barrier.
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), hasher, cfg.clone())
+                .await
+                .unwrap();
+        assert_eq!(merkle.size(), expected.0);
+        assert_eq!(merkle.root(hasher, 0).unwrap(), expected.1);
+        assert_eq!(merkle.durable().end, Position::new(8));
+        (merkle, cfg, expected)
+    }
+
+    /// Pruning an instance reopened over a tail beyond its durability barrier must first make the
+    /// metadata boundary safe to recover after a crash.
+    fn full_prune_recovered_tail_crash_inner<F: Family>() {
+        let executor = deterministic::Runner::default();
+        let ((expected_size, expected_root), checkpoint) =
+            executor.start_and_recover(|context| async move {
+                let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+                let (merkle, _, expected) =
+                    full_reopen_lagging_barrier::<F>(&context, &hasher).await;
+
+                let halt = Arc::new(MetadataPruneState::default());
+                let prune =
+                    merkle.prune_inner(Location::new(6), MetadataPruneHalt::armed(halt.clone()));
+                futures::pin_mut!(prune);
+                loop {
+                    assert!(
+                        futures::poll!(prune.as_mut()).is_pending(),
+                        "prune must park after publishing its metadata boundary"
+                    );
+                    if halt.reached.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    reschedule().await;
+                }
+                assert!(
+                    halt.durable_before_metadata.load(Ordering::SeqCst) >= 10,
+                    "journal nodes required by the metadata boundary must already be durable"
+                );
+
+                expected
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("after_crash"),
+                &hasher,
+                Config {
+                    items_per_blob: NZU64!(8),
+                    ..test_config(&context)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(merkle.size(), expected_size);
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), expected_root);
+            assert_eq!(merkle.bounds().start, Location::new(6));
+            merkle.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_prune_recovered_tail_crash_mmr() {
+        full_prune_recovered_tail_crash_inner::<mmr::Family>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_prune_recovered_tail_crash_mmb() {
+        full_prune_recovered_tail_crash_inner::<mmb::Family>();
+    }
+
+    /// State-sync pruning must prove recovered tail nodes durable before publishing a metadata
+    /// boundary that depends on them.
+    fn full_init_sync_recovered_tail_crash_inner<F: Family>() {
+        let executor = deterministic::Runner::default();
+        let ((expected_size, expected_root), checkpoint) =
+            executor.start_and_recover(|context| async move {
+                let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+                let (merkle, cfg, expected) =
+                    full_reopen_lagging_barrier::<F>(&context, &hasher).await;
+                let pinned_nodes = merkle.pinned_nodes_at(Location::new(6)).await.unwrap();
+                drop(merkle);
+
+                let sync_cfg = SyncConfig::<F, Digest, Sequential> {
+                    config: cfg,
+                    range: non_empty_range!(Location::new(6), Location::new(7)),
+                    pinned_nodes: Some(pinned_nodes),
+                };
+                let halt = Arc::new(MetadataPruneState::default());
+                let sync = Merkle::<F, _, Digest, Sequential>::init_sync_inner(
+                    context.child("sync"),
+                    sync_cfg,
+                    MetadataPruneHalt::armed(halt.clone()),
+                );
+                futures::pin_mut!(sync);
+                loop {
+                    assert!(
+                        futures::poll!(sync.as_mut()).is_pending(),
+                        "state-sync initialization must park after publishing its metadata boundary"
+                    );
+                    if halt.reached.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    reschedule().await;
+                }
+                assert!(
+                    halt.durable_before_metadata.load(Ordering::SeqCst) >= 10,
+                    "journal nodes required by the metadata boundary must already be durable"
+                );
+
+                expected
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("after_crash"),
+                &hasher,
+                Config {
+                    items_per_blob: NZU64!(8),
+                    ..test_config(&context)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(merkle.size(), expected_size);
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), expected_root);
+            assert_eq!(merkle.bounds().start, Location::new(6));
+            merkle.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_init_sync_recovered_tail_crash_mmr() {
+        full_init_sync_recovered_tail_crash_inner::<mmr::Family>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_init_sync_recovered_tail_crash_mmb() {
+        full_init_sync_recovered_tail_crash_inner::<mmb::Family>();
     }
 
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent
@@ -2647,7 +2938,7 @@ mod tests {
         // init_sync must read pinned nodes BEFORE pruning or they'll be lost.
         let prune_loc = Location::<F>::new(32);
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: cfg,
+            config: cfg.clone(),
             range: non_empty_range!(prune_loc, Location::<F>::new(128)),
             pinned_nodes: None, // Force init_sync to compute pinned nodes from journal
         };
@@ -2661,8 +2952,16 @@ mod tests {
         assert_eq!(sync_mmr.size(), original_size);
         assert_eq!(sync_mmr.root(&hasher, 0).unwrap(), original_root);
         assert_eq!(sync_mmr.bounds().start, prune_loc);
+        drop(sync_mmr);
 
-        sync_mmr.destroy().await.unwrap();
+        let reopened =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(reopened.size(), original_size);
+        assert_eq!(reopened.root(&hasher, 0).unwrap(), original_root);
+        assert_eq!(reopened.bounds().start, prune_loc);
+        reopened.destroy().await.unwrap();
     }
 
     #[test_traced]
