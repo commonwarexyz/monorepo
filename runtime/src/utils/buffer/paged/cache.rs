@@ -1,22 +1,28 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
+use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, Checksum, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
 use ahash::AHashMap;
 use commonware_utils::{cache::Clock, sync::RwLock};
-use futures::{FutureExt, future::Shared};
+use futures::{
+    FutureExt,
+    future::{Shared, try_join_all},
+};
 use std::{
     collections::hash_map::Entry,
     future::Future,
     num::{NonZeroU16, NonZeroUsize},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
 use tracing::{error, trace, warn};
+
+/// Bounds each allocation and cache-lock hold while amortizing storage-page reads.
+const MAX_BULK_READ_SIZE: usize = 1024 * 1024;
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
@@ -321,15 +327,184 @@ impl CacheRef {
                 }
             }
 
-            // Handle page fault.
-            let count = self
-                .read_after_page_fault(blob, blob_id, buf, offset)
-                .await?;
+            let (_, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
+            let spans_multiple_pages = (offset_in_page as usize)
+                .checked_add(buf.len())
+                .is_some_and(|len| len > self.page_size as usize);
+            let count = if spans_multiple_pages {
+                self.read_bulk_after_page_fault(blob, blob_id, buf, offset)
+                    .await?
+            } else {
+                self.read_after_page_fault(blob, blob_id, buf, offset)
+                    .await?
+            };
             offset += count as u64;
             buf = &mut buf[count..];
         }
 
         Ok(())
+    }
+
+    /// Fetch consecutive full pages in one bounded read after the first page misses.
+    ///
+    /// Every page joins the ordinary single-flight registry and is validated before any result is
+    /// copied or cached. Completion admits all still-owned pages under one cache lock, so a corrupt
+    /// page cannot expose a prefix and overlapping readers do not duplicate the physical read.
+    async fn read_bulk_after_page_fault<B: Blob>(
+        &self,
+        blob: &B,
+        blob_id: u64,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> Result<usize, Error> {
+        let page_size = self.page_size as usize;
+        let physical_page_size = page_size
+            .checked_add(CHECKSUM_SIZE as usize)
+            .ok_or(Error::OffsetOverflow)?;
+        let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
+        let offset_in_page = offset_in_page as usize;
+        let requested = offset_in_page
+            .checked_add(buf.len())
+            .ok_or(Error::OffsetOverflow)?;
+        let requested_pages = requested.div_ceil(page_size);
+        let max_pages = MAX_BULK_READ_SIZE / physical_page_size;
+        let pages = requested_pages.min(max_pages);
+        debug_assert!(pages > 1);
+
+        let physical_offset = page_num
+            .checked_mul(physical_page_size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        let physical_len = pages
+            .checked_mul(physical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        let keys = (0..pages)
+            .map(|index| {
+                page_num
+                    .checked_add(index as u64)
+                    .map(|page| (blob_id, page))
+                    .ok_or(Error::OffsetOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Completion may cache or remove only the fetch generations installed below. The owners
+        // become available before polling without making the shared physical future self-referential.
+        let fetch_owners = Arc::new(OnceLock::<Vec<PageFetch>>::new());
+        let completion_owners = Arc::clone(&fetch_owners);
+        let completion_keys = keys.clone();
+        let cache_ref = Arc::clone(&self.cache);
+        let bulk_blob = blob.clone();
+        let physical = async move {
+            let result = async {
+                let physical = bulk_blob
+                    .read_at(physical_offset, physical_len)
+                    .await
+                    .map(|bytes| bytes.coalesce().freeze())
+                    .map_err(Arc::new)?;
+                let mut logical = Vec::with_capacity(pages);
+                for index in 0..pages {
+                    let start = index * physical_page_size;
+                    let end = start + physical_page_size;
+                    let page = &physical.as_ref()[start..end];
+                    let checksum = Checksum::validate_page(page)
+                        .ok_or_else(|| Arc::new(Error::InvalidChecksum))?;
+                    if checksum.len as usize != page_size {
+                        return Err(Arc::new(Error::InvalidChecksum));
+                    }
+                    logical.push(physical.slice(start..start + page_size));
+                }
+                Ok(Arc::new(logical))
+            }
+            .await;
+            if let Err(error) = &result {
+                error!(page_num, pages, ?error, "bulk page fetch failed");
+            }
+            let owners = completion_owners
+                .get()
+                .expect("bulk fetch owners are installed before polling");
+            let mut cache = cache_ref.write();
+            for (index, (key, owner)) in completion_keys.iter().zip(owners).enumerate() {
+                let current = cache
+                    .page_fetches
+                    .get(key)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.fetch, owner));
+                if !current {
+                    continue;
+                }
+                if let Ok(pages) = &result {
+                    cache.cache(blob_id, pages[index].as_ref(), key.1);
+                }
+                let _ = cache.page_fetches.remove(key);
+            }
+            result
+        }
+        .boxed()
+        .shared();
+
+        let (fetches, mut fetch_guards) = {
+            let mut cache = self.cache.write();
+            let count = cache.read_at(blob_id, buf, offset);
+            if count != 0 {
+                return Ok(count);
+            }
+            if keys.iter().any(|key| cache.page_fetches.contains_key(key)) {
+                (Vec::new(), Vec::new())
+            } else {
+                let mut fetches = Vec::with_capacity(pages);
+                let mut fetch_guards = Vec::with_capacity(pages);
+                let mut owners = Vec::with_capacity(pages);
+                for (index, key) in keys.iter().copied().enumerate() {
+                    let physical = physical.clone();
+                    let fetch_future = async move {
+                        physical.await.map(|pages| pages[index].clone())
+                    }
+                    .boxed()
+                    .shared();
+                    let fetch = Arc::new(fetch_future.clone());
+                    cache.page_fetches.insert(
+                        key,
+                        PageFetchEntry {
+                            fetch: Arc::clone(&fetch),
+                            waiters: 1,
+                        },
+                    );
+                    owners.push(Arc::clone(&fetch));
+                    fetches.push(fetch_future);
+                    fetch_guards.push(PageFetchGuard::new(Arc::clone(&self.cache), key, fetch));
+                }
+                assert!(
+                    fetch_owners.set(owners).is_ok(),
+                    "bulk fetch owners are initialized once"
+                );
+                (fetches, fetch_guards)
+            }
+        };
+
+        if fetches.is_empty() {
+            return self
+                .read_after_page_fault(blob, blob_id, buf, offset)
+                .await;
+        }
+
+        let logical = match try_join_all(fetches).await {
+            Ok(logical) => {
+                for guard in &mut fetch_guards {
+                    guard.disarm();
+                }
+                logical
+            }
+            Err(error) => return Err(error.as_ref().clone()),
+        };
+
+        let mut copied = 0;
+        for (index, page) in logical.iter().enumerate() {
+            let start = if index == 0 { offset_in_page } else { 0 };
+            let count = (page_size - start).min(buf.len() - copied);
+            buf[copied..copied + count].copy_from_slice(&page.as_ref()[start..start + count]);
+            copied += count;
+            if copied == buf.len() {
+                break;
+            }
+        }
+        Ok(copied)
     }
 
     /// Fetch the requested page after encountering a page fault, which may involve retrieving it
@@ -906,6 +1081,192 @@ mod tests {
 
             // Cleanup.
             blob.sync().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_cache_coalesces_cold_consecutive_pages() {
+        #[derive(Clone)]
+        struct CountingBlob {
+            data: Arc<Vec<u8>>,
+            reads: Arc<AtomicUsize>,
+        }
+
+        impl Blob for CountingBlob {
+            async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+                self.read_at_buf(offset, len, IoBufsMut::default()).await
+            }
+
+            async fn read_at_buf(
+                &self,
+                offset: u64,
+                len: usize,
+                _bufs: impl Into<IoBufsMut> + Send,
+            ) -> Result<IoBufsMut, Error> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+                let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+                Ok(IoBufsMut::from(self.data[start..end].to_vec()))
+            }
+
+            async fn write_at(
+                &self,
+                _offset: u64,
+                _bufs: impl Into<IoBufs> + Send,
+                _options: WriteOptions,
+            ) -> Result<(), Error> {
+                Ok(())
+            }
+
+            async fn resize(&self, _len: u64) -> Result<(), Error> {
+                Ok(())
+            }
+
+            async fn sync(&self) -> Result<(), Error> {
+                Ok(())
+            }
+
+            async fn start_sync(&self) -> Handle<()> {
+                Handle::ready(Ok(()))
+            }
+        }
+
+        deterministic::Runner::default().start(|context| async move {
+            const BULK_PAGE_SIZE: NonZeroU16 = NZU16!(4084);
+            const PAGES: usize = 129;
+            let mut physical = Vec::new();
+            let mut logical = Vec::new();
+            for page in 0..PAGES {
+                let bytes = vec![page as u8; BULK_PAGE_SIZE.get() as usize];
+                physical.extend_from_slice(&bytes);
+                physical.extend_from_slice(
+                    &Checksum::new(BULK_PAGE_SIZE.get(), Crc32::checksum(&bytes)).to_bytes(),
+                );
+                logical.extend_from_slice(&bytes);
+            }
+            let blob = CountingBlob {
+                data: Arc::new(physical),
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let cache = CacheRef::from_pooler(&context, BULK_PAGE_SIZE, NZUsize!(PAGES));
+
+            let mut first = vec![0; logical.len()];
+            cache.read(&blob, 0, &mut first, 0).await.unwrap();
+            assert_eq!(first, logical);
+            assert_eq!(blob.reads.load(Ordering::Relaxed), 1);
+
+            let mut second = vec![0; logical.len()];
+            cache.read(&blob, 0, &mut second, 0).await.unwrap();
+            assert_eq!(second, logical);
+            assert_eq!(blob.reads.load(Ordering::Relaxed), 1);
+
+            let mut corrupt = blob.data.as_ref().clone();
+            corrupt[BULK_PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize] ^= 1;
+            let corrupt = CountingBlob {
+                data: Arc::new(corrupt),
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let empty = CacheRef::from_pooler(&context, BULK_PAGE_SIZE, NZUsize!(PAGES));
+            let mut rejected = vec![0; logical.len()];
+            assert!(matches!(
+                empty.read(&corrupt, 0, &mut rejected, 0).await,
+                Err(Error::InvalidChecksum)
+            ));
+            let mut page = vec![0; BULK_PAGE_SIZE.get() as usize];
+            assert_eq!(empty.read_cached(0, &mut page, 0), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_bulk_reads_are_single_flight() {
+        deterministic::Runner::default().start(|context| async move {
+            const PAGES: usize = 3;
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut physical = Vec::new();
+            let mut logical = Vec::new();
+            for page in 0..PAGES {
+                let bytes = vec![page as u8; page_size];
+                physical.extend_from_slice(&bytes);
+                physical.extend_from_slice(
+                    &Checksum::new(PAGE_SIZE.get(), Crc32::checksum(&bytes)).to_bytes(),
+                );
+                logical.extend_from_slice(&bytes);
+            }
+
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let reads = Arc::new(AtomicUsize::new(0));
+            let blob = ControlledBlob {
+                started: Arc::new(Mutex::new(Some(started_tx))),
+                release: Arc::new(Mutex::new(Some(release_rx))),
+                reads: Arc::clone(&reads),
+                result: ControlledBlobResult::Success(Arc::new(physical)),
+            };
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGES));
+
+            let first_cache = cache.clone();
+            let first_blob = blob.clone();
+            let first = context.child("first").spawn(move |_| async move {
+                let mut buf = vec![0; page_size * PAGES];
+                first_cache.read(&first_blob, 0, &mut buf, 0).await.unwrap();
+                buf
+            });
+            started_rx.await.expect("bulk read never started");
+
+            let second_cache = cache.clone();
+            let second_blob = blob.clone();
+            let second = context.child("second").spawn(move |_| async move {
+                let mut buf = vec![0; page_size * (PAGES - 1)];
+                second_cache
+                    .read(&second_blob, 0, &mut buf, PAGE_SIZE_U64)
+                    .await
+                    .unwrap();
+                buf
+            });
+
+            loop {
+                let joined = {
+                    let page_cache = cache.cache.read();
+                    reads.load(Ordering::Relaxed) > 1
+                        || page_cache
+                            .page_fetches
+                            .get(&(0, 1))
+                            .is_some_and(|fetch| fetch.waiters == 2)
+                };
+                if joined {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            let _ = release_tx.send(());
+            assert_eq!(first.await.unwrap(), logical);
+            assert_eq!(second.await.unwrap(), logical[page_size..]);
+            assert_eq!(reads.load(Ordering::Relaxed), 1);
+            assert!(cache.cache.read().page_fetches.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_cancelled_bulk_read_releases_every_page_fetch() {
+        deterministic::Runner::default().start(|context| async move {
+            const PAGES: usize = 3;
+            let (started_tx, started_rx) = oneshot::channel();
+            let blob = BlockingBlob {
+                started: Arc::new(Mutex::new(Some(started_tx))),
+            };
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGES));
+            let task_cache = cache.clone();
+            let task = context.spawn(move |_| async move {
+                let mut buf = vec![0; PAGE_SIZE.get() as usize * PAGES];
+                let _ = task_cache.read(&blob, 0, &mut buf, 0).await;
+            });
+
+            started_rx.await.expect("bulk read never started");
+            assert_eq!(cache.cache.read().page_fetches.len(), PAGES);
+            task.abort();
+            assert!(matches!(task.await, Err(Error::Closed)));
+            assert!(cache.cache.read().page_fetches.is_empty());
         });
     }
 
