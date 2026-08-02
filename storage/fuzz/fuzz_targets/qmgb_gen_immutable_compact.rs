@@ -408,6 +408,7 @@ fn fuzz_variable<F: Family>(input: &FuzzInput, name: &str) {
                         update_rx: None,
                         finish_rx: None,
                         reached_target_tx: None,
+                        max_retained_roots: 1,
                     })
                     .await
                     .expect("compact-sync variable immutable db");
