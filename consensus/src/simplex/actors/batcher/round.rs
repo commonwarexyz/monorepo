@@ -6,7 +6,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize, Kind,
-            NullifyFinalize, Proposal, Vote, VoteTracker,
+            NullifyFinalize, ObservedVote, Outcome, Proposal, Vote, VoteTracker,
         },
     },
     types::{Participant, Round as Rnd},
@@ -56,7 +56,13 @@ impl<
     R: Reporter<Activity = Activity<S, D>>,
 > Round<S, B, D, R>
 {
-    pub fn new(round: Rnd, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
+    pub fn new(
+        round: Rnd,
+        scheme: Arc<S>,
+        blocker: B,
+        reporter: R,
+        track_historical_votes: bool,
+    ) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
         let len = scheme.participants().len();
         Self {
@@ -64,7 +70,7 @@ impl<
             reporter,
             verifier: Verifier::new(round, scheme, quorum),
 
-            votes: VoteTracker::new(len),
+            votes: VoteTracker::new(len, track_historical_votes),
 
             proposal_sent: false,
 
@@ -97,10 +103,10 @@ impl<
 
     /// Records a verified certificate.
     ///
-    /// The first notarization or finalization establishes an authoritative
-    /// proposal and may replace one learned from the leader's vote. Returns
-    /// `true` when a notarization selects a new proposal, making its buffered
-    /// finalize votes eligible for processing.
+    /// Completes its verifier phase and applies the configured vote retention
+    /// policy. A notarization or finalization also establishes authoritative
+    /// proposal evidence. Returns `true` when a notarization selects a new proposal,
+    /// making buffered finalize votes eligible for processing.
     pub fn record_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
         let process_votes = match certificate {
             Certificate::Notarization(notarization) => {
@@ -116,7 +122,76 @@ impl<
             Certificate::Nullification(_) => false,
         };
         self.verifier.record_certificate(certificate.kind());
+        self.release_votes(certificate.kind());
         process_votes
+    }
+
+    /// Applies the configured retention policy to a certified vote phase.
+    fn release_votes(&mut self, kind: Kind) {
+        match kind {
+            Kind::Notarization => {
+                let proposal = self
+                    .verifier
+                    .proposal()
+                    .expect("notarization must establish a proposal");
+                self.votes.release_notarizes(proposal);
+            }
+            Kind::Nullification => self.votes.release_nullifies(),
+            Kind::Finalization => {
+                let proposal = self
+                    .verifier
+                    .proposal()
+                    .expect("finalization must establish a proposal");
+                self.votes.release_finalizes(proposal);
+            }
+        }
+    }
+
+    /// Records and reports a vote after source-specific admission checks.
+    ///
+    /// Retained votes are forwarded to the verifier for certificate assembly.
+    /// Compacted phases preserve duplicate suppression and proposal forwarding
+    /// without recreating their released vote maps.
+    pub(super) fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> Outcome {
+        if constructed && let Vote::Finalize(finalize) = &message {
+            // The voter only constructs a finalize after independently
+            // authenticating the proposal.
+            self.set_authoritative_proposal(&finalize.proposal);
+        }
+
+        let retained = match self.votes.record(&message, self.verifier.proposal()) {
+            Outcome::Added { retained } => retained,
+            Outcome::Duplicate { retained } => {
+                if constructed && retained {
+                    // Nullify is reconstructed for each retry. Notarize and finalize
+                    // are one-shot local actions, so constructing either twice is a bug.
+                    match &message {
+                        Vote::Notarize(_) => panic!("duplicate notarize"),
+                        Vote::Nullify(_) => {}
+                        Vote::Finalize(_) => panic!("duplicate finalize"),
+                    }
+                }
+                return Outcome::Duplicate { retained };
+            }
+            Outcome::Conflicting => {
+                assert!(!constructed, "conflicting constructed vote");
+                return Outcome::Conflicting;
+            }
+        };
+
+        // Completed phases report new signer evidence without forwarding votes
+        // to the verifier.
+        let verifier_message = retained.then(|| message.clone());
+        let activity = match message {
+            Vote::Notarize(notarize) => Activity::Notarize(notarize),
+            Vote::Nullify(nullify) => Activity::Nullify(nullify),
+            Vote::Finalize(finalize) => Activity::Finalize(finalize),
+        };
+        self.reporter.report(activity);
+        if let Some(message) = verifier_message {
+            self.verifier.add(message, constructed);
+        }
+        Outcome::Added { retained }
     }
 
     /// Makes an independently authenticated proposal authoritative, restoring
@@ -172,12 +247,14 @@ impl<
                         }
                         false
                     }
-                    None => {
-                        self.reporter.report(Activity::Notarize(notarize.clone()));
-                        self.votes.insert_notarize(notarize.clone());
-                        self.verifier.add(Vote::Notarize(notarize), false);
-                        true
-                    }
+                    None => match self.accept_vote(Vote::Notarize(notarize), false) {
+                        Outcome::Added { .. } => true,
+                        Outcome::Duplicate { .. } => false,
+                        Outcome::Conflicting => {
+                            commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
+                            false
+                        }
+                    },
                 }
             }
             Vote::Nullify(nullify) => {
@@ -188,9 +265,11 @@ impl<
                 }
 
                 // Check if finalized
-                if let Some(previous) = self.votes.finalize(index) {
-                    let activity = NullifyFinalize::new(nullify, previous.clone());
-                    self.reporter.report(Activity::NullifyFinalize(activity));
+                if let Some(previous) = self.votes.saw_finalize(index) {
+                    if let ObservedVote::Retained(previous) = previous {
+                        let activity = NullifyFinalize::new(nullify, previous.clone());
+                        self.reporter.report(Activity::NullifyFinalize(activity));
+                    }
                     commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
                     return false;
                 }
@@ -203,12 +282,13 @@ impl<
                         }
                         false
                     }
-                    None => {
-                        self.reporter.report(Activity::Nullify(nullify.clone()));
-                        self.votes.insert_nullify(nullify.clone());
-                        self.verifier.add(Vote::Nullify(nullify), false);
-                        true
-                    }
+                    None => match self.accept_vote(Vote::Nullify(nullify), false) {
+                        Outcome::Added { .. } => true,
+                        Outcome::Duplicate { .. } => false,
+                        Outcome::Conflicting => {
+                            unreachable!("nullify votes do not carry proposals")
+                        }
+                    },
                 }
             }
             Vote::Finalize(finalize) => {
@@ -219,9 +299,11 @@ impl<
                 }
 
                 // Check if nullified
-                if let Some(previous) = self.votes.nullify(index) {
-                    let activity = NullifyFinalize::new(previous.clone(), finalize);
-                    self.reporter.report(Activity::NullifyFinalize(activity));
+                if let Some(previous) = self.votes.saw_nullify(index) {
+                    if let ObservedVote::Retained(previous) = previous {
+                        let activity = NullifyFinalize::new(previous.clone(), finalize);
+                        self.reporter.report(Activity::NullifyFinalize(activity));
+                    }
                     commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
                     return false;
                 }
@@ -239,72 +321,25 @@ impl<
                         }
                         false
                     }
-                    None => {
-                        self.reporter.report(Activity::Finalize(finalize.clone()));
-                        self.votes.insert_finalize(finalize.clone());
-                        self.verifier.add(Vote::Finalize(finalize), false);
-                        true
-                    }
+                    None => match self.accept_vote(Vote::Finalize(finalize), false) {
+                        Outcome::Added { .. } => true,
+                        Outcome::Duplicate { .. } => false,
+                        Outcome::Conflicting => {
+                            commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
+                            false
+                        }
+                    },
                 }
             }
         }
-    }
-
-    /// Adds a vote that we constructed ourselves to the verifier.
-    ///
-    /// Duplicate nullifies are ignored (the voter re-sends its nullify vote on
-    /// every timeout retry).
-    ///
-    /// # Panics
-    ///
-    /// Panics if a notarize or finalize vote is added more than once.
-    pub fn add_constructed(&mut self, message: Vote<S, D>) {
-        match &message {
-            Vote::Notarize(notarize) => {
-                // Our own votes are already verified
-                assert!(
-                    self.votes.insert_notarize(notarize.clone()),
-                    "duplicate notarize"
-                );
-
-                // Report activity
-                self.reporter.report(Activity::Notarize(notarize.clone()));
-            }
-            Vote::Nullify(nullify) => {
-                // The voter re-sends its nullify on every timeout retry (the
-                // batcher's state does not survive a restart), so duplicates
-                // are expected and ignored.
-                if !self.votes.insert_nullify(nullify.clone()) {
-                    return;
-                }
-
-                // Report activity
-                self.reporter.report(Activity::Nullify(nullify.clone()));
-            }
-            Vote::Finalize(finalize) => {
-                // The voter only constructs a finalize after independently
-                // authenticating the proposal.
-                self.set_authoritative_proposal(&finalize.proposal);
-                assert!(
-                    self.votes.insert_finalize(finalize.clone()),
-                    "duplicate finalize"
-                );
-
-                // Report activity
-                self.reporter.report(Activity::Finalize(finalize.clone()));
-            }
-        }
-
-        // The verifier drops votes for a different proposal than the selected one.
-        self.verifier.add(message, true);
     }
 
     /// Sets the leader for this view. If the leader's notarize has already
     /// been received, this will also set the leader's proposal (filtering out
     /// votes for other proposals).
     pub fn set_leader(&mut self, leader: Participant) {
-        // Certification drops the verifier's buffered notarizes, so read the
-        // leader's vote from the tracker, which holds it for the round's lifetime.
+        // Certification drops the verifier's buffered notarizes, so read an
+        // uncertified leader vote from the tracker.
         self.verifier
             .set_leader(leader, self.votes.notarize(leader));
     }
@@ -344,47 +379,29 @@ impl<
         self.verifier.try_verify_finalizes(rng, strategy).await
     }
 
-    /// Returns true if `signer` has a nullify vote in this round.
+    /// Returns whether `signer` has a nullify vote.
     pub fn has_nullify(&self, signer: Participant) -> bool {
         self.votes.has_nullify(signer)
     }
 
-    /// Returns participant indices whose matching vote for `proposal` was not
-    /// observed locally.
+    /// Returns whether `participant` has not voted for `proposal` locally.
     ///
-    /// Uses `votes` rather than the verified vote vectors because we only
-    /// verify the first quorum of votes. A peer whose matching vote arrived
-    /// after quorum but before the certificate is still tracked in pending.
+    /// Uses tracker membership, including compact state, because verification stops
+    /// after the first quorum. Matching votes received later still inform forwarding.
     ///
     /// Both notarize and finalize votes are checked: a participant who sent
     /// either for the same proposal already has the block and does not need
     /// it forwarded. Votes for a conflicting proposal are treated as missing
     /// because those peers still need the winning block forwarded.
     pub fn is_missing_voter(&self, proposal: &Proposal<D>, participant: Participant) -> bool {
-        if self
-            .votes
-            .notarize(participant)
-            .is_some_and(|vote| &vote.proposal == proposal)
-        {
+        if self.votes.has_notarize_for(participant, proposal) {
             return false;
         }
 
-        self.votes
-            .finalize(participant)
-            .is_none_or(|vote| &vote.proposal != proposal)
+        !self.votes.has_finalize_for(participant, proposal)
     }
 
-    /// Returns participant indices whose matching vote for `proposal` was not
-    /// observed locally.
-    ///
-    /// Uses `votes` rather than the verified vote vectors because we only
-    /// verify the first quorum of votes. A peer whose matching vote arrived
-    /// after quorum but before the certificate is still tracked in pending.
-    ///
-    /// Both notarize and finalize votes are checked: a participant who sent
-    /// either for the same proposal already has the block and does not need
-    /// it forwarded. Votes for a conflicting proposal are treated as missing
-    /// because those peers still need the winning block forwarded.
+    /// Returns participant indices for which [`Self::is_missing_voter`] is true.
     pub fn missing_voters(&self, proposal: &Proposal<D>) -> Vec<Participant> {
         (0..self.verifier.participants().len())
             .map(Participant::from_usize)
@@ -402,6 +419,8 @@ impl<
         &mut self,
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
-        self.verifier.try_construct_certificate(strategy).await
+        let certificate = self.verifier.try_construct_certificate(strategy).await?;
+        self.record_certificate(&certificate);
+        Some(certificate)
     }
 }

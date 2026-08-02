@@ -8484,12 +8484,11 @@ mod tests {
         first_view_progress_without_timeout::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    /// Tests that certification and finalize are coalesced into one durable section sync.
+    /// Certification and the finalize vote share one durable section sync.
     ///
-    /// 1. First run: gate the section sync after certification and verify finalize is staged but
-    ///    not broadcast.
-    /// 2. Release the only section sync, observe the finalize broadcast, and abort the voter.
-    /// 3. Second run: replay both artifacts and advance without re-certifying.
+    /// 1. Gate the sync and verify the finalize reaches neither batcher nor network.
+    /// 2. Release the sync, observe both deliveries, and abort the voter.
+    /// 3. Restart, replay both artifacts, and advance without re-certifying.
     fn successful_certification_replayed_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -8691,8 +8690,8 @@ mod tests {
                 }
             }
             assert!(
-                finalize_constructed,
-                "finalize was not constructed before the section sync"
+                !finalize_constructed,
+                "finalize reached the batcher before the section sync completed"
             );
             assert_eq!(
                 pending_syncs.calls(),
@@ -8720,6 +8719,26 @@ mod tests {
             }
 
             deferred.release.send(Ok(())).unwrap();
+
+            // The batcher may report our vote, so it must only receive the
+            // finalize after the vote is durable.
+            let deadline = context.current() + Duration::from_secs(5);
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if matches!(
+                            msg.unwrap(),
+                            batcher::Message::Constructed(Vote::Finalize(ref finalize))
+                                if finalize.view() == target_view
+                        ) {
+                            break;
+                        }
+                    },
+                    _ = context.sleep_until(deadline) => {
+                        panic!("timed out waiting for durable finalize in view {target_view}");
+                    },
+                }
+            }
 
             // The resolver should observe certification only after the section sync completes.
             let mut certified = false;
@@ -9182,6 +9201,11 @@ mod tests {
             let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let epoch = Epoch::new(333);
+            let pending_syncs = PendingSyncs::default();
+            let voter_context = DelayedSyncContext {
+                inner: context.child("voter"),
+                pending: pending_syncs.clone(),
+            };
 
             // First run: trigger timeout and nullification.
             let app_cfg = mocks::application::Config::<Sha256, _> {
@@ -9207,15 +9231,15 @@ mod tests {
                 epoch,
                 floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(1),
+                leader_timeout: Duration::from_secs(100),
+                certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
             let (resolver_sender, _resolver_receiver) =
                 mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
@@ -9250,7 +9274,32 @@ mod tests {
             )
             .await;
 
-            // Wait for the timeout-driven nullify vote.
+            // Gate the first-attempt nullify's journal sync.
+            pending_syncs.arm();
+            mailbox.timeout(Round::new(epoch, target_view), TimeoutReason::LeaderTimeout);
+            while pending_syncs.lock().is_empty() {
+                reschedule().await;
+            }
+            let deferred = next_pending_sync(&pending_syncs);
+            deferred
+                .blocked
+                .await
+                .expect("gated nullify section sync was dropped");
+
+            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+                assert!(
+                    !matches!(
+                        msg,
+                        batcher::Message::Constructed(Vote::Nullify(ref nullify))
+                            if nullify.view() == target_view
+                    ),
+                    "nullify reached the batcher before the section sync completed"
+                );
+            }
+
+            deferred.release.send(Ok(())).unwrap();
+
+            // Wait for the durable timeout-driven nullify vote.
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {

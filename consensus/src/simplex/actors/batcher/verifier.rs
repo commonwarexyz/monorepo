@@ -59,14 +59,14 @@ enum State<V> {
 }
 
 impl<V> Certification<V> {
-    /// Creates an empty [State::Incomplete] with buffers sized for `quorum` votes.
-    fn new(quorum: usize, batchable: bool) -> Self {
+    /// Creates an empty [State::Incomplete] whose vote buffers allocate lazily.
+    const fn new(quorum: usize, batchable: bool) -> Self {
         Self {
             quorum,
             batchable,
             state: State::Incomplete {
-                pending: Vec::with_capacity(quorum),
-                verified: Vec::with_capacity(quorum),
+                pending: Vec::new(),
+                verified: Vec::new(),
             },
         }
     }
@@ -74,8 +74,21 @@ impl<V> Certification<V> {
     /// Buffers a vote for verification (or, if already verified, for
     /// certificate recovery). Dropped once complete.
     fn add(&mut self, vote: V, is_verified: bool) {
+        // Completed certifications drop subsequent votes without allocating.
         if let State::Incomplete { pending, verified } = &mut self.state {
-            if is_verified { verified } else { pending }.push(vote);
+            // Verified votes may accumulate to quorum. A batchable pending buffer
+            // only needs the remaining unverified slots, while a non-batchable
+            // pending buffer is consumed after each vote.
+            let initial_capacity = if is_verified || self.batchable {
+                self.quorum.saturating_sub(verified.len()).max(1)
+            } else {
+                1
+            };
+            let votes = if is_verified { verified } else { pending };
+            if votes.capacity() == 0 {
+                votes.reserve_exact(initial_capacity);
+            }
+            votes.push(vote);
         }
     }
 
@@ -674,6 +687,74 @@ mod tests {
                 State::Complete => &[],
             }
         }
+
+        /// Returns the capacities of the pending and verified vote buffers.
+        fn capacities(&self) -> (usize, usize) {
+            match &self.state {
+                State::Incomplete { pending, verified } => {
+                    (pending.capacity(), verified.capacity())
+                }
+                State::Complete => (0, 0),
+            }
+        }
+    }
+
+    #[test]
+    fn test_certification_allocates_vote_buffers_lazily() {
+        let mut certification = Certification::new(4, true);
+        assert_eq!(certification.capacities(), (0, 0));
+
+        certification.add(1u8, false);
+        let (pending, verified) = certification.capacities();
+        assert!(pending >= 4);
+        assert_eq!(verified, 0);
+
+        certification.complete();
+        assert_eq!(certification.capacities(), (0, 0));
+    }
+
+    #[test_async]
+    async fn test_non_batchable_certification_avoids_repeated_quorum_reservations() {
+        let quorum = 64;
+        let mut certification = Certification::new(quorum, false);
+        certification.add(1u8, false);
+        certification
+            .try_verify(|pending, mut verified| async move {
+                verified.extend(pending);
+                (verified, Vec::new())
+            })
+            .await
+            .expect("non-batchable pending votes must verify eagerly");
+
+        certification.add(2u8, false);
+        let (pending, _) = certification.capacities();
+        assert!(
+            pending < quorum,
+            "a single eagerly verified vote should not reserve a quorum-sized buffer"
+        );
+    }
+
+    #[test_async]
+    async fn test_batchable_certification_reserves_only_remaining_quorum() {
+        let quorum = 64;
+        let mut certification = Certification::new(quorum, true);
+        for vote in 0..quorum {
+            certification.add(vote, false);
+        }
+        certification
+            .try_verify(|mut pending, _| async move {
+                pending.pop().expect("quorum batch must be non-empty");
+                (pending, Vec::new())
+            })
+            .await
+            .expect("a quorum of pending votes must trigger batch verification");
+
+        certification.add(quorum, false);
+        let (pending, _) = certification.capacities();
+        assert!(
+            pending < quorum,
+            "one replacement vote should not reserve a quorum-sized buffer"
+        );
     }
 
     // Helper function to create a sample digest
