@@ -37,7 +37,7 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 
 /// [Acknowledgement] that returns after all instances are acknowledged.
 ///
-/// Dropping an acknowledgement cancels the waiter unless [`Exact::freeze`] is used.
+/// Dropping an acknowledgement cancels the waiter unless [`Exact::abandon`] is used.
 pub struct Exact {
     state: Arc<ExactState>,
     acknowledged: bool,
@@ -55,7 +55,7 @@ impl Exact {
     /// Consume this handle without resolving or canceling its waiter.
     ///
     /// The waiter remains pending so incomplete work can be redelivered after restart.
-    pub fn freeze(mut self) {
+    pub fn abandon(mut self) {
         self.acknowledged = true;
     }
 }
@@ -201,9 +201,9 @@ mod tests {
     }
 
     #[test]
-    fn freeze_neither_acknowledges_nor_cancels() {
+    fn abandon_neither_acknowledges_nor_cancels() {
         let (ack, waiter) = Exact::handle();
-        ack.freeze();
+        ack.abandon();
         assert!(waiter.now_or_never().is_none());
     }
 

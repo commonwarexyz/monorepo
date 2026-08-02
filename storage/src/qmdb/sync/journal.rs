@@ -113,11 +113,16 @@ where
             return Ok(journal);
         }
 
-        // Progress that has pruned the requested start or advanced beyond the target belongs to
-        // an incompatible sync range and cannot be resumed.
+        // A pruned start cannot be reconstructed from the retained suffix.
         let bounds = journal.bounds();
-        if bounds.start > *range.start() || size > *range.end() {
+        if bounds.start > *range.start() {
             return journal.clear_to_size(*range.start()).await;
+        }
+
+        // Sync targets describe the same append-only log, so progress beyond an older target can
+        // retain its authenticated prefix instead of refetching it.
+        if size > *range.end() {
+            journal = journal.rewind(*range.end()).await?;
         }
 
         if size <= *range.start() {
@@ -347,7 +352,7 @@ mod tests {
             let journal = journal.sync().await.unwrap();
             drop(journal);
 
-            // Opening against an older target resets the stale position to its range start.
+            // No operations exist to rewind, so opening resets to the requested start.
             let range = non_empty_range!(
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
@@ -367,7 +372,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_sync_journal_new_discards_incompatible_progress() {
+    fn test_fixed_sync_journal_new_rewinds_ahead_and_discards_pruned_progress() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg(&context);
             let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
@@ -385,7 +390,13 @@ mod tests {
                     .await
                     .unwrap();
 
-            assert_eq!(journal.bounds(), 7..7);
+            assert_eq!(journal.bounds(), 5..20);
+            for value in 7..20u8 {
+                assert_eq!(
+                    journal.read(value.into()).await.unwrap(),
+                    Digest([value; 32])
+                );
+            }
             journal.destroy().await.unwrap();
 
             let mut journal = FixedJournal::init(context.child("pruned_setup"), cfg.clone())
@@ -413,7 +424,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_sync_journal_new_discards_incompatible_progress() {
+    fn test_variable_sync_journal_new_rewinds_ahead_and_discards_pruned_progress() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = variable_test_cfg(&context);
             let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
@@ -431,7 +442,10 @@ mod tests {
                     .await
                     .unwrap();
 
-            assert_eq!(journal.bounds(), 7..7);
+            assert_eq!(journal.bounds(), 5..20);
+            for value in 7..20u64 {
+                assert_eq!(journal.read(value).await.unwrap(), value);
+            }
             journal.destroy().await.unwrap();
 
             let mut journal = VariableJournal::init(context.child("pruned_setup"), cfg.clone())

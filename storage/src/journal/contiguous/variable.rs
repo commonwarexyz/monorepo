@@ -1278,10 +1278,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             }
         }
 
-        // Progress that has pruned the requested start or advanced beyond the target belongs to
-        // an incompatible sync range and cannot be resumed.
+        // A pruned start cannot be reconstructed from the retained suffix.
         let bounds = journal.bounds.clone();
-        if bounds.start > range.start || size > range.end {
+        if bounds.start > range.start {
             debug!(
                 size,
                 bounds.start,
@@ -1291,6 +1290,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             );
             return journal.clear_to_size(range.start).await;
         }
+
+        // Sync targets describe the same append-only log, so progress beyond an older target can
+        // retain its authenticated prefix instead of refetching it.
+        let journal = if size > range.end {
+            debug!(size, range.end, "rewinding journal to sync range end");
+            journal.rewind(range.end).await?
+        } else {
+            journal
+        };
+        let size = journal.size();
 
         // If all existing data is before our sync range, reset to range start
         if size <= range.start {
@@ -2200,8 +2209,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///   crash-safe clear path and returns an empty journal.
     /// - Overlap within [`range.start`, `range.end`]: prunes toward `range.start`
     ///   (blob-aligned, so some items before `range.start` may be retained).
-    /// - Data that has pruned `range.start` or extends beyond `range.end`: resets to
-    ///   `range.start` because it belongs to an incompatible sync target.
+    /// - Data that has pruned `range.start`: resets to `range.start`.
+    /// - Data beyond `range.end`: rewinds to `range.end` and retains the requested prefix.
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -7056,9 +7065,9 @@ mod tests {
         });
     }
 
-    /// Test `init_sync` when existing data exceeds the sync target range.
+    /// Test `init_sync` rewinds data that exceeds the sync target range.
     #[test_traced]
-    fn test_init_sync_existing_data_exceeds_upper_bound() {
+    fn test_init_sync_rewinds_data_exceeding_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
@@ -7093,9 +7102,12 @@ mod tests {
                 lower_bound..upper_bound,
             )
             .await
-            .expect("Failed to reset journal to the older sync range");
+            .expect("Failed to rewind journal to the older sync range");
 
-            assert_eq!(journal.bounds(), lower_bound..lower_bound);
+            assert_eq!(journal.bounds(), 5..upper_bound);
+            for i in lower_bound..upper_bound {
+                assert_eq!(journal.read(i).await.unwrap(), i * 1000);
+            }
             journal.destroy().await.unwrap();
         });
     }

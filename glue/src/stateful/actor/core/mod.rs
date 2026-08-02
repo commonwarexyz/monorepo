@@ -59,7 +59,7 @@ impl From<Exact> for Deferred {
 impl Drop for Deferred {
     fn drop(&mut self) {
         if let Some(acknowledgement) = self.0.take() {
-            acknowledgement.freeze();
+            acknowledgement.abandon();
         }
     }
 }

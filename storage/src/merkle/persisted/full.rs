@@ -129,8 +129,8 @@ pub struct Config<S: Strategy> {
 /// Determines how to handle existing persistent data based on sync boundaries:
 /// - **Fresh Start**: Existing data < range start -> discard and start fresh
 /// - **Prune and Reuse**: range contains existing data -> prune and reuse
-/// - **Incompatible**: retained data does not cover the range start or extends beyond the range
-///   end -> discard and start fresh
+/// - **Ahead**: retained data extends beyond range end -> rewind to range end
+/// - **Incompatible**: retained data starts after range start -> discard and start fresh
 pub struct SyncConfig<F: Family, D: Digest, S: Strategy> {
     /// Base configuration (journal, metadata, etc.)
     pub config: Config<S>,
@@ -443,7 +443,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///    - Keeps existing journal data
     ///    - Prunes the journal toward `range.start` (section-aligned)
     ///
-    /// 3. **Incompatible**: retained data starts after range.start or ends after range.end
+    /// 3. **Ahead**: retained data covers range.start but ends after range.end
+    ///    - Rewinds the journal to `range.end`
+    ///
+    /// 4. **Incompatible**: retained data starts after range.start
     ///    - Discards existing data and creates a new [Journal] at `range.start`
     pub async fn init_sync(context: E, cfg: SyncConfig<F, D, S>) -> Result<Self, Error<F>> {
         let prune_pos = Position::try_from(cfg.range.start())?;
@@ -472,11 +475,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             journal_size = last_valid_size;
         }
 
-        // Data that has pruned the requested start or advanced beyond the target cannot be reused.
+        // A pruned start cannot be reconstructed from the retained suffix.
         let journal_bounds = journal.bounds();
-        let incompatible = journal_bounds.start > *prune_pos || journal_size > *end_pos;
-        let reinitialized = incompatible || journal_size <= *prune_pos;
-        if incompatible {
+        let missing_start = journal_bounds.start > *prune_pos;
+        let ahead = journal_size > *end_pos;
+        let reinitialized = missing_start || ahead || journal_size <= *prune_pos;
+        if missing_start {
             debug!(
                 journal_size = *journal_size,
                 journal_start = journal_bounds.start,
@@ -485,6 +489,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 "existing Merkle journal is incompatible with sync range, resetting"
             );
             journal = journal.clear_to_size(*prune_pos).await?;
+            journal_size = Position::new(journal.size());
+        } else if ahead {
+            // Sync targets describe the same append-only tree, so a later target retains every
+            // node through this target's end.
+            journal = journal.rewind(*end_pos).await?.sync().await?;
             journal_size = Position::new(journal.size());
         } else if journal_size <= *prune_pos && *prune_pos != 0 {
             journal = journal.clear_to_size(*prune_pos).await?;
@@ -2462,6 +2471,71 @@ mod tests {
     fn test_full_init_sync_partial_overlap_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_init_sync_partial_overlap_inner::<mmb::Family>);
+    }
+
+    async fn full_init_sync_rewinds_state_beyond_range_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
+                .await
+                .unwrap();
+
+        let target_end = Location::<F>::new(20);
+        let mut batch = merkle.new_batch();
+        for i in 0..20 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let target_root = merkle.root(&hasher, 0).unwrap();
+        let restart = Location::<F>::new(7);
+        let pinned_nodes = merkle.pinned_nodes_at(restart).await.unwrap();
+
+        let mut batch = merkle.new_batch();
+        for i in 20..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        drop(merkle);
+
+        let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
+            config: cfg.clone(),
+            range: non_empty_range!(restart, target_end),
+            pinned_nodes: Some(pinned_nodes),
+        };
+        let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(context.child("sync"), sync_cfg)
+            .await
+            .unwrap();
+
+        assert_eq!(merkle.leaves(), target_end);
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
+        let merkle = merkle.sync().await.unwrap();
+        drop(merkle);
+
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(merkle.leaves(), target_end);
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_init_sync_rewinds_state_beyond_range_mmr() {
+        deterministic::Runner::default()
+            .start(full_init_sync_rewinds_state_beyond_range_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_init_sync_rewinds_state_beyond_range_mmb() {
+        deterministic::Runner::default()
+            .start(full_init_sync_rewinds_state_beyond_range_inner::<mmb::Family>);
     }
 
     async fn full_init_sync_discards_state_pruned_past_range_inner<F: Family>(

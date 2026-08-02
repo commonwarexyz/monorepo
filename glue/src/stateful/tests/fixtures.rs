@@ -40,7 +40,7 @@ impl Reporter for FixtureReporter {
             if self.acknowledge {
                 ack.acknowledge();
             } else {
-                ack.freeze();
+                ack.abandon();
             }
         }
         Feedback::Ok

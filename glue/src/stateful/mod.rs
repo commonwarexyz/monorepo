@@ -66,11 +66,10 @@
 //!   and any required handoff blocks are durable. A crash before completion restarts from
 //!   that floor. The storage target is advanced to the block backing marshal's durable
 //!   processed position when necessary, because marshal cannot redeliver acknowledged blocks
-//!   below that position.
-//!   Operation and Merkle journal state that no longer covers the resulting range, or extends
-//!   beyond it, is discarded and rebuilt. A lagging floor sampled during restart cannot move
-//!   the floor backward. Subsequent restarts after completion take the marshal sync path to
-//!   ensure a contiguous stream.
+//!   below that position. Journal state that has pruned the resulting range start is discarded
+//!   and rebuilt. State extending beyond the target is rewound to the target end so its retained
+//!   prefix can be reused. A lagging floor sampled during restart cannot move the floor backward.
+//!   Subsequent restarts after completion take the marshal sync path to ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!

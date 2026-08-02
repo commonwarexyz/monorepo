@@ -3898,7 +3898,7 @@ mod tests {
 
             // Let the coordinator finish its initial queue drain so the update
             // below exercises the live select arm.
-            context.sleep(Duration::from_millis(1)).await;
+            context.sleep(Duration::from_millis(10)).await;
             let (update, observed) = TipUpdate::with_observation(anchor(9), 7);
             let _ = tip_tx.send(update).await;
             observed

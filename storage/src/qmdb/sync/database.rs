@@ -119,6 +119,10 @@ where
     S: Strategy,
 {
     let hasher = crate::qmdb::hasher::<H>();
+    // Resetting an incompatible node journal and replacing its metadata span touch separate
+    // durable stores. A crash between them can leave stale metadata referring to nodes that were
+    // deliberately discarded. Local pins are only an optimization, so fetch a peer-authenticated
+    // boundary in that case while preserving every other initialization error.
     let merkle = match full::Merkle::<F, _, _, S>::init(context, &hasher, config).await {
         Ok(merkle) => merkle,
         Err(crate::merkle::Error::MissingNode(_)) => return Ok(None),
