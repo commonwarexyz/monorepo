@@ -2905,23 +2905,23 @@ mod tests {
     fn test_key_read_plan_captures_candidates_and_verifies_collisions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, NZU64!(8));
+            let cfg = test_config(&context, "key-read-plan", NZU64!(8));
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
             let key = test_key("aaaa-target");
             archive = archive
-                .put(1, test_key("aaaa-collision"), 20)
+                .put(1, test_key("aaaa-collision"), &20)
                 .await
                 .unwrap();
-            archive = archive.put(2, key.clone(), 10).await.unwrap();
+            archive = archive.put(2, key.clone(), &10).await.unwrap();
 
             let plan = archive
                 .key_read_plan(&key)
                 .expect("Failed to capture key read")
                 .expect("Key should have translated candidates");
-            archive = archive.put(3, key.clone(), 30).await.unwrap();
+            archive = archive.put(3, key.clone(), &30).await.unwrap();
 
             assert_eq!(plan.execute().await.unwrap(), Some(10));
             assert_eq!(
@@ -2939,17 +2939,17 @@ mod tests {
     fn test_read_plans_survive_prune_and_new_plans_reject_pruned_state() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, NZU64!(1));
+            let cfg = test_config(&context, "read-plan-prune", NZU64!(1));
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
 
             let first = test_key("first");
             let second = test_key("second");
-            archive = archive.put_multi(1, first.clone(), 10).await.unwrap();
-            archive = archive.put_multi(1, second.clone(), 20).await.unwrap();
+            archive = archive.put_multi(1, first.clone(), &10).await.unwrap();
+            archive = archive.put_multi(1, second.clone(), &20).await.unwrap();
             archive = archive
-                .put_multi(3, test_key("retained"), 30)
+                .put_multi(3, test_key("retained"), &30)
                 .await
                 .unwrap();
 

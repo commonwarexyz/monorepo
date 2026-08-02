@@ -40,13 +40,18 @@ type Faults<S, D> = HashMap<<S as Verifier>::PublicKey, HashMap<View, HashSet<Ac
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<S: Scheme, L: elector::Config<S>> {
+pub struct Config<S: Scheme, L: elector::Config<S::PublicKey, S::Certificate>> {
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
     pub elector: L,
 }
 
-pub struct Reporter<E: CryptoRng, S: Scheme, L: elector::Config<S>, D: Digest> {
+pub struct Reporter<
+    E: CryptoRng,
+    S: Scheme,
+    L: elector::Config<S::PublicKey, S::Certificate>,
+    D: Digest,
+> {
     context: Arc<Mutex<E>>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
@@ -73,7 +78,7 @@ impl<E, S, L, D> Clone for Reporter<E, S, L, D>
 where
     E: CryptoRng,
     S: Scheme,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     L::Elector: Clone,
     D: Digest,
 {
@@ -105,7 +110,7 @@ impl<E, S, L, D> Reporter<E, S, L, D>
 where
     E: CryptoRng,
     S: Scheme,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
@@ -163,7 +168,7 @@ impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
     E: CryptoRng + Send + Sync + 'static,
     S: scheme::Scheme<D>,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -367,7 +372,7 @@ impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
     E: CryptoRng + Send + Sync + 'static,
     S: Scheme,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;

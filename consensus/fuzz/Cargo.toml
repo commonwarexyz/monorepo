@@ -10,8 +10,9 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+commonware-actor.workspace = true
 commonware-codec.workspace = true
-commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
+commonware-consensus = { workspace = true, features = ["mocks", "arbitrary", "test-utils"] }
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
@@ -46,6 +47,41 @@ bench = false
 [[bin]]
 name = "attributable_map"
 path = "fuzz_targets/attributable_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multimmit_machine"
+path = "fuzz_targets/multimmit_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multimmit_wire"
+path = "fuzz_targets/multimmit_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multimmit_batcher"
+path = "fuzz_targets/multimmit_batcher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multimmit_engine_minpk"
+path = "fuzz_targets/multimmit_engine_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multimmit_engine_minsig"
+path = "fuzz_targets/multimmit_engine_minsig.rs"
 test = false
 doc = false
 bench = false

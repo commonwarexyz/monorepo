@@ -60,13 +60,18 @@ stability_scope!(BETA {
 
     impl<T: Epochable + Viewable> Roundable for T {}
 
-    /// Block is the interface for a block in the blockchain.
+    /// Block is the interface for an application-defined block.
     ///
     /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
     /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
     /// the same block.
+    ///
+    /// [`Digestible::digest`] is the block's canonical identity. It must commit to the complete
+    /// block, including its height and parent, and [`Block::parent`] must return the canonical
+    /// digest of the parent block. Consensus and attached transport, storage, and delivery services
+    /// use this one identity uniformly.
     pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
-        /// Get the parent block's digest.
+        /// Returns the parent block's canonical digest.
         fn parent(&self) -> Self::Digest;
     }
 
@@ -93,26 +98,42 @@ stability_scope!(BETA {
         fn context(&self) -> Self::Context;
     }
 });
+stability_scope!(BETA {
+    pub mod elector;
+});
+stability_scope!(ALPHA {
+    pub mod multimmit;
+});
+stability_scope!(ALPHA, cfg(any(test, feature = "mocks")) {
+    pub mod twins;
+});
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_actor::Feedback;
     use commonware_cryptography::{Digest, PublicKey};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
-    pub mod marshal;
+    pub use simplex::marshal;
 
     mod reporter;
     pub use reporter::*;
 
     /// Histogram buckets for measuring consensus latency.
-    const LATENCY: [f64; 36] = [
-        0.05, 0.1, 0.125, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26,
-        0.27, 0.28, 0.29, 0.3, 0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.4, 0.45,
-        0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+    ///
+    /// Resolution is 1ms below 10ms, 5ms below 100ms, and 10ms below 250ms so the internal
+    /// pipeline stages (single-digit milliseconds) and view-scale stages (tens of milliseconds)
+    /// both report real quantiles. The tail extends well past the healthy operating range so a
+    /// degraded deployment reports real quantiles instead of censoring everything at the largest
+    /// bucket.
+    const LATENCY: [f64; 58] = [
+        0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015, 0.02, 0.025,
+        0.03, 0.035, 0.04, 0.045, 0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095,
+        0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23, 0.24,
+        0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 3.0, 5.0, 10.0, 30.0,
     ];
 
-    /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
-    /// and verifying payloads proposed by other participants.
+    /// Automaton drives consensus forward by returning commitments for new application payloads and
+    /// validating commitments proposed by other participants.
     pub trait Automaton: Clone + Send + 'static {
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
@@ -122,16 +143,16 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
-        /// Generate a new payload for the given context.
+        /// Select or construct a payload for the given context and return its commitment.
         ///
         /// If it is possible to generate a payload, the Digest should be returned over the provided
         /// channel. If it is not possible to generate a payload, the channel can be dropped. If construction
         /// takes too long, the consensus engine may drop the provided proposal.
         ///
-        /// Returning a payload from `propose` commits the local proposer to verifying
+        /// Returning a commitment from `propose` commits the local proposer to verifying
         /// the same `(context, payload)`.
         ///
-        /// For [`CertifiableAutomaton`] implementations, returning a payload from
+        /// For [`CertifiableAutomaton`] implementations, returning a commitment from
         /// `propose` also commits the local proposer to certifying that same
         /// `(round, payload)` if it later becomes notarized.
         ///
@@ -221,12 +242,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
-    /// Relay is the interface responsible for broadcasting payloads to the network.
+    /// Relay notifies an attached system that a consensus-defined item should be broadcast.
     ///
-    /// The consensus engine is only aware of a payload's digest, not its contents. It is up
-    /// to the relay to efficiently broadcast the full payload to other participants.
+    /// The consensus engine supplies only the item's identity digest, never its contents. The
+    /// underlying consensus mechanism defines which item the digest identifies. Implementations use
+    /// that identity to drive a separate transport.
     pub trait Relay: Clone + Send + 'static {
-        /// Hash of an arbitrary payload.
+        /// Identity digest of the item to disseminate.
         type Digest: Digest;
 
         /// Identity key of a network participant.
@@ -239,8 +261,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// treat every broadcast identically can set this to `()`.
         type Plan: Send;
 
-        /// Broadcast a payload according to the given plan.
-        fn broadcast(&mut self, payload: Self::Digest, plan: Self::Plan) -> Feedback;
+        /// Request dissemination of the item identified by `digest`.
+        fn broadcast(&mut self, digest: Self::Digest, plan: Self::Plan) -> Feedback;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.

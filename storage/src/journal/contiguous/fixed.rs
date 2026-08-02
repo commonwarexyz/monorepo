@@ -1504,6 +1504,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// Shared body of [`super::Contiguous::read_many`] and the variable journal's offsets
     /// reads; the callers record the batch-read metrics, so routing them through `read_many`
     /// would count every batch twice.
+    #[expect(
+        clippy::chunks_exact_to_as_chunks,
+        reason = "A::SIZE cannot be used as a stable const-generic argument"
+    )]
     pub(super) async fn read_many_inner(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
         if positions.is_empty() {
             return Ok(Vec::new());
@@ -1581,6 +1585,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// Probe `positions` (strictly increasing) against the page cache, returning one slot per
     /// position: `Some(item)` for sync hits and `None` for positions that require I/O, fail to
     /// decode, or fall outside `bounds()`.
+    #[expect(
+        clippy::chunks_exact_to_as_chunks,
+        reason = "A::SIZE cannot be used as a stable const-generic argument"
+    )]
     pub(super) fn probe_items(&self, positions: &[u64]) -> Vec<Option<A>> {
         assert!(
             positions.is_sorted_by(|a, b| a < b),

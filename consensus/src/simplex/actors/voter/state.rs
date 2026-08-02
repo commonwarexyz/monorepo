@@ -104,7 +104,7 @@ pub struct CertificateFetch {
 }
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: certificate::Scheme, L: Elector<S>> {
+pub struct Config<S: certificate::Scheme, L: Elector<S::Certificate>> {
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
@@ -119,7 +119,12 @@ pub struct Config<S: certificate::Scheme, L: Elector<S>> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> {
+pub struct State<
+    E: Clock + CryptoRng + Metrics,
+    S: Scheme<D>,
+    L: Elector<S::Certificate>,
+    D: Digest,
+> {
     context: E,
     scheme: S,
     elector: L,
@@ -168,7 +173,9 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     nullifications: CounterFamily<Leader<S::PublicKey>>,
 }
 
-impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> State<E, S, L, D> {
+impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S::Certificate>, D: Digest>
+    State<E, S, L, D>
+{
     /// Returns true when `view` is within the optimistic *issuance* window:
     /// a directly-notarized anchor exists and `view` sits at most
     /// `optimistic_views` hops above the anchor's child (see
@@ -1605,7 +1612,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 mod tests {
     use super::*;
     use crate::simplex::{
-        elector::{Config as _, RoundRobin, RoundRobinElector, Terms},
+        elector::{RoundRobin, RoundRobinElector, Terms},
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
@@ -1619,8 +1626,8 @@ mod tests {
     use commonware_utils::{NZU32, futures::AbortablePool, non_empty};
     use std::time::Duration;
 
-    fn round_robin<S: certificate::Scheme>(scheme: &S) -> RoundRobinElector<S> {
-        <RoundRobin>::default().build(scheme.participants())
+    fn round_robin<S: certificate::Scheme>(scheme: &S) -> RoundRobinElector {
+        <RoundRobin>::default().rotation(scheme.participants().len())
     }
 
     fn round_robin_with_term<S: certificate::Scheme>(
@@ -1628,10 +1635,10 @@ mod tests {
         term_length: TermLength,
         stall_timeout: Duration,
         optimistic_views: ViewDelta,
-    ) -> RoundRobinElector<S> {
+    ) -> RoundRobinElector {
         <RoundRobin>::default()
             .with_term(term_length, stall_timeout, optimistic_views)
-            .build(scheme.participants())
+            .rotation(scheme.participants().len())
     }
 
     fn test_genesis() -> Sha256Digest {
@@ -1751,12 +1758,8 @@ mod tests {
         });
     }
 
-    type TestState = State<
-        deterministic::Context,
-        ed25519::Scheme,
-        RoundRobinElector<ed25519::Scheme>,
-        Sha256Digest,
-    >;
+    type TestState =
+        State<deterministic::Context, ed25519::Scheme, RoundRobinElector, Sha256Digest>;
 
     fn setup_state(
         context: &mut deterministic::Context,
@@ -1869,7 +1872,7 @@ mod tests {
         _phantom: std::marker::PhantomData<S>,
     }
 
-    impl<S: certificate::Scheme> Elector<S> for RequireCertificateElector<S> {
+    impl<S: certificate::Scheme> Elector<S::Certificate> for RequireCertificateElector<S> {
         fn terms(&self) -> Terms {
             Terms::stable(self.term_length, Duration::from_secs(30), ViewDelta::new(1))
         }
@@ -3928,7 +3931,7 @@ mod tests {
                 context,
                 Config {
                     scheme: verifier,
-                    elector: RequireCertificateElector {
+                    elector: RequireCertificateElector::<ed25519::Scheme> {
                         term_length: TermLength::new(NZU32!(5)),
                         _phantom: std::marker::PhantomData,
                     },
@@ -5652,7 +5655,7 @@ mod tests {
             );
             // Use a non-leader so its local vote is the event that opens the
             // optimistic child.
-            let leader_idx = usize::from(elector.elect(Rnd::new(epoch, View::new(1)), None));
+            let leader_idx = usize::from(elector.leader(Rnd::new(epoch, View::new(1))));
             let local_idx = (leader_idx + 1) % schemes.len();
 
             let config = |scheme: ed25519::Scheme, elector| {

@@ -205,11 +205,11 @@ mod tests {
                 Archive::init(context.child("storage"), start_sync_config(&context))
                     .await
                     .unwrap();
-            let archive = archive.put(1, key, 10).await.unwrap();
+            let archive = archive.put(1, key, &10).await.unwrap();
             let captured = archive
                 .read_step(ReadRequest::key(key))
                 .expect("key head should capture");
-            let archive = archive.put(2, key, 20).await.unwrap();
+            let archive = archive.put(2, key, &20).await.unwrap();
 
             assert!(matches!(
                 captured.execute().await.unwrap(),
@@ -245,7 +245,10 @@ mod tests {
             ];
 
             for (index, key) in keys.iter().copied().enumerate() {
-                archive = archive.put(index as u64, key, index as i32).await.unwrap();
+                archive = archive
+                    .put(index as u64, key, &(index as i32))
+                    .await
+                    .unwrap();
                 archive = archive.sync().await.unwrap();
             }
 
@@ -273,7 +276,7 @@ mod tests {
 
             let archive: Archive<_, Digest, i32> =
                 Archive::init(context.child("storage"), cfg).await.unwrap();
-            let archive = archive.put(1, first_key, 10).await.unwrap();
+            let archive = archive.put(1, first_key, &10).await.unwrap();
 
             pending.arm();
             let (archive, handle) = archive.start_sync().await.unwrap();
@@ -286,7 +289,7 @@ mod tests {
                 "start_sync must return while lower-layer durability is pending"
             );
 
-            let archive = archive.put(2, second_key, 20).await.unwrap();
+            let archive = archive.put(2, second_key, &20).await.unwrap();
             drive_pending_syncs(&pending, handle).await.unwrap();
             drop(archive);
         });

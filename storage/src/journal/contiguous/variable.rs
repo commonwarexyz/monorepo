@@ -1199,7 +1199,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             cfg.write_buffer,
         );
         let (offsets, mut pending) = futures::try_join!(
-            fixed::Inner::<E, u64>::init_sealed(context.child("offsets"), cfg.offsets_config(), size),
+            fixed::Inner::<E, u64>::init_sealed(
+                context.child("offsets"),
+                cfg.offsets_config(),
+                size
+            ),
             partition.open_all(),
         )?;
 
@@ -1234,10 +1238,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let handle = data
             .get(last_blob)
             .expect("the last retained blob was just verified");
-        let header_len = usize::try_from(
-            (handle.size() - final_offset).min(MAX_U32_VARINT_SIZE as u64),
-        )
-        .expect("frame headers are small");
+        let header_len =
+            usize::try_from((handle.size() - final_offset).min(MAX_U32_VARINT_SIZE as u64))
+                .expect("frame headers are small");
         let exact = handle
             .read_at(final_offset, header_len)
             .await
@@ -1689,7 +1692,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Journal::start_seal].
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn start_seal(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
-        let size = self.barrier.size();
+        let size = self.barrier.boundary();
         let (offsets, handle) = self.offsets.start_watermark_sync(size).await?;
         self.offsets = offsets;
         Ok((self, handle))
@@ -3177,6 +3180,7 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
                 write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
             };
             let items: Vec<FixedBytes<32>> = (0..4u8).map(|i| FixedBytes::new([i; 32])).collect();
             seed_sealed(&context, &cfg, "writer", &items).await;
@@ -3219,13 +3223,10 @@ mod tests {
                 ..cfg.clone()
             };
             seed_sealed(&context, &cfg_mid, "mid_writer", &items[..2]).await;
-            let reader = Journal::<_, FixedBytes<32>>::init_sealed(
-                context.child("mid_sealed"),
-                cfg_mid,
-                2,
-            )
-            .await
-            .unwrap();
+            let reader =
+                Journal::<_, FixedBytes<32>>::init_sealed(context.child("mid_sealed"), cfg_mid, 2)
+                    .await
+                    .unwrap();
             assert_eq!(reader.bounds(), 0..2);
             assert_eq!(reader.read(1).await.unwrap(), items[1]);
             drop(reader);
@@ -3267,6 +3268,7 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
                 write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
             };
             let items: Vec<FixedBytes<4096>> =
                 (0..64u8).map(|i| FixedBytes::new([i; 4096])).collect();
@@ -3309,6 +3311,7 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
                 write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
             };
             let mut journal = Journal::<_, u64>::init(
                 DelayedSyncContext {
@@ -3319,7 +3322,10 @@ mod tests {
             )
             .await
             .unwrap();
-            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3, 4])).await.unwrap();
+            (journal, _) = journal
+                .append_many(Many::Flat(&[1, 2, 3, 4]))
+                .await
+                .unwrap();
             let (journal, cut) = journal.start_sync().await.unwrap();
             drive_pending_syncs(&pending, cut).await.unwrap();
 
@@ -3329,7 +3335,10 @@ mod tests {
             let (journal, second) = journal.start_seal().await.unwrap();
             fail_pending_syncs(&pending);
             assert!(first.await.is_err());
-            assert!(second.await.is_err(), "a staged watermark was reported durable");
+            assert!(
+                second.await.is_err(),
+                "a staged watermark was reported durable"
+            );
             drop(journal);
         });
     }
@@ -3345,6 +3354,7 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
                 write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
             };
             let items: Vec<FixedBytes<32>> = (0..4u8).map(|i| FixedBytes::new([i; 32])).collect();
             let mut journal =

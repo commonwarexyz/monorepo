@@ -731,7 +731,6 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     pub fn key_read_plan(&self, key: &K) -> Result<Option<KeyReadPlan<E::Blob, K, V>>, Error> {
         self.0.key_read_plan(key)
     }
-
 }
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archive

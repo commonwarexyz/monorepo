@@ -13,6 +13,7 @@ use commonware_p2p::Recipients;
 use reqwest::blocking::Client;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroUsize,
     time::Duration,
 };
 use tracing::debug;
@@ -78,6 +79,26 @@ pub enum Command {
 pub enum Threshold {
     Count(usize),
     Percent(f64),
+    Faults(FaultThreshold),
+}
+
+/// A threshold expressed in terms of the maximum tolerated faults.
+///
+/// `resilience=R` means the protocol requires `n >= Rf+1`, so the estimator computes
+/// `f=floor((n-1)/R)` for the configured peer count.
+#[derive(Clone)]
+pub enum FaultThreshold {
+    /// A threshold of `multiplier * f + offset`.
+    AtLeast {
+        multiplier: usize,
+        offset: usize,
+        resilience: NonZeroUsize,
+    },
+    /// A threshold of `n - multiplier * f`.
+    AllBut {
+        multiplier: usize,
+        resilience: NonZeroUsize,
+    },
 }
 
 // =============================================================================
@@ -213,19 +234,7 @@ fn parse_single_command(line: &str) -> Command {
                 || {
                     panic!("Missing threshold for {command}");
                 },
-                |thresh_str| {
-                    if thresh_str.ends_with('%') {
-                        let p = thresh_str
-                            .trim_end_matches('%')
-                            .parse::<f64>()
-                            .expect("Invalid percent")
-                            / 100.0;
-                        Threshold::Percent(p)
-                    } else {
-                        let c = thresh_str.parse::<usize>().expect("Invalid count");
-                        Threshold::Count(c)
-                    }
-                },
+                |thresh_str| parse_threshold(thresh_str, parsed_args.get("resilience")),
             );
 
             let delay = parsed_args.get("delay").map(|delay_str| {
@@ -251,6 +260,55 @@ fn parse_single_command(line: &str) -> Command {
         }
         _ => panic!("Unknown command: {command}"),
     }
+}
+
+fn parse_threshold(threshold: &str, resilience: Option<&String>) -> Threshold {
+    if threshold.ends_with('%') {
+        let percent = threshold
+            .trim_end_matches('%')
+            .parse::<f64>()
+            .expect("Invalid percent")
+            / 100.0;
+        return Threshold::Percent(percent);
+    }
+
+    if let Ok(count) = threshold.parse::<usize>() {
+        return Threshold::Count(count);
+    }
+
+    let resilience = resilience
+        .unwrap_or_else(|| panic!("Missing resilience for threshold {threshold}"))
+        .parse::<usize>()
+        .expect("Invalid resilience");
+    let resilience = NonZeroUsize::new(resilience).expect("resilience must be greater than zero");
+
+    let threshold = match threshold {
+        "f+1" => FaultThreshold::AtLeast {
+            multiplier: 1,
+            offset: 1,
+            resilience,
+        },
+        "2f+1" => FaultThreshold::AtLeast {
+            multiplier: 2,
+            offset: 1,
+            resilience,
+        },
+        "3f+1" => FaultThreshold::AtLeast {
+            multiplier: 3,
+            offset: 1,
+            resilience,
+        },
+        "n-f" => FaultThreshold::AllBut {
+            multiplier: 1,
+            resilience,
+        },
+        "n-2f" => FaultThreshold::AllBut {
+            multiplier: 2,
+            resilience,
+        },
+        _ => panic!("Invalid threshold: {threshold}"),
+    };
+    Threshold::Faults(threshold)
 }
 
 /// Parse a complex expression with parentheses and operators
@@ -556,6 +614,21 @@ pub fn calculate_threshold(thresh: &Threshold, peers: usize) -> usize {
     match thresh {
         Threshold::Percent(p) => ((peers as f64) * *p).ceil() as usize,
         Threshold::Count(c) => *c,
+        Threshold::Faults(FaultThreshold::AtLeast {
+            multiplier,
+            offset,
+            resilience,
+        }) => {
+            let faults = peers.saturating_sub(1) / resilience.get();
+            faults.saturating_mul(*multiplier).saturating_add(*offset)
+        }
+        Threshold::Faults(FaultThreshold::AllBut {
+            multiplier,
+            resilience,
+        }) => {
+            let faults = peers.saturating_sub(1) / resilience.get();
+            peers.saturating_sub(faults.saturating_mul(*multiplier))
+        }
     }
 }
 
@@ -764,6 +837,33 @@ mod tests {
     fn test_calculate_threshold() {
         assert_eq!(calculate_threshold(&Threshold::Count(5), 10), 5);
         assert_eq!(calculate_threshold(&Threshold::Percent(0.5), 10), 5);
+
+        let thresholds = [
+            ("f+1", 10),
+            ("2f+1", 19),
+            ("3f+1", 28),
+            ("n-f", 41),
+            ("n-2f", 32),
+        ];
+        for (threshold, expected) in thresholds {
+            let command = parse_task(&format!("wait{{0, threshold={threshold}, resilience=5}}"));
+            let Command::Wait(_, threshold, _) = &command[0].1 else {
+                panic!("expected wait command");
+            };
+            assert_eq!(calculate_threshold(threshold, 50), expected);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Missing resilience for threshold n-f")]
+    fn test_parse_fault_threshold_requires_resilience() {
+        parse_task("wait{0, threshold=n-f}");
+    }
+
+    #[test]
+    #[should_panic(expected = "resilience must be greater than zero")]
+    fn test_parse_fault_threshold_rejects_zero_resilience() {
+        parse_task("wait{0, threshold=n-f, resilience=0}");
     }
 
     #[test]
@@ -1093,6 +1193,16 @@ broadcast{1}
             (
                 "kudzu_large_block_coding_50.lazy",
                 include_str!("../kudzu_large_block_coding_50.lazy"),
+                true,
+            ),
+            (
+                "multimmit_small_block_50.lazy",
+                include_str!("../multimmit_small_block_50.lazy"),
+                true,
+            ),
+            (
+                "multimmit_large_block_50.lazy",
+                include_str!("../multimmit_large_block_50.lazy"),
                 true,
             ),
             ("hotstuff.lazy", include_str!("../hotstuff.lazy"), true),

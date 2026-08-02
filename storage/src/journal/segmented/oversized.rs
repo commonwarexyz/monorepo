@@ -1241,8 +1241,7 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, BufMut, BufferPooler, Runner, Spawner as _, Storage as _, Supervisor as _,
-        WriteOptions,
+        BufMut, BufferPooler, Runner, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
@@ -1377,7 +1376,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("storage"), cfg, None)
+                Oversized::init(context.child("storage"), cfg)
                     .await
                     .expect("failed to init");
 
