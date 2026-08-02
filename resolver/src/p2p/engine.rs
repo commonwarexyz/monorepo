@@ -389,8 +389,11 @@ where
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
+        let Some(receiver) = producer.try_produce(key) else {
+            self.metrics.serve.inc(Status::Dropped);
+            return;
+        };
         let timer = self.metrics.serve_duration.timer(self.context.as_ref());
-        let receiver = producer.produce(key);
         self.serves.push(async move {
             let result = receiver.await;
             Serve {

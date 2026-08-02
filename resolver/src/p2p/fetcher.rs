@@ -160,7 +160,7 @@ where
     NetS: Sender<PublicKey = P>,
 {
     /// Creates a new fetcher.
-    pub fn new(context: E, config: Config<P>) -> Self {
+    pub fn new(mut context: E, config: Config<P>) -> Self {
         let performance = context.family(
             "peer_performance",
             "Per-peer performance (exponential moving average of response time in ms)",
@@ -176,12 +176,13 @@ where
             "Number and duration of requests that were resolved",
             Buckets::NETWORK,
         );
+        let request_id = context.next_u64();
         Self {
             context,
             me: config.me,
             excluded: HashSet::new(),
             participants: PrioritySet::new(),
-            request_id: 0,
+            request_id,
             active: PrioritySet::new(),
             requests: HashMap::new(),
             key_to_id: HashMap::new(),
@@ -751,6 +752,20 @@ mod tests {
         fetcher.add_targets(MockKey(1), [missing_peer]);
         fetcher.add_ready(MockKey(1));
         (fetcher, peer)
+    }
+
+    #[test]
+    fn request_sequences_are_session_scoped() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let first = create_test_fetcher::<FailMockSender>(context.child("first"));
+            let second = create_test_fetcher::<FailMockSender>(context.child("second"));
+
+            assert_ne!(
+                first.request_id, second.request_id,
+                "a delayed response from an old engine session must not collide with a new request"
+            );
+        });
     }
 
     /// Helper to add an active request directly for testing
