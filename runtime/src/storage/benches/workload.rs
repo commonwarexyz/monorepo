@@ -10,19 +10,19 @@ use crate::{
     },
     report::Report,
     runner::{
-        RunLimit, WritePolicy, random_blocks, run_atomic_batch_append_loop, run_atomic_write_loop,
+        RunLimit, WritePolicy, random_blocks, run_atomic_append_loop, run_atomic_batch_append_loop,
         run_multi_blob_append_loop, run_paired_atomic_batch_append_loop, run_read_loop,
         run_sync_write_loop, run_write_loop, sequential_blocks, warm_read_loop,
     },
 };
 use commonware_runtime::{
-    BatchOperation, BatchStorage as _, Blob as _, Storage as _, WriteOptions, tokio::Context,
+    AtomicBlob as _, BatchOperation, BatchStorage as _, Blob as _, Storage as _, WriteOptions,
+    tokio::Context,
 };
 use commonware_utils::TestRng;
 use futures::{TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::{
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -64,7 +64,6 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
         Workload::WriteSeq | Workload::WriteRand => run_overwrite(cfg, &context).await,
         Workload::WriteAppend => run_write_append(cfg, &context).await,
         Workload::WriteSync => run_write_sync(cfg, &context).await,
-        Workload::WriteAtomic | Workload::WriteAtomicRand => run_write_atomic(cfg, &context).await,
         Workload::WriteAtomicAppend => run_write_atomic_append(cfg, &context).await,
         Workload::WriteMultiBlobAppend => run_write_multi_blob_append(cfg, &context).await,
         Workload::WriteAtomicBatchAppend => run_write_atomic_batch_append(cfg, &context).await,
@@ -320,95 +319,17 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
     ))
 }
 
-/// Run sequential atomic positioned writes on a fixed-size file.
-async fn run_write_atomic(cfg: &Config, context: &Context) -> Result<Report> {
-    let rss_before = resident_set_size();
-    let file_size = cfg.file_size();
-    let total_blocks = file_size / cfg.io_size() as u64;
-    let inflight = cfg.inflight as u64;
-    let sequential = cfg.workload == Workload::WriteAtomic;
-
-    let blob = prepare_atomic_blob(context, &cfg.root, PARTITION, BLOB_NAME, file_size).await?;
-    let mut rng = TestRng::new(cfg.seed);
-    let payload = random_write_payload(&mut rng, cfg.io_size(), cfg.write_shape);
-
-    let start = Instant::now();
-    let limit = run_limit(cfg, start);
-    let workers = (0..cfg.inflight)
-        .map(|worker| {
-            let blob = blob.clone();
-            let payload = payload.clone();
-            async move {
-                if sequential {
-                    run_atomic_write_loop(
-                        blob,
-                        limit,
-                        cfg.io_size(),
-                        payload,
-                        file_size,
-                        cfg.sync_mode,
-                        sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
-                    )
-                    .await
-                } else {
-                    run_atomic_write_loop(
-                        blob,
-                        limit,
-                        cfg.io_size(),
-                        payload,
-                        file_size,
-                        cfg.sync_mode,
-                        random_blocks(worker_seed(cfg.seed, worker), total_blocks),
-                    )
-                    .await
-                }
-            }
-        })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>()
-        .await?;
-
-    let hot_elapsed = start.elapsed();
-    let frontier_sync_elapsed = if cfg.sync_mode == SyncMode::End {
-        let sync_started = Instant::now();
-        blob.sync().await?;
-        Some(sync_started.elapsed())
-    } else {
-        None
-    };
-
-    let mut report = Report::new(
-        hot_elapsed,
-        frontier_sync_elapsed,
-        None,
-        Some(workers),
-        file_size,
-    );
-    report.set_resident_memory(rss_before, resident_set_size());
-    Ok(report)
-}
-
 /// Run append writes through the atomic protocol on a growing file.
 async fn run_write_atomic_append(cfg: &Config, context: &Context) -> Result<Report> {
     let rss_before = resident_set_size();
-    let blob = prepare_atomic_blob(context, &cfg.root, PARTITION, BLOB_NAME, 0).await?;
+    let blob = prepare_atomic_blob(context, PARTITION, BLOB_NAME).await?;
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size(), cfg.write_shape);
 
     let start = Instant::now();
     let limit = run_limit(cfg, start);
-    // Use the same Blob::write_at interface as the ordinary append workload so this comparison
-    // isolates the cost of the R05 protocol used by existing buffered writers and journals.
-    let stats = run_write_loop(
-        blob.clone(),
-        limit,
-        cfg.io_size(),
-        payload,
-        write_policy(cfg),
-        sequential_blocks(0, 1, u64::MAX),
-        |_| {},
-    )
-    .await?;
+    let stats =
+        run_atomic_append_loop(blob.clone(), limit, cfg.io_size(), payload, cfg.sync_mode).await?;
     let final_file_size = stats.bytes;
 
     let hot_elapsed = start.elapsed();
@@ -461,11 +382,11 @@ async fn run_write_atomic_batch_append(cfg: &Config, context: &Context) -> Resul
     let names = multi_blob_names(cfg.blobs());
     let atomic_blobs = names
         .iter()
-        .map(|name| prepare_atomic_blob(context, &cfg.root, PARTITION, name, 0))
+        .map(|name| prepare_atomic_blob(context, PARTITION, name))
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>()
         .await?;
-    warm_atomic_batch(context, &cfg.root).await?;
+    warm_atomic_batch(context).await?;
 
     let ordinary_blobs = if cfg.paired_baseline {
         let names = baseline_blob_names(cfg.blobs());
@@ -522,9 +443,9 @@ async fn run_write_atomic_batch_append(cfg: &Config, context: &Context) -> Resul
 }
 
 /// Exercise one-time batch initialization outside the timed phase.
-async fn warm_atomic_batch(context: &Context, root: &Path) -> Result<()> {
-    let blob = prepare_atomic_blob(context, root, PARTITION, BATCH_WARMUP_BLOB, 0).await?;
-    blob.write_at(0, vec![0u8], WriteOptions::default()).await?;
+async fn warm_atomic_batch(context: &Context) -> Result<()> {
+    let blob = prepare_atomic_blob(context, PARTITION, BATCH_WARMUP_BLOB).await?;
+    blob.append(vec![0u8]).await?;
     context
         .apply(vec![BatchOperation::Publish(blob.clone())])
         .await?;

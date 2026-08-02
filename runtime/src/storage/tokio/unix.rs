@@ -264,16 +264,38 @@ impl Blob {
         Ok(())
     }
 
-    fn validate_update(offset: u64, data_len: u64, len: u64) -> Result<u64, Error> {
-        let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
-        if end > len {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "atomic update range exceeds its final length",
-            )
-            .into());
+    async fn rewind_atomic(&self, len: u64) -> Result<(), Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(Self::atomic_layout_required(&self.partition, &self.name));
+        };
+        let mut state = atomic.lock().await;
+        self.ensure_healthy(&state)?;
+        let truncate = len < state.logical_len() && len >= state.committed_len();
+        state.rewind(len)?;
+        if !truncate {
+            return Ok(());
         }
-        Ok(end)
+
+        let raw_len = state.raw_len()?;
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let generation = self.generation.clone();
+        task::spawn_blocking(move || {
+            let _generation = generation;
+            let result = file
+                .set_len(raw_len)
+                .map_err(|error| Error::BlobResizeFailed(partition, hex(&name), error.into()));
+            if result.is_err() {
+                state.poison();
+            }
+            result
+        })
+        .await
+        .map_err(|error| {
+            let error: std::io::Error = error.into();
+            Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), error.into())
+        })?
     }
 
     fn prepare_log_writes(
@@ -286,10 +308,7 @@ impl Blob {
             return Ok(None);
         }
         let materialized_previous = state.deferred_batch_root().cloned();
-        let (payload_start, payload_len, payload_ranges) = state.pending_payload()?;
-        if atomic::reclaim_shadowed_payload(file, payload_start, payload_len, &payload_ranges)? {
-            state.invalidate_payload_checksum();
-        }
+        let (payload_start, payload_len) = state.pending_payload()?;
         atomic::begin_payload_writeback(file, payload_start, payload_len)?;
         let mut prepared = state
             .prepare_commit()?
@@ -301,17 +320,9 @@ impl Blob {
             let root = atomic::materialized_candidate_root(candidate)?;
             file.write_all_at(&root, candidate.root_offset)?;
         }
-        if !prepared.manifest.is_empty() {
-            file.write_all_at(&prepared.manifest, prepared.manifest_offset)?;
-        }
         if !batch_prepared {
             file.write_all_at(&prepared.prepared_root, prepared.root_offset)?;
         }
-        prepared.set_materialized_previous(if materialize_previous {
-            materialized_previous
-        } else {
-            None
-        });
         Ok(Some(prepared))
     }
 
@@ -323,7 +334,7 @@ impl Blob {
     ) -> Result<Option<atomic::PreparedCommit>, Error> {
         let prepared = Self::prepare_log_writes(state, file, true, false)?;
         if prepared.is_some() {
-            // A committed root is written only after every payload and checkpoint byte is durable.
+            // A committed root is written only after every payload byte is durable.
             // Recovery can therefore accept it without rereading payload data.
             Self::sync_inner(file, partition, name)?;
         }
@@ -341,6 +352,11 @@ impl Blob {
         };
         atomic::write_durable_at(file, prepared.root_offset, &prepared.committed_root)
             .map_err(Error::from)?;
+        if prepared.requires_truncate() {
+            file.set_len(prepared.raw_len()).map_err(|error| {
+                Error::BlobResizeFailed(partition.to_string(), hex(name), error.into())
+            })?;
+        }
         state.finish_commit(prepared);
         Ok(())
     }
@@ -380,17 +396,42 @@ impl Blob {
     }
 
     pub(super) fn activate_batch_commit(
+        &self,
         state: &mut V2State,
-        prepared: atomic::PreparedCommit,
+        prepared: Option<atomic::PreparedCommit>,
         defer_root: bool,
-    ) -> atomic::Candidate {
-        if defer_root {
+        force_truncate: bool,
+    ) -> Result<Option<atomic::Candidate>, Error> {
+        let Some(prepared) = prepared else {
+            if force_truncate {
+                self.truncate_batch_rewind(state)?;
+            }
+            return Ok(None);
+        };
+        if force_truncate || prepared.requires_truncate() {
+            self.truncate_batch_rewind(state)?;
+        }
+        Ok(Some(if defer_root {
             state.finish_batch_commit(prepared)
         } else {
             let candidate = prepared.candidate();
             state.finish_commit(prepared);
             candidate
+        }))
+    }
+
+    /// Reclaim a batch-rewound suffix after the group decision is durable.
+    pub(super) fn truncate_batch_rewind(&self, state: &mut V2State) -> Result<(), Error> {
+        let raw_len = state.raw_len()?;
+        if let Err(error) = self.file.set_len(raw_len) {
+            state.poison();
+            return Err(Error::BlobResizeFailed(
+                self.partition.clone(),
+                hex(&self.name),
+                error.into(),
+            ));
         }
+        Ok(())
     }
 
     pub(super) const fn poison_batch_state(state: &mut V2State) {
@@ -528,25 +569,19 @@ impl crate::Blob for Blob {
                     for span in &plan {
                         let destination =
                             &mut buf.as_mut()[span.destination..span.destination + span.len];
-                        match span.source {
-                            atomic::ReadSource::Zero => destination.fill(0),
-                            atomic::ReadSource::File(offset) => file
-                                .read_exact_at(destination, offset)
-                                .map_err(|_| Error::ReadFailed)?,
-                        }
+                        let atomic::ReadSource::File(offset) = span.source;
+                        file.read_exact_at(destination, offset)
+                            .map_err(|_| Error::ReadFailed)?;
                     }
                 } else {
-                    // SAFETY: every byte is filled from one planned extent or a zero span.
+                    // SAFETY: every byte is filled from the planned file span.
                     let mut temp = unsafe { pool.alloc_len(len) };
                     for span in &plan {
                         let destination =
                             &mut temp.as_mut()[span.destination..span.destination + span.len];
-                        match span.source {
-                            atomic::ReadSource::Zero => destination.fill(0),
-                            atomic::ReadSource::File(offset) => file
-                                .read_exact_at(destination, offset)
-                                .map_err(|_| Error::ReadFailed)?,
-                        }
+                        let atomic::ReadSource::File(offset) = span.source;
+                        file.read_exact_at(destination, offset)
+                            .map_err(|_| Error::ReadFailed)?;
                     }
                     bufs.copy_from_slice(temp.as_ref());
                 }
@@ -617,8 +652,15 @@ impl crate::Blob for Blob {
             return task::spawn_blocking(move || {
                 let _generation = generation;
                 let _namespace_guard = namespace_guard;
+                if offset != state.logical_len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "atomic writes must append at the current logical tail",
+                    )
+                    .into());
+                }
                 let prepared = state
-                    .prepare_write(offset, bufs, None)?
+                    .prepare_append(bufs)?
                     .expect("nonempty writes always prepare payload storage");
                 let result = (|| {
                     Self::write_with_options(
@@ -664,11 +706,8 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        if let Some(atomic) = &self.atomic {
-            let mut state = atomic.lock().await;
-            self.ensure_healthy(&state)?;
-            state.resize(len);
-            return Ok(());
+        if self.atomic.is_some() {
+            return self.rewind_atomic(len).await;
         }
         let file = self.file.clone();
         let len = len
@@ -722,24 +761,17 @@ impl crate::Blob for Blob {
 }
 
 impl crate::AtomicBlob for Blob {
-    async fn update(
-        &self,
-        offset: u64,
-        data: impl Into<IoBufs> + Send,
-        len: u64,
-    ) -> Result<(), Error> {
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
         };
         let data = data.into();
-        let data_len = u64::try_from(data.remaining()).map_err(|_| Error::OffsetOverflow)?;
-        Self::validate_update(offset, data_len, len)?;
         let mut state = atomic.lock().await;
         self.ensure_healthy(&state)?;
-        if data_len == 0 {
-            state.resize(len);
-            return Ok(());
-        }
+        let offset = state.logical_len();
+        let Some(prepared) = state.prepare_append(data)? else {
+            return Ok(offset);
+        };
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
@@ -747,9 +779,6 @@ impl crate::AtomicBlob for Blob {
         let generation = self.generation.clone();
         task::spawn_blocking(move || {
             let _generation = generation;
-            let prepared = state
-                .prepare_write(offset, data, Some(len))?
-                .expect("nonempty updates always prepare payload storage");
             let result = (|| {
                 Self::write_with_options(
                     &file,
@@ -761,7 +790,7 @@ impl crate::AtomicBlob for Blob {
                     &name,
                 )?;
                 state.finish_mutation(prepared.mutation);
-                Ok(())
+                Ok(offset)
             })();
             if result.is_err() {
                 state.poison();
@@ -770,6 +799,10 @@ impl crate::AtomicBlob for Blob {
         })
         .await
         .unwrap_or(Err(Error::WriteFailed))
+    }
+
+    async fn rewind(&self, len: u64) -> Result<(), Error> {
+        self.rewind_atomic(len).await
     }
 }
 

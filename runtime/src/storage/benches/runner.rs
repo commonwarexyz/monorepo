@@ -199,26 +199,23 @@ pub async fn run_sync_write_loop(
     Ok(stats)
 }
 
-/// Timed atomic write loop with caller-defined offset selection.
+/// Timed atomic append loop.
 #[inline]
-pub async fn run_atomic_write_loop(
+pub async fn run_atomic_append_loop(
     blob: impl AtomicBlob,
     limit: RunLimit,
     io_size: usize,
     payload: IoBufs,
-    final_len: u64,
     sync_mode: SyncMode,
-    mut next_block: impl FnMut() -> u64,
 ) -> Result<Stats> {
     let mut stats = Stats::default();
     let mut writes_since_sync = 0u64;
     let io_size = io_size as u64;
     while should_continue(limit, stats.ops) {
-        let offset = next_block() * io_size;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.update(offset, payload.clone(), final_len).await?;
+        blob.append(payload.clone()).await?;
 
-        // Record latency before sync so percentiles reflect pure update cost.
+        // Record latency before sync so percentiles reflect pure append cost.
         stats.record(io_size, started.map(|s| s.elapsed()));
 
         writes_since_sync += 1;
@@ -390,7 +387,7 @@ async fn run_ordinary_append_group(
     stats: &mut Stats,
 ) -> Result<Duration> {
     let started = Instant::now();
-    write_blob_group(blobs, offset, payload).await?;
+    write_ordinary_blob_group(blobs, offset, payload).await?;
 
     let sync_started = Instant::now();
     sync_blob_group(blobs).await?;
@@ -410,7 +407,7 @@ async fn run_atomic_append_group<S: BatchStorage>(
     stats: &mut Stats,
 ) -> Result<Duration> {
     let started = Instant::now();
-    write_blob_group(blobs, offset, payload).await?;
+    append_atomic_blob_group(blobs, offset, payload).await?;
 
     let publication_started = Instant::now();
     let completion = storage.start_apply(publications.to_vec()).await?;
@@ -437,7 +434,11 @@ fn group_dimensions(blob_count: usize, io_size: usize) -> Result<(u64, u64)> {
     Ok((io_size, group_bytes))
 }
 
-async fn write_blob_group(blobs: &[impl Blob], offset: u64, payload: &IoBufs) -> Result<()> {
+async fn write_ordinary_blob_group(
+    blobs: &[impl Blob],
+    offset: u64,
+    payload: &IoBufs,
+) -> Result<()> {
     blobs
         .iter()
         .cloned()
@@ -451,6 +452,29 @@ async fn write_blob_group(blobs: &[impl Blob], offset: u64, payload: &IoBufs) ->
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>()
         .await?;
+    Ok(())
+}
+
+async fn append_atomic_blob_group(
+    blobs: &[impl AtomicBlob],
+    expected_offset: u64,
+    payload: &IoBufs,
+) -> Result<()> {
+    let offsets = blobs
+        .iter()
+        .cloned()
+        .map(|blob| {
+            let payload = payload.clone();
+            async move { blob.append(payload).await }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>()
+        .await?;
+    if offsets.iter().any(|&offset| offset != expected_offset) {
+        return Err(Error::Harness(
+            "atomic append group participants have different logical tails".into(),
+        ));
+    }
     Ok(())
 }
 

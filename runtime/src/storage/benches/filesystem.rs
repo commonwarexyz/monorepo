@@ -7,7 +7,7 @@ use crate::{
 use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use commonware_formatting::hex;
-use commonware_runtime::{AtomicStorage, Blob, IoBuf, IoBufs, Storage, WriteOptions};
+use commonware_runtime::{AtomicBlob, AtomicStorage, Blob, IoBuf, IoBufs, Storage, WriteOptions};
 use rand::Rng;
 use std::{
     fs, io,
@@ -32,12 +32,12 @@ pub const fn backend_name() -> &'static str {
 
 /// Protocol used by blobs opened through [`AtomicStorage`].
 pub const fn atomic_protocol() -> &'static str {
-    "uno_r05_prepared_root"
+    "uno_r11_append_root"
 }
 
 /// Protocol used to publish prepared roots as one multi-blob decision.
 pub const fn atomic_batch_protocol() -> &'static str {
-    "uno_r08_embedded_participant_witness"
+    "uno_r11_append_embedded_participant_witness"
 }
 
 /// On-disk footprint of the benchmark blob after the timed workload.
@@ -185,37 +185,6 @@ const fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::
     Ok(())
 }
 
-/// Reserve an unwritten append range without changing the blob's raw length.
-#[cfg(target_os = "linux")]
-fn preallocate_blob_tail(root: &Path, partition: &str, name: &[u8], length: u64) -> io::Result<()> {
-    let path = root.join(partition).join(hex(name));
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
-    let offset = file.metadata()?.len();
-    let offset = libc::off_t::try_from(offset)
-        .map_err(|_| io::Error::other("blob offset is too large for fallocate"))?;
-    let length = libc::off_t::try_from(length)
-        .map_err(|_| io::Error::other("blob length is too large for fallocate"))?;
-
-    // SAFETY: The descriptor remains valid through the call, and both values were checked against
-    // the platform's off_t range. KEEP_SIZE reserves blocks without changing the R05 log frontier.
-    let result =
-        unsafe { libc::fallocate(file.as_raw_fd(), libc::FALLOC_FL_KEEP_SIZE, offset, length) };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    file.sync_all()
-}
-
-#[cfg(not(target_os = "linux"))]
-const fn preallocate_blob_tail(
-    _root: &Path,
-    _partition: &str,
-    _name: &[u8],
-    _length: u64,
-) -> std::io::Result<()> {
-    Ok(())
-}
-
 /// Best-effort eviction of a blob from the OS page cache.
 ///
 /// On Linux, `POSIX_FADV_DONTNEED` asks the kernel to discard cached pages
@@ -265,24 +234,15 @@ pub async fn prepare_blob<S: Storage>(
     Ok(blob)
 }
 
-/// Create a fixed-size atomic blob and publish its initial logical length.
+/// Create an empty atomic blob and publish its initial logical length.
 pub async fn prepare_atomic_blob<S: AtomicStorage>(
     storage: &S,
-    root: &Path,
     partition: &str,
     name: &[u8],
-    file_size: u64,
 ) -> Result<S::AtomicBlob> {
     let (blob, _) = storage.open_atomic(partition, name).await?;
-    blob.resize(file_size).await?;
+    blob.rewind(0).await?;
     blob.sync().await?;
-    if file_size > 0 {
-        drop(blob);
-        preallocate_blob_tail(root, partition, name, file_size)?;
-        let (blob, _) = storage.open_atomic(partition, name).await?;
-        blob.sync().await?;
-        return Ok(blob);
-    }
     Ok(blob)
 }
 

@@ -97,13 +97,13 @@ stability_scope!(BETA {
     pub enum BatchOperation<B> {
         /// Remove an exact namespace entry.
         Remove(RemoveTarget),
-        /// Publish pending updates to a retained atomic blob.
+        /// Publish pending appends to a retained atomic blob.
         Publish(B),
-        /// Resize a retained atomic blob to `len` bytes.
-        Resize {
-            /// Current atomic blob handle to resize.
+        /// Rewind a retained atomic blob to `len` bytes.
+        Rewind {
+            /// Current atomic blob handle to rewind.
             blob: B,
-            /// New logical blob length in bytes.
+            /// New logical blob length in bytes, which cannot exceed its current length.
             len: u64,
         },
     }
@@ -717,17 +717,16 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
-    /// Opt-in interface for opening blobs that support crash-atomic updates.
+    /// Opt-in interface for opening blobs that support crash-atomic journal mutations.
     ///
     /// Ordinary [`Storage::open`] and [`Storage::open_versioned`] retain the flat blob layout and
     /// behavior used by runtimes that do not opt into this capability. Atomic blobs use a distinct
-    /// log-structured layout. Each update writes its payload once to shadow storage and becomes
-    /// immediately visible; repeated overwrites in one unsynced epoch may reuse a shadow slot that
-    /// no committed root references. [`Blob::sync`] first makes the payload and self-contained
-    /// checkpoint durable, then publishes a small root record. Recovery exposes either the
-    /// preceding synced epoch or the complete new epoch while reading only root and checkpoint
-    /// metadata, never payload bytes or historical records. A failed or canceled mutation after
-    /// physical I/O admission poisons that open generation.
+    /// append-only layout. Appended payload occupies its final offset and is written once. A rewind
+    /// that crosses the last published length fences further appends until synchronization
+    /// publishes the shorter length and truncates the file. Recovery exposes either the preceding
+    /// synced epoch or the complete new epoch while reading only bounded metadata and, for an
+    /// unresolved batch, a bounded appended suffix. A failed or canceled mutation after physical
+    /// I/O admission poisons that open generation.
     pub trait AtomicStorage: Storage {
         /// Blob type returned by atomic opens.
         type AtomicBlob: AtomicBlob;
@@ -773,7 +772,7 @@ stability_scope!(BETA {
     /// because a removed blob cannot witness its own removal. Recovery does not scan unrelated
     /// blobs.
     pub trait BatchStorage: AtomicStorage {
-        /// Start publishing atomic blobs and applying removals and resizes as one durable batch.
+        /// Start publishing atomic blobs and applying removals and rewinds as one durable batch.
         ///
         /// A mutated handle must belong to this storage instance and still refer to the current
         /// blob at its partition and name. Missing mutation targets fail the batch. Each blob may
@@ -789,8 +788,8 @@ stability_scope!(BETA {
         /// batch leaves every target unchanged. Other errors, or cancellation of this future, may
         /// leave the outcome indeterminate. Only `Ok` proves the batch is durably committed.
         ///
-        /// Publishing or resizing a blob makes its pending updates durable. A resize preserves
-        /// existing bytes below `len` and zero-fills an extension. Once this method returns `Ok`,
+        /// Publishing or rewinding a blob makes its pending mutation durable. A rewind preserves
+        /// existing bytes below `len` and cannot extend a blob. Once this method returns `Ok`,
         /// retained participant handles may begin their next pending epoch. Implementations
         /// serialize that access until the committed in-memory epoch is active. Implementations may
         /// retain the durable batch decision while participant roots are folded into a later batch.
@@ -802,17 +801,16 @@ stability_scope!(BETA {
         /// # Filesystem Eligibility
         ///
         /// The Tokio and io_uring implementations currently limit a batch to 32 dirty mutation
-        /// participants and 64 MiB of newly appended payload across those participants. If a dirty
-        /// participant appends payload, those bytes must form one CRC32C-verifiable physical range.
-        /// The exact descriptor must fit in the unused portion of every participant's 4 KiB root
-        /// slot. A batch outside these bounds returns an `InvalidInput` error before durable
-        /// commitment. Clean publishes do not count as participants.
+        /// participants. At most 64 MiB of newly appended payload is revalidated after a crash;
+        /// larger or non-contiguous pending epochs are made durable before their roots are staged
+        /// rather than rejected. The exact descriptor must fit in the unused portion of every
+        /// participant's 4 KiB root slot. Clean publishes do not count as participants.
         fn start_apply(
             &self,
             operations: Vec<BatchOperation<Self::AtomicBlob>>,
         ) -> impl Future<Output = Result<Handle<()>, Error>> + Send;
 
-        /// Publish atomic blobs and apply removals and resizes as one durable batch.
+        /// Publish atomic blobs and apply removals and rewinds as one durable batch.
         fn apply(
             &self,
             operations: Vec<BatchOperation<Self::AtomicBlob>>,
@@ -920,7 +918,8 @@ stability_scope!(BETA {
         /// With [`WriteOptions::SYNC`], the submitted bytes are durably persisted before this
         /// operation returns. This is not a durability barrier for previous operations: earlier
         /// writes without [`WriteOptions::SYNC`], earlier [`Blob::resize`] calls, and earlier
-        /// [`AtomicBlob::update`] calls require [`Blob::sync`] to become durable.
+        /// [`AtomicBlob::append`] and [`AtomicBlob::rewind`] calls require [`Blob::sync`] to become
+        /// durable.
         fn write_at(
             &self,
             offset: u64,
@@ -944,34 +943,29 @@ stability_scope!(BETA {
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 
-    /// Opt-in interface for atomic, immediately visible blob updates.
+    /// Opt-in interface for atomic, immediately visible journal mutations.
+    ///
+    /// On an atomic blob, [`Blob::write_at`] accepts only the current logical tail and
+    /// [`Blob::resize`] accepts only a shorter length. Prefer the explicit methods below. Rewinding
+    /// below the last synchronized length fences appends until a successful [`Blob::sync`] or
+    /// completed [`Blob::start_sync`] publishes the rewind.
     pub trait AtomicBlob: Blob {
-        /// Atomically write `data` at `offset` and set the blob length to `len`.
+        /// Append `data` and return its starting logical offset.
         ///
-        /// Bytes outside the written range are preserved up to `len`, and extending the blob
-        /// zero-fills any gap. On success, the data and final length are visible as one update:
-        /// reads cannot observe only part of either change.
-        ///
-        /// This operation does not independently guarantee durability. A subsequent successful
-        /// [`Blob::sync`] or [`Blob::start_sync`] makes this update, and all earlier pending blob
-        /// operations, durable. An implementation may persist pending updates earlier, including
-        /// while fulfilling [`WriteOptions::SYNC`] for a later write, but callers must not rely on
-        /// that. Before the guaranteed frontier, recovery may discard the update but must not
-        /// expose a partial update. Implementations may roll back every pending operation since
-        /// the previous successful blob sync.
-        ///
-        /// # Data Range
-        ///
-        /// The byte length of `data` must be representable as a `u64`, `offset + data.len()` must
-        /// not overflow, and the half-open written range must end at or before `len`. Empty data is
-        /// permitted when `offset <= len`. An invalid range must return an error without changing
-        /// the visible blob contents or length.
-        fn update(
+        /// The bytes become immediately visible but require a subsequent successful sync to become
+        /// durable. Empty data succeeds without changing the blob. An append after rewinding
+        /// committed bytes returns `InvalidInput` until that rewind is synchronized.
+        fn append(
             &self,
-            offset: u64,
             data: impl Into<IoBufs> + Send,
-            len: u64,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
+        ) -> impl Future<Output = Result<u64, Error>> + Send;
+
+        /// Rewind the blob to `len`, which must not exceed its current logical length.
+        ///
+        /// Rewinding only unpublished appends permits immediate reuse of their physical tail.
+        /// Rewinding committed bytes becomes durable at the next sync and fences appends until that
+        /// sync completes successfully.
+        fn rewind(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

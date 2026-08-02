@@ -15,6 +15,7 @@ type BlobKey = (String, Vec<u8>);
 
 struct V2State {
     logical_len: u64,
+    committed_len: u64,
     dirty: bool,
     poisoned: bool,
 }
@@ -23,6 +24,7 @@ impl V2State {
     const fn new(logical_len: u64) -> Self {
         Self {
             logical_len,
+            committed_len: logical_len,
             dirty: false,
             poisoned: false,
         }
@@ -149,9 +151,9 @@ impl Storage {
                 if require_atomic && !is_v2 {
                     return Err(atomic_layout_required(partition, name));
                 }
-                // The memory backend snapshots V2 content directly instead of encoding the
-                // filesystem manifest. Its durable length is therefore the snapshotted payload
-                // length, while the shared V2 header only identifies the layout.
+                // The memory backend snapshots V2 content directly. Its durable length is the
+                // snapshotted payload length, while the shared V2 header only identifies the
+                // layout.
                 let logical_size = if is_v2 {
                     u64::try_from(durable_content.len())
                         .map_err(|_| crate::Error::OffsetOverflow)?
@@ -347,7 +349,7 @@ impl crate::BatchStorage for Storage {
                         .or_default()
                         .push(blob);
                 }
-                BatchOperation::Resize { blob, len } => {
+                BatchOperation::Rewind { blob, .. } => {
                     if !self.owns(blob) {
                         return Err(crate::Error::BlobMissing(
                             blob.partition.clone(),
@@ -357,7 +359,6 @@ impl crate::BatchStorage for Storage {
                     if blob.v2.is_none() {
                         return Err(atomic_layout_required(&blob.partition, &blob.name));
                     }
-                    blob.physical_len(*len)?;
                     mutation_blobs
                         .entry((blob.partition.clone(), blob.name.clone()))
                         .or_default()
@@ -372,7 +373,7 @@ impl crate::BatchStorage for Storage {
             .iter()
             .filter_map(|operation| match operation {
                 super::batch::Operation::Publish { partition, name }
-                | super::batch::Operation::Resize {
+                | super::batch::Operation::Rewind {
                     partition, name, ..
                 } => Some((
                     operation,
@@ -436,7 +437,16 @@ impl crate::BatchStorage for Storage {
             blob.validate_v2_content(state, content)?;
             let logical_len = match operation {
                 super::batch::Operation::Publish { .. } => state.logical_len,
-                super::batch::Operation::Resize { len, .. } => *len,
+                super::batch::Operation::Rewind { len, .. } => {
+                    if *len > state.logical_len {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "atomic rewind cannot extend a blob",
+                        )
+                        .into());
+                    }
+                    *len
+                }
                 super::batch::Operation::Remove(_) => {
                     unreachable!("mutation set contains a removal")
                 }
@@ -468,6 +478,7 @@ impl crate::BatchStorage for Storage {
             durable.resize(physical_len, 0);
             durable.copy_from_slice(content);
             state.logical_len = logical_len;
+            state.committed_len = logical_len;
             state.dirty = false;
         }
 
@@ -483,7 +494,7 @@ impl crate::BatchStorage for Storage {
                     namespace.remove(&(partition.clone(), name.clone()));
                 }
                 super::batch::Operation::Publish { .. }
-                | super::batch::Operation::Resize { .. } => {}
+                | super::batch::Operation::Rewind { .. } => {}
             }
         }
         if !removed_partitions.is_empty() {
@@ -584,6 +595,74 @@ impl Blob {
         result
     }
 
+    fn append_v2(
+        &self,
+        live: &V2Live,
+        data: IoBufs,
+        expected_offset: Option<u64>,
+    ) -> Result<u64, crate::Error> {
+        let mut state = live.state.lock();
+        state.ensure_available()?;
+        let offset = state.logical_len;
+        if data.is_empty() {
+            return Ok(offset);
+        }
+        if expected_offset.is_some_and(|expected| expected != offset) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic writes must append at the current logical tail",
+            )
+            .into());
+        }
+        if offset < state.committed_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic append requires syncing the committed rewind first",
+            )
+            .into());
+        }
+
+        let mut content = live.content.write();
+        self.validate_v2_content(&mut state, &content)?;
+        let data_len = u64::try_from(data.len()).map_err(|_| crate::Error::OffsetOverflow)?;
+        let logical_end = offset
+            .checked_add(data_len)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let start = self.physical_len(offset)?;
+        let required = self.physical_len(logical_end)?;
+        Self::reserve_v2(&mut content, required)?;
+        content.resize(required, 0);
+        if let Err(error) = Self::write_v2_payload(&mut content, start, &data) {
+            state.poisoned = true;
+            return Err(error);
+        }
+        state.logical_len = logical_end;
+        state.dirty = true;
+        Ok(offset)
+    }
+
+    fn rewind_v2(&self, live: &V2Live, len: u64) -> Result<(), crate::Error> {
+        let mut state = live.state.lock();
+        state.ensure_available()?;
+        let mut content = live.content.write();
+        self.validate_v2_content(&mut state, &content)?;
+        if len > state.logical_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic rewind cannot extend a blob",
+            )
+            .into());
+        }
+        if len == state.logical_len {
+            return Ok(());
+        }
+        let required = self.physical_len(len)?;
+        content.resize(required, 0);
+        state.logical_len = len;
+        state.dirty = len != state.committed_len;
+        Ok(())
+    }
+
     fn sync_v2(&self, live: &V2Live) -> Result<(), crate::Error> {
         let mut state = live.state.lock();
         state.ensure_available()?;
@@ -606,6 +685,7 @@ impl Blob {
         if state.dirty {
             Self::reserve_v2(durable_content, live_content.len())?;
             durable_content.clone_from(&live_content);
+            state.committed_len = state.logical_len;
             state.dirty = false;
         }
         Ok(())
@@ -702,35 +782,8 @@ impl crate::Blob for Blob {
             return Ok(());
         }
         if let Some(live) = &self.v2 {
-            let data_len = u64::try_from(bufs.len()).map_err(|_| crate::Error::OffsetOverflow)?;
-            let logical_end = offset
-                .checked_add(data_len)
-                .ok_or(crate::Error::OffsetOverflow)?;
-            let start = self.physical_len(offset)?;
-            let _write_end = start
-                .checked_add(bufs.len())
-                .ok_or(crate::Error::OffsetOverflow)?;
-            {
-                let mut state = live.state.lock();
-                state.ensure_available()?;
-                let logical_len = state.logical_len.max(logical_end);
-                let required = self.physical_len(logical_len)?;
-                let mut content = live.content.write();
-                self.validate_v2_content(&mut state, &content)?;
-                Self::reserve_v2(&mut content, required)?;
-                content.resize(required, 0);
-                if let Err(error) = Self::write_v2_payload(&mut content, start, &bufs) {
-                    state.poisoned = true;
-                    return Err(error);
-                }
-                state.logical_len = logical_len;
-                state.dirty = true;
-            }
-            return if sync {
-                crate::Blob::sync(self).await
-            } else {
-                Ok(())
-            };
+            self.append_v2(live, bufs, Some(offset))?;
+            return if sync { self.sync_v2(live) } else { Ok(()) };
         }
         let buf = bufs.coalesce();
         let offset = offset
@@ -754,16 +807,7 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
         if let Some(live) = &self.v2 {
-            let required = self.physical_len(len)?;
-            let mut state = live.state.lock();
-            state.ensure_available()?;
-            let mut content = live.content.write();
-            self.validate_v2_content(&mut state, &content)?;
-            Self::reserve_v2(&mut content, required)?;
-            content.resize(required, 0);
-            state.logical_len = len;
-            state.dirty = true;
-            return Ok(());
+            return self.rewind_v2(live, len);
         }
         let len = len
             .checked_add(self.data_offset)
@@ -784,51 +828,18 @@ impl crate::Blob for Blob {
 }
 
 impl crate::AtomicBlob for Blob {
-    async fn update(
-        &self,
-        offset: u64,
-        data: impl Into<IoBufs> + Send,
-        len: u64,
-    ) -> Result<(), crate::Error> {
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, crate::Error> {
         let Some(live) = &self.v2 else {
             return Err(atomic_layout_required(&self.partition, &self.name));
         };
-        let data = data.into();
-        let data_len = u64::try_from(data.len()).map_err(|_| crate::Error::OffsetOverflow)?;
-        let logical_end = offset
-            .checked_add(data_len)
-            .ok_or(crate::Error::OffsetOverflow)?;
-        if logical_end > len || (data.is_empty() && offset > len) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "atomic blob update exceeds its final logical length",
-            )
-            .into());
-        }
-        let start = self.physical_len(offset)?;
-        let write_end = start
-            .checked_add(data.len())
-            .ok_or(crate::Error::OffsetOverflow)?;
-        let required = self.physical_len(len)?;
+        self.append_v2(live, data.into(), None)
+    }
 
-        let mut state = live.state.lock();
-        state.ensure_available()?;
-        let mut content = live.content.write();
-        self.validate_v2_content(&mut state, &content)?;
-        Self::reserve_v2(&mut content, required)?;
-        if !data.is_empty() {
-            if write_end > content.len() {
-                content.resize(write_end, 0);
-            }
-            if let Err(error) = Self::write_v2_payload(&mut content, start, &data) {
-                state.poisoned = true;
-                return Err(error);
-            }
-        }
-        content.resize(required, 0);
-        state.logical_len = len;
-        state.dirty = true;
-        Ok(())
+    async fn rewind(&self, len: u64) -> Result<(), crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        self.rewind_v2(live, len)
     }
 }
 
@@ -903,19 +914,20 @@ mod tests {
             second.v2.as_ref().unwrap()
         ));
 
-        first.update(0, b"abcdef", 6).await.unwrap();
+        assert_eq!(first.append(b"abcdef").await.unwrap(), 0);
         assert_eq!(second.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
         second.resize(4).await.unwrap();
         assert_eq!(first.read_at(0, 4).await.unwrap().coalesce(), b"abcd");
         first
-            .write_at(6, b"z", WriteOptions::default())
+            .write_at(4, b"z", WriteOptions::default())
             .await
             .unwrap();
-        assert_eq!(second.read_at(0, 7).await.unwrap().coalesce(), b"abcd\0\0z");
+        assert_eq!(second.read_at(0, 5).await.unwrap().coalesce(), b"abcdz");
 
-        first.update(0, b"old", 3).await.unwrap();
+        first.rewind(0).await.unwrap();
+        assert_eq!(first.append(b"old").await.unwrap(), 0);
         second.sync().await.unwrap();
-        first.update(0, b"new", 3).await.unwrap();
+        assert_eq!(first.append(b" pending").await.unwrap(), 3);
         let dropped = Arc::downgrade(first.v2.as_ref().unwrap());
         drop((first, second));
         assert!(dropped.upgrade().is_none());
@@ -944,10 +956,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_atomic_committed_rewind_fences_append_until_sync() {
+        let storage = Storage::new(test_pool());
+        let (blob, _) = storage.open_atomic("atomic_fence", b"blob").await.unwrap();
+        blob.append(b"abcdef").await.unwrap();
+        blob.sync().await.unwrap();
+
+        blob.rewind(4).await.unwrap();
+        assert!(matches!(blob.append(b"z").await, Err(crate::Error::Io(_))));
+        assert!(matches!(
+            blob.write_at(4, b"z", WriteOptions::default()).await,
+            Err(crate::Error::Io(_))
+        ));
+        assert!(matches!(blob.resize(5).await, Err(crate::Error::Io(_))));
+        assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"abcd");
+
+        blob.sync().await.unwrap();
+        assert_eq!(blob.append(b"z").await.unwrap(), 4);
+        assert_eq!(blob.read_at(0, 5).await.unwrap().coalesce(), b"abcdz");
+    }
+
+    #[tokio::test]
     async fn test_atomic_remove_recreate_rotates_live_generation() {
         let storage = Storage::new(test_pool());
         let (old, _) = storage.open_atomic("atomic_remove", b"blob").await.unwrap();
-        old.update(0, b"old", 3).await.unwrap();
+        old.append(b"old").await.unwrap();
 
         storage
             .remove("atomic_remove", Some(b"blob"))
@@ -964,7 +997,7 @@ mod tests {
         assert!(old.sync().await.is_err());
         assert_eq!(old.read_at(0, 3).await.unwrap().coalesce(), b"old");
 
-        new.update(0, b"new", 3).await.unwrap();
+        new.append(b"new").await.unwrap();
         new.sync().await.unwrap();
         drop((old, new));
         let (reopened, len) = storage.open_atomic("atomic_remove", b"blob").await.unwrap();
@@ -973,14 +1006,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_atomic_batch_publishes_and_resizes_live_contents() {
+    async fn test_atomic_batch_publishes_and_rewinds_live_contents() {
         let storage = Storage::new(test_pool());
         let (published, _) = storage
             .open_atomic("atomic_batch", b"published")
             .await
             .unwrap();
-        let (resized, _) = storage
-            .open_atomic("atomic_batch", b"resized")
+        let (rewound, _) = storage
+            .open_atomic("atomic_batch", b"rewound")
             .await
             .unwrap();
         storage
@@ -988,12 +1021,12 @@ mod tests {
             .await
             .unwrap();
 
-        published.update(0, b"alpha-old", 9).await.unwrap();
-        resized.update(0, b"bravo-old", 9).await.unwrap();
+        published.append(b"alpha-old").await.unwrap();
+        rewound.append(b"bravo-old").await.unwrap();
         storage
             .apply(vec![
-                BatchOperation::Resize {
-                    blob: resized.clone(),
+                BatchOperation::Rewind {
+                    blob: rewound.clone(),
                     len: 5,
                 },
                 BatchOperation::Remove(RemoveTarget::Blob {
@@ -1009,7 +1042,7 @@ mod tests {
             published.read_at(0, 9).await.unwrap().coalesce(),
             b"alpha-old"
         );
-        assert_eq!(resized.read_at(0, 5).await.unwrap().coalesce(), b"bravo");
+        assert_eq!(rewound.read_at(0, 5).await.unwrap().coalesce(), b"bravo");
         assert!(
             storage
                 .scan("atomic_batch_remove")
@@ -1018,11 +1051,11 @@ mod tests {
                 .is_empty()
         );
 
-        // Later pending updates disappear when the live generation is dropped, proving the batch
+        // Later pending appends disappear when the live generation is dropped, proving the batch
         // durably snapshotted exactly the contents and final lengths it published.
-        published.update(0, b"new", 3).await.unwrap();
-        resized.update(0, b"new", 3).await.unwrap();
-        drop((published, resized));
+        published.append(b"-new").await.unwrap();
+        rewound.append(b"-new").await.unwrap();
+        drop((published, rewound));
 
         let (published, published_len) = storage
             .open_atomic("atomic_batch", b"published")
@@ -1033,12 +1066,12 @@ mod tests {
             published.read_at(0, 9).await.unwrap().coalesce(),
             b"alpha-old"
         );
-        let (resized, resized_len) = storage
-            .open_atomic("atomic_batch", b"resized")
+        let (rewound, rewound_len) = storage
+            .open_atomic("atomic_batch", b"rewound")
             .await
             .unwrap();
-        assert_eq!(resized_len, 5);
-        assert_eq!(resized.read_at(0, 5).await.unwrap().coalesce(), b"bravo");
+        assert_eq!(rewound_len, 5);
+        assert_eq!(rewound.read_at(0, 5).await.unwrap().coalesce(), b"bravo");
     }
 
     #[tokio::test]
@@ -1048,7 +1081,7 @@ mod tests {
             .open_atomic("atomic_batch_reject", b"published")
             .await
             .unwrap();
-        published.update(0, b"pending", 7).await.unwrap();
+        published.append(b"pending").await.unwrap();
         storage
             .open("atomic_batch_reject_victim", b"victim")
             .await
@@ -1069,7 +1102,7 @@ mod tests {
                     partition: "atomic_batch_reject_victim".into(),
                     name: b"victim".to_vec(),
                 }),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: ordinary.clone(),
                     len: 1,
                 },
@@ -1096,6 +1129,37 @@ mod tests {
             .unwrap();
         assert_eq!(len, 0);
         assert!(published.read_at(0, 1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_atomic_batch_rejects_extending_rewind_before_publication() {
+        let storage = Storage::new(test_pool());
+        let (published, _) = storage.open_atomic("a_publish", b"blob").await.unwrap();
+        published.append(b"pending").await.unwrap();
+        let (rewound, _) = storage.open_atomic("z_rewind", b"blob").await.unwrap();
+        rewound.append(b"old").await.unwrap();
+        rewound.sync().await.unwrap();
+
+        assert!(matches!(
+            storage
+                .apply(vec![
+                    BatchOperation::Publish(published.clone()),
+                    BatchOperation::Rewind {
+                        blob: rewound,
+                        len: 4,
+                    },
+                ])
+                .await,
+            Err(crate::Error::Io(_))
+        ));
+
+        drop(published);
+        let (published, len) = storage.open_atomic("a_publish", b"blob").await.unwrap();
+        assert_eq!(len, 0);
+        assert!(published.read_at(0, 1).await.is_err());
+        let (rewound, len) = storage.open_atomic("z_rewind", b"blob").await.unwrap();
+        assert_eq!(len, 3);
+        assert_eq!(rewound.read_at(0, 3).await.unwrap().coalesce(), b"old");
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! Validation and canonicalization of storage namespace operation sets.
 //!
 //! Duplicate removals are discarded, and a partition removal subsumes every blob removal in that
-//! partition. Identical publishes and resizes are discarded. Publishing and resizing the same
+//! partition. Identical publishes and rewinds are discarded. Publishing and rewinding the same
 //! blob conflict, as does any mutation covered by an exact or partition removal.
 //!
 //! The filesystem publication and recovery protocol is documented in the `coordinator` submodule.
@@ -19,8 +19,8 @@ pub(crate) enum Operation {
     Remove(RemoveTarget),
     /// Publish the pending epoch of an exact atomic blob.
     Publish { partition: String, name: Vec<u8> },
-    /// Resize an exact blob to `len` bytes.
-    Resize {
+    /// Rewind an exact blob to `len` bytes.
+    Rewind {
         partition: String,
         name: Vec<u8>,
         len: u64,
@@ -34,7 +34,7 @@ impl Operation {
             Self::Remove(RemoveTarget::Blob { partition, .. })
             | Self::Remove(RemoveTarget::Partition(partition))
             | Self::Publish { partition, .. }
-            | Self::Resize { partition, .. } => partition,
+            | Self::Rewind { partition, .. } => partition,
         }
     }
 
@@ -43,7 +43,7 @@ impl Operation {
             Self::Remove(RemoveTarget::Partition(_)) => None,
             Self::Remove(RemoveTarget::Blob { name, .. })
             | Self::Publish { name, .. }
-            | Self::Resize { name, .. } => Some(name),
+            | Self::Rewind { name, .. } => Some(name),
         }
     }
 
@@ -52,7 +52,7 @@ impl Operation {
             Self::Remove(RemoveTarget::Blob { partition, .. })
             | Self::Remove(RemoveTarget::Partition(partition))
             | Self::Publish { partition, .. }
-            | Self::Resize { partition, .. } => partition,
+            | Self::Rewind { partition, .. } => partition,
         }
     }
 }
@@ -61,7 +61,7 @@ impl Operation {
 enum BlobOperation {
     Remove,
     Publish,
-    Resize(u64),
+    Rewind(u64),
 }
 
 enum PartitionOperations {
@@ -122,7 +122,7 @@ pub(crate) fn map_blobs<B, C>(
         .map(|operation| match operation {
             BatchOperation::Remove(target) => BatchOperation::Remove(target),
             BatchOperation::Publish(blob) => BatchOperation::Publish(map(blob)),
-            BatchOperation::Resize { blob, len } => BatchOperation::Resize {
+            BatchOperation::Rewind { blob, len } => BatchOperation::Rewind {
                 blob: map(blob),
                 len,
             },
@@ -143,9 +143,9 @@ pub(crate) fn canonicalize_descriptors<B>(
                 let (partition, name) = location(blob);
                 Operation::Publish { partition, name }
             }
-            BatchOperation::Resize { blob, len } => {
+            BatchOperation::Rewind { blob, len } => {
                 let (partition, name) = location(blob);
-                Operation::Resize {
+                Operation::Rewind {
                     partition,
                     name,
                     len: *len,
@@ -210,13 +210,13 @@ pub(crate) fn canonicalize_operations(operations: Vec<Operation>) -> Result<Vec<
                     },
                 }
             }
-            Operation::Resize {
+            Operation::Rewind {
                 partition,
                 name,
                 len,
             } => {
                 super::validate_partition_name(&partition)?;
-                insert_mutation(&mut partitions, partition, name, BlobOperation::Resize(len))?;
+                insert_mutation(&mut partitions, partition, name, BlobOperation::Rewind(len))?;
             }
             Operation::Publish { partition, name } => {
                 super::validate_partition_name(&partition)?;
@@ -241,7 +241,7 @@ pub(crate) fn canonicalize_operations(operations: Vec<Operation>) -> Result<Vec<
                         partition: partition.clone(),
                         name,
                     },
-                    BlobOperation::Resize(len) => Operation::Resize {
+                    BlobOperation::Rewind(len) => Operation::Rewind {
                         partition: partition.clone(),
                         name,
                         len,
@@ -284,8 +284,8 @@ mod tests {
         })
     }
 
-    fn resize(partition: &str, name: &[u8], len: u64) -> Operation {
-        Operation::Resize {
+    fn rewind(partition: &str, name: &[u8], len: u64) -> Operation {
+        Operation::Rewind {
             partition: partition.into(),
             name: name.to_vec(),
             len,
@@ -302,14 +302,14 @@ mod tests {
     #[test]
     fn canonicalizes_mixed_operations() {
         let operations = vec![
-            resize("beta", b"two", 22),
+            rewind("beta", b"two", 22),
             publish("delta", b"one"),
             publish("delta", b"one"),
             remove("alpha", b"two"),
-            resize("alpha", b"one", 11),
+            rewind("alpha", b"one", 11),
             remove("beta", b"one"),
             remove("alpha", b"two"),
-            resize("beta", b"two", 22),
+            rewind("beta", b"two", 22),
             remove("beta", b"one"),
             Operation::Remove(RemoveTarget::Blob {
                 partition: "gamma".into(),
@@ -321,10 +321,10 @@ mod tests {
         assert_eq!(
             canonicalize_operations(operations).unwrap(),
             vec![
-                resize("alpha", b"one", 11),
+                rewind("alpha", b"one", 11),
                 remove("alpha", b"two"),
                 remove("beta", b"one"),
-                resize("beta", b"two", 22),
+                rewind("beta", b"two", 22),
                 publish("delta", b"one"),
                 Operation::Remove(RemoveTarget::Partition("gamma".into())),
             ]
@@ -336,27 +336,27 @@ mod tests {
         for operations in [
             vec![
                 remove("partition", b"blob"),
-                resize("partition", b"blob", 1),
+                rewind("partition", b"blob", 1),
             ],
             vec![
-                resize("partition", b"blob", 1),
+                rewind("partition", b"blob", 1),
                 remove("partition", b"blob"),
             ],
             vec![
                 Operation::Remove(RemoveTarget::Partition("partition".into())),
-                resize("partition", b"blob", 1),
+                rewind("partition", b"blob", 1),
             ],
             vec![
-                resize("partition", b"blob", 1),
+                rewind("partition", b"blob", 1),
                 Operation::Remove(RemoveTarget::Partition("partition".into())),
             ],
             vec![
-                resize("partition", b"blob", 1),
-                resize("partition", b"blob", 2),
+                rewind("partition", b"blob", 1),
+                rewind("partition", b"blob", 2),
             ],
             vec![
                 publish("partition", b"blob"),
-                resize("partition", b"blob", 1),
+                rewind("partition", b"blob", 1),
             ],
             vec![publish("partition", b"blob"), remove("partition", b"blob")],
         ] {
@@ -367,7 +367,7 @@ mod tests {
             }
         }
 
-        assert!(canonicalize_operations(vec![resize("../invalid", b"blob", 1)]).is_err());
+        assert!(canonicalize_operations(vec![rewind("../invalid", b"blob", 1)]).is_err());
     }
 }
 

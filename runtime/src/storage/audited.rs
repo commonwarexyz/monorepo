@@ -141,13 +141,13 @@ impl<S: BatchStorage> BatchStorage for Storage<S> {
                         hasher.update(partition.as_bytes());
                         hasher.update(name);
                     }
-                    crate::storage::batch::Operation::Resize {
+                    crate::storage::batch::Operation::Rewind {
                         partition,
                         name,
                         len,
                         ..
                     } => {
-                        hasher.update(b"resize");
+                        hasher.update(b"rewind");
                         hasher.update(partition.as_bytes());
                         hasher.update(name);
                         hasher.update(len.to_be_bytes());
@@ -208,9 +208,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(offset.to_be_bytes());
             hasher.update_bufs(&bufs);
         });
-        self.inner
-            .write_at(offset, bufs, options)
-            .await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -240,21 +238,23 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for Blob<B> {
-    async fn update(
-        &self,
-        offset: u64,
-        data: impl Into<IoBufs> + Send,
-        len: u64,
-    ) -> Result<(), Error> {
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         let data = data.into();
-        self.auditor.event(b"update", |hasher| {
+        self.auditor.event(b"append", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(offset.to_be_bytes());
             hasher.update_bufs(&data);
+        });
+        self.inner.append(data).await
+    }
+
+    async fn rewind(&self, len: u64) -> Result<(), Error> {
+        self.auditor.event(b"rewind", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
             hasher.update(len.to_be_bytes());
         });
-        self.inner.update(offset, data, len).await
+        self.inner.rewind(len).await
     }
 }
 
@@ -334,12 +334,12 @@ mod tests {
         let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
         let auditor2 = Arc::new(Auditor::default());
         let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
-        let (resize1, _) = storage1
-            .open_atomic("resize_partition", b"name")
+        let (rewind1, _) = storage1
+            .open_atomic("rewind_partition", b"name")
             .await
             .unwrap();
-        let (resize2, _) = storage2
-            .open_atomic("resize_partition", b"name")
+        let (rewind2, _) = storage2
+            .open_atomic("rewind_partition", b"name")
             .await
             .unwrap();
         let (publish1, _) = storage1
@@ -350,14 +350,16 @@ mod tests {
             .open_atomic("publish_partition", b"name")
             .await
             .unwrap();
-        publish1.update(0, b"pending", 7).await.unwrap();
-        publish2.update(0, b"pending", 7).await.unwrap();
+        rewind1.append(b"rewind").await.unwrap();
+        rewind2.append(b"rewind").await.unwrap();
+        publish1.append(b"pending").await.unwrap();
+        publish2.append(b"pending").await.unwrap();
 
         storage1
             .apply(vec![
-                BatchOperation::Resize {
-                    blob: resize1.clone(),
-                    len: 7,
+                BatchOperation::Rewind {
+                    blob: rewind1.clone(),
+                    len: 3,
                 },
                 RemoveTarget::Blob {
                     partition: "blob_partition".into(),
@@ -375,9 +377,9 @@ mod tests {
                     name: b"name".to_vec(),
                 }
                 .into(),
-                BatchOperation::Resize {
-                    blob: resize1,
-                    len: 7,
+                BatchOperation::Rewind {
+                    blob: rewind1,
+                    len: 3,
                 },
                 BatchOperation::Publish(publish1),
             ])
@@ -391,9 +393,9 @@ mod tests {
                     name: b"name".to_vec(),
                 }
                 .into(),
-                BatchOperation::Resize {
-                    blob: resize2,
-                    len: 7,
+                BatchOperation::Rewind {
+                    blob: rewind2,
+                    len: 3,
                 },
                 BatchOperation::Publish(publish2),
             ])
@@ -404,19 +406,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_audited_update_hashes_all_fields() {
-        async fn state(offset: u64, data: &'static [u8], len: u64) -> String {
+    async fn test_audited_atomic_mutations_hash_all_fields() {
+        async fn append_state(data: &'static [u8]) -> String {
             let auditor = Arc::new(Auditor::default());
             let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
             let (blob, _) = storage.open_atomic("partition", b"name").await.unwrap();
-            blob.update(offset, data, len).await.unwrap();
+            blob.append(data).await.unwrap();
             auditor.state()
         }
 
-        let baseline = state(1, b"a", 2).await;
-        assert_ne!(baseline, state(0, b"a", 2).await);
-        assert_ne!(baseline, state(1, b"b", 2).await);
-        assert_ne!(baseline, state(1, b"a", 3).await);
+        async fn rewind_state(len: u64) -> String {
+            let auditor = Arc::new(Auditor::default());
+            let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+            let (blob, _) = storage.open_atomic("partition", b"name").await.unwrap();
+            blob.append(b"abc").await.unwrap();
+            blob.rewind(len).await.unwrap();
+            auditor.state()
+        }
+
+        assert_ne!(append_state(b"a").await, append_state(b"b").await);
+        assert_ne!(rewind_state(1).await, rewind_state(2).await);
     }
 
     #[tokio::test]
@@ -424,16 +433,17 @@ mod tests {
         let auditor = Arc::new(Auditor::default());
         let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
         let (blob, _) = storage.open_atomic("partition", b"name").await.unwrap();
+        blob.append(b"abc").await.unwrap();
         let before = auditor.state();
 
         assert!(matches!(
             storage
                 .apply(vec![
-                    BatchOperation::Resize {
+                    BatchOperation::Rewind {
                         blob: blob.clone(),
                         len: 1,
                     },
-                    BatchOperation::Resize { blob, len: 2 },
+                    BatchOperation::Rewind { blob, len: 2 },
                 ])
                 .await,
             Err(Error::Io(_))
@@ -592,7 +602,8 @@ mod tests {
     #[derive(Clone)]
     struct RecordingBlob {
         writes: Arc<Mutex<Vec<(usize, WriteOptions)>>>,
-        updates: Arc<Mutex<Vec<(u64, usize, u64)>>>,
+        appends: Arc<Mutex<Vec<usize>>>,
+        rewinds: Arc<Mutex<Vec<u64>>>,
     }
 
     impl crate::Blob for RecordingBlob {
@@ -635,30 +646,30 @@ mod tests {
     }
 
     impl crate::AtomicBlob for RecordingBlob {
-        async fn update(
-            &self,
-            offset: u64,
-            data: impl Into<IoBufs> + Send,
-            len: u64,
-        ) -> Result<(), Error> {
-            self.updates
-                .lock()
-                .push((offset, data.into().chunk_count(), len));
+        async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+            self.appends.lock().push(data.into().chunk_count());
+            Ok(7)
+        }
+
+        async fn rewind(&self, len: u64) -> Result<(), Error> {
+            self.rewinds.lock().push(len);
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn test_audited_blob_writes_and_updates_preserve_chunking_and_options() {
+    async fn test_audited_blob_writes_and_atomic_mutations_preserve_arguments() {
         let writes = Arc::new(Mutex::new(Vec::new()));
-        let updates = Arc::new(Mutex::new(Vec::new()));
+        let appends = Arc::new(Mutex::new(Vec::new()));
+        let rewinds = Arc::new(Mutex::new(Vec::new()));
         let blob = super::Blob {
             auditor: Arc::new(crate::deterministic::Auditor::default()),
             partition: "partition".into(),
             name: b"blob".to_vec(),
             inner: RecordingBlob {
                 writes: writes.clone(),
-                updates: updates.clone(),
+                appends: appends.clone(),
+                rewinds: rewinds.clone(),
             },
         };
 
@@ -677,10 +688,9 @@ mod tests {
             .await
             .unwrap();
         let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
-        blob.write_at(0, chunked(), options)
-            .await
-            .unwrap();
-        blob.update(1, chunked(), 5).await.unwrap();
+        blob.write_at(0, chunked(), options).await.unwrap();
+        assert_eq!(blob.append(chunked()).await.unwrap(), 7);
+        blob.rewind(5).await.unwrap();
 
         assert_eq!(
             *writes.lock(),
@@ -690,6 +700,7 @@ mod tests {
                 (4, options),
             ]
         );
-        assert_eq!(*updates.lock(), vec![(1, 4, 5)]);
+        assert_eq!(*appends.lock(), vec![4]);
+        assert_eq!(*rewinds.lock(), vec![5]);
     }
 }

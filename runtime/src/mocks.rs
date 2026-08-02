@@ -646,10 +646,7 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         options: WriteOptions,
     ) -> Result<(), Error> {
         if !options.contains(WriteOptions::SYNC) || !self.pending.tracking() {
-            return self
-                .inner
-                .write_at(offset, bufs, options)
-                .await;
+            return self.inner.write_at(offset, bufs, options).await;
         }
         self.inner
             .write_at(offset, bufs, options.without(WriteOptions::SYNC))
@@ -694,13 +691,12 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for DelayedSyncBlob<B> {
-    async fn update(
-        &self,
-        offset: u64,
-        data: impl Into<IoBufs> + Send,
-        len: u64,
-    ) -> Result<(), Error> {
-        self.inner.update(offset, data, len).await
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+        self.inner.append(data).await
+    }
+
+    async fn rewind(&self, len: u64) -> Result<(), Error> {
+        self.inner.rewind(len).await
     }
 }
 
@@ -865,7 +861,7 @@ impl PendingSyncs {
     }
 }
 
-/// Controls a [WriteFaultContext]: while armed, every `write_at` or atomic update fails with an
+/// Controls a [WriteFaultContext]: while armed, every `write_at` or atomic append fails with an
 /// injected error. Successful writes are counted.
 #[derive(Clone, Default)]
 pub struct WriteFaults {
@@ -908,7 +904,7 @@ impl WriteFaults {
     }
 }
 
-/// Context wrapper whose blobs fail `write_at` or atomic updates while the shared [WriteFaults]
+/// Context wrapper whose blobs fail `write_at` or atomic appends while the shared [WriteFaults]
 /// is armed, counting successful writes. Unlike [DelayedSyncContext], this injects failures
 /// into inline writes issued before any blob sync starts.
 #[derive(Clone)]
@@ -982,7 +978,7 @@ impl<E: AtomicStorage> AtomicStorage for WriteFaultContext<E> {
     }
 }
 
-/// Blob wrapper that fails `write_at` or atomic updates while its [WriteFaults] is armed.
+/// Blob wrapper that fails `write_at` or atomic appends while its [WriteFaults] is armed.
 #[derive(Clone)]
 pub struct WriteFaultBlob<B> {
     inner: B,
@@ -1010,9 +1006,7 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
         options: WriteOptions,
     ) -> Result<(), Error> {
         self.faults.check()?;
-        self.inner
-            .write_at(offset, bufs, options)
-            .await?;
+        self.inner.write_at(offset, bufs, options).await?;
         self.faults.note();
         Ok(())
     }
@@ -1031,16 +1025,15 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for WriteFaultBlob<B> {
-    async fn update(
-        &self,
-        offset: u64,
-        data: impl Into<IoBufs> + Send,
-        len: u64,
-    ) -> Result<(), Error> {
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         self.faults.check()?;
-        self.inner.update(offset, data, len).await?;
+        let offset = self.inner.append(data).await?;
         self.faults.note();
-        Ok(())
+        Ok(offset)
+    }
+
+    async fn rewind(&self, len: u64) -> Result<(), Error> {
+        self.inner.rewind(len).await
     }
 }
 
@@ -1143,9 +1136,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        self.inner
-            .write_at(offset, bufs, options)
-            .await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -1169,13 +1160,12 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for SyncFaultBlob<B> {
-    async fn update(
-        &self,
-        offset: u64,
-        data: impl Into<IoBufs> + Send,
-        len: u64,
-    ) -> Result<(), Error> {
-        self.inner.update(offset, data, len).await
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+        self.inner.append(data).await
+    }
+
+    async fn rewind(&self, len: u64) -> Result<(), Error> {
+        self.inner.rewind(len).await
     }
 }
 

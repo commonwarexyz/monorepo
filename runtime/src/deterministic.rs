@@ -1858,17 +1858,20 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_atomic_update_uses_blob_sync_frontier() {
+    fn test_recover_atomic_mutations_use_blob_sync_frontier() {
         let partition = "atomic_recovery";
         let name = b"blob";
         let (_, checkpoint) =
             deterministic::Runner::default().start_and_recover(|context| async move {
                 let (blob, _) = context.open_atomic(partition, name).await.unwrap();
-                blob.update(0, b"old", 3).await.unwrap();
+                assert_eq!(blob.append(b"old").await.unwrap(), 0);
                 blob.sync().await.unwrap();
 
-                blob.update(0, b"new", 3).await.unwrap();
-                assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"new");
+                blob.append(b" discarded").await.unwrap();
+                assert_eq!(
+                    blob.read_at(0, 13).await.unwrap().coalesce(),
+                    b"old discarded"
+                );
             });
 
         let (_, checkpoint) =
@@ -1877,8 +1880,15 @@ mod tests {
                 assert_eq!(len, 3);
                 assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"old");
 
-                blob.update(0, b"new", 3).await.unwrap();
-                blob.update(3, b" tail", 8).await.unwrap();
+                blob.rewind(0).await.unwrap();
+                assert!(matches!(blob.append(b"new").await, Err(Error::Io(_))));
+                assert!(matches!(
+                    blob.write_at(0, b"new", WriteOptions::default()).await,
+                    Err(Error::Io(_))
+                ));
+                blob.sync().await.unwrap();
+                assert_eq!(blob.append(b"new").await.unwrap(), 0);
+                assert_eq!(blob.append(b" tail").await.unwrap(), 3);
                 blob.sync().await.unwrap();
             });
 
@@ -1923,7 +1933,7 @@ mod tests {
 
                 let mut operations: Vec<BatchOperation<_>> =
                     removals().into_iter().map(Into::into).collect();
-                operations.push(BatchOperation::Resize {
+                operations.push(BatchOperation::Rewind {
                     blob: resized,
                     len: 3,
                 });
@@ -1947,7 +1957,7 @@ mod tests {
                     FaultConfig::default().batch_post_commit(1.0);
                 let mut operations: Vec<BatchOperation<_>> =
                     removals().into_iter().map(Into::into).collect();
-                operations.push(BatchOperation::Resize {
+                operations.push(BatchOperation::Rewind {
                     blob: resized,
                     len: 3,
                 });

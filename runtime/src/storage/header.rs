@@ -312,8 +312,8 @@ stability_scope!(BETA {
         /// Number of leading bytes [resolve] needs for a blob of raw on-disk length
         /// `raw_len`: the immutable header page, capped by the file itself.
         ///
-        /// V2 root pages are mutable recovery records and are read separately from the selected
-        /// checkpoint. Header resolution must not read them or any bytes beyond the first page.
+        /// V2 root pages are mutable recovery records read separately by atomic recovery. Header
+        /// resolution must not read them or any bytes beyond the first page.
         pub(crate) const fn resolve_len(raw_len: u64) -> usize {
             if raw_len < Layout::V1.data_offset() {
                 raw_len as usize

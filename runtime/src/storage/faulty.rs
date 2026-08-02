@@ -339,7 +339,7 @@ impl<S: BatchStorage> BatchStorage for Storage<S> {
             .iter()
             .filter_map(|operation| match operation {
                 BatchOperation::Remove(_) | BatchOperation::Publish(_) => None,
-                BatchOperation::Resize { blob, len } => Some((blob.size.clone(), *len)),
+                BatchOperation::Rewind { blob, len } => Some((blob.size.clone(), *len)),
             })
             .collect();
         let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
@@ -419,9 +419,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
                 // Partial write: write some bytes, sync, then fail
                 let bufs = bufs.coalesce().slice(..bytes as usize);
-                self.inner
-                    .write_at(offset, bufs, options)
-                    .await?;
+                self.inner.write_at(offset, bufs, options).await?;
                 if !sync {
                     self.inner.sync().await?;
                 }
@@ -441,9 +439,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return Err(injected_io_error().into());
         }
 
-        self.inner
-            .write_at(offset, bufs, options)
-            .await?;
+        self.inner.write_at(offset, bufs, options).await?;
         self.size
             .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
         Ok(())
@@ -483,16 +479,23 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for Blob<B> {
-    async fn update(
-        &self,
-        offset: u64,
-        data: impl Into<IoBufs> + Send,
-        len: u64,
-    ) -> Result<(), Error> {
-        if self.ctx.should_fail(Op::Write) || self.ctx.should_fail(Op::Resize) {
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+        if self.ctx.should_fail(Op::Write) {
             return Err(injected_io_error().into());
         }
-        self.inner.update(offset, data, len).await?;
+        let data = data.into();
+        let data_len = u64::try_from(data.remaining()).map_err(|_| Error::OffsetOverflow)?;
+        let offset = self.inner.append(data).await?;
+        let len = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+        self.size.store(len, Ordering::Relaxed);
+        Ok(offset)
+    }
+
+    async fn rewind(&self, len: u64) -> Result<(), Error> {
+        if self.ctx.should_fail(Op::Resize) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.rewind(len).await?;
         self.size.store(len, Ordering::Relaxed);
         Ok(())
     }
@@ -767,7 +770,7 @@ mod tests {
                     partition: "partition".into(),
                     name: b"name".to_vec(),
                 }),
-                BatchOperation::Resize { blob, len: 0 },
+                BatchOperation::Rewind { blob, len: 0 },
             ])
             .await
             .unwrap_err();
@@ -778,7 +781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_batch_resize_bypasses_resize_faults() {
+    async fn test_faulty_storage_batch_rewind_bypasses_resize_faults() {
         let h = Harness::new(Config::default());
         let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
         blob.write_at(0, b"contents", WriteOptions::default())
@@ -788,7 +791,7 @@ mod tests {
         *h.config.write() = Config::default().resize(1.0).partial_resize(1.0);
 
         h.storage
-            .apply(vec![BatchOperation::Resize { blob, len: 3 }])
+            .apply(vec![BatchOperation::Rewind { blob, len: 3 }])
             .await
             .unwrap();
 
@@ -797,10 +800,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_atomic_update_faults_before_apply() {
-        for config in [
-            Config::default().write(1.0).partial_write(1.0),
-            Config::default().resize(1.0).partial_resize(1.0),
+    async fn test_faulty_atomic_mutations_fault_before_apply() {
+        for (config, append) in [
+            (Config::default().write(1.0).partial_write(1.0), true),
+            (Config::default().resize(1.0).partial_resize(1.0), false),
         ] {
             let h = Harness::new(Config::default());
             let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
@@ -809,7 +812,12 @@ mod tests {
                 .unwrap();
             *h.config.write() = config;
 
-            assert!(matches!(blob.update(1, b"new", 4).await, Err(Error::Io(_))));
+            let result = if append {
+                blob.append(b"new").await.map(|_| ())
+            } else {
+                blob.rewind(4).await
+            };
+            assert!(matches!(result, Err(Error::Io(_))));
 
             assert_eq!(blob.size.load(Ordering::Relaxed), 8);
             assert_eq!(blob.read_at(0, 8).await.unwrap().coalesce(), b"contents");
@@ -817,7 +825,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_atomic_update_forwards_vectored_data_and_tracks_size() {
+    async fn test_faulty_atomic_mutations_forward_data_and_track_size() {
         let h = Harness::new(Config::default());
         let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
         blob.write_at(0, b"contents", WriteOptions::default())
@@ -827,10 +835,16 @@ mod tests {
             IoBuf::from(b"n".to_vec()),
             IoBuf::from(b"ew".to_vec()),
         ]);
-        blob.update(1, data, 4).await.unwrap();
+        assert_eq!(blob.append(data).await.unwrap(), 8);
 
+        assert_eq!(blob.size.load(Ordering::Relaxed), 11);
+        assert_eq!(
+            blob.read_at(0, 11).await.unwrap().coalesce(),
+            b"contentsnew"
+        );
+        blob.rewind(4).await.unwrap();
         assert_eq!(blob.size.load(Ordering::Relaxed), 4);
-        assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"cnew");
+        assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"cont");
     }
 
     #[tokio::test]

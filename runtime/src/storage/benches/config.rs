@@ -30,12 +30,6 @@ pub enum Workload {
     /// Sequential durable positioned writes over a fixed-size file.
     #[value(name = "write_sync")]
     WriteSync,
-    /// Sequential atomic positioned writes over a fixed-size file.
-    #[value(name = "write_atomic")]
-    WriteAtomic,
-    /// Uniform random atomic positioned writes over a fixed-size file.
-    #[value(name = "write_atomic_rand")]
-    WriteAtomicRand,
     /// Atomic append writes to a growing file.
     #[value(name = "write_atomic_append")]
     WriteAtomicAppend,
@@ -59,8 +53,6 @@ impl Workload {
                 | Self::WriteRand
                 | Self::WriteAppend
                 | Self::WriteSync
-                | Self::WriteAtomic
-                | Self::WriteAtomicRand
                 | Self::WriteAtomicAppend
                 | Self::WriteMultiBlobAppend
                 | Self::WriteAtomicBatchAppend
@@ -83,13 +75,7 @@ impl Workload {
 
     /// Whether the workload opens blobs through the atomic storage capability.
     pub const fn is_atomic(self) -> bool {
-        matches!(
-            self,
-            Self::WriteAtomic
-                | Self::WriteAtomicRand
-                | Self::WriteAtomicAppend
-                | Self::WriteAtomicBatchAppend
-        )
+        matches!(self, Self::WriteAtomicAppend | Self::WriteAtomicBatchAppend)
     }
 }
 
@@ -244,7 +230,7 @@ pub struct Config {
     #[arg(long, value_enum, default_value = "contiguous")]
     pub write_shape: WriteShape,
 
-    /// Request best-effort page-cache bypass for direct append comparisons.
+    /// Request best-effort page-cache bypass for ordinary append writes.
     #[arg(long, default_value_t = false)]
     pub dont_cache: bool,
 
@@ -387,11 +373,7 @@ impl Config {
                 }
                 if matches!(
                     self.workload,
-                    Workload::WriteSeq
-                        | Workload::WriteRand
-                        | Workload::WriteSync
-                        | Workload::WriteAtomic
-                        | Workload::WriteAtomicRand
+                    Workload::WriteSeq | Workload::WriteRand | Workload::WriteSync
                 ) {
                     let total_blocks = file_size / io_size;
                     if total_blocks < self.inflight as u64 {
@@ -439,15 +421,8 @@ impl Config {
         } else if self.workload == Workload::WriteSync && self.sync_mode != SyncMode::End {
             return Err("--sync-every is not used by write_sync".into());
         }
-        if self.dont_cache
-            && !matches!(
-                self.workload,
-                Workload::WriteAppend | Workload::WriteAtomicAppend
-            )
-        {
-            return Err(
-                "--dont-cache is only valid for write_append or write_atomic_append".into(),
-            );
+        if self.dont_cache && self.workload != Workload::WriteAppend {
+            return Err("--dont-cache is only valid for write_append".into());
         }
         if self.workload != Workload::WriteSync && self.sync_method != SyncMethod::WriteThenSync {
             return Err("--sync-method is only valid for write_sync".into());

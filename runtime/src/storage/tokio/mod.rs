@@ -190,7 +190,7 @@ impl Namespace {
                         states.retain(|(candidate, _), _| candidate != partition);
                     }
                     super::batch::Operation::Publish { .. }
-                    | super::batch::Operation::Resize { .. } => {}
+                    | super::batch::Operation::Rewind { .. } => {}
                 }
             }
         }
@@ -414,7 +414,7 @@ impl Storage {
                     handles.push(blob.clone());
                     blobs.entry((partition, name)).or_insert(blob);
                 }
-                BatchOperation::Resize { blob, len } => {
+                BatchOperation::Rewind { blob, len } => {
                     let partition = blob.partition().to_string();
                     let name = blob.name().to_vec();
                     if !blob.is_atomic() {
@@ -423,12 +423,12 @@ impl Storage {
                             hex(&name),
                             std::io::Error::new(
                                 std::io::ErrorKind::Unsupported,
-                                "batch resize requires an atomic blob",
+                                "batch rewind requires an atomic blob",
                             )
                             .into(),
                         ));
                     }
-                    descriptors.push(super::batch::Operation::Resize {
+                    descriptors.push(super::batch::Operation::Rewind {
                         partition: partition.clone(),
                         name: name.clone(),
                         len,
@@ -449,7 +449,7 @@ impl Storage {
             .iter()
             .filter_map(|operation| match operation {
                 super::batch::Operation::Publish { partition, name }
-                | super::batch::Operation::Resize {
+                | super::batch::Operation::Rewind {
                     partition, name, ..
                 } => Some((partition.clone(), name.clone())),
                 super::batch::Operation::Remove(_) => None,
@@ -500,6 +500,27 @@ impl Storage {
             filesystem_operations
         };
 
+        let rewind_lengths = filesystem_operations
+            .iter()
+            .filter_map(|operation| match operation {
+                super::batch::Operation::Rewind {
+                    partition,
+                    name,
+                    len,
+                } => Some(((partition.clone(), name.clone()), *len)),
+                super::batch::Operation::Publish { .. } | super::batch::Operation::Remove(_) => {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (blob, state) in &locked {
+            if let Some(len) =
+                rewind_lengths.get(&(blob.partition().to_string(), blob.name().to_vec()))
+            {
+                state.validate_rewind(*len)?;
+            }
+        }
+
         self.namespace
             .recovery_required
             .store(true, Ordering::Release);
@@ -509,18 +530,6 @@ impl Storage {
         let (completion_sender, completion_receiver) = oneshot::channel();
         drop(tokio::task::spawn_blocking(move || {
             on_worker_start();
-            let resize_lengths = filesystem_operations
-                .iter()
-                .filter_map(|operation| match operation {
-                    super::batch::Operation::Resize {
-                        partition,
-                        name,
-                        len,
-                    } => Some(((partition.clone(), name.clone()), *len)),
-                    super::batch::Operation::Publish { .. }
-                    | super::batch::Operation::Remove(_) => None,
-                })
-                .collect::<BTreeMap<_, _>>();
             struct ParticipantPreparation {
                 partition: String,
                 name: Vec<u8>,
@@ -542,6 +551,11 @@ impl Storage {
 
             let item_count = locked.len();
             let worker_count = item_count.min(MAX_BATCH_WORKERS);
+            let payload_budget = if item_count == 0 {
+                super::atomic::MAX_VALIDATED_PAYLOAD_LEN
+            } else {
+                super::atomic::MAX_VALIDATED_PAYLOAD_LEN / item_count as u64
+            };
             let mut chunks = Vec::with_capacity(worker_count);
             if worker_count != 0 {
                 let chunk_len = item_count.div_ceil(worker_count);
@@ -555,7 +569,7 @@ impl Storage {
                 }
             }
 
-            let resize_lengths = Arc::new(resize_lengths);
+            let resize_lengths = Arc::new(rewind_lengths);
 
             // Keep each participant worker alive between candidate preparation and its durability
             // barrier. Tokio's blocking pool retains these threads across batches while the owner
@@ -585,10 +599,41 @@ impl Storage {
                                 let resize = resize_lengths
                                     .get(&(blob.partition().to_string(), blob.name().to_vec()))
                                     .copied();
-                                if let Some(len) = resize {
-                                    state.resize(len);
+                                if let Some(len) = resize
+                                    && let Err(error) = state.rewind(len)
+                                {
+                                    let error = Error::from(error);
+                                    summaries.push((index, Err(error.clone())));
+                                    states.push((index, blob, state, Err(error)));
+                                    continue;
                                 }
-                                let prepared = blob.prepare_batch_commit_unflushed(&mut state);
+                                let mut prepared = blob.prepare_batch_commit_unflushed(&mut state);
+                                let preflush = prepared
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(Option::as_ref)
+                                    .is_some_and(|prepared| match prepared.payload_checksum() {
+                                        super::atomic::PayloadChecksumEligibility::Eligible(
+                                            Some(checksum),
+                                        ) => checksum.len > payload_budget,
+                                        super::atomic::PayloadChecksumEligibility::Eligible(
+                                            None,
+                                        ) => false,
+                                        super::atomic::PayloadChecksumEligibility::Ineligible => {
+                                            true
+                                        }
+                                    });
+                                if preflush {
+                                    match blob.sync_batch_commit() {
+                                        Ok(()) => prepared
+                                            .as_mut()
+                                            .unwrap()
+                                            .as_mut()
+                                            .unwrap()
+                                            .mark_payload_preflushed(),
+                                        Err(error) => prepared = Err(error),
+                                    }
+                                }
                                 let summary = match &prepared {
                                     Ok(Some(prepared)) => Ok(Some(ParticipantPreparation {
                                         partition: blob.partition().to_string(),
@@ -913,10 +958,17 @@ impl Storage {
                         if let Some(witness) = embedded_witness {
                             namespace.set_embedded_batch_decision(Some(witness));
                             notify_commit(&filesystem_operations);
-                            for (_, mut state, prepared) in prepared_states.drain(..) {
-                                if let Some(prepared) = prepared.unwrap() {
-                                    Blob::activate_batch_commit(&mut state, prepared, true);
-                                }
+                            for (blob, mut state, prepared) in prepared_states.drain(..) {
+                                let force_truncate = resize_lengths.contains_key(&(
+                                    blob.partition().to_string(),
+                                    blob.name().to_vec(),
+                                ));
+                                blob.activate_batch_commit(
+                                    &mut state,
+                                    prepared.unwrap(),
+                                    true,
+                                    force_truncate,
+                                )?;
                             }
                             return Ok(true);
                         }
@@ -924,16 +976,37 @@ impl Storage {
                             publication
                                 .finish(|operations| notify_commit(operations))
                                 .map_err(Error::from)?;
-                            for (_, mut state, prepared) in prepared_states.drain(..) {
-                                if let Some(prepared) = prepared.unwrap() {
-                                    Blob::activate_batch_commit(&mut state, prepared, false);
-                                }
+                            for (blob, mut state, prepared) in prepared_states.drain(..) {
+                                let force_truncate = resize_lengths.contains_key(&(
+                                    blob.partition().to_string(),
+                                    blob.name().to_vec(),
+                                ));
+                                blob.activate_batch_commit(
+                                    &mut state,
+                                    prepared.unwrap(),
+                                    false,
+                                    force_truncate,
+                                )?;
                             }
                             return Ok(false);
                         }
 
                         debug_assert!(!has_participant_mutations);
                         notify_commit(&filesystem_operations);
+                        for (blob, mut state, prepared) in prepared_states.drain(..) {
+                            let prepared = prepared.unwrap();
+                            debug_assert!(prepared.is_none());
+                            let force_truncate = resize_lengths.contains_key(&(
+                                blob.partition().to_string(),
+                                blob.name().to_vec(),
+                            ));
+                            blob.activate_batch_commit(
+                                &mut state,
+                                prepared,
+                                false,
+                                force_truncate,
+                            )?;
+                        }
                         Ok(false)
                     },
                     Err,
@@ -1550,17 +1623,13 @@ mod tests {
         let baseline = (0..16_384)
             .map(|index| (index % 251) as u8)
             .collect::<Vec<_>>();
-        blob.update(0, baseline.clone(), baseline.len() as u64)
-            .await
-            .unwrap();
+        blob.append(baseline.clone()).await.unwrap();
         blob.sync().await.unwrap();
         let live_path = source_directory
             .join("partition")
             .join(commonware_formatting::hex(b"blob"));
         let committed_end = std::fs::metadata(&live_path).unwrap().len();
-        blob.update(0, vec![0xa5; baseline.len()], baseline.len() as u64)
-            .await
-            .unwrap();
+        blob.append(vec![0xa5; baseline.len()]).await.unwrap();
         drop((blob, storage));
 
         for damage in 0..4 {
@@ -1620,26 +1689,149 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn test_atomic_rewind_reclaims_only_unpublished_tail_before_sync() {
+        let directory =
+            env::temp_dir().join(format!("storage_tokio_atomic_rewind_{}", random_suffix()));
+        let storage = Storage::new(Config::new(directory.clone(), 2 * 1024 * 1024), test_pool());
+        let (blob, _) = storage.open_atomic("partition", b"blob").await.unwrap();
+        let path = directory
+            .join("partition")
+            .join(commonware_formatting::hex(b"blob"));
+        let data_offset = Layout::V2.data_offset();
+
+        blob.append(b"abcdef").await.unwrap();
+        blob.sync().await.unwrap();
+        blob.append(b"ghij").await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 10);
+
+        blob.rewind(8).await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 8);
+        blob.rewind(6).await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 6);
+
+        // The current durable root still names six bytes, so crossing that frontier cannot
+        // truncate until the shorter root is durable.
+        blob.rewind(3).await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 6);
+        blob.sync().await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 3);
+
+        drop((blob, storage));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_atomic_batch_rewind_reclaims_unpublished_tail_on_completion() {
+        let directory = env::temp_dir().join(format!(
+            "storage_tokio_atomic_batch_rewind_{}",
+            random_suffix()
+        ));
+        let storage = Storage::new(Config::new(directory.clone(), 2 * 1024 * 1024), test_pool());
+        let (blob, _) = storage.open_atomic("partition", b"blob").await.unwrap();
+        let path = directory
+            .join("partition")
+            .join(commonware_formatting::hex(b"blob"));
+        let data_offset = Layout::V2.data_offset();
+
+        blob.append(b"base").await.unwrap();
+        blob.sync().await.unwrap();
+        blob.append(b"discarded").await.unwrap();
+        storage
+            .apply(vec![BatchOperation::Rewind {
+                blob: blob.clone(),
+                len: 4,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 4);
+
+        blob.append(b"abcdef").await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 10);
+
+        storage
+            .apply(vec![BatchOperation::Rewind {
+                blob: blob.clone(),
+                len: 7,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(blob.read_at(0, 7).await.unwrap().coalesce(), b"baseabc");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 7);
+
+        blob.append(b"XYZ").await.unwrap();
+        storage
+            .apply(vec![BatchOperation::Rewind {
+                blob: blob.clone(),
+                len: 7,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data_offset + 7);
+
+        drop((blob, storage));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_atomic_batch_preflushes_payload_above_recovery_bound() {
+        let directory = env::temp_dir().join(format!(
+            "storage_tokio_atomic_large_batch_{}",
+            random_suffix()
+        ));
+        let config = Config::new(directory.clone(), 2 * 1024 * 1024);
+        let storage = Storage::new(config.clone(), test_pool());
+        let (blob, _) = storage.open_atomic("partition", b"blob").await.unwrap();
+        let len = usize::try_from(crate::storage::atomic::MAX_VALIDATED_PAYLOAD_LEN).unwrap() + 1;
+        blob.append(vec![0x5a; len]).await.unwrap();
+        storage
+            .apply(vec![BatchOperation::Publish(blob.clone())])
+            .await
+            .unwrap();
+        drop((blob, storage));
+
+        let recovered = Storage::new(config, test_pool());
+        let (blob, recovered_len) = recovered.open_atomic("partition", b"blob").await.unwrap();
+        assert_eq!(recovered_len, len as u64);
+        assert_eq!(blob.read_at(0, 1).await.unwrap().coalesce(), b"Z");
+        assert_eq!(
+            blob.read_at(len as u64 - 1, 1).await.unwrap().coalesce(),
+            b"Z"
+        );
+
+        drop((blob, recovered));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn test_atomic_independent_opens_share_dirty_generation() {
         let directory =
             env::temp_dir().join(format!("storage_tokio_atomic_shared_{}", random_suffix()));
         let config = Config::new(directory.clone(), 2 * 1024 * 1024);
         let storage = Storage::new(config.clone(), test_pool());
         let (first, _) = storage.open_atomic("partition", b"blob").await.unwrap();
-        first.update(0, b"old", 3).await.unwrap();
+        first.append(b"old").await.unwrap();
         first.sync().await.unwrap();
-        first.update(0, b"new-value", 9).await.unwrap();
+        first.append(b"new-value").await.unwrap();
 
         let (second, len) = storage.open_atomic("partition", b"blob").await.unwrap();
-        assert_eq!(len, 9);
-        assert_eq!(second.read_at(0, 9).await.unwrap().coalesce(), b"new-value");
+        assert_eq!(len, 12);
+        assert_eq!(
+            second.read_at(0, 12).await.unwrap().coalesce(),
+            b"oldnew-value"
+        );
         second.sync().await.unwrap();
         drop((first, second, storage));
 
         let recovered = Storage::new(config, test_pool());
         let (blob, len) = recovered.open_atomic("partition", b"blob").await.unwrap();
-        assert_eq!(len, 9);
-        assert_eq!(blob.read_at(0, 9).await.unwrap().coalesce(), b"new-value");
+        assert_eq!(len, 12);
+        assert_eq!(
+            blob.read_at(0, 12).await.unwrap().coalesce(),
+            b"oldnew-value"
+        );
         drop((blob, recovered));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1652,9 +1844,9 @@ mod tests {
         let config = Config::new(directory.clone(), 2 * 1024 * 1024);
         let storage = Storage::new(config.clone(), test_pool());
         let (updated, _) = storage.open_atomic("partition", b"updated").await.unwrap();
-        updated.update(0, b"durable", 7).await.unwrap();
+        updated.append(b"durable").await.unwrap();
         updated.sync().await.unwrap();
-        updated.update(0, b"pending", 7).await.unwrap();
+        updated.append(b"pending").await.unwrap();
 
         let (written, _) = storage.open_atomic("partition", b"written").await.unwrap();
         written
@@ -1691,10 +1883,10 @@ mod tests {
         let config = Config::new(directory.clone(), 2 * 1024 * 1024);
         let storage = Storage::new(config.clone(), test_pool());
         let (old, _) = storage.open_atomic("partition", b"blob").await.unwrap();
-        old.update(0, b"old", 3).await.unwrap();
+        old.append(b"old").await.unwrap();
         old.sync().await.unwrap();
         storage.remove("partition", Some(b"blob")).await.unwrap();
-        old.update(0, b"stale", 5).await.unwrap();
+        old.append(b"stale").await.unwrap();
 
         let (new, len) = storage.open_atomic("partition", b"blob").await.unwrap();
         assert_eq!(len, 0);
@@ -1720,9 +1912,9 @@ mod tests {
         let config = Config::new(directory.clone(), 2 * 1024 * 1024);
         let storage = Storage::new(config.clone(), test_pool());
         let (blob, _) = storage.open_atomic("partition", b"blob").await.unwrap();
-        blob.update(0, b"durable", 7).await.unwrap();
+        blob.append(b"durable").await.unwrap();
         drop(blob.start_sync().await);
-        blob.update(0, b"pending", 7).await.unwrap();
+        blob.append(b"pending").await.unwrap();
         drop((blob, storage));
 
         let recovered = Storage::new(config, test_pool());
@@ -1866,7 +2058,7 @@ mod tests {
                 name: b"victim".to_vec(),
             }
             .into(),
-            BatchOperation::Resize {
+            BatchOperation::Rewind {
                 blob: resized.clone(),
                 len: 3,
             },
@@ -1949,7 +2141,7 @@ mod tests {
         // Recovery can confirm the absent marker, but must not make the committed generation
         // current again.
         let error = storage
-            .apply(vec![BatchOperation::Resize { blob: old, len: 1 }])
+            .apply(vec![BatchOperation::Rewind { blob: old, len: 1 }])
             .await
             .unwrap_err();
         assert!(matches!(error, Error::BlobMissing(..)));
@@ -1980,7 +2172,7 @@ mod tests {
             storage
                 .apply(vec![
                     BatchOperation::Remove(RemoveTarget::Partition("CaseAlias".into())),
-                    BatchOperation::Resize {
+                    BatchOperation::Rewind {
                         blob: distinct.clone(),
                         len: 3,
                     },
@@ -1999,7 +2191,7 @@ mod tests {
         let error = storage
             .apply(vec![
                 BatchOperation::Remove(RemoveTarget::Partition("casealias".into())),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: old.clone(),
                     len: 3,
                 },
@@ -2031,7 +2223,7 @@ mod tests {
                     partition: "case_alias_victim".into(),
                     name: b"blob".to_vec(),
                 }),
-                BatchOperation::Resize { blob: old, len: 1 },
+                BatchOperation::Rewind { blob: old, len: 1 },
             ])
             .await
             .unwrap_err();
@@ -2066,7 +2258,7 @@ mod tests {
             .await
             .unwrap();
         let error = storage
-            .apply(vec![BatchOperation::Resize { blob: old, len: 0 }])
+            .apply(vec![BatchOperation::Rewind { blob: old, len: 0 }])
             .await
             .unwrap_err();
         assert!(matches!(error, Error::BlobMissing(..)));
@@ -2154,24 +2346,12 @@ mod tests {
         );
         let (first, _) = storage.open_atomic("group", b"first").await.unwrap();
         let (second, _) = storage.open_atomic("group", b"second").await.unwrap();
-        first
-            .write_at(0, b"old-one", WriteOptions::default())
-            .await
-            .unwrap();
-        second
-            .write_at(0, b"old-two", WriteOptions::default())
-            .await
-            .unwrap();
+        first.append(b"old-one").await.unwrap();
+        second.append(b"old-two").await.unwrap();
         first.sync().await.unwrap();
         second.sync().await.unwrap();
-        first
-            .write_at(0, b"new-one", WriteOptions::default())
-            .await
-            .unwrap();
-        second
-            .write_at(0, b"new-two", WriteOptions::default())
-            .await
-            .unwrap();
+        first.append(b"new-one").await.unwrap();
+        second.append(b"new-two").await.unwrap();
 
         let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
         let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
@@ -2209,10 +2389,16 @@ mod tests {
         );
         let (first, first_len) = recovered.open_atomic("group", b"first").await.unwrap();
         let (second, second_len) = recovered.open_atomic("group", b"second").await.unwrap();
-        assert_eq!(first_len, 7);
-        assert_eq!(second_len, 7);
-        assert_eq!(first.read_at(0, 7).await.unwrap().coalesce(), b"new-one");
-        assert_eq!(second.read_at(0, 7).await.unwrap().coalesce(), b"new-two");
+        assert_eq!(first_len, 14);
+        assert_eq!(second_len, 14);
+        assert_eq!(
+            first.read_at(0, 14).await.unwrap().coalesce(),
+            b"old-onenew-one"
+        );
+        assert_eq!(
+            second.read_at(0, 14).await.unwrap().coalesce(),
+            b"old-twonew-two"
+        );
 
         let _ = std::fs::remove_dir_all(storage_directory);
         let _ = std::fs::remove_dir_all(crash_directory);
@@ -2229,24 +2415,12 @@ mod tests {
         let storage = Storage::new(config.clone(), test_pool());
         let (first, _) = storage.open_atomic("group", b"first").await.unwrap();
         let (second, _) = storage.open_atomic("group", b"second").await.unwrap();
-        first
-            .write_at(0, b"old-one", WriteOptions::default())
-            .await
-            .unwrap();
-        second
-            .write_at(0, b"old-two", WriteOptions::default())
-            .await
-            .unwrap();
+        first.append(b"old-one").await.unwrap();
+        second.append(b"old-two").await.unwrap();
         first.sync().await.unwrap();
         second.sync().await.unwrap();
-        first
-            .write_at(0, b"new-one", WriteOptions::default())
-            .await
-            .unwrap();
-        second
-            .write_at(0, b"new-two", WriteOptions::default())
-            .await
-            .unwrap();
+        first.append(b"new-one").await.unwrap();
+        second.append(b"new-two").await.unwrap();
         storage
             .apply(vec![
                 BatchOperation::Publish(first.clone()),
@@ -2261,8 +2435,11 @@ mod tests {
         let restarted = Storage::new(config, test_pool());
         restarted.remove("group", Some(b"first")).await.unwrap();
         let (second, len) = restarted.open_atomic("group", b"second").await.unwrap();
-        assert_eq!(len, 7);
-        assert_eq!(second.read_at(0, 7).await.unwrap().coalesce(), b"new-two");
+        assert_eq!(len, 14);
+        assert_eq!(
+            second.read_at(0, 14).await.unwrap().coalesce(),
+            b"old-twonew-two"
+        );
 
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -2308,22 +2485,12 @@ mod tests {
         let storage = Storage::new(config.clone(), test_pool());
         let (removed, _) = storage.open_atomic("removed", b"first").await.unwrap();
         let (kept, _) = storage.open_atomic("kept", b"second").await.unwrap();
-        removed
-            .write_at(0, b"old-one", WriteOptions::default())
-            .await
-            .unwrap();
-        kept.write_at(0, b"old-two", WriteOptions::default())
-            .await
-            .unwrap();
+        removed.append(b"old-one").await.unwrap();
+        kept.append(b"old-two").await.unwrap();
         removed.sync().await.unwrap();
         kept.sync().await.unwrap();
-        removed
-            .write_at(0, b"new-one", WriteOptions::default())
-            .await
-            .unwrap();
-        kept.write_at(0, b"new-two", WriteOptions::default())
-            .await
-            .unwrap();
+        removed.append(b"new-one").await.unwrap();
+        kept.append(b"new-two").await.unwrap();
         storage
             .apply(vec![
                 BatchOperation::Publish(removed.clone()),
@@ -2343,8 +2510,11 @@ mod tests {
             .await
             .unwrap();
         let (kept, len) = restarted.open_atomic("kept", b"second").await.unwrap();
-        assert_eq!(len, 7);
-        assert_eq!(kept.read_at(0, 7).await.unwrap().coalesce(), b"new-two");
+        assert_eq!(len, 14);
+        assert_eq!(
+            kept.read_at(0, 14).await.unwrap().coalesce(),
+            b"old-twonew-two"
+        );
 
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -2373,13 +2543,9 @@ mod tests {
 
         for epoch in *b"12" {
             for (index, blob) in blobs.iter().enumerate() {
-                blob.write_at(
-                    0,
-                    vec![epoch, u8::try_from(index).unwrap()],
-                    WriteOptions::default(),
-                )
-                .await
-                .unwrap();
+                blob.append(vec![epoch, u8::try_from(index).unwrap()])
+                    .await
+                    .unwrap();
             }
             storage
                 .apply(blobs.iter().cloned().map(BatchOperation::Publish).collect())
@@ -2407,11 +2573,11 @@ mod tests {
         let latest = embedded
             .first()
             .expect("second batch has an embedded witness");
-        let trailer_offset = latest.candidate.root_offset + 4096 - 16;
+        let witness_offset = latest.candidate.root_offset + super::super::atomic::ROOT_LEN as u64;
         let mut byte = [0u8; 1];
-        file.read_exact_at(&mut byte, trailer_offset).unwrap();
+        file.read_exact_at(&mut byte, witness_offset).unwrap();
         byte[0] ^= 1;
-        file.write_all_at(&byte, trailer_offset).unwrap();
+        file.write_all_at(&byte, witness_offset).unwrap();
         file.sync_all().unwrap();
         drop(blobs);
         drop(storage);
@@ -2425,10 +2591,15 @@ mod tests {
             .enumerate()
         {
             let (blob, len) = recovered.open_atomic("group", name).await.unwrap();
-            assert_eq!(len, 2);
+            assert_eq!(len, 4);
             assert_eq!(
-                blob.read_at(0, 2).await.unwrap().coalesce(),
-                [b'2', u8::try_from(index).unwrap()]
+                blob.read_at(0, 4).await.unwrap().coalesce(),
+                [
+                    b'1',
+                    u8::try_from(index).unwrap(),
+                    b'2',
+                    u8::try_from(index).unwrap()
+                ]
             );
         }
 

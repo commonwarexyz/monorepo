@@ -1,7 +1,7 @@
 //! Crash recovery publication for atomic storage batches.
 //!
-//! This module implements a coordinator-free fast path for batches containing only writes and
-//! resizes, plus a fixed-slot coordinator for batches containing namespace removals. Both paths use
+//! This module implements a coordinator-free fast path for batches containing only appends and
+//! rewinds, plus a fixed-slot coordinator for batches containing namespace removals. Both paths use
 //! the same exact descriptor format and candidate validation rules.
 //!
 //! # Coordinator-free write-only groups
@@ -15,14 +15,13 @@
 //! participant A root slot                 participant B root slot
 //! +-----------------------------+         +-----------------------------+
 //! | prepared root for A         |         | prepared root for B         |
-//! | checkpoint                  |         | checkpoint                  |
 //! | descriptor { A, B, ... }    |<------->| descriptor { A, B, ... }    |
 //! +-----------------------------+         +-----------------------------+
 //!              |                                      |
 //!              +------ concurrent durability ---------+
 //! ```
 //!
-//! The canonical `CWUNOD08` descriptor has this logical layout. Variable-length partition and blob
+//! The canonical `CWUNOD11` descriptor has this logical layout. Variable-length partition and blob
 //! names carry unsigned 32-bit lengths, and participants are sorted by their exact path.
 //!
 //! ```text
@@ -77,14 +76,14 @@
 //!
 //! # Bounds and fault model
 //!
-//! Coordinator-free recovery is limited to 32 dirty participants and 64 MiB of newly appended
-//! payload across the group. Any newly appended participant payload must be representable by one
-//! physically contiguous CRC32C range. The complete descriptor must also fit beside any inline
-//! checkpoint in every participant's 4 KiB root slot. Ineligible write-only batches fail with
-//! `InvalidInput` before a durable group decision.
+//! Coordinator-free recovery is limited to 32 dirty participants and at most 64 MiB of payload
+//! revalidation across the group. Larger or non-contiguous pending append epochs are preflushed
+//! before any root is staged, so their descriptors need no payload checksum and never turn the
+//! recovery bound into an application-visible size limit. The complete descriptor must also fit
+//! beside the root in every participant's 4 KiB root slot.
 //!
 //! Until a file durability barrier succeeds, a crash may preserve any subset of issued payload,
-//! checkpoint, descriptor, or root-overwrite bytes. Prepared roots are invisible to ordinary blob
+//! descriptor, or root-overwrite bytes. Prepared roots are invisible to ordinary blob
 //! recovery, exact root-transition validation rejects unrelated byte combinations, and payload plus
 //! descriptor checksums determine whether the complete new group survived. The trusted local-disk
 //! model treats matching CRC32C values as intact, subject to the checksum's collision probability.
@@ -106,8 +105,8 @@ const CONTROL_DIRECTORY: &str = ".commonware";
 const COORDINATOR_FILE: &str = "_COMMONWARE_RUNTIME_UNO_COORDINATOR";
 const CREATION_FILE: &str = "_COMMONWARE_RUNTIME_UNO_COORDINATOR_CREATING";
 const REMOVAL_DIRECTORY_PREFIX: &str = "_COMMONWARE_RUNTIME_UNO_REMOVALS_";
-const ROOT_MAGIC: &[u8; 8] = b"CWUNOC08";
-const DESCRIPTOR_MAGIC: &[u8; 8] = b"CWUNOD08";
+const ROOT_MAGIC: &[u8; 8] = b"CWUNOC11";
+const DESCRIPTOR_MAGIC: &[u8; 8] = b"CWUNOD11";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_UNO_COORDINATOR_ROOT";
 const ROOT_BODY_LEN: usize = 36;
 const ROOT_LEN: usize = 40;
@@ -301,7 +300,7 @@ fn encode_descriptor(
         .iter()
         .filter_map(|operation| match operation {
             Operation::Remove(target) => Some(target),
-            Operation::Publish { .. } | Operation::Resize { .. } => None,
+            Operation::Publish { .. } | Operation::Rewind { .. } => None,
         })
         .collect::<Vec<_>>();
 
@@ -572,7 +571,7 @@ fn validate_operation_participants(
 ) -> io::Result<()> {
     let mut operations = operations.iter().filter_map(|operation| match operation {
         Operation::Publish { partition, name }
-        | Operation::Resize {
+        | Operation::Rewind {
             partition, name, ..
         } => Some((partition.as_str(), name.as_slice())),
         Operation::Remove(_) => None,
@@ -1108,7 +1107,7 @@ pub(crate) fn preflight(operations: &[Operation]) -> io::Result<()> {
                 (partition, Some(name.as_slice()), 1 + 4 + 4)
             }
             Operation::Publish { partition, name }
-            | Operation::Resize {
+            | Operation::Rewind {
                 partition, name, ..
             } => (
                 partition,
@@ -1624,7 +1623,7 @@ pub(crate) fn prepare_removal_publication(
         .iter()
         .filter_map(|operation| match operation {
             Operation::Remove(target) => Some(target.clone()),
-            Operation::Publish { .. } | Operation::Resize { .. } => None,
+            Operation::Publish { .. } | Operation::Rewind { .. } => None,
         })
         .collect::<Vec<_>>();
     if removals.is_empty() {
@@ -1833,17 +1832,14 @@ mod tests {
     }
 
     fn write_prepared(file: &File, prepared: &atomic::PreparedCommit) {
-        if !prepared.manifest.is_empty() {
-            file.write_all_at(&prepared.manifest, prepared.manifest_offset)
-                .unwrap();
-        }
         file.write_all_at(&prepared.prepared_root, prepared.root_offset)
             .unwrap();
     }
 
     fn write_payload(file: &File, state: &mut atomic::State, offset: u64, data: &[u8]) {
+        assert_eq!(state.logical_len(), offset);
         let prepared = state
-            .prepare_write(offset, IoBufs::from(data.to_vec()), None)
+            .prepare_append(IoBufs::from(data.to_vec()))
             .unwrap()
             .unwrap();
         file.write_all_at(
@@ -1859,23 +1855,21 @@ mod tests {
         write_prepared(file, &prepared);
         file.sync_all().unwrap();
         atomic::write_durable_at(file, prepared.root_offset, &prepared.committed_root).unwrap();
+        if prepared.requires_truncate() {
+            file.set_len(prepared.raw_len()).unwrap();
+        }
         state.finish_commit(prepared);
     }
 
     fn read_blob_state(file: &File, state: &atomic::State) -> Vec<u8> {
         let mut output = vec![0u8; state.logical_len() as usize];
         for span in state.read_plan(0, output.len()).unwrap() {
-            match span.source {
-                atomic::ReadSource::Zero => {
-                    output[span.destination..span.destination + span.len].fill(0);
-                }
-                atomic::ReadSource::File(offset) => file
-                    .read_exact_at(
-                        &mut output[span.destination..span.destination + span.len],
-                        offset,
-                    )
-                    .unwrap(),
-            }
+            let atomic::ReadSource::File(offset) = span.source;
+            file.read_exact_at(
+                &mut output[span.destination..span.destination + span.len],
+                offset,
+            )
+            .unwrap();
         }
         output
     }
@@ -2036,7 +2030,7 @@ mod tests {
             ErrorKind::InvalidInput
         );
 
-        let write = vec![Operation::Resize {
+        let write = vec![Operation::Rewind {
             partition: "group".into(),
             name: b"blob".to_vec(),
             len: 1,

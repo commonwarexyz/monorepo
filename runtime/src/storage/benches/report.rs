@@ -274,7 +274,7 @@ pub struct Report {
     paired: Option<PairedReport>,
     /// Final logical file size.
     final_file_size: u64,
-    /// Atomic-update protocol selected by the filesystem, when applicable.
+    /// Atomic-append protocol selected by the filesystem, when applicable.
     atomic_protocol: Option<&'static str>,
     /// Raw and physically allocated file sizes after the workload.
     file_metrics: Option<FileMetrics>,
@@ -336,7 +336,7 @@ impl Report {
         }
     }
 
-    /// Record the atomic-update protocol observed by the benchmark harness.
+    /// Record the atomic-append protocol observed by the benchmark harness.
     pub const fn set_atomic_protocol(&mut self, protocol: &'static str) {
         self.atomic_protocol = Some(protocol);
     }
@@ -428,7 +428,7 @@ impl Report {
                 );
             } else {
                 println!(
-                    "atomic_protocol={protocol} atomic_phase=volatile_update durability_frontier=blob_sync full_completion=blob_sync byte_accounting=logical_payload"
+                    "atomic_protocol={protocol} atomic_phase=pending_append durability_frontier=blob_sync full_completion=blob_sync byte_accounting=logical_payload"
                 );
             }
         }
@@ -507,7 +507,7 @@ impl Report {
             "atomic_phase": self.atomic_protocol.map(|_| if is_atomic_batch {
                 "prepared_root"
             } else {
-                "volatile_update"
+                "pending_append"
             }),
             "durability_frontier": if is_group {
                 Some(if is_atomic_batch { "decision_return" } else { "all_blob_syncs" })

@@ -144,41 +144,44 @@ pub(crate) mod tests {
         test_apply_batch_carries_consecutive_publications(&storage).await;
         test_apply_batch_carries_disjoint_publications(&storage).await;
         test_apply_batch_validates_atomically(&storage).await;
+        test_apply_batch_validates_all_rewinds_before_mutating(&storage).await;
         test_apply_batch_conflicts_are_atomic(&storage).await;
         test_apply_batch_rejects_stale_handle(&storage).await;
     }
 
-    /// Runs atomic visibility and range semantics on a blob.
+    /// Runs append, rewind, and synchronization-fence semantics on an atomic blob.
     pub(crate) async fn run_atomic_blob_tests<B>(blob: B)
     where
         B: AtomicBlob,
     {
-        blob.update(0, vec![IoBuf::from(b"ab"), IoBuf::from(b"cdef")], 6)
-            .await
-            .unwrap();
+        assert_eq!(
+            blob.append(vec![IoBuf::from(b"ab"), IoBuf::from(b"cdef")])
+                .await
+                .unwrap(),
+            0
+        );
         assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
 
         assert!(
-            blob.write_at(u64::MAX, b"x", WriteOptions::default())
+            blob.write_at(0, b"x", WriteOptions::default())
                 .await
                 .is_err()
         );
         assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
 
-        assert!(blob.update(4, b"x", 4).await.is_err());
-        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
+        blob.rewind(4).await.unwrap();
+        assert_eq!(blob.append(b"XY").await.unwrap(), 4);
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdXY");
+        blob.sync().await.unwrap();
 
-        blob.update(1, b"XY", 4).await.unwrap();
-        assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"aXYd");
-        assert!(blob.read_at(4, 1).await.is_err());
-
-        blob.update(2, Vec::<u8>::new(), 2).await.unwrap();
-        blob.update(4, b"z", 5).await.unwrap();
-        assert_eq!(
-            blob.read_at(0, 5).await.unwrap().coalesce(),
-            b"aX\0\0z",
-            "re-extending a shrunken blob must zero-fill the gap"
-        );
+        blob.rewind(3).await.unwrap();
+        assert!(blob.append(b"blocked").await.is_err());
+        assert_eq!(blob.append(Vec::<u8>::new()).await.unwrap(), 3);
+        assert!(blob.resize(4).await.is_err());
+        assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"abc");
+        blob.sync().await.unwrap();
+        assert_eq!(blob.append(b"Z").await.unwrap(), 3);
+        assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"abcZ");
     }
 
     /// Verify that a batch rejects a blob handle created by another instance of the backend.
@@ -191,7 +194,7 @@ pub(crate) mod tests {
             .open_atomic("batch_foreign_handle", b"shared_name")
             .await
             .unwrap();
-        local.update(0, b"local", 5).await.unwrap();
+        local.append(b"local").await.unwrap();
         local.sync().await.unwrap();
         let (victim, _) = storage
             .open("batch_foreign_victim", b"victim")
@@ -206,7 +209,7 @@ pub(crate) mod tests {
             .open_atomic("batch_foreign_handle", b"shared_name")
             .await
             .unwrap();
-        foreign.update(0, b"foreign", 7).await.unwrap();
+        foreign.append(b"foreign").await.unwrap();
         foreign.sync().await.unwrap();
 
         let result = storage
@@ -215,7 +218,7 @@ pub(crate) mod tests {
                     partition: "batch_foreign_victim".into(),
                     name: b"victim".to_vec(),
                 }),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: foreign.clone(),
                     len: 1,
                 },
@@ -287,7 +290,7 @@ pub(crate) mod tests {
             .open_atomic("batch_start_retained", b"blob")
             .await
             .unwrap();
-        retained.update(0, b"old bytes", 9).await.unwrap();
+        retained.append(b"old bytes").await.unwrap();
         retained.sync().await.unwrap();
         let completion = storage
             .start_apply(vec![
@@ -295,7 +298,7 @@ pub(crate) mod tests {
                     partition: "batch_start_generic".into(),
                     name: b"victim".to_vec(),
                 }),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: retained.clone(),
                     len: 3,
                 },
@@ -331,10 +334,10 @@ pub(crate) mod tests {
             .open_atomic("batch_set_resize", b"blob")
             .await
             .unwrap();
-        resized.update(0, b"abcdef", 6).await.unwrap();
+        resized.append(b"abcdef").await.unwrap();
 
         let operations = vec![
-            BatchOperation::Resize {
+            BatchOperation::Rewind {
                 blob: resized.clone(),
                 len: 3,
             },
@@ -360,7 +363,7 @@ pub(crate) mod tests {
                 partition: "batch_blob_missing".into(),
                 name: b"missing".to_vec(),
             }),
-            BatchOperation::Resize {
+            BatchOperation::Rewind {
                 blob: resized.clone(),
                 len: 3,
             },
@@ -388,12 +391,12 @@ pub(crate) mod tests {
             .open_atomic("batch_mixed_publish", b"published")
             .await
             .unwrap();
-        published.update(0, b"published-value", 15).await.unwrap();
+        published.append(b"published-value").await.unwrap();
         let (resized, _) = storage
             .open_atomic("batch_mixed_resize", b"resized")
             .await
             .unwrap();
-        resized.update(0, b"pending bytes", 13).await.unwrap();
+        resized.append(b"pending bytes").await.unwrap();
         storage.open("batch_mixed_blob", b"victim").await.unwrap();
         storage
             .open("batch_mixed_partition", b"victim")
@@ -408,7 +411,7 @@ pub(crate) mod tests {
                     name: b"victim".to_vec(),
                 }),
                 BatchOperation::Publish(published.clone()),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: resized.clone(),
                     len: 7,
                 },
@@ -453,7 +456,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         first
-            .update(0, vec![IoBuf::from(b"atomic-"), IoBuf::from(b"first")], 12)
+            .append(vec![IoBuf::from(b"atomic-"), IoBuf::from(b"first")])
             .await
             .unwrap();
         let (second, _) = storage
@@ -461,15 +464,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         second
-            .update(
-                0,
-                vec![
-                    IoBuf::from(b"second"),
-                    IoBuf::from(b"-"),
-                    IoBuf::from(b"value"),
-                ],
-                12,
-            )
+            .append(vec![
+                IoBuf::from(b"second"),
+                IoBuf::from(b"-"),
+                IoBuf::from(b"value"),
+            ])
             .await
             .unwrap();
 
@@ -513,14 +512,8 @@ pub(crate) mod tests {
         let (second, _) = storage.open_atomic("batch_carry", b"second").await.unwrap();
 
         for suffix in *b"12" {
-            first
-                .write_at(0, vec![b'f', suffix], WriteOptions::default())
-                .await
-                .unwrap();
-            second
-                .write_at(0, vec![b's', suffix], WriteOptions::default())
-                .await
-                .unwrap();
+            first.append(vec![b'f', suffix]).await.unwrap();
+            second.append(vec![b's', suffix]).await.unwrap();
             storage
                 .apply(vec![
                     BatchOperation::Publish(first.clone()),
@@ -534,10 +527,10 @@ pub(crate) mod tests {
         drop(second);
         let (first, first_len) = storage.open_atomic("batch_carry", b"first").await.unwrap();
         let (second, second_len) = storage.open_atomic("batch_carry", b"second").await.unwrap();
-        assert_eq!(first_len, 2);
-        assert_eq!(second_len, 2);
-        assert_eq!(first.read_at(0, 2).await.unwrap().coalesce(), b"f2");
-        assert_eq!(second.read_at(0, 2).await.unwrap().coalesce(), b"s2");
+        assert_eq!(first_len, 4);
+        assert_eq!(second_len, 4);
+        assert_eq!(first.read_at(0, 4).await.unwrap().coalesce(), b"f1f2");
+        assert_eq!(second.read_at(0, 4).await.unwrap().coalesce(), b"s1s2");
     }
 
     /// A retained handle can rejoin after a disjoint decision materializes its prior root.
@@ -555,34 +548,25 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        first
-            .write_at(0, b"a1", WriteOptions::default())
-            .await
-            .unwrap();
+        first.append(b"a1").await.unwrap();
         storage
             .apply(vec![BatchOperation::Publish(first.clone())])
             .await
             .unwrap();
 
-        second
-            .write_at(0, b"b1", WriteOptions::default())
-            .await
-            .unwrap();
+        second.append(b"b1").await.unwrap();
         storage
             .apply(vec![BatchOperation::Publish(second.clone())])
             .await
             .unwrap();
 
-        first
-            .write_at(0, b"a2", WriteOptions::default())
-            .await
-            .unwrap();
+        first.append(b"a2").await.unwrap();
         storage
             .apply(vec![BatchOperation::Publish(first.clone())])
             .await
             .unwrap();
 
-        assert_eq!(first.read_at(0, 2).await.unwrap().coalesce(), b"a2");
+        assert_eq!(first.read_at(0, 4).await.unwrap().coalesce(), b"a1a2");
         assert_eq!(second.read_at(0, 2).await.unwrap().coalesce(), b"b1");
     }
 
@@ -610,6 +594,44 @@ pub(crate) mod tests {
         );
     }
 
+    /// An invalid rewind rejects the batch before another participant is rewound.
+    async fn test_apply_batch_validates_all_rewinds_before_mutating<S>(storage: &S)
+    where
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let (first, _) = storage
+            .open_atomic("batch_rewind_validation", b"first")
+            .await
+            .unwrap();
+        let (second, _) = storage
+            .open_atomic("batch_rewind_validation", b"second")
+            .await
+            .unwrap();
+        first.append(b"abc").await.unwrap();
+        second.append(b"xyz").await.unwrap();
+        first.sync().await.unwrap();
+        second.sync().await.unwrap();
+
+        let result = storage
+            .apply(vec![
+                BatchOperation::Rewind {
+                    blob: first.clone(),
+                    len: 1,
+                },
+                BatchOperation::Rewind {
+                    blob: second.clone(),
+                    len: 4,
+                },
+            ])
+            .await;
+        assert!(
+            matches!(result, Err(crate::Error::Io(err)) if err.kind() == std::io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(first.read_at(0, 3).await.unwrap().coalesce(), b"abc");
+        assert_eq!(second.read_at(0, 3).await.unwrap().coalesce(), b"xyz");
+    }
+
     /// Conflicting blob mutations reject the entire batch without changing blob state.
     async fn test_apply_batch_conflicts_are_atomic<S>(storage: &S)
     where
@@ -620,7 +642,7 @@ pub(crate) mod tests {
             .open_atomic("batch_conflict_resize", b"blob")
             .await
             .unwrap();
-        resized.update(0, b"abcdef", 6).await.unwrap();
+        resized.append(b"abcdef").await.unwrap();
         resized.sync().await.unwrap();
         let (victim, _) = storage
             .open("batch_conflict_victim", b"victim")
@@ -638,7 +660,7 @@ pub(crate) mod tests {
         let cases = vec![
             vec![
                 removal.clone(),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: resized.clone(),
                     len: 2,
                 },
@@ -650,25 +672,25 @@ pub(crate) mod tests {
             vec![
                 removal.clone(),
                 BatchOperation::Remove(RemoveTarget::Partition("batch_conflict_resize".into())),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: resized.clone(),
                     len: 2,
                 },
             ],
             vec![
                 removal.clone(),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: resized.clone(),
                     len: 2,
                 },
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: resized.clone(),
                     len: 3,
                 },
             ],
             vec![
                 removal.clone(),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: resized.clone(),
                     len: 4,
                 },
@@ -677,7 +699,7 @@ pub(crate) mod tests {
             vec![
                 removal,
                 BatchOperation::Publish(resized.clone()),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: resized.clone(),
                     len: 4,
                 },
@@ -707,7 +729,7 @@ pub(crate) mod tests {
             .open_atomic("batch_stale", b"shared_name")
             .await
             .unwrap();
-        old.update(0, b"old", 3).await.unwrap();
+        old.append(b"old").await.unwrap();
         old.sync().await.unwrap();
         storage
             .apply(vec![BatchOperation::Remove(RemoveTarget::Blob {
@@ -724,7 +746,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(size, 0);
-        new.update(0, b"new", 3).await.unwrap();
+        new.append(b"new").await.unwrap();
         new.sync().await.unwrap();
         let (victim, _) = storage.open("batch_stale_victim", b"victim").await.unwrap();
         victim
@@ -738,11 +760,11 @@ pub(crate) mod tests {
                     partition: "batch_stale_victim".into(),
                     name: b"victim".to_vec(),
                 }),
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: new.clone(),
                     len: 1,
                 },
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: old.clone(),
                     len: 1,
                 },

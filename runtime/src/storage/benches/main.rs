@@ -7,7 +7,7 @@
 //! - steady-state random reads and writes on fixed-size files
 //! - append-only writes on a growing file
 //! - durable positioned writes comparing sync strategies
-//! - atomic positioned writes and appends with an explicit sync durability frontier
+//! - atomic appends with an explicit sync durability frontier
 //! - durable multi-blob journal appends comparing ordinary syncs with atomic batch publication
 //! - mixed append-plus-read pressure with one writer and many readers
 

@@ -159,7 +159,7 @@ impl<S: BatchStorage> BatchStorage for Storage<S> {
             match operation {
                 crate::storage::batch::Operation::Remove(_) => {}
                 crate::storage::batch::Operation::Publish { .. } => {}
-                crate::storage::batch::Operation::Resize { .. } => {
+                crate::storage::batch::Operation::Rewind { .. } => {
                     self.metrics.storage_resizes.inc();
                 }
             }
@@ -291,24 +291,29 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
 impl<B: AtomicBlob> AtomicBlob for Blob<B> {
     #[tracing::instrument(
-        name = "runtime.storage.blob.update",
+        name = "runtime.storage.blob.append",
         level = "info",
         skip_all,
-        fields(partition = %self.partition, bytes = Empty, len = len)
+        fields(partition = %self.partition, bytes = Empty)
     )]
-    async fn update(
-        &self,
-        offset: u64,
-        data: impl Into<IoBufs> + Send,
-        len: u64,
-    ) -> Result<(), Error> {
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         let data = data.into();
         let data_len = data.remaining();
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(data_len as u64);
-        self.metrics.storage_resizes.inc();
         Span::current().record("bytes", data_len as u64);
-        self.inner.update(offset, data, len).await
+        self.inner.append(data).await
+    }
+
+    #[tracing::instrument(
+        name = "runtime.storage.blob.rewind",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, len = len)
+    )]
+    async fn rewind(&self, len: u64) -> Result<(), Error> {
+        self.metrics.storage_resizes.inc();
+        self.inner.rewind(len).await
     }
 }
 
@@ -470,26 +475,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metered_batch_and_atomic_update_metrics() {
+    async fn test_metered_batch_and_atomic_mutation_metrics() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
         let (first, _) = storage.open_atomic("partition", b"first").await.unwrap();
         let (second, _) = storage.open_atomic("partition", b"second").await.unwrap();
         let (updated, _) = storage.open_atomic("partition", b"updated").await.unwrap();
-        updated.update(1, b"new", 4).await.unwrap();
+        first.append(b"first").await.unwrap();
+        second.append(b"second").await.unwrap();
+        updated.append(b"new").await.unwrap();
 
         storage
             .apply(vec![
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: first.clone(),
                     len: 3,
                 },
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: first,
                     len: 3,
                 },
-                BatchOperation::Resize {
+                BatchOperation::Rewind {
                     blob: second,
                     len: 5,
                 },
@@ -498,11 +505,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(storage.metrics.storage_writes.get(), 1);
-        assert_eq!(storage.metrics.storage_write_bytes.get(), 3);
-        assert_eq!(storage.metrics.storage_resizes.get(), 3);
+        assert_eq!(storage.metrics.storage_writes.get(), 3);
+        assert_eq!(storage.metrics.storage_write_bytes.get(), 14);
+        assert_eq!(storage.metrics.storage_resizes.get(), 2);
 
-        assert_eq!(updated.read_at(0, 4).await.unwrap().coalesce(), b"\0new");
+        assert_eq!(updated.read_at(0, 3).await.unwrap().coalesce(), b"new");
     }
 
     /// Test that `start_sync` increments the sync metric, matching `sync`.

@@ -180,12 +180,11 @@ impl crate::Blob for Blob {
 }
 
 impl crate::AtomicBlob for Blob {
-    async fn update(
-        &self,
-        _offset: u64,
-        _data: impl Into<IoBufs> + Send,
-        _len: u64,
-    ) -> Result<(), Error> {
+    async fn append(&self, _data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
+    async fn rewind(&self, _len: u64) -> Result<(), Error> {
         Err(super::unsupported_atomic(&self.partition, &self.name))
     }
 }
