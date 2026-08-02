@@ -1579,15 +1579,32 @@ impl crate::Storage for Context {
         self.storage.remove(partition, name).await
     }
 
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.storage.scan(partition).await
+    }
+}
+
+impl crate::BatchStorage for Context {
     async fn start_apply(
         &self,
-        operations: Vec<crate::BatchOperation<Self::Blob>>,
+        operations: Vec<crate::BatchOperation<Self::AtomicBlob>>,
     ) -> Result<crate::Handle<()>, Error> {
         self.storage.start_apply(operations).await
     }
+}
 
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.storage.scan(partition).await
+impl crate::AtomicStorage for Context {
+    type AtomicBlob = <Storage as crate::AtomicStorage>::AtomicBlob;
+
+    async fn open_atomic_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::AtomicBlob, u64, u16), Error> {
+        self.storage
+            .open_atomic_versioned(partition, name, versions)
+            .await
     }
 }
 
@@ -1607,8 +1624,9 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        BatchOperation, Blob, Metrics as _, RemoveTarget, Resolver, Runner as _, Spawner as _,
-        Storage, Strategizer, Supervisor as _, deterministic, reschedule,
+        AtomicBlob as _, AtomicStorage as _, BatchOperation, BatchStorage as _, Blob, Metrics as _,
+        RemoveTarget, Resolver, Runner as _, Spawner as _, Storage, Strategizer, Supervisor as _,
+        WriteOptions, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
@@ -1777,7 +1795,9 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, data, WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
         });
@@ -1822,7 +1842,9 @@ mod tests {
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, data, WriteOptions::default())
+                .await
+                .unwrap();
         });
 
         // Recover the runtime
@@ -1832,6 +1854,38 @@ mod tests {
         executor.start(|context| async move {
             let (_, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_atomic_update_uses_blob_sync_frontier() {
+        let partition = "atomic_recovery";
+        let name = b"blob";
+        let (_, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let (blob, _) = context.open_atomic(partition, name).await.unwrap();
+                blob.update(0, b"old", 3).await.unwrap();
+                blob.sync().await.unwrap();
+
+                blob.update(0, b"new", 3).await.unwrap();
+                assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"new");
+            });
+
+        let (_, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                let (blob, len) = context.open_atomic(partition, name).await.unwrap();
+                assert_eq!(len, 3);
+                assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"old");
+
+                blob.update(0, b"new", 3).await.unwrap();
+                blob.update(3, b" tail", 8).await.unwrap();
+                blob.sync().await.unwrap();
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (blob, len) = context.open_atomic(partition, name).await.unwrap();
+            assert_eq!(len, 8);
+            assert_eq!(blob.read_at(0, 8).await.unwrap().coalesce(), b"new tail");
         });
     }
 
@@ -1855,27 +1909,23 @@ mod tests {
             deterministic::Runner::new(config).start_and_recover(|context| async move {
                 for partition in ["batch_blob", "batch_partition"] {
                     let (blob, _) = context.open(partition, b"name").await.unwrap();
-                    blob.write_at(0, partition.as_bytes()).await.unwrap();
+                    blob.write_at(0, partition.as_bytes(), WriteOptions::default())
+                        .await
+                        .unwrap();
                     blob.sync().await.unwrap();
                 }
-                let (resized, _) = context.open("batch_resize", b"name").await.unwrap();
-                resized.write_at(0, b"resize").await.unwrap();
+                let (resized, _) = context.open_atomic("batch_resize", b"name").await.unwrap();
+                resized
+                    .write_at(0, b"resize", WriteOptions::default())
+                    .await
+                    .unwrap();
                 resized.sync().await.unwrap();
-                let (updated, _) = context.open("batch_update", b"name").await.unwrap();
-                updated.write_at(0, b"update-old").await.unwrap();
-                updated.sync().await.unwrap();
 
                 let mut operations: Vec<BatchOperation<_>> =
                     removals().into_iter().map(Into::into).collect();
                 operations.push(BatchOperation::Resize {
                     blob: resized,
                     len: 3,
-                });
-                operations.push(BatchOperation::Update {
-                    blob: updated,
-                    offset: 2,
-                    data: b"NEW".into(),
-                    len: 5,
                 });
                 context.apply(operations).await
             });
@@ -1891,14 +1941,8 @@ mod tests {
                     context.scan("batch_partition").await.unwrap(),
                     vec![b"name".to_vec()]
                 );
-                let (resized, len) = context.open("batch_resize", b"name").await.unwrap();
+                let (resized, len) = context.open_atomic("batch_resize", b"name").await.unwrap();
                 assert_eq!(len, 6);
-                let (updated, len) = context.open("batch_update", b"name").await.unwrap();
-                assert_eq!(len, 10);
-                assert_eq!(
-                    updated.read_at(0, 10).await.unwrap().coalesce(),
-                    b"update-old"
-                );
                 *context.storage_fault_config().write() =
                     FaultConfig::default().batch_post_commit(1.0);
                 let mut operations: Vec<BatchOperation<_>> =
@@ -1906,12 +1950,6 @@ mod tests {
                 operations.push(BatchOperation::Resize {
                     blob: resized,
                     len: 3,
-                });
-                operations.push(BatchOperation::Update {
-                    blob: updated,
-                    offset: 2,
-                    data: b"NEW".into(),
-                    len: 5,
                 });
                 assert!(matches!(context.apply(operations).await, Err(Error::Io(_))));
             });
@@ -1922,11 +1960,8 @@ mod tests {
                 context.scan("batch_partition").await,
                 Err(Error::PartitionMissing(_))
             ));
-            let (_, resized_len) = context.open("batch_resize", b"name").await.unwrap();
+            let (_, resized_len) = context.open_atomic("batch_resize", b"name").await.unwrap();
             assert_eq!(resized_len, 3);
-            let (updated, updated_len) = context.open("batch_update", b"name").await.unwrap();
-            assert_eq!(updated_len, 5);
-            assert_eq!(updated.read_at(0, 5).await.unwrap().coalesce(), b"upNEW");
             let (_, blob_len) = context.open("batch_blob", b"name").await.unwrap();
             assert_eq!(blob_len, 0);
             let (_, partition_len) = context.open("batch_partition", b"name").await.unwrap();
@@ -2278,7 +2313,9 @@ mod tests {
         let (result, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
                 let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
-                blob.write_at(0, b"data".to_vec()).await.unwrap();
+                blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                    .await
+                    .unwrap();
                 blob.sync().await // This should fail due to fault injection
             });
 
@@ -2295,7 +2332,9 @@ mod tests {
             assert_eq!(len, 0, "unsynced data should be lost after recovery");
 
             // Now we can write and sync successfully
-            blob.write_at(0, b"recovered".to_vec()).await.unwrap();
+            blob.write_at(0, b"recovered".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync()
                 .await
                 .expect("sync should succeed with faults disabled");
@@ -2313,7 +2352,9 @@ mod tests {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
             // Initially no faults - sync should succeed
-            blob.write_at(0, b"initial".to_vec()).await.unwrap();
+            blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.expect("initial sync should succeed");
 
             // Enable sync faults dynamically
@@ -2321,7 +2362,9 @@ mod tests {
             storage_fault_cfg.write().sync_rate = Some(1.0);
 
             // Now sync should fail
-            blob.write_at(0, b"updated".to_vec()).await.unwrap();
+            blob.write_at(0, b"updated".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             let result = blob.sync().await;
             assert!(result.is_err(), "sync should fail with faults enabled");
 
@@ -2398,7 +2441,11 @@ mod tests {
                             let name = format!("task{i}_blob{j}");
                             if let Ok((blob, _)) = ctx.open("partition", name.as_bytes()).await {
                                 successes += 1;
-                                if blob.write_at(0, b"data".to_vec()).await.is_ok() {
+                                if blob
+                                    .write_at(0, b"data".to_vec(), WriteOptions::default())
+                                    .await
+                                    .is_ok()
+                                {
                                     successes += 1;
                                 }
                                 if blob.sync().await.is_ok() {

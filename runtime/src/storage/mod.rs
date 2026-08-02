@@ -10,8 +10,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
     /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
     ///   crash-durable.
-    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`; it needs admin and is skipped
-    ///   otherwise, so it is **not** crash-durable.
     ///
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
     /// >= 5.8. A missing `dir` is treated as success.
@@ -34,56 +32,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     "made storage filesystem durable at startup (syncfs)"
                 );
                 Ok(())
-            } else if #[cfg(unix)] {
+            } else {
                 // SAFETY: `sync` takes no arguments and cannot fail.
                 unsafe { libc::sync() };
                 tracing::debug!(
                     storage_directory = %dir.display(),
                     "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
-                );
-                Ok(())
-            } else if #[cfg(windows)] {
-                // Resolve the volume containing `dir` (e.g. `C:\...` -> `\\.\C:`). `sync_all` on a
-                // volume handle is `FlushFileBuffers`, which flushes every open file on the volume.
-                // Best-effort (see fn docs): opening the volume needs admin, so a failure (or a
-                // non-disk storage path) is logged, not fatal.
-                use std::path::{Component, Prefix};
-                let volume = dir.components().next().and_then(|component| match component {
-                    Component::Prefix(prefix) => match prefix.kind() {
-                        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
-                            Some(format!(r"\\.\{}:", drive as char))
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                });
-                let flushed = volume.as_deref().map(|volume| {
-                    std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(volume)
-                        .and_then(|handle| handle.sync_all())
-                });
-                match flushed {
-                    Some(Ok(())) => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        "made storage volume durable at startup (FlushFileBuffers)"
-                    ),
-                    Some(Err(e)) => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        error = %e,
-                        "best-effort volume flush skipped at startup; not crash-durable"
-                    ),
-                    None => tracing::debug!(
-                        storage_directory = %dir.display(),
-                        "unable to guarantee storage durability at startup"
-                    ),
-                }
-                Ok(())
-            } else {
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "no whole-filesystem durable flush on this platform; recovered-data durability not guaranteed"
                 );
                 Ok(())
             }
@@ -105,6 +59,8 @@ stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouri
 stability_scope!(BETA {
     pub mod metered;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) mod atomic;
     pub(crate) mod batch;
     #[cfg(not(target_arch = "wasm32"))]
     mod generation;
@@ -130,7 +86,8 @@ stability_scope!(BETA {
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::{
-        BatchOperation, Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, RemoveTarget, Storage,
+        AtomicBlob, BatchOperation, BatchStorage, Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+        RemoveTarget, Storage, WriteOptions,
     };
     use futures::FutureExt;
 
@@ -142,12 +99,6 @@ pub(crate) mod tests {
     {
         test_open_and_write(&storage).await;
         test_remove(&storage).await;
-        test_start_apply_is_self_driving(&storage).await;
-        test_apply_batch_dedup_and_subsumption(&storage).await;
-        test_apply_batch_mixed_success(&storage).await;
-        test_apply_batch_validates_atomically(&storage).await;
-        test_apply_batch_conflicts_are_atomic(&storage).await;
-        test_apply_batch_rejects_stale_handle(&storage).await;
         test_read_after_remove_blob(&storage).await;
         test_read_after_remove_partition(&storage).await;
         test_recreate_after_remove(&storage).await;
@@ -180,28 +131,83 @@ pub(crate) mod tests {
         test_read_at_buf_larger_capacity(&storage).await;
     }
 
+    /// Runs the batch-specific suite on an opt-in storage implementation.
+    pub(crate) async fn run_batch_storage_tests<S>(storage: S)
+    where
+        S: BatchStorage + Send + Sync + 'static,
+        S::AtomicBlob: Send + Sync,
+    {
+        test_start_apply_is_self_driving(&storage).await;
+        test_apply_batch_dedup_and_subsumption(&storage).await;
+        test_apply_batch_mixed_success(&storage).await;
+        test_apply_batch_publishes_two_pending_blobs(&storage).await;
+        test_apply_batch_carries_consecutive_publications(&storage).await;
+        test_apply_batch_carries_disjoint_publications(&storage).await;
+        test_apply_batch_validates_atomically(&storage).await;
+        test_apply_batch_conflicts_are_atomic(&storage).await;
+        test_apply_batch_rejects_stale_handle(&storage).await;
+    }
+
+    /// Runs atomic visibility and range semantics on a blob.
+    pub(crate) async fn run_atomic_blob_tests<B>(blob: B)
+    where
+        B: AtomicBlob,
+    {
+        blob.update(0, vec![IoBuf::from(b"ab"), IoBuf::from(b"cdef")], 6)
+            .await
+            .unwrap();
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
+
+        assert!(
+            blob.write_at(u64::MAX, b"x", WriteOptions::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
+
+        assert!(blob.update(4, b"x", 4).await.is_err());
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
+
+        blob.update(1, b"XY", 4).await.unwrap();
+        assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"aXYd");
+        assert!(blob.read_at(4, 1).await.is_err());
+
+        blob.update(2, Vec::<u8>::new(), 2).await.unwrap();
+        blob.update(4, b"z", 5).await.unwrap();
+        assert_eq!(
+            blob.read_at(0, 5).await.unwrap().coalesce(),
+            b"aX\0\0z",
+            "re-extending a shrunken blob must zero-fill the gap"
+        );
+    }
+
     /// Verify that a batch rejects a blob handle created by another instance of the backend.
     pub(crate) async fn run_storage_foreign_handle_test<S>(storage: &S, foreign_storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
     {
         let (local, _) = storage
-            .open("batch_foreign_handle", b"shared_name")
+            .open_atomic("batch_foreign_handle", b"shared_name")
             .await
             .unwrap();
-        local.write_at_sync(0, b"local").await.unwrap();
+        local.update(0, b"local", 5).await.unwrap();
+        local.sync().await.unwrap();
         let (victim, _) = storage
             .open("batch_foreign_victim", b"victim")
             .await
             .unwrap();
-        victim.write_at_sync(0, b"keep").await.unwrap();
-
-        let (foreign, _) = foreign_storage
-            .open("batch_foreign_handle", b"shared_name")
+        victim
+            .write_at(0, b"keep", WriteOptions::SYNC)
             .await
             .unwrap();
-        foreign.write_at_sync(0, b"foreign").await.unwrap();
+
+        let (foreign, _) = foreign_storage
+            .open_atomic("batch_foreign_handle", b"shared_name")
+            .await
+            .unwrap();
+        foreign.update(0, b"foreign", 7).await.unwrap();
+        foreign.sync().await.unwrap();
 
         let result = storage
             .apply(vec![
@@ -228,24 +234,6 @@ pub(crate) mod tests {
             b"foreign",
             "a rejected foreign resize must not mutate its source blob"
         );
-
-        let result = storage
-            .apply(vec![
-                BatchOperation::Remove(RemoveTarget::Blob {
-                    partition: "batch_foreign_victim".into(),
-                    name: b"victim".to_vec(),
-                }),
-                BatchOperation::Update {
-                    blob: foreign.clone(),
-                    offset: 0,
-                    data: b"x".into(),
-                    len: 1,
-                },
-            ])
-            .await;
-        assert!(matches!(result, Err(crate::Error::BlobMissing(..))));
-        assert_eq!(victim.read_at(0, 4).await.unwrap().coalesce(), b"keep");
-        assert_eq!(foreign.read_at(0, 7).await.unwrap().coalesce(), b"foreign");
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -257,7 +245,9 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         let read = blob.read_at(0, 11).await.unwrap();
 
         assert_eq!(
@@ -279,17 +269,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Single removes use the same idempotent batch path as multi-operation commits.
-        storage
-            .remove("partition", Some(b"test_blob"))
-            .await
-            .unwrap();
-        storage
-            .remove("missing_partition", Some(b"missing_blob"))
-            .await
-            .unwrap();
-        storage.remove("missing_partition", None).await.unwrap();
-
         let blobs = storage.scan("partition").await.unwrap();
         assert!(blobs.is_empty(), "Blob was not removed as expected");
     }
@@ -297,25 +276,27 @@ pub(crate) mod tests {
     /// Once intent is committed, aborting its observer does not cancel physical application.
     async fn test_start_apply_is_self_driving<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
     {
         storage
             .open("batch_start_generic", b"victim")
             .await
             .unwrap();
-        let (retained, _) = storage.open("batch_start_retained", b"blob").await.unwrap();
-        retained.write_at_sync(0, b"old bytes").await.unwrap();
+        let (retained, _) = storage
+            .open_atomic("batch_start_retained", b"blob")
+            .await
+            .unwrap();
+        retained.update(0, b"old bytes", 9).await.unwrap();
+        retained.sync().await.unwrap();
         let completion = storage
             .start_apply(vec![
                 BatchOperation::Remove(RemoveTarget::Blob {
                     partition: "batch_start_generic".into(),
                     name: b"victim".to_vec(),
                 }),
-                BatchOperation::Update {
+                BatchOperation::Resize {
                     blob: retained.clone(),
-                    offset: 0,
-                    data: b"new".into(),
                     len: 3,
                 },
             ])
@@ -331,41 +312,31 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(retained.read_at(0, 3).await.unwrap().coalesce(), b"new");
+        assert_eq!(retained.read_at(0, 3).await.unwrap().coalesce(), b"old");
+        assert!(retained.read_at(3, 1).await.is_err());
     }
 
     /// Duplicate operations are idempotent, and partition removals subsume child removals.
     async fn test_apply_batch_dedup_and_subsumption<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
     {
         storage.apply(Vec::new()).await.unwrap();
         storage.open("batch_set_a", b"one").await.unwrap();
         storage.open("batch_set_a", b"two").await.unwrap();
         storage.open("batch_set_a", b"keep").await.unwrap();
         storage.open("batch_set_b", b"victim").await.unwrap();
-        let (resized, _) = storage.open("batch_set_resize", b"blob").await.unwrap();
-        resized.write_at(0, b"abcdef").await.unwrap();
-        let (updated, _) = storage.open("batch_set_update", b"blob").await.unwrap();
-        updated.write_at(0, b"abcdef").await.unwrap();
+        let (resized, _) = storage
+            .open_atomic("batch_set_resize", b"blob")
+            .await
+            .unwrap();
+        resized.update(0, b"abcdef", 6).await.unwrap();
 
         let operations = vec![
             BatchOperation::Resize {
                 blob: resized.clone(),
                 len: 3,
-            },
-            BatchOperation::Update {
-                blob: updated.clone(),
-                offset: 1,
-                data: b"NEW".into(),
-                len: 4,
-            },
-            BatchOperation::Update {
-                blob: updated.clone(),
-                offset: 1,
-                data: b"NEW".into(),
-                len: 4,
             },
             BatchOperation::Remove(RemoveTarget::Blob {
                 partition: "batch_set_a".into(),
@@ -402,8 +373,6 @@ pub(crate) mod tests {
         assert!(storage.scan("batch_set_b").await.is_err());
         assert_eq!(resized.read_at(0, 3).await.unwrap().coalesce(), b"abc");
         assert!(resized.read_at(3, 1).await.is_err());
-        assert_eq!(updated.read_at(0, 4).await.unwrap().coalesce(), b"aNEW");
-        assert!(updated.read_at(4, 1).await.is_err());
 
         // Repeating the same canonical set succeeds after every removal target is absent.
         storage.apply(operations).await.unwrap();
@@ -412,19 +381,19 @@ pub(crate) mod tests {
     /// Pending blob contents, retained mutations, and removals commit together.
     async fn test_apply_batch_mixed_success<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
     {
+        let (published, _) = storage
+            .open_atomic("batch_mixed_publish", b"published")
+            .await
+            .unwrap();
+        published.update(0, b"published-value", 15).await.unwrap();
         let (resized, _) = storage
-            .open("batch_mixed_resize", b"resized")
+            .open_atomic("batch_mixed_resize", b"resized")
             .await
             .unwrap();
-        resized.write_at(0, b"pending bytes").await.unwrap();
-        let (updated, _) = storage
-            .open("batch_mixed_update", b"updated")
-            .await
-            .unwrap();
-        updated.write_at(0, b"update-old").await.unwrap();
+        resized.update(0, b"pending bytes", 13).await.unwrap();
         storage.open("batch_mixed_blob", b"victim").await.unwrap();
         storage
             .open("batch_mixed_partition", b"victim")
@@ -438,35 +407,33 @@ pub(crate) mod tests {
                     partition: "batch_mixed_blob".into(),
                     name: b"victim".to_vec(),
                 }),
+                BatchOperation::Publish(published.clone()),
                 BatchOperation::Resize {
                     blob: resized.clone(),
                     len: 7,
-                },
-                BatchOperation::Update {
-                    blob: updated.clone(),
-                    offset: 2,
-                    data: b"NEW".into(),
-                    len: 5,
                 },
                 BatchOperation::Remove(RemoveTarget::Partition("batch_mixed_partition".into())),
             ])
             .await
             .unwrap();
 
+        drop(published);
         drop(resized);
+        let (published, len) = storage
+            .open_atomic("batch_mixed_publish", b"published")
+            .await
+            .unwrap();
+        assert_eq!(len, 15);
+        assert_eq!(
+            published.read_at(0, 15).await.unwrap().coalesce(),
+            b"published-value"
+        );
         let (resized, len) = storage
-            .open("batch_mixed_resize", b"resized")
+            .open_atomic("batch_mixed_resize", b"resized")
             .await
             .unwrap();
         assert_eq!(len, 7);
         assert_eq!(resized.read_at(0, 7).await.unwrap().coalesce(), b"pending");
-        drop(updated);
-        let (updated, len) = storage
-            .open("batch_mixed_update", b"updated")
-            .await
-            .unwrap();
-        assert_eq!(len, 5);
-        assert_eq!(updated.read_at(0, 5).await.unwrap().coalesce(), b"upNEW");
         assert!(storage.scan("batch_mixed_blob").await.unwrap().is_empty());
         assert!(storage.scan("batch_mixed_partition").await.is_err());
         assert_eq!(
@@ -475,11 +442,155 @@ pub(crate) mod tests {
         );
     }
 
+    /// Two pending atomic blobs are published completely by one batch.
+    async fn test_apply_batch_publishes_two_pending_blobs<S>(storage: &S)
+    where
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let (first, _) = storage
+            .open_atomic("batch_publish_two", b"first")
+            .await
+            .unwrap();
+        first
+            .update(0, vec![IoBuf::from(b"atomic-"), IoBuf::from(b"first")], 12)
+            .await
+            .unwrap();
+        let (second, _) = storage
+            .open_atomic("batch_publish_two", b"second")
+            .await
+            .unwrap();
+        second
+            .update(
+                0,
+                vec![
+                    IoBuf::from(b"second"),
+                    IoBuf::from(b"-"),
+                    IoBuf::from(b"value"),
+                ],
+                12,
+            )
+            .await
+            .unwrap();
+
+        storage
+            .apply(vec![
+                BatchOperation::Publish(first.clone()),
+                BatchOperation::Publish(second.clone()),
+            ])
+            .await
+            .unwrap();
+
+        drop(first);
+        drop(second);
+        let (first, first_len) = storage
+            .open_atomic("batch_publish_two", b"first")
+            .await
+            .unwrap();
+        let (second, second_len) = storage
+            .open_atomic("batch_publish_two", b"second")
+            .await
+            .unwrap();
+        assert_eq!(first_len, 12);
+        assert_eq!(second_len, 12);
+        assert_eq!(
+            first.read_at(0, 12).await.unwrap().coalesce(),
+            b"atomic-first"
+        );
+        assert_eq!(
+            second.read_at(0, 12).await.unwrap().coalesce(),
+            b"second-value"
+        );
+    }
+
+    /// A later batch can durably supersede a still-authoritative prior decision.
+    async fn test_apply_batch_carries_consecutive_publications<S>(storage: &S)
+    where
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let (first, _) = storage.open_atomic("batch_carry", b"first").await.unwrap();
+        let (second, _) = storage.open_atomic("batch_carry", b"second").await.unwrap();
+
+        for suffix in *b"12" {
+            first
+                .write_at(0, vec![b'f', suffix], WriteOptions::default())
+                .await
+                .unwrap();
+            second
+                .write_at(0, vec![b's', suffix], WriteOptions::default())
+                .await
+                .unwrap();
+            storage
+                .apply(vec![
+                    BatchOperation::Publish(first.clone()),
+                    BatchOperation::Publish(second.clone()),
+                ])
+                .await
+                .unwrap();
+        }
+
+        drop(first);
+        drop(second);
+        let (first, first_len) = storage.open_atomic("batch_carry", b"first").await.unwrap();
+        let (second, second_len) = storage.open_atomic("batch_carry", b"second").await.unwrap();
+        assert_eq!(first_len, 2);
+        assert_eq!(second_len, 2);
+        assert_eq!(first.read_at(0, 2).await.unwrap().coalesce(), b"f2");
+        assert_eq!(second.read_at(0, 2).await.unwrap().coalesce(), b"s2");
+    }
+
+    /// A retained handle can rejoin after a disjoint decision materializes its prior root.
+    async fn test_apply_batch_carries_disjoint_publications<S>(storage: &S)
+    where
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let (first, _) = storage
+            .open_atomic("batch_carry_disjoint", b"first")
+            .await
+            .unwrap();
+        let (second, _) = storage
+            .open_atomic("batch_carry_disjoint", b"second")
+            .await
+            .unwrap();
+
+        first
+            .write_at(0, b"a1", WriteOptions::default())
+            .await
+            .unwrap();
+        storage
+            .apply(vec![BatchOperation::Publish(first.clone())])
+            .await
+            .unwrap();
+
+        second
+            .write_at(0, b"b1", WriteOptions::default())
+            .await
+            .unwrap();
+        storage
+            .apply(vec![BatchOperation::Publish(second.clone())])
+            .await
+            .unwrap();
+
+        first
+            .write_at(0, b"a2", WriteOptions::default())
+            .await
+            .unwrap();
+        storage
+            .apply(vec![BatchOperation::Publish(first.clone())])
+            .await
+            .unwrap();
+
+        assert_eq!(first.read_at(0, 2).await.unwrap().coalesce(), b"a2");
+        assert_eq!(second.read_at(0, 2).await.unwrap().coalesce(), b"b1");
+    }
+
     /// A bad late operation rejects the entire batch before any valid operation is applied.
     async fn test_apply_batch_validates_atomically<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
     {
         storage.open("batch_validation", b"survivor").await.unwrap();
         let result = storage
@@ -502,19 +613,23 @@ pub(crate) mod tests {
     /// Conflicting blob mutations reject the entire batch without changing blob state.
     async fn test_apply_batch_conflicts_are_atomic<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
     {
         let (resized, _) = storage
-            .open("batch_conflict_resize", b"blob")
+            .open_atomic("batch_conflict_resize", b"blob")
             .await
             .unwrap();
-        resized.write_at_sync(0, b"abcdef").await.unwrap();
+        resized.update(0, b"abcdef", 6).await.unwrap();
+        resized.sync().await.unwrap();
         let (victim, _) = storage
             .open("batch_conflict_victim", b"victim")
             .await
             .unwrap();
-        victim.write_at_sync(0, b"keep").await.unwrap();
+        victim
+            .write_at(0, b"keep", WriteOptions::SYNC)
+            .await
+            .unwrap();
 
         let removal = BatchOperation::Remove(RemoveTarget::Blob {
             partition: "batch_conflict_victim".into(),
@@ -557,34 +672,13 @@ pub(crate) mod tests {
                     blob: resized.clone(),
                     len: 4,
                 },
-                BatchOperation::Update {
-                    blob: resized.clone(),
-                    offset: 1,
-                    data: b"new".into(),
-                    len: 4,
-                },
-            ],
-            vec![
-                removal.clone(),
-                BatchOperation::Update {
-                    blob: resized.clone(),
-                    offset: 1,
-                    data: b"new".into(),
-                    len: 4,
-                },
-                BatchOperation::Update {
-                    blob: resized.clone(),
-                    offset: 0,
-                    data: b"old".into(),
-                    len: 4,
-                },
+                BatchOperation::Publish(resized.clone()),
             ],
             vec![
                 removal,
-                BatchOperation::Update {
+                BatchOperation::Publish(resized.clone()),
+                BatchOperation::Resize {
                     blob: resized.clone(),
-                    offset: 2,
-                    data: b"new".into(),
                     len: 4,
                 },
             ],
@@ -606,11 +700,15 @@ pub(crate) mod tests {
     /// An identical duplicate cannot hide a stale handle; rejection leaves the batch unchanged.
     async fn test_apply_batch_rejects_stale_handle<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
     {
-        let (old, _) = storage.open("batch_stale", b"shared_name").await.unwrap();
-        old.write_at_sync(0, b"old").await.unwrap();
+        let (old, _) = storage
+            .open_atomic("batch_stale", b"shared_name")
+            .await
+            .unwrap();
+        old.update(0, b"old", 3).await.unwrap();
+        old.sync().await.unwrap();
         storage
             .apply(vec![BatchOperation::Remove(RemoveTarget::Blob {
                 partition: "batch_stale".into(),
@@ -621,11 +719,18 @@ pub(crate) mod tests {
 
         assert_eq!(old.read_at(0, 3).await.unwrap().coalesce(), b"old");
 
-        let (new, size) = storage.open("batch_stale", b"shared_name").await.unwrap();
+        let (new, size) = storage
+            .open_atomic("batch_stale", b"shared_name")
+            .await
+            .unwrap();
         assert_eq!(size, 0);
-        new.write_at_sync(0, b"new").await.unwrap();
+        new.update(0, b"new", 3).await.unwrap();
+        new.sync().await.unwrap();
         let (victim, _) = storage.open("batch_stale_victim", b"victim").await.unwrap();
-        victim.write_at_sync(0, b"keep").await.unwrap();
+        victim
+            .write_at(0, b"keep", WriteOptions::SYNC)
+            .await
+            .unwrap();
 
         let result = storage
             .apply(vec![
@@ -633,16 +738,12 @@ pub(crate) mod tests {
                     partition: "batch_stale_victim".into(),
                     name: b"victim".to_vec(),
                 }),
-                BatchOperation::Update {
+                BatchOperation::Resize {
                     blob: new.clone(),
-                    offset: 0,
-                    data: b"x".into(),
                     len: 1,
                 },
-                BatchOperation::Update {
+                BatchOperation::Resize {
                     blob: old.clone(),
-                    offset: 0,
-                    data: b"x".into(),
                     len: 1,
                 },
             ])
@@ -662,7 +763,9 @@ pub(crate) mod tests {
     {
         let (blob, _) = storage.open("read_after_remove", b"by_name").await.unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         storage
@@ -692,7 +795,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).rev().collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         storage
@@ -719,7 +824,9 @@ pub(crate) mod tests {
             .open("recreate_after_remove", b"name")
             .await
             .unwrap();
-        old.write_at(0, b"old contents").await.unwrap();
+        old.write_at(0, b"old contents", WriteOptions::default())
+            .await
+            .unwrap();
         old.sync().await.unwrap();
 
         storage
@@ -733,7 +840,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(len, 0, "recreated blob must start empty");
-        new.write_at(0, b"new contents").await.unwrap();
+        new.write_at(0, b"new contents", WriteOptions::default())
+            .await
+            .unwrap();
         new.sync().await.unwrap();
 
         let old_read = old.read_at(0, 12).await.unwrap();
@@ -757,7 +866,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
-        blob.write_at(0, data.clone()).await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read through the handle before removal so the removal crosses an actively-used handle.
         let read = blob.read_at(0, 16).await.unwrap();
@@ -791,7 +902,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
-        first.write_at(0, data.clone()).await.unwrap();
+        first
+            .write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         first.sync().await.unwrap();
         let second = first.clone();
         // Opened independently: a distinct handle to the same blob, not a clone.
@@ -834,7 +948,9 @@ pub(crate) mod tests {
             let (blob, len) = storage.open(partition, b"name").await.unwrap();
             assert_eq!(len, 0, "each recreation must start empty");
             let data = vec![generation; 32];
-            blob.write_at(0, data.clone()).await.unwrap();
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             storage.remove(partition, Some(b"name")).await.unwrap();
             handles.push((blob, data));
@@ -843,7 +959,9 @@ pub(crate) mod tests {
         // Churn the name further with the removed generations still held.
         for _ in 0..5 {
             let (blob, _) = storage.open(partition, b"name").await.unwrap();
-            blob.write_at(0, vec![0xFF; 8]).await.unwrap();
+            blob.write_at(0, vec![0xFF; 8], WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
             storage.remove(partition, Some(b"name")).await.unwrap();
@@ -868,16 +986,25 @@ pub(crate) mod tests {
     {
         let partition = "read_after_remove_partition_multi";
         let (small_a, _) = storage.open(partition, b"a").await.unwrap();
-        small_a.write_at(0, b"alpha").await.unwrap();
+        small_a
+            .write_at(0, b"alpha", WriteOptions::default())
+            .await
+            .unwrap();
         small_a.sync().await.unwrap();
         // Deliberately never synced: partition removal must not lose unsynced bytes either.
         let (small_b, _) = storage.open(partition, b"b").await.unwrap();
-        small_b.write_at(0, b"bravo").await.unwrap();
+        small_b
+            .write_at(0, b"bravo", WriteOptions::default())
+            .await
+            .unwrap();
 
         const LARGE_LEN: usize = 1 << 20;
         let (large, _) = storage.open(partition, b"large").await.unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(LARGE_LEN).collect();
-        large.write_at(0, data.clone()).await.unwrap();
+        large
+            .write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
         large.sync().await.unwrap();
 
         storage.remove(partition, None).await.unwrap();
@@ -900,7 +1027,10 @@ pub(crate) mod tests {
         // Recreating the partition and a same-named blob yields an independent blob.
         let (fresh, len) = storage.open(partition, b"a").await.unwrap();
         assert_eq!(len, 0, "recreated blob must start empty");
-        fresh.write_at(0, b"fresh").await.unwrap();
+        fresh
+            .write_at(0, b"fresh", WriteOptions::default())
+            .await
+            .unwrap();
         fresh.sync().await.unwrap();
         let read = small_a.read_at(0, 5).await.unwrap();
         assert_eq!(
@@ -944,13 +1074,15 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
-        blob.write_at(0, b"concurrent write").await.unwrap();
+        blob.write_at(0, b"concurrent write", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read and write concurrently
         let write_task = tokio::spawn({
             let blob = blob.clone();
             async move {
-                blob.write_at(0, IoBuf::from(b"concurrent write"))
+                blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default())
                     .await
                     .unwrap();
             }
@@ -980,7 +1112,9 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
-        blob.write_at(0, large_data.clone()).await.unwrap();
+        blob.write_at(0, large_data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
 
         let read = blob.read_at(0, 10 * 1024 * 1024).await.unwrap().coalesce();
 
@@ -999,10 +1133,14 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(0, b"initial data").await.unwrap();
+        blob.write_at(0, b"initial data", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Overwrite part of the data
-        blob.write_at(8, b"overwrite").await.unwrap();
+        blob.write_at(8, b"overwrite", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(0, 17).await.unwrap().coalesce();
@@ -1025,7 +1163,9 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write some data
-        blob.write_at(0, b"hello").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Attempt to read beyond the written data
         let result = blob.read_at(6, 10).await;
@@ -1055,7 +1195,9 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write data at a large offset
-        blob.write_at(10_000, b"offset data").await.unwrap();
+        blob.write_at(10_000, b"offset data", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(10_000, 11).await.unwrap().coalesce();
@@ -1074,7 +1216,9 @@ pub(crate) mod tests {
             .unwrap();
 
         // Empty writes should be accepted without extending the blob.
-        blob.write_at_sync(1024, Vec::<u8>::new()).await.unwrap();
+        blob.write_at(1024, Vec::<u8>::new(), WriteOptions::SYNC)
+            .await
+            .unwrap();
         drop(blob);
 
         let (blob, len) = storage
@@ -1084,10 +1228,16 @@ pub(crate) mod tests {
         assert_eq!(len, 0);
 
         // Non-empty writes must be visible after reopen without a separate sync call.
-        blob.write_at_sync(0, b"hello").await.unwrap();
-        blob.write_at_sync(5, vec![IoBuf::from(b" "), IoBuf::from(b"world")])
+        blob.write_at(0, b"hello", WriteOptions::SYNC)
             .await
             .unwrap();
+        blob.write_at(
+            5,
+            vec![IoBuf::from(b" "), IoBuf::from(b"world")],
+            WriteOptions::SYNC,
+        )
+        .await
+        .unwrap();
         drop(blob);
 
         // Reopening a blob in the same process may still observe dirty kernel
@@ -1110,7 +1260,9 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         blob.start_sync().await.await.unwrap();
         drop(blob);
 
@@ -1133,10 +1285,14 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(0, b"first").await.unwrap();
+        blob.write_at(0, b"first", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Append data
-        blob.write_at(5, b"second").await.unwrap();
+        blob.write_at(5, b"second", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(0, 11).await.unwrap().coalesce();
@@ -1149,13 +1305,13 @@ pub(crate) mod tests {
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
-        let test = |partition, bufs: Vec<IoBuf>, context| async move {
+        let test = |partition, bufs: Vec<IoBuf>, options, context| async move {
             // Coalesce the input to test later when reading
             let expected = IoBufs::from(bufs.clone()).coalesce();
             let (blob, _) = storage.open(partition, b"test_blob").await.unwrap();
 
             // Write data
-            blob.write_at(0, bufs).await.unwrap();
+            blob.write_at(0, bufs, options).await.unwrap();
 
             // Read back the data
             let read = blob.read_at(0, expected.len()).await.unwrap().coalesce();
@@ -1169,6 +1325,7 @@ pub(crate) mod tests {
                 IoBuf::from(b" "),
                 IoBuf::from(b"world"),
             ],
+            WriteOptions::default(),
             "Vectored write content is incorrect",
         )
         .await;
@@ -1182,20 +1339,30 @@ pub(crate) mod tests {
                 IoBuf::from(b"def"),
                 IoBuf::default(),
             ],
+            WriteOptions::default(),
             "Vectored write with empties is incorrect",
         )
         .await;
 
-        let chunk_count = 128;
+        // Both filesystem backends cap one submission at 1,024 iovecs.
+        let chunk_count = 1_025;
         let mut bufs = Vec::with_capacity(chunk_count);
         for i in 0..chunk_count {
-            bufs.push(IoBuf::from(vec![i as u8; i]));
+            bufs.push(IoBuf::from(vec![i as u8]));
         }
 
         test(
             "test_vectored_write_many_chunks",
-            bufs,
+            bufs.clone(),
+            WriteOptions::default(),
             "Vectored write over batch size is incorrect",
+        )
+        .await;
+        test(
+            "test_vectored_sync_write_many_chunks",
+            bufs,
+            WriteOptions::SYNC,
+            "Synchronized vectored write over batch size is incorrect",
         )
         .await;
     }
@@ -1219,7 +1386,9 @@ pub(crate) mod tests {
         let expected = IoBufs::from(bufs.clone()).coalesce();
 
         // Write vectored data at a large offset
-        blob.write_at(5_000, bufs).await.unwrap();
+        blob.write_at(5_000, bufs, WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob
@@ -1248,8 +1417,12 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
-        blob.write_at(0, b"first").await.unwrap();
-        blob.write_at(10, b"second").await.unwrap();
+        blob.write_at(0, b"first", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(10, b"second", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(0, 5).await.unwrap().coalesce();
@@ -1276,9 +1449,13 @@ pub(crate) mod tests {
 
         // Write data in chunks
         for i in 0..num_chunks {
-            blob.write_at((i * chunk_size) as u64, data.clone())
-                .await
-                .unwrap();
+            blob.write_at(
+                (i * chunk_size) as u64,
+                data.clone(),
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
         }
 
         // Read back the data in chunks
@@ -1330,8 +1507,12 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write overlapping data
-        blob.write_at(0, b"overlap").await.unwrap();
-        blob.write_at(4, b"map").await.unwrap();
+        blob.write_at(0, b"overlap", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(4, b"map", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Read back the data
         let read = blob.read_at(0, 7).await.unwrap().coalesce();
@@ -1350,7 +1531,9 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Write some data
-            blob.write_at(0, b"hello world").await.unwrap();
+            blob.write_at(0, b"hello world", WriteOptions::default())
+                .await
+                .unwrap();
 
             // Resize the blob
             blob.resize(5).await.unwrap();
@@ -1488,7 +1671,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(size, 0);
-        blob.write_at(0, b"hello world".to_vec()).await.unwrap();
+        blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         let read = blob.read_at(0, 11).await.unwrap().coalesce();
         assert_eq!(read.as_ref(), b"hello world");
@@ -1528,7 +1713,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
 
         // read_at with len=0 should succeed and return empty
         let output = blob.read_at(0, 0).await.unwrap();
@@ -1552,7 +1739,9 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write test data
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Test with single buffer - verify same buffer is returned
         let input_buf = IoBufMut::zeroed(11);
@@ -1632,7 +1821,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Single buffer with capacity 5, request 11 bytes
         let buf = IoBufMut::with_capacity(5);
@@ -1666,7 +1857,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         // Buffer with capacity 64, request only 11 bytes
         let buf = IoBufMut::with_capacity(64);

@@ -407,16 +407,14 @@ impl crate::Runner for Runner {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
-        // Make any storage a prior process left in the page cache crash-durable before we open it,
-        // so the data read during init is durable.
+        // Make prior page-cache state durable before recovery reads coordinator or participant
+        // data. Recovery then durably resolves any committed namespace batch before storage opens.
         if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
             panic!(
                 "failed to sync storage filesystem at startup ({}): {e}",
                 self.cfg.storage_directory.display()
             );
         }
-
-        // Resolve any committed namespace batch before storage is exposed.
         if let Err(e) = crate::storage::batch::recover(&self.cfg.storage_directory) {
             panic!(
                 "failed to recover storage namespace at startup ({}): {e}",
@@ -791,8 +789,8 @@ impl crate::Network for Context {
 
 impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
-        // Uses the host's DNS configuration (e.g. /etc/resolv.conf on Unix,
-        // registry on Windows). This delegates to the system's libc resolver.
+        // Uses the host's DNS configuration (e.g. /etc/resolv.conf). This delegates to the
+        // system's libc resolver.
         //
         // The `:0` port is required by lookup_host's API but is not used
         // for DNS resolution.
@@ -838,15 +836,32 @@ impl crate::Storage for Context {
         self.storage.remove(partition, name).await
     }
 
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.storage.scan(partition).await
+    }
+}
+
+impl crate::BatchStorage for Context {
     async fn start_apply(
         &self,
-        operations: Vec<crate::BatchOperation<Self::Blob>>,
+        operations: Vec<crate::BatchOperation<Self::AtomicBlob>>,
     ) -> Result<crate::Handle<()>, Error> {
         self.storage.start_apply(operations).await
     }
+}
 
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.storage.scan(partition).await
+impl crate::AtomicStorage for Context {
+    type AtomicBlob = <Storage as crate::AtomicStorage>::AtomicBlob;
+
+    async fn open_atomic_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::AtomicBlob, u64, u16), Error> {
+        self.storage
+            .open_atomic_versioned(partition, name, versions)
+            .await
     }
 }
 
@@ -940,31 +955,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn test_startup_flush_survives_restart() {
-        use crate::{Blob as _, Runner as _, Storage as _};
-
-        // Write and sync a blob, drop the runtime, then reopen the same storage directory in a new
-        // runtime. `sync` runs on startup and reads the blob back.
-        // Confirms the startup flush path runs and storage survives a restart.
-        let cfg = Config::new();
-        let dir = cfg.storage_directory().clone();
-        Runner::new(cfg).start(|context| async move {
-            let (blob, _) = context.open("test", b"blob").await.unwrap();
-            blob.write_at(0, vec![1u8, 2, 3, 4]).await.unwrap();
-            blob.sync().await.unwrap();
-        });
-        let reopened_len = Runner::new(Config::new().with_storage_directory(dir.clone())).start(
-            |context| async move {
-                let (_, len) = context.open("test", b"blob").await.unwrap();
-                len
-            },
-        );
-        assert_eq!(reopened_len, 4);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[test]
     fn test_startup_recovers_committed_batch_before_user_code() {
         let cfg = Config::new();
@@ -975,10 +965,8 @@ mod tests {
         std::fs::create_dir_all(&beta).unwrap();
         let removed_blob = alpha.join(commonware_formatting::hex(b"remove"));
         let kept_blob = alpha.join(commonware_formatting::hex(b"keep"));
-        let updated_blob = alpha.join(commonware_formatting::hex(b"update"));
         std::fs::write(&removed_blob, b"remove").unwrap();
         std::fs::write(&kept_blob, b"keep").unwrap();
-        std::fs::write(&updated_blob, b"update-old").unwrap();
         std::fs::write(beta.join(commonware_formatting::hex(b"remove")), b"remove").unwrap();
 
         let operations = crate::storage::batch::canonicalize_operations(vec![
@@ -987,13 +975,6 @@ mod tests {
                 partition: "alpha".into(),
                 name: b"remove".to_vec(),
             }),
-            crate::storage::batch::Operation::Update {
-                partition: "alpha".into(),
-                name: b"update".to_vec(),
-                offset: 2,
-                data: b"NEW".into(),
-                len: 5,
-            },
         ])
         .unwrap();
         assert!(
@@ -1006,7 +987,6 @@ mod tests {
             assert!(!removed_blob.exists());
             assert!(!checked_root.join("beta").exists());
             assert!(kept_blob.exists());
-            assert_eq!(std::fs::read(updated_blob).unwrap(), b"upNEW");
         });
         let _ = std::fs::remove_dir_all(root);
     }

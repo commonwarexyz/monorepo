@@ -78,7 +78,7 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
-    /// A namespace target to remove with [`Storage::apply`].
+    /// A namespace target to remove with [`BatchStorage::apply`].
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum RemoveTarget {
         /// Remove one blob from a partition.
@@ -92,27 +92,18 @@ stability_scope!(BETA {
         Partition(String),
     }
 
-    /// An operation in a durable [`Storage::apply`] batch.
+    /// An operation in a durable [`BatchStorage::apply`] batch.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum BatchOperation<B> {
         /// Remove an exact namespace entry.
         Remove(RemoveTarget),
-        /// Resize a retained blob to `len` bytes.
+        /// Publish pending updates to a retained atomic blob.
+        Publish(B),
+        /// Resize a retained atomic blob to `len` bytes.
         Resize {
-            /// Current blob handle to resize.
+            /// Current atomic blob handle to resize.
             blob: B,
             /// New logical blob length in bytes.
-            len: u64,
-        },
-        /// Write `data` at `offset` and resize a retained blob to `len` bytes.
-        Update {
-            /// Current blob handle to update.
-            blob: B,
-            /// Logical byte offset at which to write `data`.
-            offset: u64,
-            /// Bytes to write before applying the final length.
-            data: IoBuf,
-            /// Final logical blob length in bytes.
             len: u64,
         },
     }
@@ -674,9 +665,7 @@ stability_scope!(BETA {
         /// Multiple instances of the same blob can be opened concurrently, however,
         /// writing to the same blob concurrently may lead to undefined behavior.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists). On
-        /// platforms without directory sync (e.g. Windows), the durability of the blob's
-        /// name is best-effort.
+        /// An Ok result indicates the blob is durably created (or already exists).
         ///
         /// # Versions
         ///
@@ -685,8 +674,9 @@ stability_scope!(BETA {
         ///
         /// # Layout
         ///
-        /// New blobs are created with the latest header layout. Reopening an existing blob
-        /// honors the layout recorded in its header.
+        /// New blobs use the flat compatibility layout. Reopening an existing blob honors the
+        /// layout recorded in its header, including blobs created through
+        /// [`AtomicStorage::open_atomic_versioned`].
         ///
         /// # Returns
         ///
@@ -701,7 +691,6 @@ stability_scope!(BETA {
         /// Remove a blob from a given partition.
         ///
         /// If no `name` is provided, the entire partition is removed.
-        /// Removing a target that does not exist succeeds.
         ///
         /// An Ok result indicates the blob is durably removed.
         ///
@@ -721,18 +710,63 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: Option<&[u8]>,
-        ) -> impl Future<Output = Result<(), Error>> + Send {
-            let target = name.map_or_else(
-                || RemoveTarget::Partition(partition.to_string()),
-                |name| RemoveTarget::Blob {
-                    partition: partition.to_string(),
-                    name: name.to_vec(),
-                },
-            );
-            self.apply(vec![target.into()])
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Return all blobs in a given partition.
+        fn scan(&self, partition: &str)
+        -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+    }
+
+    /// Opt-in interface for opening blobs that support crash-atomic updates.
+    ///
+    /// Ordinary [`Storage::open`] and [`Storage::open_versioned`] retain the flat blob layout and
+    /// behavior used by runtimes that do not opt into this capability. Atomic blobs use a distinct
+    /// log-structured layout. Each update writes its payload once to shadow storage and becomes
+    /// immediately visible; repeated overwrites in one unsynced epoch may reuse a shadow slot that
+    /// no committed root references. [`Blob::sync`] first makes the payload and self-contained
+    /// checkpoint durable, then publishes a small root record. Recovery exposes either the
+    /// preceding synced epoch or the complete new epoch while reading only root and checkpoint
+    /// metadata, never payload bytes or historical records. A failed or canceled mutation after
+    /// physical I/O admission poisons that open generation.
+    pub trait AtomicStorage: Storage {
+        /// Blob type returned by atomic opens.
+        type AtomicBlob: AtomicBlob;
+
+        /// [`AtomicStorage::open_atomic_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only
+        /// accepted blob version.
+        fn open_atomic(
+            &self,
+            partition: &str,
+            name: &[u8],
+        ) -> impl Future<Output = Result<(Self::AtomicBlob, u64), Error>> + Send {
+            async move {
+                let (blob, size, _) = self
+                    .open_atomic_versioned(
+                        partition,
+                        name,
+                        DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
+                    )
+                    .await?;
+                Ok((blob, size))
+            }
         }
 
-        /// Start applying removals and retained-blob mutations as one durable batch.
+        /// Open an existing atomic blob or create a new one, returning its logical length and
+        /// application-owned blob version.
+        ///
+        /// A blob previously created through ordinary [`Storage`] methods is not converted in
+        /// place. Implementations return an error rather than rewriting its format implicitly.
+        fn open_atomic_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> impl Future<Output = Result<(Self::AtomicBlob, u64, u16), Error>> + Send;
+    }
+
+    /// Opt-in interface for publishing atomic blobs and applying namespace mutations atomically.
+    pub trait BatchStorage: AtomicStorage {
+        /// Start publishing atomic blobs and applying removals and resizes as one durable batch.
         ///
         /// A mutated handle must belong to this storage instance and still refer to the current
         /// blob at its partition and name. Missing mutation targets fail the batch. Each blob may
@@ -743,32 +777,76 @@ stability_scope!(BETA {
         ///
         /// If this method returns `Ok`, the entire batch is durably committed and will finish
         /// applying even if the returned handle is dropped or aborted. Awaiting the handle waits
-        /// until every operation is durably applied. A conflicting namespace operation waits for
-        /// the batch to finish. Rejecting an invalid batch leaves every target unchanged. Other
-        /// errors, or cancellation of this future, may leave the outcome indeterminate; only `Ok`
-        /// proves the batch is durably committed.
+        /// until the committed logical state is active and any required namespace effects finish.
+        /// A conflicting namespace operation waits for the batch to finish. Rejecting an invalid
+        /// batch leaves every target unchanged. Other errors, or cancellation of this future, may
+        /// leave the outcome indeterminate; only `Ok` proves the batch is durably committed.
         ///
-        /// A mutation also makes prior writes through its blob handle durable. A resize preserves
-        /// existing bytes below `len` and zero-fills an extension. An update writes `data` at
-        /// `offset` and sets the blob length to `len`; the written range must fit within that
-        /// length. Callers must not access a mutated blob until the handle completes. Operations
-        /// on disjoint, already-open blobs may proceed concurrently.
+        /// Publishing or resizing a blob makes its pending updates durable. A resize preserves
+        /// existing bytes below `len` and zero-fills an extension. Once this method returns `Ok`,
+        /// retained participant handles may begin their next pending epoch; implementations
+        /// serialize that access until the committed in-memory epoch is active. Implementations may
+        /// retain the durable batch decision while participant roots are folded into a later batch;
+        /// reopening or performing a conflicting non-batch operation completes that bounded repair
+        /// transparently. Operations on disjoint, already-open blobs may proceed concurrently.
         fn start_apply(
             &self,
-            operations: Vec<BatchOperation<Self::Blob>>,
+            operations: Vec<BatchOperation<Self::AtomicBlob>>,
         ) -> impl Future<Output = Result<Handle<()>, Error>> + Send;
 
-        /// Apply removals and retained-blob mutations as one durable batch.
+        /// Publish atomic blobs and apply removals and resizes as one durable batch.
         fn apply(
             &self,
-            operations: Vec<BatchOperation<Self::Blob>>,
+            operations: Vec<BatchOperation<Self::AtomicBlob>>,
         ) -> impl Future<Output = Result<(), Error>> + Send {
             async move { self.start_apply(operations).await?.await }
         }
+    }
 
-        /// Return all blobs in a given partition.
-        fn scan(&self, partition: &str)
-        -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+    /// Options that alter one [`Blob::write_at`] operation.
+    ///
+    /// [`WriteOptions::default`] applies no options.
+    /// Combine options with `|`, such as `WriteOptions::SYNC | WriteOptions::DONT_CACHE`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct WriteOptions(u8);
+
+    impl WriteOptions {
+        /// Durably persist the submitted bytes before returning.
+        ///
+        /// This is not a durability barrier for earlier operations.
+        pub const SYNC: Self = Self(1 << 0);
+
+        /// Advise that the submitted bytes need not remain in the OS page cache.
+        ///
+        /// This is a best-effort performance hint for callers that maintain their own cache.
+        /// Implementations may ignore it. It does not change visibility or durability.
+        pub const DONT_CACHE: Self = Self(1 << 1);
+
+        /// Return whether all of `options` are set.
+        #[must_use]
+        pub const fn contains(self, options: Self) -> bool {
+            self.0 & options.0 == options.0
+        }
+
+        /// Return these options with `options` cleared.
+        #[must_use]
+        pub const fn without(self, options: Self) -> Self {
+            Self(self.0 & !options.0)
+        }
+    }
+
+    impl std::ops::BitOr for WriteOptions {
+        type Output = Self;
+
+        fn bitor(self, rhs: Self) -> Self::Output {
+            Self(self.0 | rhs.0)
+        }
+    }
+
+    impl std::ops::BitOrAssign for WriteOptions {
+        fn bitor_assign(&mut self, rhs: Self) {
+            self.0 |= rhs.0;
+        }
     }
 
     /// Interface to read and write to a blob.
@@ -819,23 +897,17 @@ stability_scope!(BETA {
             len: usize,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Write `bufs` to the blob at the given offset.
+        /// Write `bufs` to the blob at the given offset with composable [`WriteOptions`].
+        ///
+        /// With [`WriteOptions::SYNC`], the submitted bytes are durably persisted before this
+        /// operation returns. This is not a durability barrier for previous operations: earlier
+        /// writes without [`WriteOptions::SYNC`], earlier [`Blob::resize`] calls, and earlier
+        /// [`AtomicBlob::update`] calls require [`Blob::sync`] to become durable.
         fn write_at(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
-
-        /// Write `bufs` to the blob at the given offset and durably persist that write.
-        ///
-        /// This is not a durability barrier for previous operations. When it completes,
-        /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
-        /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
-        /// durable.
-        fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Resize the blob to the given length.
@@ -852,6 +924,36 @@ stability_scope!(BETA {
         /// Awaiting this future waits until the sync has started. Awaiting the returned
         /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
+    }
+
+    /// Opt-in interface for atomic, immediately visible blob updates.
+    pub trait AtomicBlob: Blob {
+        /// Atomically write `data` at `offset` and set the blob length to `len`.
+        ///
+        /// Bytes outside the written range are preserved up to `len`, and extending the blob
+        /// zero-fills any gap. On success, the data and final length are visible as one update:
+        /// reads cannot observe only part of either change.
+        ///
+        /// This operation does not independently guarantee durability. A subsequent successful
+        /// [`Blob::sync`] or [`Blob::start_sync`] makes this update, and all earlier pending blob
+        /// operations, durable. An implementation may persist pending updates earlier, including
+        /// while fulfilling [`WriteOptions::SYNC`] for a later write, but callers must not rely on
+        /// that. Before the guaranteed frontier, recovery may discard the update but must not
+        /// expose a partial update. Implementations may roll back every pending operation since
+        /// the previous successful blob sync.
+        ///
+        /// # Data Range
+        ///
+        /// The byte length of `data` must be representable as a `u64`, `offset + data.len()` must
+        /// not overflow, and the half-open written range must end at or before `len`. Empty data is
+        /// permitted when `offset <= len`. An invalid range must return an error without changing
+        /// the visible blob contents or length.
+        fn update(
+            &self,
+            offset: u64,
+            data: impl Into<IoBufs> + Send,
+            len: u64,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
@@ -949,6 +1051,23 @@ mod tests {
         task::{Context as TContext, Poll, Waker},
     };
     use utils::reschedule;
+
+    #[test]
+    fn test_write_options_compose() {
+        let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
+        let mut assigned = WriteOptions::SYNC;
+        assigned |= WriteOptions::DONT_CACHE;
+        assert!(options.contains(WriteOptions::SYNC));
+        assert!(options.contains(WriteOptions::DONT_CACHE));
+        assert_eq!(assigned, options);
+        assert_eq!(
+            options.without(WriteOptions::SYNC),
+            WriteOptions::DONT_CACHE
+        );
+        let default = WriteOptions::default();
+        assert!(!default.contains(WriteOptions::SYNC));
+        assert!(!default.contains(WriteOptions::DONT_CACHE));
+    }
 
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
@@ -1333,7 +1452,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 
@@ -1416,10 +1535,10 @@ mod tests {
             // Write data at different offsets
             let data1 = b"Hello";
             let data2 = b"World";
-            blob.write_at(0, data1)
+            blob.write_at(0, data1, WriteOptions::default())
                 .await
                 .expect("Failed to write data1");
-            blob.write_at(5, data2)
+            blob.write_at(5, data2, WriteOptions::default())
                 .await
                 .expect("Failed to write data2");
 
@@ -1435,7 +1554,7 @@ mod tests {
 
             // Rewrite data without affecting length
             let data3 = b"Store";
-            blob.write_at(5, data3)
+            blob.write_at(5, data3, WriteOptions::default())
                 .await
                 .expect("Failed to write data3");
 
@@ -1469,7 +1588,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             let data = b"some data";
-            blob.write_at(0, data.to_vec())
+            blob.write_at(0, data.to_vec(), WriteOptions::default())
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
@@ -1533,10 +1652,10 @@ mod tests {
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-                blob.write_at(0, data1)
+                blob.write_at(0, data1, WriteOptions::default())
                     .await
                     .expect("Failed to write data1");
-                blob.write_at(5 + additional as u64, data2)
+                blob.write_at(5 + additional as u64, data2, WriteOptions::default())
                     .await
                     .expect("Failed to write data2");
 
@@ -1587,7 +1706,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!".to_vec();
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 
@@ -1616,7 +1735,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 

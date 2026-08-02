@@ -112,7 +112,7 @@ impl Registry {
                 Operation::Remove(RemoveTarget::Partition(partition)) => {
                     removed_partitions.insert(partition.as_str());
                 }
-                Operation::Resize { .. } | Operation::Update { .. } => {}
+                Operation::Publish { .. } | Operation::Resize { .. } => {}
             }
         }
 

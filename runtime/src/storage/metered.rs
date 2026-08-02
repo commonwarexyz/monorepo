@@ -1,6 +1,10 @@
 use crate::{
-    BatchOperation, Buf, Error, Handle, IoBufs, IoBufsMut,
-    telemetry::metrics::{Counter, Gauge, Register, raw},
+    AtomicBlob, AtomicStorage, BatchOperation, BatchStorage, Buf, Error, Handle, IoBufs, IoBufsMut,
+    WriteOptions,
+    telemetry::{
+        metrics::{Counter, Gauge, Register, raw},
+        traces::TracedExt as _,
+    },
 };
 use std::{
     ops::{Deref, RangeInclusive},
@@ -109,9 +113,41 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         self.inner.remove(partition, name).await
     }
 
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+impl<S: AtomicStorage> AtomicStorage for Storage<S> {
+    type AtomicBlob = Blob<S::AtomicBlob>;
+
+    async fn open_atomic_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Self::AtomicBlob, u64, u16), Error> {
+        let (inner, len, blob_version) = self
+            .inner
+            .open_atomic_versioned(partition, name, versions)
+            .await?;
+        Ok((
+            Blob {
+                inner,
+                partition: partition.into(),
+                name: Arc::from(name),
+                metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
+            },
+            len,
+            blob_version,
+        ))
+    }
+}
+
+impl<S: BatchStorage> BatchStorage for Storage<S> {
     async fn start_apply(
         &self,
-        operations: Vec<BatchOperation<Self::Blob>>,
+        operations: Vec<BatchOperation<Self::AtomicBlob>>,
     ) -> Result<Handle<()>, Error> {
         let descriptors = crate::storage::batch::canonicalize_descriptors(&operations, |blob| {
             (blob.partition.to_string(), blob.name.to_vec())
@@ -122,21 +158,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         for operation in descriptors {
             match operation {
                 crate::storage::batch::Operation::Remove(_) => {}
+                crate::storage::batch::Operation::Publish { .. } => {}
                 crate::storage::batch::Operation::Resize { .. } => {
                     self.metrics.storage_resizes.inc();
-                }
-                crate::storage::batch::Operation::Update { data, .. } => {
-                    self.metrics.storage_resizes.inc();
-                    self.metrics.storage_writes.inc();
-                    self.metrics.storage_write_bytes.inc_by(data.len() as u64);
                 }
             }
         }
         Ok(completion)
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
     }
 }
 
@@ -199,35 +227,27 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         name = "runtime.storage.blob.write_at",
         level = "info",
         skip_all,
-        fields(partition = %self.partition, bytes = Empty)
+        fields(
+            partition = %self.partition,
+            bytes = Empty,
+            options = options.0.traced(),
+        )
     )]
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let bufs_len = bufs.remaining();
-        self.metrics.storage_writes.inc();
-        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
-        Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at(offset, bufs).await
-    }
-
-    #[tracing::instrument(
-        name = "runtime.storage.blob.write_at_sync",
-        level = "info",
-        skip_all,
-        fields(partition = %self.partition, bytes = Empty)
-    )]
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let bufs_len = bufs.remaining();
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
-        self.metrics.storage_syncs.inc();
+        if options.contains(WriteOptions::SYNC) {
+            self.metrics.storage_syncs.inc();
+        }
         Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at_sync(offset, bufs).await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     #[tracing::instrument(
@@ -269,14 +289,40 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 }
 
+impl<B: AtomicBlob> AtomicBlob for Blob<B> {
+    #[tracing::instrument(
+        name = "runtime.storage.blob.update",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, bytes = Empty, len = len)
+    )]
+    async fn update(
+        &self,
+        offset: u64,
+        data: impl Into<IoBufs> + Send,
+        len: u64,
+    ) -> Result<(), Error> {
+        let data = data.into();
+        let data_len = data.remaining();
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(data_len as u64);
+        self.metrics.storage_resizes.inc();
+        Span::current().record("bytes", data_len as u64);
+        self.inner.update(offset, data, len).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        Blob, BufferPool, BufferPoolConfig, Storage as _,
+        Blob, BufferPool, BufferPoolConfig, Storage as _, WriteOptions,
         storage::{
             memory::Storage as MemoryStorage,
-            tests::{run_storage_foreign_handle_test, run_storage_tests},
+            tests::{
+                run_atomic_blob_tests, run_batch_storage_tests, run_storage_foreign_handle_test,
+                run_storage_tests,
+            },
         },
         telemetry::metrics::Registry,
     };
@@ -291,7 +337,13 @@ mod tests {
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
         let tested = storage.clone();
-        run_storage_tests(storage).await;
+        run_storage_tests(storage.clone()).await;
+        run_batch_storage_tests(storage.clone()).await;
+        let (atomic, _) = storage
+            .open_atomic("atomic_storage", b"blob")
+            .await
+            .unwrap();
+        run_atomic_blob_tests(atomic).await;
 
         let mut foreign_registry = crate::telemetry::metrics::Registry::default();
         let foreign_inner = MemoryStorage::new(test_pool(
@@ -347,7 +399,9 @@ mod tests {
         );
 
         // Write data to the blob
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         let writes = storage.metrics.storage_writes.get();
         let write_bytes = storage.metrics.storage_write_bytes.get();
         assert_eq!(
@@ -382,16 +436,18 @@ mod tests {
         );
 
         // Write and sync in a single call
-        blob.write_at_sync(11, b" again").await.unwrap();
+        blob.write_at(11, b" again", WriteOptions::SYNC)
+            .await
+            .unwrap();
         assert_eq!(
             storage.metrics.storage_writes.get(),
             2,
-            "storage_writes metric was not incremented after write_at_sync"
+            "storage_writes metric was not incremented after write_at(SYNC)"
         );
         assert_eq!(
             storage.metrics.storage_syncs.get(),
             2,
-            "storage_syncs metric was not incremented after write_at_sync"
+            "storage_syncs metric was not incremented after write_at(SYNC)"
         );
 
         // Resize the blob
@@ -414,13 +470,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metered_batch_counts_resize_and_update_effects() {
+    async fn test_metered_batch_and_atomic_update_metrics() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
-        let (first, _) = storage.open("partition", b"first").await.unwrap();
-        let (second, _) = storage.open("partition", b"second").await.unwrap();
-        let (updated, _) = storage.open("partition", b"updated").await.unwrap();
+        let (first, _) = storage.open_atomic("partition", b"first").await.unwrap();
+        let (second, _) = storage.open_atomic("partition", b"second").await.unwrap();
+        let (updated, _) = storage.open_atomic("partition", b"updated").await.unwrap();
+        updated.update(1, b"new", 4).await.unwrap();
 
         storage
             .apply(vec![
@@ -436,18 +493,7 @@ mod tests {
                     blob: second,
                     len: 5,
                 },
-                BatchOperation::Update {
-                    blob: updated.clone(),
-                    offset: 1,
-                    data: b"new".into(),
-                    len: 4,
-                },
-                BatchOperation::Update {
-                    blob: updated,
-                    offset: 1,
-                    data: b"new".into(),
-                    len: 4,
-                },
+                BatchOperation::Publish(updated.clone()),
             ])
             .await
             .unwrap();
@@ -456,8 +502,6 @@ mod tests {
         assert_eq!(storage.metrics.storage_write_bytes.get(), 3);
         assert_eq!(storage.metrics.storage_resizes.get(), 3);
 
-        let (updated, len) = storage.inner.open("partition", b"updated").await.unwrap();
-        assert_eq!(len, 4);
         assert_eq!(updated.read_at(0, 4).await.unwrap().coalesce(), b"\0new");
     }
 
@@ -469,7 +513,9 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         blob.start_sync().await.await.unwrap();
         assert_eq!(
@@ -549,8 +595,13 @@ mod tests {
         );
 
         // Use the clones for some operations to verify they share metrics
-        blob.write_at(0, b"hello").await.unwrap();
-        clone1.write_at(5, b"world").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        clone1
+            .write_at(5, b"world", WriteOptions::default())
+            .await
+            .unwrap();
         let _ = clone1.read_at(0, 10).await.unwrap();
         let _ = clone2.read_at(0, 10).await.unwrap();
 

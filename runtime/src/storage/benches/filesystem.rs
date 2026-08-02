@@ -7,7 +7,7 @@ use crate::{
 use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use commonware_formatting::hex;
-use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
+use commonware_runtime::{AtomicStorage, Blob, IoBuf, IoBufs, Storage, WriteOptions};
 use rand::Rng;
 use std::{
     fs, io,
@@ -16,9 +16,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 #[cfg(target_os = "linux")]
-use std::{fs::OpenOptions, os::fd::AsRawFd};
+use std::{
+    fs::OpenOptions,
+    os::{fd::AsRawFd, unix::fs::MetadataExt as _},
+};
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
+#[cfg(target_os = "linux")]
+const COORDINATOR_PATH: [&str; 2] = [".commonware", "_COMMONWARE_RUNTIME_UNO_COORDINATOR"];
 
 pub const fn backend_name() -> &'static str {
     if cfg!(feature = "iouring-storage") {
@@ -26,6 +31,106 @@ pub const fn backend_name() -> &'static str {
     } else {
         "tokio"
     }
+}
+
+/// Protocol used by blobs opened through [`AtomicStorage`].
+pub const fn atomic_protocol() -> &'static str {
+    "uno_r05_prepared_root"
+}
+
+/// Protocol used to publish prepared roots as one multi-blob decision.
+pub const fn atomic_batch_protocol() -> &'static str {
+    "uno_r06_carried_coordinator"
+}
+
+/// On-disk footprint of the benchmark blob after the timed workload.
+#[derive(Clone, Copy)]
+pub struct FileMetrics {
+    pub file_count: u64,
+    pub raw_len: u64,
+    pub allocated_bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+pub fn file_metrics(root: &Path, partition: &str, name: &[u8]) -> io::Result<Option<FileMetrics>> {
+    Ok(Some(path_metrics(&root.join(partition).join(hex(name)))?))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub const fn file_metrics(
+    _root: &Path,
+    _partition: &str,
+    _name: &[u8],
+) -> io::Result<Option<FileMetrics>> {
+    Ok(None)
+}
+
+/// Aggregate on-disk footprint across multi-blob participants and the optional coordinator.
+#[cfg(target_os = "linux")]
+pub fn group_file_metrics(
+    root: &Path,
+    partition: &str,
+    names: &[Vec<u8>],
+    include_coordinator: bool,
+) -> io::Result<Option<FileMetrics>> {
+    let mut total = FileMetrics {
+        file_count: 0,
+        raw_len: 0,
+        allocated_bytes: 0,
+    };
+    for name in names {
+        total.add(path_metrics(&root.join(partition).join(hex(name)))?);
+    }
+    if include_coordinator {
+        total.add(path_metrics(
+            &root.join(COORDINATOR_PATH[0]).join(COORDINATOR_PATH[1]),
+        )?);
+    }
+    Ok(Some(total))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub const fn group_file_metrics(
+    _root: &Path,
+    _partition: &str,
+    _names: &[Vec<u8>],
+    _include_coordinator: bool,
+) -> io::Result<Option<FileMetrics>> {
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn path_metrics(path: &Path) -> io::Result<FileMetrics> {
+    let metadata = fs::metadata(path)?;
+    Ok(FileMetrics {
+        file_count: 1,
+        raw_len: metadata.len(),
+        allocated_bytes: metadata.blocks().saturating_mul(512),
+    })
+}
+
+#[cfg(target_os = "linux")]
+impl FileMetrics {
+    const fn add(&mut self, other: Self) {
+        self.file_count = self.file_count.saturating_add(other.file_count);
+        self.raw_len = self.raw_len.saturating_add(other.raw_len);
+        self.allocated_bytes = self.allocated_bytes.saturating_add(other.allocated_bytes);
+    }
+}
+
+/// Current resident memory, for controlled before/after comparisons within one process.
+#[cfg(target_os = "linux")]
+pub fn resident_set_size() -> Option<u64> {
+    let statm = fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    // SAFETY: `sysconf` has no pointer arguments and `_SC_PAGESIZE` has no side effects.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    (page_size > 0).then(|| resident_pages.saturating_mul(page_size as u64))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub const fn resident_set_size() -> Option<u64> {
+    None
 }
 
 /// Create a unique storage root for one benchmark run under the configured parent.
@@ -90,6 +195,37 @@ const fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::
     Ok(())
 }
 
+/// Reserve an unwritten append range without changing the blob's raw length.
+#[cfg(target_os = "linux")]
+fn preallocate_blob_tail(root: &Path, partition: &str, name: &[u8], length: u64) -> io::Result<()> {
+    let path = root.join(partition).join(hex(name));
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    let offset = file.metadata()?.len();
+    let offset = libc::off_t::try_from(offset)
+        .map_err(|_| io::Error::other("blob offset is too large for fallocate"))?;
+    let length = libc::off_t::try_from(length)
+        .map_err(|_| io::Error::other("blob length is too large for fallocate"))?;
+
+    // SAFETY: The descriptor remains valid through the call, and both values were checked against
+    // the platform's off_t range. KEEP_SIZE reserves blocks without changing the R05 log frontier.
+    let result =
+        unsafe { libc::fallocate(file.as_raw_fd(), libc::FALLOC_FL_KEEP_SIZE, offset, length) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    file.sync_all()
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn preallocate_blob_tail(
+    _root: &Path,
+    _partition: &str,
+    _name: &[u8],
+    _length: u64,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Best-effort eviction of a blob from the OS page cache.
 ///
 /// On Linux, `POSIX_FADV_DONTNEED` asks the kernel to discard cached pages
@@ -139,6 +275,27 @@ pub async fn prepare_blob<S: Storage>(
     Ok(blob)
 }
 
+/// Create a fixed-size atomic blob and publish its initial logical length.
+pub async fn prepare_atomic_blob<S: AtomicStorage>(
+    storage: &S,
+    root: &Path,
+    partition: &str,
+    name: &[u8],
+    file_size: u64,
+) -> Result<S::AtomicBlob> {
+    let (blob, _) = storage.open_atomic(partition, name).await?;
+    blob.resize(file_size).await?;
+    blob.sync().await?;
+    if file_size > 0 {
+        drop(blob);
+        preallocate_blob_tail(root, partition, name, file_size)?;
+        let (blob, _) = storage.open_atomic(partition, name).await?;
+        blob.sync().await?;
+        return Ok(blob);
+    }
+    Ok(blob)
+}
+
 /// Create a fixed-size blob and fill it with random data.
 ///
 /// Returns the open blob handle so the caller can reuse it for the timed phase.
@@ -157,7 +314,8 @@ pub async fn prepare_filled_blob<S: Storage>(
         let len = ((file_size - offset) as usize).min(DEFAULT_FILL_CHUNK_SIZE);
         let mut payload = vec![0u8; len];
         rng.fill_bytes(&mut payload);
-        blob.write_at(offset, payload).await?;
+        blob.write_at(offset, payload, WriteOptions::default())
+            .await?;
         offset += len as u64;
     }
     blob.sync().await?;

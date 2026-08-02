@@ -2,7 +2,7 @@
 
 use crate::{
     config::{Config, Workload},
-    filesystem::backend_name,
+    filesystem::{FileMetrics, backend_name},
 };
 use serde_json::json;
 use std::time::Duration;
@@ -16,6 +16,14 @@ pub struct Stats {
     pub bytes: u64,
     /// Sampled per-operation latencies.
     pub latency_samples: Vec<Duration>,
+    /// Durability barriers issued by the loop.
+    pub syncs: u64,
+    /// Wall time spent awaiting those barriers.
+    pub sync_elapsed: Duration,
+    /// Time from batch publication start until the durable coordinator return.
+    pub coordinator_return_samples: Vec<Duration>,
+    /// Time from batch publication start through full completion-handle cleanup.
+    pub full_completion_samples: Vec<Duration>,
 }
 
 impl Stats {
@@ -34,6 +42,73 @@ impl Stats {
         self.ops += other.ops;
         self.bytes += other.bytes;
         self.latency_samples.append(&mut other.latency_samples);
+        self.syncs += other.syncs;
+        self.sync_elapsed += other.sync_elapsed;
+        self.coordinator_return_samples
+            .append(&mut other.coordinator_return_samples);
+        self.full_completion_samples
+            .append(&mut other.full_completion_samples);
+    }
+
+    #[inline(always)]
+    pub fn record_sync(&mut self, elapsed: Duration) {
+        self.syncs += 1;
+        self.sync_elapsed += elapsed;
+    }
+
+    /// Record the durable-decision and completion-handle boundaries of one atomic batch.
+    pub fn record_publication(&mut self, coordinator_return: Duration, full_completion: Duration) {
+        self.coordinator_return_samples.push(coordinator_return);
+        self.full_completion_samples.push(full_completion);
+    }
+}
+
+/// Latency distribution for a separately measured operation phase.
+struct PhaseReport {
+    samples: u64,
+    elapsed: Duration,
+    p50_latency: Duration,
+    p95_latency: Duration,
+    p99_latency: Duration,
+}
+
+impl PhaseReport {
+    fn new(mut samples: Vec<Duration>) -> Option<Self> {
+        if samples.is_empty() {
+            return None;
+        }
+        samples.sort_unstable();
+        let percentile = |pct: usize| samples[(samples.len() - 1) * pct / 100];
+        Some(Self {
+            samples: samples.len() as u64,
+            elapsed: samples.iter().sum(),
+            p50_latency: percentile(50),
+            p95_latency: percentile(95),
+            p99_latency: percentile(99),
+        })
+    }
+
+    fn print(&self, label: &str) {
+        println!(
+            "{label} samples={} elapsed_s={:.6} mean_us={:.1} p50_us={:.1} p95_us={:.1} p99_us={:.1}",
+            self.samples,
+            self.elapsed.as_secs_f64(),
+            self.elapsed.as_nanos() as f64 / self.samples as f64 / 1_000.0,
+            self.p50_latency.as_nanos() as f64 / 1_000.0,
+            self.p95_latency.as_nanos() as f64 / 1_000.0,
+            self.p99_latency.as_nanos() as f64 / 1_000.0,
+        );
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        json!({
+            "samples": self.samples,
+            "elapsed_ns": self.elapsed.as_nanos() as u64,
+            "mean_latency_ns": self.elapsed.as_nanos() as u64 / self.samples,
+            "p50_latency_ns": self.p50_latency.as_nanos() as u64,
+            "p95_latency_ns": self.p95_latency.as_nanos() as u64,
+            "p99_latency_ns": self.p99_latency.as_nanos() as u64,
+        })
     }
 }
 
@@ -53,6 +128,13 @@ struct OperationReport {
     p95_latency: Duration,
     /// p99 latency.
     p99_latency: Duration,
+    /// Durability barriers and total time spent awaiting them.
+    syncs: u64,
+    sync_elapsed: Duration,
+    /// Atomic-batch durable coordinator-return latency.
+    coordinator_return: Option<PhaseReport>,
+    /// Atomic-batch latency through full completion-handle cleanup.
+    full_completion: Option<PhaseReport>,
 }
 
 impl OperationReport {
@@ -78,6 +160,10 @@ impl OperationReport {
             p50_latency: percentile(50),
             p95_latency: percentile(95),
             p99_latency: percentile(99),
+            syncs: merged.syncs,
+            sync_elapsed: merged.sync_elapsed,
+            coordinator_return: PhaseReport::new(merged.coordinator_return_samples),
+            full_completion: PhaseReport::new(merged.full_completion_samples),
         }
     }
 
@@ -92,6 +178,20 @@ impl OperationReport {
             self.p95_latency.as_nanos() as f64 / 1_000.0,
             self.p99_latency.as_nanos() as f64 / 1_000.0,
         );
+        if self.syncs != 0 {
+            println!(
+                "{label}_sync count={} elapsed_s={:.6} mean_us={:.1}",
+                self.syncs,
+                self.sync_elapsed.as_secs_f64(),
+                self.sync_elapsed.as_nanos() as f64 / self.syncs as f64 / 1_000.0,
+            );
+        }
+        if let Some(coordinator_return) = &self.coordinator_return {
+            coordinator_return.print(&format!("{label}_coordinator_return"));
+        }
+        if let Some(full_completion) = &self.full_completion {
+            full_completion.print(&format!("{label}_full_completion"));
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -103,6 +203,10 @@ impl OperationReport {
             "p50_latency_ns": self.p50_latency.as_nanos() as u64,
             "p95_latency_ns": self.p95_latency.as_nanos() as u64,
             "p99_latency_ns": self.p99_latency.as_nanos() as u64,
+            "sync_count": self.syncs,
+            "sync_elapsed_ns": self.sync_elapsed.as_nanos() as u64,
+            "coordinator_return": self.coordinator_return.as_ref().map(PhaseReport::to_json),
+            "full_completion": self.full_completion.as_ref().map(PhaseReport::to_json),
         })
     }
 }
@@ -111,12 +215,22 @@ impl OperationReport {
 pub struct Report {
     /// Actual elapsed time, including any final end-of-run sync.
     elapsed: Duration,
+    /// Time spent in the operation loop used for throughput calculations.
+    hot_elapsed: Duration,
+    /// Time spent advancing the final durability frontier, when measured separately.
+    frontier_sync_elapsed: Option<Duration>,
     /// Read-side metrics, when present.
     read: Option<OperationReport>,
     /// Write-side metrics, when present.
     write: Option<OperationReport>,
     /// Final logical file size.
     final_file_size: u64,
+    /// Atomic-update protocol selected by the filesystem, when applicable.
+    atomic_protocol: Option<&'static str>,
+    /// Raw and physically allocated file sizes after the workload.
+    file_metrics: Option<FileMetrics>,
+    /// Resident memory before and during the workload while its blob remains open.
+    resident_memory: Option<(u64, u64)>,
 }
 
 impl Report {
@@ -124,30 +238,60 @@ impl Report {
     ///
     /// Pass `None` for the side that doesn't apply to this workload.
     pub fn new(
-        elapsed: Duration,
+        hot_elapsed: Duration,
+        frontier_sync_elapsed: Option<Duration>,
         read_workers: Option<Vec<Stats>>,
         write_workers: Option<Vec<Stats>>,
         final_file_size: u64,
     ) -> Self {
+        let elapsed = hot_elapsed + frontier_sync_elapsed.unwrap_or_default();
         Self {
             elapsed,
-            read: read_workers.map(|w| OperationReport::new(w, elapsed)),
-            write: write_workers.map(|w| OperationReport::new(w, elapsed)),
+            hot_elapsed,
+            frontier_sync_elapsed,
+            read: read_workers.map(|w| OperationReport::new(w, hot_elapsed)),
+            write: write_workers.map(|w| OperationReport::new(w, hot_elapsed)),
             final_file_size,
+            atomic_protocol: None,
+            file_metrics: None,
+            resident_memory: None,
         }
+    }
+
+    /// Record the atomic-update protocol observed by the benchmark harness.
+    pub const fn set_atomic_protocol(&mut self, protocol: &'static str) {
+        self.atomic_protocol = Some(protocol);
+    }
+
+    pub const fn set_file_metrics(&mut self, metrics: FileMetrics) {
+        self.file_metrics = Some(metrics);
+    }
+
+    pub const fn set_resident_memory(&mut self, before: Option<u64>, after: Option<u64>) {
+        self.resident_memory = match (before, after) {
+            (Some(before), Some(after)) => Some((before, after)),
+            _ => None,
+        };
     }
 
     /// Print a concise human-readable report.
     pub fn print_human(&self, cfg: &Config) {
         println!(
-            "backend={} workload={} elapsed_s={:.3}",
+            "backend={} workload={} elapsed_s={:.3} hot_elapsed_s={:.3} frontier_sync_s={}",
             backend_name(),
             cfg.workload,
             self.elapsed.as_secs_f64(),
+            self.hot_elapsed.as_secs_f64(),
+            self.frontier_sync_elapsed.map_or_else(
+                || "n/a".to_string(),
+                |elapsed| format!("{:.6}", elapsed.as_secs_f64())
+            ),
         );
         println!(
-            "io_size={} inflight={} worker_threads={} global_queue_interval={} seed={} output={}",
-            cfg.io_size,
+            "io_size={} operations={} inflight={} worker_threads={} global_queue_interval={} seed={} output={}",
+            cfg.io_size(),
+            cfg.operations
+                .map_or_else(|| "duration".to_string(), |value| value.to_string()),
             cfg.inflight,
             cfg.worker_threads,
             cfg.global_queue_interval
@@ -159,17 +303,63 @@ impl Report {
         if let Some(file_size) = cfg.file_size {
             println!("file_size={file_size}");
         }
+        if cfg.workload.is_multi_blob_append() {
+            let bytes_per_op = cfg.io_size() as u64 * cfg.blobs() as u64;
+            let completion = if cfg.workload == Workload::WriteAtomicBatchAppend {
+                "full_batch_handle"
+            } else {
+                "all_blob_syncs"
+            };
+            println!(
+                "blobs={} operation_unit=n_blob_durable_group bytes_per_op={} operation_latency={completion}",
+                cfg.blobs(),
+                bytes_per_op
+            );
+        }
         println!("root={}", cfg.root.display());
         if let Some(cache) = cfg.cache {
             println!("cache={cache}");
         }
         if cfg.workload.has_writes() {
             println!("write_shape={}", cfg.write_shape);
-            if cfg.workload == Workload::WriteSync {
-                println!("sync_method={}", cfg.sync_method);
-            } else {
-                println!("sync_every={}", cfg.sync_mode);
+            if matches!(
+                cfg.workload,
+                Workload::WriteAppend | Workload::WriteAtomicAppend
+            ) {
+                println!("dont_cache={}", cfg.dont_cache);
             }
+            if !cfg.workload.is_multi_blob_append() {
+                if cfg.workload == Workload::WriteSync {
+                    println!("sync_method={}", cfg.sync_method);
+                } else {
+                    println!("sync_every={}", cfg.sync_mode);
+                }
+            }
+        }
+        if let Some(protocol) = self.atomic_protocol {
+            if cfg.workload == Workload::WriteAtomicBatchAppend {
+                println!(
+                    "atomic_protocol={protocol} atomic_phase=prepared_root durability_frontier=coordinator_return full_completion=batch_handle byte_accounting=logical_group_payload"
+                );
+            } else {
+                println!(
+                    "atomic_protocol={protocol} atomic_phase=volatile_update durability_frontier=blob_sync full_completion=blob_sync byte_accounting=logical_payload"
+                );
+            }
+        }
+        if let Some(metrics) = self.file_metrics {
+            println!(
+                "measured_file_count={} raw_file_size={} allocated_file_size={}",
+                metrics.file_count, metrics.raw_len, metrics.allocated_bytes
+            );
+        }
+        if let Some((before, after)) = self.resident_memory {
+            println!(
+                "rss_before={} rss_after={} rss_delta={}",
+                before,
+                after,
+                i128::from(after) - i128::from(before)
+            );
         }
 
         if let Some(read) = &self.read {
@@ -183,11 +373,22 @@ impl Report {
 
     /// Print a single JSON object for downstream processing.
     pub fn print_json(&self, cfg: &Config) {
+        let is_group = cfg.workload.is_multi_blob_append();
+        let is_atomic_batch = cfg.workload == Workload::WriteAtomicBatchAppend;
         let json = json!({
             "backend": backend_name(),
             "workload": cfg.workload.to_string(),
-            "duration_seconds": cfg.duration().as_secs(),
-            "io_size": cfg.io_size,
+            "duration_seconds": cfg.operations.is_none().then(|| cfg.duration().as_secs()),
+            "operations_per_worker": cfg.operations,
+            "io_size": cfg.io_size(),
+            "blobs": is_group.then(|| cfg.blobs()),
+            "bytes_per_op": is_group.then(|| cfg.io_size() as u64 * cfg.blobs() as u64),
+            "operation_unit": is_group.then_some("n_blob_durable_group"),
+            "operation_latency": is_group.then_some(if is_atomic_batch {
+                "full_batch_handle"
+            } else {
+                "all_blob_syncs"
+            }),
             "inflight": cfg.inflight,
             "worker_threads": cfg.worker_threads,
             "global_queue_interval": cfg.global_queue_interval,
@@ -195,15 +396,49 @@ impl Report {
             "root": cfg.root,
             "cache": cfg.cache.map(|mode| mode.to_string()),
             "write_shape": cfg.workload.has_writes().then(|| cfg.write_shape.to_string()),
-            "sync_every": (cfg.workload.has_writes() && cfg.workload != Workload::WriteSync)
+            "dont_cache": matches!(cfg.workload, Workload::WriteAppend | Workload::WriteAtomicAppend)
+                .then_some(cfg.dont_cache),
+            "sync_every": (cfg.workload.has_writes()
+                && cfg.workload != Workload::WriteSync
+                && !is_group)
                 .then(|| cfg.sync_mode.to_string()),
             "sync_method": (cfg.workload == Workload::WriteSync)
                 .then(|| cfg.sync_method.to_string()),
+            "atomic_protocol": self.atomic_protocol,
+            "atomic_phase": self.atomic_protocol.map(|_| if is_atomic_batch {
+                "prepared_root"
+            } else {
+                "volatile_update"
+            }),
+            "durability_frontier": if is_group {
+                Some(if is_atomic_batch { "coordinator_return" } else { "all_blob_syncs" })
+            } else {
+                self.atomic_protocol.map(|_| "blob_sync")
+            },
+            "full_completion": if is_group {
+                Some(if is_atomic_batch { "batch_handle" } else { "all_blob_syncs" })
+            } else {
+                self.atomic_protocol.map(|_| "blob_sync")
+            },
+            "byte_accounting": if is_group {
+                Some("logical_group_payload")
+            } else {
+                self.atomic_protocol.map(|_| "logical_payload")
+            },
+            "measured_file_count": self.file_metrics.map(|metrics| metrics.file_count),
+            "raw_file_size": self.file_metrics.map(|metrics| metrics.raw_len),
+            "allocated_file_size": self.file_metrics.map(|metrics| metrics.allocated_bytes),
+            "rss_before": self.resident_memory.map(|(before, _)| before),
+            "rss_after": self.resident_memory.map(|(_, after)| after),
+            "rss_delta": self.resident_memory.map(|(before, after)| i128::from(after) - i128::from(before)),
             "seed": cfg.seed,
             "elapsed_ns": self.elapsed.as_nanos() as u64,
+            "hot_elapsed_ns": self.hot_elapsed.as_nanos() as u64,
+            "frontier_sync_ns": self.frontier_sync_elapsed.map(|elapsed| elapsed.as_nanos() as u64),
             "read": self.read.as_ref().map(OperationReport::to_json),
             "write": self.write.as_ref().map(OperationReport::to_json),
             "final_file_size": self.final_file_size,
+            "final_file_size_scope": is_group.then_some("all_participants"),
         });
         println!("{json}");
     }

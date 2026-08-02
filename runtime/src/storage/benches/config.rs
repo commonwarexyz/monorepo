@@ -3,6 +3,12 @@
 use clap::{CommandFactory, Parser, ValueEnum, builder::Styles, error::ErrorKind, value_parser};
 use std::{env, fmt, path::PathBuf, time::Duration};
 
+const DEFAULT_IO_SIZE: usize = 4 * 1024;
+const DEFAULT_MULTI_BLOB_IO_SIZE: usize = 1024 * 1024;
+const DEFAULT_BLOBS: usize = 4;
+/// Largest group that fits the coordinator's fixed descriptor with benchmark-generated names.
+const MAX_BLOBS: usize = 129_055;
+
 /// Benchmark workload to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Workload {
@@ -24,6 +30,21 @@ pub enum Workload {
     /// Sequential durable positioned writes over a fixed-size file.
     #[value(name = "write_sync")]
     WriteSync,
+    /// Sequential atomic positioned writes over a fixed-size file.
+    #[value(name = "write_atomic")]
+    WriteAtomic,
+    /// Uniform random atomic positioned writes over a fixed-size file.
+    #[value(name = "write_atomic_rand")]
+    WriteAtomicRand,
+    /// Atomic append writes to a growing file.
+    #[value(name = "write_atomic_append")]
+    WriteAtomicAppend,
+    /// Durable grouped append writes to multiple ordinary blobs.
+    #[value(name = "write_multi_blob_append")]
+    WriteMultiBlobAppend,
+    /// Atomic grouped append writes published through one batch.
+    #[value(name = "write_atomic_batch_append")]
+    WriteAtomicBatchAppend,
     /// One append writer plus many random readers of the visible prefix.
     #[value(name = "read_write_append")]
     ReadWriteAppend,
@@ -38,6 +59,11 @@ impl Workload {
                 | Self::WriteRand
                 | Self::WriteAppend
                 | Self::WriteSync
+                | Self::WriteAtomic
+                | Self::WriteAtomicRand
+                | Self::WriteAtomicAppend
+                | Self::WriteMultiBlobAppend
+                | Self::WriteAtomicBatchAppend
                 | Self::ReadWriteAppend
         )
     }
@@ -45,6 +71,25 @@ impl Workload {
     /// Whether the workload benchmarks reads.
     pub const fn has_reads(self) -> bool {
         matches!(self, Self::ReadSeq | Self::ReadRand | Self::ReadWriteAppend)
+    }
+
+    /// Whether one operation is a durable append across multiple blobs.
+    pub const fn is_multi_blob_append(self) -> bool {
+        matches!(
+            self,
+            Self::WriteMultiBlobAppend | Self::WriteAtomicBatchAppend
+        )
+    }
+
+    /// Whether the workload opens blobs through the atomic storage capability.
+    pub const fn is_atomic(self) -> bool {
+        matches!(
+            self,
+            Self::WriteAtomic
+                | Self::WriteAtomicRand
+                | Self::WriteAtomicAppend
+                | Self::WriteAtomicBatchAppend
+        )
     }
 }
 
@@ -79,7 +124,7 @@ pub enum SyncMethod {
     /// Call `write_at`, then call `sync`.
     #[value(name = "write_then_sync")]
     WriteThenSync,
-    /// Call `write_at_sync`.
+    /// Call `write_at` with `WriteOptions::SYNC`.
     #[value(name = "write_at_sync")]
     WriteAtSync,
 }
@@ -147,9 +192,21 @@ pub struct Config {
     #[arg(long, default_value_t = 30, value_parser = value_parser!(u64).range(1..))]
     duration: u64,
 
+    /// Exact operations per worker stream. When set, the duration is ignored.
+    #[arg(long, value_parser = value_parser!(u64).range(1..))]
+    pub operations: Option<u64>,
+
     /// Read or write size in bytes. Accepts suffixes like 64K, 4M, or 1G.
-    #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
-    pub io_size: usize,
+    ///
+    /// Defaults to 1 MiB for multi-blob journal appends and 4 KiB otherwise.
+    #[arg(long, value_parser = parse_byte_size_usize)]
+    io_size: Option<usize>,
+
+    /// Blobs in each durable multi-blob append group.
+    ///
+    /// Defaults to 4 for multi-blob workloads and is invalid for other workloads.
+    #[arg(long, value_parser = value_parser!(usize))]
+    blobs: Option<usize>,
 
     /// Parallel worker count for steady-state workloads.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
@@ -182,6 +239,10 @@ pub struct Config {
     /// Write payload layout for write-heavy workloads.
     #[arg(long, value_enum, default_value = "contiguous")]
     pub write_shape: WriteShape,
+
+    /// Request best-effort page-cache bypass for direct append comparisons.
+    #[arg(long, default_value_t = false)]
+    pub dont_cache: bool,
 
     /// Durable write method for the write_sync workload.
     #[arg(long, value_enum, default_value = "write_then_sync")]
@@ -229,6 +290,23 @@ impl Config {
             .expect("validated configuration must include --file-size")
     }
 
+    /// Resolved I/O size after applying the workload-specific default.
+    pub const fn io_size(&self) -> usize {
+        match self.io_size {
+            Some(io_size) => io_size,
+            None if self.workload.is_multi_blob_append() => DEFAULT_MULTI_BLOB_IO_SIZE,
+            None => DEFAULT_IO_SIZE,
+        }
+    }
+
+    /// Resolved participant count for a validated multi-blob workload.
+    pub const fn blobs(&self) -> usize {
+        match self.blobs {
+            Some(blobs) => blobs,
+            None => DEFAULT_BLOBS,
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.inflight == 0 {
             return Err("--inflight must be greater than zero".into());
@@ -239,14 +317,46 @@ impl Config {
         if self.global_queue_interval == Some(0) {
             return Err("--global-queue-interval must be greater than zero".into());
         }
+        if self.blobs == Some(0) {
+            return Err("--blobs must be greater than zero".into());
+        }
+        if !self.workload.is_multi_blob_append() && self.blobs.is_some() {
+            return Err(
+                "--blobs is only valid for write_multi_blob_append or write_atomic_batch_append"
+                    .into(),
+            );
+        }
+        if self.blobs.is_some_and(|blobs| blobs > MAX_BLOBS) {
+            return Err(format!("--blobs must not exceed {MAX_BLOBS}"));
+        }
+        if self.workload.is_multi_blob_append() {
+            let io_size = u64::try_from(self.io_size())
+                .map_err(|_| "--io-size is too large for group byte accounting")?;
+            let blobs = u64::try_from(self.blobs())
+                .map_err(|_| "--blobs is too large for group byte accounting")?;
+            io_size
+                .checked_mul(blobs)
+                .ok_or_else(|| "--blobs * --io-size exceeds u64".to_string())?;
+            if self.write_shape != WriteShape::Contiguous {
+                return Err("multi-blob append workloads require --write-shape contiguous".into());
+            }
+            if self.sync_mode != SyncMode::End {
+                return Err(
+                    "--sync-every is not used by durable multi-blob append workloads".into(),
+                );
+            }
+        }
 
         match self.workload {
-            Workload::WriteAppend => {
+            Workload::WriteAppend
+            | Workload::WriteAtomicAppend
+            | Workload::WriteMultiBlobAppend
+            | Workload::WriteAtomicBatchAppend => {
                 if self.file_size.is_some() {
-                    return Err("--file-size is not used by write_append".into());
+                    return Err("--file-size is not used by append workloads".into());
                 }
                 if self.inflight != 1 {
-                    return Err("write_append only supports --inflight 1".into());
+                    return Err("append workloads only support --inflight 1".into());
                 }
                 if self.cache.is_some() {
                     return Err("--cache is only valid for read-heavy workloads".into());
@@ -256,7 +366,7 @@ impl Config {
                 let file_size = self
                     .file_size
                     .ok_or_else(|| "--file-size is required for this workload".to_string())?;
-                let io_size = self.io_size as u64;
+                let io_size = self.io_size() as u64;
                 if file_size < io_size {
                     return Err("--file-size must be at least --io-size".into());
                 }
@@ -265,12 +375,16 @@ impl Config {
                 }
                 if matches!(
                     self.workload,
-                    Workload::WriteSeq | Workload::WriteRand | Workload::WriteSync
+                    Workload::WriteSeq
+                        | Workload::WriteRand
+                        | Workload::WriteSync
+                        | Workload::WriteAtomic
+                        | Workload::WriteAtomicRand
                 ) {
                     let total_blocks = file_size / io_size;
                     if total_blocks < self.inflight as u64 {
                         return Err(
-                            "write_seq, write_rand, and write_sync require at least one non-overlapping block per worker"
+                            "fixed-size write workloads require at least one block per worker"
                                 .into(),
                         );
                     }
@@ -307,11 +421,23 @@ impl Config {
             if self.sync_mode != SyncMode::End {
                 return Err("--sync-every is only valid for write-heavy workloads".into());
             }
-        } else if self.workload == Workload::WriteSync {
-            if self.sync_mode != SyncMode::End {
-                return Err("--sync-every is not used by write_sync".into());
+            if self.dont_cache {
+                return Err("--dont-cache is only valid for append workloads".into());
             }
-        } else if self.sync_method != SyncMethod::WriteThenSync {
+        } else if self.workload == Workload::WriteSync && self.sync_mode != SyncMode::End {
+            return Err("--sync-every is not used by write_sync".into());
+        }
+        if self.dont_cache
+            && !matches!(
+                self.workload,
+                Workload::WriteAppend | Workload::WriteAtomicAppend
+            )
+        {
+            return Err(
+                "--dont-cache is only valid for write_append or write_atomic_append".into(),
+            );
+        }
+        if self.workload != Workload::WriteSync && self.sync_method != SyncMethod::WriteThenSync {
             return Err("--sync-method is only valid for write_sync".into());
         }
 
@@ -386,4 +512,34 @@ fn parse_byte_size(value: &str) -> Result<u64, String> {
         return Err("size value must be greater than zero".into());
     }
     Ok(result)
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+
+    fn multi_blob_config(workload: &str, blobs: &str) -> Config {
+        Config::try_parse_from([
+            "storage_bench",
+            "--workload",
+            workload,
+            "--blobs",
+            blobs,
+            "--operations",
+            "1",
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn multi_blob_count_is_bounded_before_allocation() {
+        for workload in ["write_multi_blob_append", "write_atomic_batch_append"] {
+            assert!(multi_blob_config(workload, "129055").validate().is_ok());
+            assert_eq!(
+                multi_blob_config(workload, "129056").validate(),
+                Err("--blobs must not exceed 129055".into())
+            );
+        }
+    }
 }

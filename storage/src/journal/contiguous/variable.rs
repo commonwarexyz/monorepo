@@ -2570,7 +2570,7 @@ mod tests {
     use crate::journal::contiguous::tests::{corrupt_page, run_contiguous_tests};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
+        Metrics as _, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, Writer},
         deterministic,
         mocks::{
@@ -3694,7 +3694,9 @@ mod tests {
                 .open(&cfg.data_partition(), &1u64.to_be_bytes())
                 .await
                 .unwrap();
-            blob.write_at_sync(0, vec![0xFF; 1]).await.unwrap();
+            blob.write_at(0, vec![0xFF; 1], WriteOptions::SYNC)
+                .await
+                .unwrap();
 
             {
                 let cache = CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10));
@@ -5820,7 +5822,7 @@ mod tests {
 
             for partition in [&legacy_partition, &blobs_partition] {
                 let (blob, _) = context.open(partition, &0u64.to_be_bytes()).await.unwrap();
-                blob.write_at_sync(0, vec![0]).await.unwrap();
+                blob.write_at(0, vec![0], WriteOptions::SYNC).await.unwrap();
             }
 
             let result = Journal::<_, u64>::init_at_size(context.child("storage"), cfg, 7).await;

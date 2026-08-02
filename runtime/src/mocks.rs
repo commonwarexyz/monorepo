@@ -1,8 +1,9 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
-    BatchOperation, Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs,
-    IoBufsMut, Metrics, Name, Spawner, Storage, Supervisor,
+    AtomicBlob, AtomicStorage, BatchOperation, BatchStorage, Blob, BufMut, BufferPool,
+    BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name, Spawner, Storage,
+    Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -564,16 +565,42 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
         self.inner.remove(partition, name).await
     }
 
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+impl<E: BatchStorage> BatchStorage for DelayedSyncContext<E> {
     async fn start_apply(
         &self,
-        operations: Vec<BatchOperation<Self::Blob>>,
+        operations: Vec<BatchOperation<Self::AtomicBlob>>,
     ) -> Result<Handle<()>, Error> {
         let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
         self.inner.start_apply(operations).await
     }
+}
 
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
+impl<E: AtomicStorage> AtomicStorage for DelayedSyncContext<E> {
+    type AtomicBlob = DelayedSyncBlob<E::AtomicBlob>;
+
+    async fn open_atomic_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::AtomicBlob, u64, u16), Error> {
+        let (inner, len, version) = self
+            .inner
+            .open_atomic_versioned(partition, name, versions)
+            .await?;
+        Ok((
+            DelayedSyncBlob {
+                inner,
+                pending: self.pending.clone(),
+            },
+            len,
+            version,
+        ))
     }
 }
 
@@ -612,21 +639,22 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        if !self.pending.tracking() {
-            return self.inner.write_at_sync(offset, bufs).await;
+        if !options.contains(WriteOptions::SYNC) || !self.pending.tracking() {
+            return self
+                .inner
+                .write_at(offset, bufs, options)
+                .await;
         }
-        self.inner.write_at(offset, bufs).await?;
-        self.pending.wait().await?;
-        self.inner.sync().await
+        self.inner
+            .write_at(offset, bufs, options.without(WriteOptions::SYNC))
+            .await?;
+        self.sync().await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -662,6 +690,17 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
             pending.state.lock().completions += 1;
             Ok(())
         })
+    }
+}
+
+impl<B: AtomicBlob> AtomicBlob for DelayedSyncBlob<B> {
+    async fn update(
+        &self,
+        offset: u64,
+        data: impl Into<IoBufs> + Send,
+        len: u64,
+    ) -> Result<(), Error> {
+        self.inner.update(offset, data, len).await
     }
 }
 
@@ -826,7 +865,7 @@ impl PendingSyncs {
     }
 }
 
-/// Controls a [WriteFaultContext]: while armed, every `write_at`/`write_at_sync` fails with an
+/// Controls a [WriteFaultContext]: while armed, every `write_at` or atomic update fails with an
 /// injected error. Successful writes are counted.
 #[derive(Clone, Default)]
 pub struct WriteFaults {
@@ -869,7 +908,7 @@ impl WriteFaults {
     }
 }
 
-/// Context wrapper whose blobs fail `write_at`/`write_at_sync` while the shared [WriteFaults]
+/// Context wrapper whose blobs fail `write_at` or atomic updates while the shared [WriteFaults]
 /// is armed, counting successful writes. Unlike [DelayedSyncContext], this injects failures
 /// into inline writes issued before any blob sync starts.
 #[derive(Clone)]
@@ -904,20 +943,46 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
         self.inner.remove(partition, name).await
     }
 
-    async fn start_apply(
-        &self,
-        operations: Vec<BatchOperation<Self::Blob>>,
-    ) -> Result<Handle<()>, Error> {
-        let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
-        self.inner.start_apply(operations).await
-    }
-
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.inner.scan(partition).await
     }
 }
 
-/// Blob wrapper that fails `write_at`/`write_at_sync` while its [WriteFaults] is armed.
+impl<E: BatchStorage> BatchStorage for WriteFaultContext<E> {
+    async fn start_apply(
+        &self,
+        operations: Vec<BatchOperation<Self::AtomicBlob>>,
+    ) -> Result<Handle<()>, Error> {
+        let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
+        self.inner.start_apply(operations).await
+    }
+}
+
+impl<E: AtomicStorage> AtomicStorage for WriteFaultContext<E> {
+    type AtomicBlob = WriteFaultBlob<E::AtomicBlob>;
+
+    async fn open_atomic_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::AtomicBlob, u64, u16), Error> {
+        let (inner, len, version) = self
+            .inner
+            .open_atomic_versioned(partition, name, versions)
+            .await?;
+        Ok((
+            WriteFaultBlob {
+                inner,
+                faults: self.faults.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+}
+
+/// Blob wrapper that fails `write_at` or atomic updates while its [WriteFaults] is armed.
 #[derive(Clone)]
 pub struct WriteFaultBlob<B> {
     inner: B,
@@ -938,20 +1003,16 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.faults.check()?;
-        self.inner.write_at(offset, bufs).await?;
-        self.faults.note();
-        Ok(())
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         self.faults.check()?;
-        self.inner.write_at_sync(offset, bufs).await?;
+        self.inner
+            .write_at(offset, bufs, options)
+            .await?;
         self.faults.note();
         Ok(())
     }
@@ -966,6 +1027,20 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
 
     async fn start_sync(&self) -> Handle<()> {
         self.inner.start_sync().await
+    }
+}
+
+impl<B: AtomicBlob> AtomicBlob for WriteFaultBlob<B> {
+    async fn update(
+        &self,
+        offset: u64,
+        data: impl Into<IoBufs> + Send,
+        len: u64,
+    ) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.update(offset, data, len).await?;
+        self.faults.note();
+        Ok(())
     }
 }
 
@@ -1002,16 +1077,42 @@ impl<E: Storage> Storage for SyncFaultContext<E> {
         self.inner.remove(partition, name).await
     }
 
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+impl<E: BatchStorage> BatchStorage for SyncFaultContext<E> {
     async fn start_apply(
         &self,
-        operations: Vec<BatchOperation<Self::Blob>>,
+        operations: Vec<BatchOperation<Self::AtomicBlob>>,
     ) -> Result<Handle<()>, Error> {
         let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
         self.inner.start_apply(operations).await
     }
+}
 
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
+impl<E: AtomicStorage> AtomicStorage for SyncFaultContext<E> {
+    type AtomicBlob = SyncFaultBlob<E::AtomicBlob>;
+
+    async fn open_atomic_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::AtomicBlob, u64, u16), Error> {
+        let (inner, len, version) = self
+            .inner
+            .open_atomic_versioned(partition, name, versions)
+            .await?;
+        Ok((
+            SyncFaultBlob {
+                inner,
+                faulty: partition == self.fail_partition,
+            },
+            len,
+            version,
+        ))
     }
 }
 
@@ -1036,16 +1137,15 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        self.inner.write_at_sync(offset, bufs).await
+        self.inner
+            .write_at(offset, bufs, options)
+            .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -1065,6 +1165,17 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
             return Handle::ready(self.sync().await);
         }
         self.inner.start_sync().await
+    }
+}
+
+impl<B: AtomicBlob> AtomicBlob for SyncFaultBlob<B> {
+    async fn update(
+        &self,
+        offset: u64,
+        data: impl Into<IoBufs> + Send,
+        len: u64,
+    ) -> Result<(), Error> {
+        self.inner.update(offset, data, len).await
     }
 }
 

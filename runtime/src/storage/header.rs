@@ -38,7 +38,7 @@ stability_scope!(BETA {
         /// before the header became durable, making the blob a candidate for
         /// [Layout::interrupted_creation] classification.
         ///
-        /// [HeaderError::VersionMismatch] is excluded: for V1 it fires only once the CRC has
+        /// [HeaderError::VersionMismatch] is excluded: for V1/V2 it fires only once the CRC has
         /// validated and the full header region is present, so the header was completely
         /// written and the failure is a genuine version disagreement. (A V0 version mismatch
         /// is checked without a CRC, but V0 recovery is out of scope.)
@@ -96,14 +96,16 @@ stability_scope!(BETA {
     /// contents: the application-owned blob version passed to
     /// [crate::Storage::open_versioned] is a separate field and is unaffected by the layout.
     ///
-    /// New blobs are always created with the latest layout. Reopening an existing blob honors
-    /// the layout recorded in its header.
+    /// Ordinary blobs are created as V1 and opt-in atomic blobs as V2. Reopening an existing
+    /// blob honors the layout recorded in its header.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum Layout {
         /// An 8-byte header, with data beginning immediately after it.
         V0,
         /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
         V1,
+        /// An atomic-blob header with one immutable page and two mutable root pages.
+        V2,
     }
 
     impl Layout {
@@ -112,6 +114,7 @@ stability_scope!(BETA {
             match self {
                 Self::V0 => 0,
                 Self::V1 => 1,
+                Self::V2 => 2,
             }
         }
 
@@ -127,6 +130,7 @@ stability_scope!(BETA {
             match self {
                 Self::V0 => *b"CWIC",
                 Self::V1 => *b"CWIK",
+                Self::V2 => *b"CWIL",
             }
         }
 
@@ -135,32 +139,36 @@ stability_scope!(BETA {
             match magic {
                 b"CWIC" => Some(Self::V0),
                 b"CWIK" => Some(Self::V1),
+                b"CWIL" => Some(Self::V2),
                 _ => None,
             }
         }
 
         /// The offset where blob data begins under this layout. Not stored on disk (the
-        /// layout's magic implies it): a [Layout::V0] header is the bare prelude, while a
-        /// [Layout::V1] header region occupies exactly one 4096-byte page.
+        /// layout's magic implies it): a [Layout::V0] header is the bare prelude, a
+        /// [Layout::V1] header region occupies exactly one 4096-byte page, and a
+        /// [Layout::V2] region occupies an immutable header page followed by two atomic-root
+        /// pages.
         ///
         /// Each offset is frozen for the lifetime of its layout: torn-creation recovery
-        /// relies on every V1 creation producing this exact region, so a different offset
+        /// relies on every creation producing its layout's exact region, so a different offset
         /// requires a new layout (with its own magic), not a change here.
         pub(crate) const fn data_offset(self) -> u64 {
             match self {
                 Self::V0 => Header::PRELUDE_SIZE as u64,
                 Self::V1 => 4096,
+                Self::V2 => 12288,
             }
         }
 
         /// Validates the header region past the prelude for this layout, which must be
-        /// fully present: a [Layout::V0] region is the prelude alone, while a [Layout::V1]
-        /// region extends to a CRC over the prelude and zero reserved padding out to the
-        /// data offset.
+        /// fully present: a [Layout::V0] region is the prelude alone, [Layout::V1] extends
+        /// to a CRC over the prelude and immutable zero reserved padding, and [Layout::V2]
+        /// retains the same structure over a larger region.
         fn validate_region(self, raw: &[u8], raw_len: u64) -> Result<(), HeaderError> {
             match self {
                 Self::V0 => Ok(()),
-                Self::V1 => {
+                Self::V1 | Self::V2 => {
                     if raw.len() < Header::PARSE_LEN {
                         return Err(HeaderError::Truncated {
                             required_len: Header::PARSE_LEN as u64,
@@ -179,7 +187,12 @@ stability_scope!(BETA {
                             raw_len,
                         });
                     }
-                    if raw[Header::PARSE_LEN..self.data_offset() as usize]
+                    let immutable_end = match self {
+                        Self::V1 => self.data_offset() as usize,
+                        Self::V2 => 4096,
+                        Self::V0 => unreachable!(),
+                    };
+                    if raw[Header::PARSE_LEN..immutable_end]
                         .iter()
                         .any(|&byte| byte != 0)
                     {
@@ -197,15 +210,11 @@ stability_scope!(BETA {
         /// pre-V1 writer's torn creation is a sub-prelude file, healed as new before any
         /// parsing).
         ///
-        /// [Layout::V1] creation writes the region with set_len(0) -> write -> sync, and
-        /// this classifier models the states it recovers as a prefix of the canonical
-        /// region, possibly followed by zeros (a persisted length without persisted bytes
-        /// reads as zeros). A file is accepted iff it fits within the region and equals a
-        /// canonical prefix followed by zeros: the magic and runtime version are fixed;
-        /// the blob version bytes continue the prefix with whatever value the writer
-        /// chose; the CRC bytes must be a prefix of the CRC over the preceding prelude,
-        /// which can only have begun persisting once the full prelude did; and everything
-        /// past the prefix must be zero.
+        /// V1 creation writes its complete region with set_len(0) -> write -> sync, and this
+        /// classifier models the states it recovers as a prefix of the canonical region,
+        /// possibly followed by zeros (a persisted length without persisted bytes reads as
+        /// zeros). V2 creation instead syncs a staging inode before publishing its live name, so
+        /// no malformed V2 live file qualifies for recreation.
         ///
         /// The prefix shape is a model, not a filesystem guarantee: device writeback before
         /// the sync completes may persist bytes out of order. A file that is not a canonical
@@ -214,7 +223,7 @@ stability_scope!(BETA {
         /// coverage for avoiding broader acceptance that might erase nonzero data.
         pub(crate) fn interrupted_creation(self, raw: &[u8]) -> bool {
             match self {
-                Self::V0 => false,
+                Self::V0 | Self::V2 => false,
                 Self::V1 => {
                     // The file cannot extend past the region creation writes, and
                     // everything past the parseable header must be zero padding.
@@ -256,20 +265,20 @@ stability_scope!(BETA {
 
     /// Fixed-size header prelude at the start of each [crate::Blob].
     ///
-    /// On-disk layout (big-endian). The prelude is 8 bytes and a V1 header extends it:
+    /// On-disk layout (big-endian). The prelude is 8 bytes and V1/V2 extend it:
     ///
     /// | bytes    | field                        | owner       | question it answers                              |
     /// |----------|------------------------------|-------------|--------------------------------------------------|
     /// | 0-3      | magic (per layout)           | runtime     | is this file one of our blobs, and which layout? |
     /// | 4-5      | runtime version (u16)        | runtime     | can this build read this container layout?       |
     /// | 6-7      | blob version (u16)           | application | can this application interpret the contents?     |
-    /// | 8-11     | CRC32 of bytes 0-7 (V1 only) | runtime     | is this header intact?                           |
-    /// | 12..     | zero padding (V1 only)       | runtime     | (spacing up to the data offset; reserved)        |
+    /// | 8-11     | CRC32 of bytes 0-7 (V1/V2)   | runtime     | is this header intact?                           |
+    /// | 12..4096 | immutable zero padding       | runtime     | is the reserved header region unchanged?         |
     ///
     /// The magic selects the header region layout ([Layout]), and the layout fully
     /// determines the geometry: a V0 header region is the 8-byte prelude alone with data at
-    /// offset 8, while a V1 header region extends to the V1 [Layout::data_offset], so data
-    /// begins on an aligned boundary.
+    /// offset 8, V1 extends to one page of zero padding, and V2 adds two mutable atomic-root
+    /// pages after that immutable page.
     ///
     /// The blob version is opaque to the runtime: creation stamps the newest version the caller
     /// requested, reopening rejects versions outside the caller's range, and the stored value is
@@ -285,10 +294,10 @@ stability_scope!(BETA {
         /// Size of the header prelude in bytes.
         pub(crate) const PRELUDE_SIZE: usize = 8;
 
-        /// Size of the V1 header extension in bytes (CRC32 over the prelude).
+        /// Size of the V1/V2 header extension in bytes (CRC32 over the prelude).
         pub(crate) const EXTENSION_SIZE: usize = 4;
 
-        /// Number of leading bytes needed to parse any header: the prelude plus the V1
+        /// Number of leading bytes needed to identify any header: the prelude plus the V1/V2
         /// extension.
         pub(crate) const PARSE_LEN: usize = Self::PRELUDE_SIZE + Self::EXTENSION_SIZE;
 
@@ -301,7 +310,10 @@ stability_scope!(BETA {
         }
 
         /// Number of leading bytes [resolve] needs for a blob of raw on-disk length
-        /// `raw_len`: the full header region, capped by the file itself.
+        /// `raw_len`: the immutable header page, capped by the file itself.
+        ///
+        /// V2 root pages are mutable recovery records and are read separately from the selected
+        /// checkpoint. Header resolution must not read them or any bytes beyond the first page.
         pub(crate) const fn resolve_len(raw_len: u64) -> usize {
             if raw_len < Layout::V1.data_offset() {
                 raw_len as usize
@@ -310,9 +322,29 @@ stability_scope!(BETA {
             }
         }
 
-        /// Creates the header region for a new blob using the latest version from the range and
-        /// the latest header layout. Returns (encoded header region, blob version); the data
-        /// offset is the region's length.
+        /// Encodes a complete header region for `layout` and `blob_version`.
+        fn encode_region(layout: Layout, blob_version: u16) -> Vec<u8> {
+            let header = Self {
+                magic: layout.magic(),
+                runtime_version: layout.runtime_version(),
+                blob_version,
+            };
+            let mut region = Vec::with_capacity(layout.data_offset() as usize);
+            region.extend_from_slice(&header.encode());
+            match layout {
+                Layout::V0 => {}
+                Layout::V1 | Layout::V2 => {
+                    let crc = Crc32::checksum(&region);
+                    region.extend_from_slice(&crc.to_be_bytes());
+                    region.resize(layout.data_offset() as usize, 0);
+                }
+            }
+            region
+        }
+
+        /// Creates the header region for a new ordinary blob using the latest version from the
+        /// range. Returns (encoded V1 region, blob version); the data offset is the region's
+        /// length.
         ///
         /// Callers writing this region over an existing blob must truncate it to zero first, so
         /// a torn write cannot splice old bytes into a fully valid header with a wrong version:
@@ -321,17 +353,16 @@ stability_scope!(BETA {
         pub(crate) fn create(versions: &RangeInclusive<u16>) -> (Vec<u8>, u16) {
             let layout = Layout::V1;
             let blob_version = *versions.end();
-            let header = Self {
-                magic: layout.magic(),
-                runtime_version: layout.runtime_version(),
-                blob_version,
-            };
-            let mut region = Vec::with_capacity(Layout::V1.data_offset() as usize);
-            region.extend_from_slice(&header.encode());
-            let crc = Crc32::checksum(&region);
-            region.extend_from_slice(&crc.to_be_bytes());
-            region.resize(layout.data_offset() as usize, 0);
-            (region, blob_version)
+            (Self::encode_region(layout, blob_version), blob_version)
+        }
+
+        /// Creates the zero-padded V2 header region for a new atomic blob using the latest version
+        /// from the range. As with [Header::create], callers must truncate an existing file before
+        /// writing the returned region.
+        pub(crate) fn create_atomic(versions: &RangeInclusive<u16>) -> (Vec<u8>, u16) {
+            let layout = Layout::V2;
+            let blob_version = *versions.end();
+            (Self::encode_region(layout, blob_version), blob_version)
         }
 
         /// Parses and validates a blob's header from its leading bytes, returning the blob's
@@ -359,7 +390,11 @@ stability_scope!(BETA {
             }
 
             let data_offset = layout.data_offset();
-            Ok((raw_len - data_offset, header.blob_version, data_offset))
+            let logical_size = match layout {
+                Layout::V2 => 0,
+                Layout::V0 | Layout::V1 => raw_len - data_offset,
+            };
+            Ok((logical_size, header.blob_version, data_offset))
         }
 
         /// Validates the magic bytes and runtime version, returning the layout the magic
@@ -418,7 +453,7 @@ stability_scope!(BETA {
     ///
     /// Returns `Some((logical_size, blob_version, data_offset))` for a valid header and
     /// `None` when the caller should (re)create the blob: the file is too short to hold a
-    /// header, or its contents are those of a [Layout::V1] creation interrupted
+    /// header, or its contents are those of a V1 creation interrupted
     /// before its header became durable. Anything else fails as corrupt or unacceptable.
     ///
     /// `raw` must hold the blob's first [Header::resolve_len] bytes, where `raw_len` is
@@ -445,11 +480,11 @@ stability_scope!(BETA {
             Err(err) => err,
         };
 
-        // Heal a V1 creation interrupted before its header became durable: the failure
-        // must be one a torn write can produce, and the contents must match the canonical
-        // creation prefix. Files longer than the creation region hold data and never heal.
-        if raw_len <= Layout::V1.data_offset()
-            && err.may_be_torn_creation()
+        // V1 recovery remains bounded by its frozen creation region. V2 creation publishes its
+        // live name only after the complete staged header is durable, so a malformed V2 is never
+        // guessed to be an interrupted creation.
+        if err.may_be_torn_creation()
+            && raw_len <= Layout::V1.data_offset()
             && Layout::V1.interrupted_creation(raw)
         {
             warn!(
@@ -514,6 +549,11 @@ pub(crate) mod tests {
         raw
     }
 
+    /// Raw bytes of a newly created V2 atomic blob.
+    fn v2_header_region(blob_version: u16) -> Vec<u8> {
+        Header::create_atomic(&(blob_version..=blob_version)).0
+    }
+
     #[test]
     fn test_header_create_v1() {
         let (region, blob_version) = Header::create(&(0..=7));
@@ -531,20 +571,100 @@ pub(crate) mod tests {
         assert_eq!(data_offset, Layout::V1.data_offset());
     }
 
+    #[test]
+    fn test_header_create_atomic_v2() {
+        let (region, blob_version) = Header::create_atomic(&(0..=7));
+        assert_eq!(blob_version, 7);
+        assert_eq!(region.len(), Layout::V2.data_offset() as usize);
+        assert_eq!(&region[..4], &Layout::V2.magic());
+        assert_eq!(&region[4..6], &Layout::V2.runtime_version().to_be_bytes());
+        assert_eq!(&region[6..8], &7u16.to_be_bytes());
+
+        let crc = u32::from_be_bytes(region[8..12].try_into().unwrap());
+        assert_eq!(crc, commonware_cryptography::Crc32::checksum(&region[..8]));
+
+        assert!(region[Header::PARSE_LEN..].iter().all(|&byte| byte == 0));
+
+        let (size, parsed_blob_version, data_offset) =
+            Header::parse(&region, Layout::V2.data_offset(), &(0..=7)).unwrap();
+        assert_eq!(size, 0);
+        assert_eq!(parsed_blob_version, 7);
+        assert_eq!(data_offset, Layout::V2.data_offset());
+    }
+
+    #[test]
+    fn test_header_resolution_never_reads_mutable_v2_root_pages() {
+        assert_eq!(
+            Header::resolve_len(Layout::V2.data_offset() + 1024 * 1024),
+            Layout::V1.data_offset() as usize,
+        );
+        let region = v2_header_region(6);
+        assert_eq!(
+            super::resolve(
+                &region[..Layout::V1.data_offset() as usize],
+                Layout::V2.data_offset() + 1024 * 1024,
+                &(6..=6),
+                "partition",
+                b"v2",
+            )
+            .unwrap(),
+            Some((0, 6, Layout::V2.data_offset())),
+        );
+    }
+
+    /// Freeze both legacy layouts independently of the current creation policy.
+    #[test]
+    fn test_header_v0_v1_compatibility() {
+        let v0_payload = b"legacy-v0";
+        let v0 = v0_blob_bytes(3, v0_payload);
+        assert_eq!(&v0[..8], &[b'C', b'W', b'I', b'C', 0x00, 0x00, 0x00, 0x03]);
+        assert_eq!(&v0[Layout::V0.data_offset() as usize..], v0_payload);
+        assert_eq!(
+            Header::parse(&v0, v0.len() as u64, &(3..=3)).unwrap(),
+            (v0_payload.len() as u64, 3, 8)
+        );
+
+        let v1_payload = b"legacy-v1";
+        let v1 = v1_blob_bytes(3, v1_payload);
+        assert_eq!(&v1[..8], &[b'C', b'W', b'I', b'K', 0x00, 0x01, 0x00, 0x03]);
+        assert!(
+            v1[Header::PARSE_LEN..Layout::V1.data_offset() as usize]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
+        assert_eq!(&v1[Layout::V1.data_offset() as usize..], v1_payload);
+        assert_eq!(
+            Header::parse(&v1, v1.len() as u64, &(3..=3)).unwrap(),
+            (v1_payload.len() as u64, 3, 4096)
+        );
+
+        // Resolving enough bytes for V2 must not change either legacy interpretation.
+        assert_eq!(
+            super::resolve(&v0, v0.len() as u64, &(3..=3), "partition", b"v0").unwrap(),
+            Some((v0_payload.len() as u64, 3, 8))
+        );
+        assert_eq!(
+            super::resolve(&v1, v1.len() as u64, &(3..=3), "partition", b"v1").unwrap(),
+            Some((v1_payload.len() as u64, 3, 4096))
+        );
+    }
+
     /// Freeze the exact on-disk bytes of a V1 header so accidental format changes are caught
     /// (the padding is asserted zero in [test_header_create_v1]).
     #[test]
     fn test_header_v1_fixture_bytes() {
         let (region, _) = Header::create(&(3..=3));
-        let expected = [
+        let expected_prelude = [
             b'C', b'W', b'I', b'K', // V1 magic
             0x00, 0x01, // runtime version 1
             0x00, 0x03, // blob version 3
         ];
-        assert_eq!(&region[..8], &expected);
-        // CRC32 over the 8-byte prelude.
-        let crc = u32::from_be_bytes(region[8..12].try_into().unwrap());
-        assert_eq!(crc, commonware_cryptography::Crc32::checksum(&expected));
+        let expected_header = [
+            b'C', b'W', b'I', b'K', 0x00, 0x01, 0x00, 0x03, 0x3b, 0x43, 0x2b, 0x28,
+        ];
+        assert_eq!(&region[..Header::PRELUDE_SIZE], &expected_prelude);
+        assert_eq!(&region[..Header::PARSE_LEN], &expected_header);
+        assert_eq!(region, v1_blob_bytes(3, b""));
     }
 
     #[test]
@@ -576,6 +696,55 @@ pub(crate) mod tests {
         region[Header::PARSE_LEN] = 0x01;
         let result = Header::parse(&region, Layout::V1.data_offset(), &(0..=0));
         assert!(matches!(result, Err(HeaderError::InvalidPadding)));
+    }
+
+    #[test]
+    fn test_header_v2_rejects_bad_crc_and_immutable_padding() {
+        let mut bad_crc = v2_header_region(0);
+        bad_crc[Header::PARSE_LEN - 1] ^= 0x01;
+        assert!(matches!(
+            Header::parse(&bad_crc, Layout::V2.data_offset(), &(0..=0)),
+            Err(HeaderError::InvalidChecksum)
+        ));
+
+        let mut bad_padding = v2_header_region(0);
+        bad_padding[Header::PARSE_LEN] = 0x01;
+        assert!(matches!(
+            Header::parse(&bad_padding, Layout::V2.data_offset(), &(0..=0)),
+            Err(HeaderError::InvalidPadding)
+        ));
+
+        let mut root_page = v2_header_region(0);
+        root_page[4096] = 0x01;
+        assert_eq!(
+            Header::parse(&root_page, Layout::V2.data_offset(), &(0..=0)).unwrap(),
+            (0, 0, Layout::V2.data_offset())
+        );
+    }
+
+    #[test]
+    fn test_header_v2_rejects_truncated_region() {
+        let region = v2_header_region(0);
+        let result = Header::parse(
+            &region[..Layout::V2.data_offset() as usize - 1],
+            Layout::V2.data_offset() - 1,
+            &(0..=0),
+        );
+        assert!(matches!(
+            result,
+            Err(HeaderError::Truncated { required_len, raw_len })
+            if required_len == Layout::V2.data_offset() && raw_len == Layout::V2.data_offset() - 1
+        ));
+    }
+
+    #[test]
+    fn test_header_v2_log_length_is_not_logical_length() {
+        let region = v2_header_region(4);
+        let raw_len = Layout::V2.data_offset() + 123;
+        assert_eq!(
+            Header::parse(&region, raw_len, &(4..=4)).unwrap(),
+            (0, 4, Layout::V2.data_offset())
+        );
     }
 
     #[test]
@@ -691,7 +860,7 @@ pub(crate) mod tests {
     /// magic: this is what lets an unparseable header safely identify a torn creation.
     #[test]
     fn test_header_magic_zero_subset_is_invalid() {
-        for layout in [Layout::V0, Layout::V1] {
+        for layout in [Layout::V0, Layout::V1, Layout::V2] {
             for i in 0..Header::MAGIC_LENGTH {
                 let mut magic = layout.magic();
                 magic[i] = 0;
@@ -791,6 +960,128 @@ pub(crate) mod tests {
                 "{label} should classify as an interrupted creation"
             );
         }
+    }
+
+    #[test]
+    fn test_header_v2_creation_does_not_broaden_interrupted_recovery() {
+        let region = v2_header_region(5);
+        let mut identified_length = vec![0u8; region.len()];
+        identified_length[..4].copy_from_slice(&region[..4]);
+        let mut persisted_length = vec![0u8; region.len()];
+        persisted_length[..10].copy_from_slice(&region[..10]);
+        let mut out_of_order = vec![0u8; region.len()];
+        out_of_order[100] = 1;
+        let malformed: &[(&str, Vec<u8>)] = &[
+            ("only length persisted", vec![0u8; region.len()]),
+            ("V2 magic with persisted length", identified_length),
+            ("CRC prefix with persisted length", persisted_length),
+            ("out-of-order persisted byte", out_of_order),
+        ];
+        for (label, raw) in malformed {
+            assert!(
+                super::resolve(raw, raw.len() as u64, &(0..=5), "partition", b"atomic").is_err(),
+                "{label} must remain corruption because V2 is published from staging"
+            );
+        }
+
+        assert_eq!(
+            super::resolve(
+                &region,
+                region.len() as u64,
+                &(0..=5),
+                "partition",
+                b"atomic",
+            )
+            .unwrap(),
+            Some((0, 5, Layout::V2.data_offset()))
+        );
+    }
+
+    #[test]
+    fn test_header_interrupted_v2_creation_rejects_existing_and_corrupt_blobs() {
+        let region = v2_header_region(5);
+        assert!(!Layout::V2.interrupted_creation(&vec![0u8; Layout::V2.data_offset() as usize]));
+        let cases: &[(&str, Vec<u8>)] = &[
+            ("intact V0 blob", v0_blob_bytes(5, b"payload")),
+            ("intact V1 blob", v1_blob_bytes(5, b"payload")),
+            ("foreign magic", {
+                let mut raw = region.clone();
+                raw[0] = b'X';
+                raw
+            }),
+            ("non-canonical runtime version", {
+                let mut raw = region.clone();
+                raw[5] = 3;
+                raw
+            }),
+            ("lost CRC byte followed by persisted bytes", {
+                let mut raw = region.clone();
+                raw[8] = 0;
+                raw
+            }),
+            ("nonzero reserved padding", {
+                let mut raw = region.clone();
+                raw[100] = 0x01;
+                raw
+            }),
+            ("data past the V2 header region", {
+                let mut raw = region;
+                raw.push(1);
+                raw
+            }),
+        ];
+        for (label, raw) in cases {
+            assert!(
+                !Layout::V2.interrupted_creation(raw),
+                "{label} must stay a loud corruption error"
+            );
+        }
+
+        // Adding V2 recovery must not broaden the old V1 recovery boundary to include a
+        // legacy blob with data whose otherwise complete CRC has become corrupt.
+        let mut corrupt_v1 = v1_blob_bytes(5, &[0u8; 100]);
+        corrupt_v1[8] ^= 1;
+        assert!(
+            super::resolve(
+                &corrupt_v1,
+                corrupt_v1.len() as u64,
+                &(0..=5),
+                "partition",
+                b"legacy",
+            )
+            .is_err()
+        );
+
+        // This was outside V1's creation boundary before V2 existed. Even though erasing
+        // its V0 tag leaves the shared `CWI` prefix followed by zeros, it must not become
+        // eligible for V2 recreation and lose its legacy logical length.
+        let mut ambiguous_v0 = v0_blob_bytes(0, &vec![0u8; 4090]);
+        ambiguous_v0[3] = 0;
+        assert!(ambiguous_v0.len() > Layout::V1.data_offset() as usize);
+        assert!(ambiguous_v0.len() <= Layout::V2.data_offset() as usize);
+        assert!(
+            super::resolve(
+                &ambiguous_v0,
+                ambiguous_v0.len() as u64,
+                &(0..=5),
+                "partition",
+                b"legacy",
+            )
+            .is_err()
+        );
+
+        let mut corrupt_v2 = v2_header_region(5);
+        corrupt_v2[100] = 1;
+        assert!(
+            super::resolve(
+                &corrupt_v2,
+                corrupt_v2.len() as u64,
+                &(0..=5),
+                "partition",
+                b"atomic",
+            )
+            .is_err()
+        );
     }
 
     /// This runtime never creates V0 blobs, so no contents qualify as an interrupted V0

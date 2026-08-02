@@ -1,4 +1,4 @@
-use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
+use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, WriteOptions};
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
 use std::{io::SeekFrom, sync::Arc};
@@ -128,25 +128,25 @@ impl crate::Blob for Blob {
         }
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let mut bufs = bufs.into();
-        let mut file = self.file.lock().await;
-        Self::write_at_inner(&mut file, offset, &mut bufs, self.data_offset).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         let mut bufs = bufs.into();
-        if !bufs.has_remaining() {
+        let sync = options.contains(WriteOptions::SYNC);
+        if sync && !bufs.has_remaining() {
             return Ok(());
         }
 
         let mut file = self.file.lock().await;
         Self::write_at_inner(&mut file, offset, &mut bufs, self.data_offset).await?;
-        Self::sync_inner(&file, &self.partition, &self.name).await
+        if sync {
+            Self::sync_inner(&file, &self.partition, &self.name).await
+        } else {
+            Ok(())
+        }
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -176,5 +176,16 @@ impl crate::Blob for Blob {
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)
+    }
+}
+
+impl crate::AtomicBlob for Blob {
+    async fn update(
+        &self,
+        _offset: u64,
+        _data: impl Into<IoBufs> + Send,
+        _len: u64,
+    ) -> Result<(), Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
     }
 }

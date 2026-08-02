@@ -124,6 +124,7 @@ struct Waiter {
 }
 
 /// Outcome produced when staging the next SQE for a waiter.
+#[allow(clippy::large_enum_variant)]
 pub enum StageOutcome {
     /// The waiter was canceled while parked in the ready queue and should
     /// complete locally with timeout rather than issuing another SQE.

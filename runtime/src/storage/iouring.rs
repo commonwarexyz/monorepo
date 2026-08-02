@@ -22,13 +22,14 @@
 
 use super::Header;
 use crate::{
-    BatchOperation, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
+    BatchOperation, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, WriteOptions,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
 };
 use commonware_formatting::{from_hex, hex};
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::Mutex as SyncMutex};
+use futures::future::join_all;
 use std::{
     collections::BTreeMap,
     fs::{self, File},
@@ -36,11 +37,11 @@ use std::{
     ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
 fn resolve_header(
@@ -100,10 +101,94 @@ pub struct Storage {
 struct Namespace {
     lock: Arc<Mutex<()>>,
     recovery_required: AtomicBool,
+    carried_batch_decision: AtomicBool,
+    storage_directory: PathBuf,
     generations: super::generation::Registry,
+    atomic_states: SyncMutex<BTreeMap<(String, Vec<u8>), AtomicStateEntry>>,
+}
+
+struct AtomicStateEntry {
+    generation: Weak<super::generation::Token>,
+    state: Weak<Mutex<V2State>>,
+}
+
+/// Mutable log/index state shared by every handle opened for one current V2 name generation.
+type V2State = super::atomic::State;
+
+async fn lock_v2(state: &Arc<Mutex<V2State>>) -> OwnedMutexGuard<V2State> {
+    if let Ok(state) = state.clone().try_lock_owned() {
+        return state;
+    }
+    state.clone().lock_owned().await
+}
+
+/// Owns a V2 content lock while an admitted mutation is in flight.
+///
+/// io_uring retains admitted requests after their observer is dropped. If the future holding this
+/// guard is canceled before normal completion, poisoning prevents later readers from treating the
+/// possibly partial physical mutation as a committed logical state.
+struct V2OperationGuard {
+    state: OwnedMutexGuard<V2State>,
+    completed: bool,
+}
+
+struct V2WriteRequest {
+    prepared: super::atomic::PreparedMutation,
+    options: WriteOptions,
+    cache: iouring::Cache,
+    retained: Arc<Mutex<V2State>>,
+    sync: bool,
+}
+
+impl V2OperationGuard {
+    const fn new(state: OwnedMutexGuard<V2State>) -> Self {
+        Self {
+            state,
+            completed: false,
+        }
+    }
+
+    const fn finish(&mut self) {
+        self.completed = true;
+    }
+
+    fn poison(&mut self) {
+        self.state.poison();
+        self.completed = true;
+    }
+
+    fn complete(&mut self, success: bool) {
+        if success {
+            self.finish();
+        } else {
+            self.poison();
+        }
+    }
+}
+
+impl Drop for V2OperationGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.state.poison();
+        }
+    }
 }
 
 impl Namespace {
+    /// Complete any committed coordinator decision while the caller holds `lock`.
+    fn recover_locked(&self) -> Result<(), Error> {
+        if !self.recovery_required.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        super::batch::recover_notifying(&self.storage_directory, |operations| {
+            self.invalidate_operations(operations);
+        })?;
+        self.recovery_required.store(false, Ordering::Release);
+        self.carried_batch_decision
+            .store(false, Ordering::Release);
+        Ok(())
+    }
+
     fn knows_partition(&self, partition: &str) -> bool {
         self.generations.knows_partition(partition)
     }
@@ -121,8 +206,65 @@ impl Namespace {
         self.generations.is_current(partition, name, generation)
     }
 
+    fn atomic_state(
+        &self,
+        partition: &str,
+        name: &[u8],
+        generation: &Arc<super::generation::Token>,
+    ) -> Option<Arc<Mutex<V2State>>> {
+        let key = (partition.to_string(), name.to_vec());
+        let mut states = self.atomic_states.lock();
+        let entry = states.get(&key)?;
+        let Some(entry_generation) = entry.generation.upgrade() else {
+            states.remove(&key);
+            return None;
+        };
+        if !Arc::ptr_eq(&entry_generation, generation) {
+            states.remove(&key);
+            return None;
+        }
+        let Some(state) = entry.state.upgrade() else {
+            states.remove(&key);
+            return None;
+        };
+        Some(state)
+    }
+
+    fn insert_atomic_state(
+        &self,
+        partition: &str,
+        name: &[u8],
+        generation: &Arc<super::generation::Token>,
+        state: V2State,
+    ) -> Arc<Mutex<V2State>> {
+        let state = Arc::new(Mutex::new(state));
+        let mut states = self.atomic_states.lock();
+        states.retain(|_, entry| entry.state.strong_count() != 0);
+        states.insert(
+            (partition.to_string(), name.to_vec()),
+            AtomicStateEntry {
+                generation: Arc::downgrade(generation),
+                state: Arc::downgrade(&state),
+            },
+        );
+        state
+    }
+
     fn invalidate_operations(&self, operations: &[super::batch::Operation]) {
         self.generations.invalidate(operations);
+        let mut states = self.atomic_states.lock();
+        for operation in operations {
+            match operation {
+                super::batch::Operation::Remove(crate::RemoveTarget::Blob { partition, name }) => {
+                    states.remove(&(partition.clone(), name.clone()));
+                }
+                super::batch::Operation::Remove(crate::RemoveTarget::Partition(partition)) => {
+                    states.retain(|(candidate, _), _| candidate != partition);
+                }
+                super::batch::Operation::Publish { .. }
+                | super::batch::Operation::Resize { .. } => {}
+            }
+        }
     }
 }
 
@@ -147,7 +289,10 @@ impl Storage {
             namespace: Arc::new(Namespace {
                 lock: Arc::new(Mutex::new(())),
                 recovery_required: AtomicBool::new(true),
+                carried_batch_decision: AtomicBool::new(false),
+                storage_directory: storage_directory.clone(),
                 generations: super::generation::Registry::default(),
+                atomic_states: SyncMutex::new(BTreeMap::new()),
             }),
             storage_directory,
             io_handle,
@@ -160,22 +305,13 @@ impl Storage {
 
     /// Complete any prior committed batch while the namespace lock is held.
     fn recover_locked(&self) -> Result<(), Error> {
-        if !self.namespace.recovery_required.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        super::batch::recover_notifying(&self.storage_directory, |operations| {
-            self.namespace.invalidate_operations(operations);
-        })?;
-        self.namespace
-            .recovery_required
-            .store(false, Ordering::Release);
-        Ok(())
+        self.namespace.recover_locked()
     }
 
     /// Commit a storage batch from a self-driving worker that owns the namespace lock.
     async fn start_apply_guarded<F, C, D>(
         &self,
-        operations: Vec<BatchOperation<<Self as crate::Storage>::Blob>>,
+        operations: Vec<BatchOperation<<Self as crate::AtomicStorage>::AtomicBlob>>,
         on_worker_start: F,
         on_commit: C,
         on_complete: D,
@@ -185,139 +321,326 @@ impl Storage {
         C: FnOnce() + Send + 'static,
         D: FnOnce() + Send + 'static,
     {
-        let storage = Self::clone(self);
+        let mut descriptors = Vec::with_capacity(operations.len());
+        let mut blobs = BTreeMap::new();
+        let mut mutation_handles = Vec::new();
+        for operation in operations {
+            match operation {
+                BatchOperation::Remove(target) => {
+                    descriptors.push(super::batch::Operation::Remove(target));
+                }
+                BatchOperation::Publish(blob) => {
+                    let partition = blob.partition.clone();
+                    let name = blob.name.clone();
+                    if blob.atomic.is_none() {
+                        return Err(Error::BlobOpenFailed(
+                            partition,
+                            hex(&name),
+                            IoError::new(
+                                std::io::ErrorKind::Unsupported,
+                                "batch publication requires an atomic blob",
+                            )
+                            .into(),
+                        ));
+                    }
+                    descriptors.push(super::batch::Operation::Publish {
+                        partition: partition.clone(),
+                        name: name.clone(),
+                    });
+                    mutation_handles.push((
+                        partition.clone(),
+                        name.clone(),
+                        blob.generation.clone(),
+                    ));
+                    blobs.entry((partition, name)).or_insert(blob);
+                }
+                BatchOperation::Resize { blob, len } => {
+                    let partition = blob.partition.clone();
+                    let name = blob.name.clone();
+                    if blob.atomic.is_none() {
+                        return Err(Error::BlobOpenFailed(
+                            partition,
+                            hex(&name),
+                            IoError::new(
+                                std::io::ErrorKind::Unsupported,
+                                "batch resize requires an atomic blob",
+                            )
+                            .into(),
+                        ));
+                    }
+                    descriptors.push(super::batch::Operation::Resize {
+                        partition: partition.clone(),
+                        name: name.clone(),
+                        len,
+                    });
+                    mutation_handles.push((
+                        partition.clone(),
+                        name.clone(),
+                        blob.generation.clone(),
+                    ));
+                    blobs.entry((partition, name)).or_insert(blob);
+                }
+            }
+        }
+        let mut filesystem_operations = super::batch::canonicalize_operations(descriptors)?;
+        super::batch::preflight(&filesystem_operations)?;
+        if filesystem_operations.is_empty() {
+            let _guard = self.namespace.lock.clone().lock_owned().await;
+            self.recover_locked()?;
+            return Ok(Handle::ready(Ok(())));
+        }
+
+        let mutation_keys = filesystem_operations
+            .iter()
+            .filter_map(|operation| match operation {
+                super::batch::Operation::Publish { partition, name }
+                | super::batch::Operation::Resize {
+                    partition, name, ..
+                } => Some((partition.clone(), name.clone())),
+                super::batch::Operation::Remove(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut locked = Vec::with_capacity(mutation_keys.len());
+        for key in mutation_keys {
+            let blob = blobs
+                .remove(&key)
+                .expect("canonical mutation retains one input blob handle");
+            let state = blob.lock_batch_state().await?;
+            locked.push((blob, state));
+        }
+
         let guard = self.namespace.lock.clone().lock_owned().await;
+        let carry_decision = self
+            .namespace
+            .carried_batch_decision
+            .load(Ordering::Acquire);
+        if !carry_decision {
+            self.recover_locked()?;
+        }
+        for (partition, name, generation) in mutation_handles {
+            if !self.namespace.is_current(&partition, &name, &generation) {
+                return Err(Error::BlobMissing(partition, hex(&name)));
+            }
+        }
+        super::batch::resolve_operation_partitions(
+            &self.storage_directory,
+            &mut filesystem_operations,
+        )?;
+        let filesystem_operations = super::batch::canonicalize_operations(filesystem_operations)?;
+        super::batch::preflight(&filesystem_operations)?;
+
+        self.namespace
+            .recovery_required
+            .store(true, Ordering::Release);
+        let root = self.storage_directory.clone();
+        let namespace = self.namespace.clone();
         let (commit_sender, commit_receiver) = oneshot::channel();
         let (completion_sender, completion_receiver) = oneshot::channel();
-        drop(tokio::task::spawn_blocking(move || {
-            on_worker_start();
-            let mut commit_sender = Some(commit_sender);
-            let result = (|| {
-                storage.recover_locked()?;
+        drop(tokio::spawn(async move {
+            match tokio::task::spawn_blocking(on_worker_start).await {
+                Ok(()) => {}
+                Err(error) if error.is_panic() => {
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                Err(_) => {
+                    let error = Error::Closed;
+                    let _ = commit_sender.send(Err(error.clone()));
+                    drop(guard);
+                    on_complete();
+                    let _ = completion_sender.send(Err(error));
+                    return;
+                }
+            }
 
-                let mut filesystem_operations = Vec::with_capacity(operations.len());
-                let mut mutated = BTreeMap::new();
-                for operation in operations {
-                    match operation {
-                        BatchOperation::Remove(target) => {
-                            filesystem_operations.push(super::batch::Operation::Remove(target));
-                        }
-                        BatchOperation::Resize { blob, len } => {
-                            let partition = blob.partition.clone();
-                            let name = blob.name.clone();
-                            if !storage.namespace.is_current(
-                                &partition,
-                                &name,
-                                &blob.generation,
-                            ) {
-                                return Err(Error::BlobMissing(partition, hex(&name)));
-                            }
-                            let raw_len = len
-                                .checked_add(blob.data_offset)
-                                .ok_or(Error::OffsetOverflow)?;
-                            filesystem_operations.push(super::batch::Operation::Resize {
-                                partition: partition.clone(),
-                                name: name.clone(),
-                                len: raw_len,
-                            });
-                            mutated.entry((partition, name)).or_insert(blob);
-                        }
-                        BatchOperation::Update {
-                            blob,
-                            offset,
-                            data,
-                            len,
-                        } => {
-                            let partition = blob.partition.clone();
-                            let name = blob.name.clone();
-                            if !storage.namespace.is_current(
-                                &partition,
-                                &name,
-                                &blob.generation,
-                            ) {
-                                return Err(Error::BlobMissing(partition, hex(&name)));
-                            }
-                            super::batch::validate_update(offset, data.len(), len)?;
-                            let raw_offset = offset
-                                .checked_add(blob.data_offset)
-                                .ok_or(Error::OffsetOverflow)?;
-                            let raw_len = len
-                                .checked_add(blob.data_offset)
-                                .ok_or(Error::OffsetOverflow)?;
-                            filesystem_operations.push(super::batch::Operation::Update {
-                                partition: partition.clone(),
-                                name: name.clone(),
-                                offset: raw_offset,
-                                data,
-                                len: raw_len,
-                            });
-                            mutated.entry((partition, name)).or_insert(blob);
-                        }
+            let resize_lengths = filesystem_operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    super::batch::Operation::Resize {
+                        partition,
+                        name,
+                        len,
+                    } => Some(((partition.clone(), name.clone()), *len)),
+                    super::batch::Operation::Publish { .. }
+                    | super::batch::Operation::Remove(_) => None,
+                })
+                .collect::<BTreeMap<_, _>>();
+            let preparations = locked.into_iter().map(|(blob, state)| {
+                let resize = resize_lengths
+                    .get(&(blob.partition.clone(), blob.name.clone()))
+                    .copied();
+                async move {
+                    let mut operation = V2OperationGuard::new(state);
+                    if let Some(len) = resize {
+                        operation.state.resize(len);
                     }
+                    let prepared = blob.prepare_batch_commit(&mut operation.state).await;
+                    (blob, operation, prepared)
                 }
-                let mut filesystem_operations =
-                    super::batch::canonicalize_operations(filesystem_operations)?;
-                super::batch::resolve_operation_partitions(
-                    &storage.storage_directory,
-                    &mut filesystem_operations,
-                )?;
-                let filesystem_operations =
-                    super::batch::canonicalize_operations(filesystem_operations)?;
-                if filesystem_operations.is_empty() {
-                    if let Some(sender) = commit_sender.take() {
-                        let _ = sender.send(Ok(()));
-                    }
-                    return Ok(());
-                }
-                super::batch::preflight(&filesystem_operations)?;
+            });
+            let mut prepared_states = join_all(preparations).await;
 
-                for blob in mutated.values() {
-                    blob.sync_blocking()?;
+            let preparation_error = prepared_states
+                .iter()
+                .find_map(|(_, _, result)| result.as_ref().err().cloned());
+            if let Some(error) = preparation_error {
+                for (_, operation, _) in &mut prepared_states {
+                    operation.poison();
                 }
+                let _ = commit_sender.send(Err(error.clone()));
+                drop(guard);
+                on_complete();
+                let _ = completion_sender.send(Err(error));
+                return;
+            }
+            let participants =
+                prepared_states
+                    .iter()
+                    .filter_map(|(blob, _, prepared)| {
+                        prepared.as_ref().unwrap().as_ref().map(|prepared| {
+                            super::batch::Participant {
+                                partition: blob.partition.clone(),
+                                name: blob.name.clone(),
+                                candidate: prepared.candidate(),
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+            let materialized_previous = prepared_states
+                .iter()
+                .filter_map(|(blob, _, prepared)| {
+                    prepared
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()?
+                        .materialized_previous()
+                        .cloned()
+                        .map(|candidate| super::batch::Participant {
+                            partition: blob.partition.clone(),
+                            name: blob.name.clone(),
+                            candidate,
+                        })
+                })
+                .collect::<Vec<_>>();
+            let defer_participant_roots = filesystem_operations
+                .iter()
+                .all(|operation| !matches!(operation, super::batch::Operation::Remove(_)));
 
-                storage
-                    .namespace
-                    .recovery_required
-                    .store(true, Ordering::Release);
-                let mut committed = false;
-                let result = super::batch::apply_batch(
-                    &storage.storage_directory,
-                    &filesystem_operations,
-                    |committed_operations| {
-                        storage
-                            .namespace
-                            .invalidate_operations(committed_operations);
-                        committed = true;
+            let (install_sender, install_receiver) = oneshot::channel();
+            let (install_result_sender, install_result_receiver) = std::sync::mpsc::sync_channel(1);
+            let installer = tokio::spawn(async move {
+                if install_receiver.await.is_ok() {
+                    let result = if defer_participant_roots {
+                        Ok(())
+                    } else {
+                        let installs = prepared_states.iter().filter_map(|(blob, _, prepared)| {
+                            prepared.as_ref().unwrap().as_ref().map(|prepared| {
+                                let candidate = prepared.candidate();
+                                async move { blob.publish_batch_candidate(&candidate).await }
+                            })
+                        });
+                        join_all(installs)
+                            .await
+                            .into_iter()
+                            .find_map(Result::err)
+                            .map_or(Ok(()), Err)
+                    };
+                    let _ = install_result_sender.send(result);
+                }
+                prepared_states
+            });
+
+            let invalidator = namespace.clone();
+            let coordinator_operations = filesystem_operations.clone();
+            let coordinator = tokio::task::spawn_blocking(move || {
+                let committed = std::cell::Cell::new(false);
+                let commit_sender = std::cell::Cell::new(Some(commit_sender));
+                let result = super::batch::apply_batch_with(
+                    &root,
+                    &participants,
+                    &materialized_previous,
+                    &coordinator_operations,
+                    carry_decision,
+                    |operations| {
+                        invalidator.invalidate_operations(operations);
+                        invalidator
+                            .carried_batch_decision
+                            .store(false, Ordering::Release);
+                        committed.set(true);
                         if let Some(sender) = commit_sender.take() {
                             let _ = sender.send(Ok(()));
                         }
                         on_commit();
                     },
+                    move || {
+                        install_sender.send(()).map_err(|_| {
+                            IoError::other("io_uring batch installer is unavailable")
+                        })?;
+                        install_result_receiver
+                            .recv()
+                            .map_err(|_| {
+                                IoError::other("io_uring batch installer did not complete")
+                            })?
+                            .map_err(|error| IoError::other(error.to_string()))
+                    },
                 )
                 .map_err(Error::from);
-                if result.is_ok() && !committed {
-                    storage
-                        .namespace
-                        .invalidate_operations(&filesystem_operations);
-                    if let Some(sender) = commit_sender.take() {
-                        let _ = sender.send(Ok(()));
-                    }
+                (result, committed.get(), commit_sender.into_inner())
+            });
+            let (mut result, committed, commit_sender) = match coordinator.await {
+                Ok(result) => result,
+                Err(error) if error.is_panic() => {
+                    std::panic::resume_unwind(error.into_panic());
                 }
-                result
-            })();
+                Err(_) => (Err(Error::Closed), false, None),
+            };
+            let mut prepared_states = match installer.await {
+                Ok(prepared_states) => prepared_states,
+                Err(error) if error.is_panic() => {
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                Err(_) => {
+                    result = Err(Error::Closed);
+                    Vec::new()
+                }
+            };
 
             if result.is_ok() {
-                storage
-                    .namespace
-                    .recovery_required
-                    .store(false, Ordering::Release);
+                for (_, operation, prepared) in &mut prepared_states {
+                    if let Some(prepared) = std::mem::replace(prepared, Ok(None))
+                        .expect("successful preparation retains no error")
+                    {
+                        Blob::finish_batch_commit(
+                            &mut operation.state,
+                            prepared,
+                            defer_participant_roots,
+                        );
+                    }
+                    operation.finish();
+                }
+            } else {
+                for (_, operation, _) in &mut prepared_states {
+                    operation.poison();
+                }
             }
-            if let Some(sender) = commit_sender {
-                let _ = sender.send(result.clone());
+            if !committed {
+                if result.is_ok() {
+                    namespace.invalidate_operations(&filesystem_operations);
+                }
+                if let Some(sender) = commit_sender {
+                    let _ = sender.send(result.clone().map(|_| ()));
+                }
+            }
+            if let Ok(carried) = &result {
+                namespace
+                    .recovery_required
+                    .store(*carried, Ordering::Release);
+                namespace
+                    .carried_batch_decision
+                    .store(*carried, Ordering::Release);
             }
             drop(guard);
             on_complete();
-            let _ = completion_sender.send(result);
+            let _ = completion_sender.send(result.map(|_| ()));
         }));
 
         match commit_receiver.await {
@@ -325,6 +648,176 @@ impl Storage {
             Ok(Err(error)) => Err(error),
             Err(_) => Err(Error::Closed),
         }
+    }
+
+    async fn open_versioned_inner(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+        require_atomic: bool,
+    ) -> Result<(Blob, u64, u16), Error> {
+        super::validate_partition_name(partition)?;
+
+        let guard = self.namespace.lock.clone().lock_owned().await;
+        self.recover_locked()?;
+
+        let requested_parent = self.storage_directory.join(partition);
+        fs::create_dir_all(&requested_parent)
+            .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
+
+        let stored_partition = if self.namespace.knows_partition(partition) {
+            partition.to_string()
+        } else {
+            super::batch::resolve_partition_name(&self.storage_directory, partition)?
+        };
+        super::validate_partition_name(&stored_partition)?;
+        let parent = self.storage_directory.join(&stored_partition);
+        let path = parent.join(hex(name));
+
+        // Open existing first so stale sidecars are durably discarded before create_new makes a
+        // replacement user name visible.
+        let mut file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                super::atomic::discard(&self.storage_directory, &stored_partition, name)?;
+                if require_atomic {
+                    let region = Header::create_atomic(&versions).0;
+                    super::atomic::create_live(
+                        &self.storage_directory,
+                        &stored_partition,
+                        name,
+                        &path,
+                        &region,
+                    )
+                    .map_err(|error| {
+                        Error::BlobOpenFailed(partition.into(), hex(name), error.into())
+                    })?
+                } else {
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .map_err(|error| {
+                            Error::BlobOpenFailed(partition.into(), hex(name), error.into())
+                        })?
+                }
+            }
+            Err(error) => {
+                return Err(Error::BlobOpenFailed(
+                    partition.into(),
+                    hex(name),
+                    error.into(),
+                ));
+            }
+        };
+
+        let generation = self.namespace.generation(&stored_partition, name);
+        let shared_atomic = self
+            .namespace
+            .atomic_state(&stored_partition, name, &generation);
+        let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
+        let existing = resolve_header(&mut file, raw_len, &versions, partition, name)?;
+
+        let (ordinary_len, blob_version, data_offset) = match existing {
+            Some(resolved) => {
+                if require_atomic && resolved.2 != super::Layout::V2.data_offset() {
+                    return Err(Error::BlobOpenFailed(
+                        partition.into(),
+                        hex(name),
+                        IoError::new(
+                            std::io::ErrorKind::Unsupported,
+                            "blob was not created with atomic storage",
+                        )
+                        .into(),
+                    ));
+                }
+                if shared_atomic.is_some() && resolved.2 != super::Layout::V2.data_offset() {
+                    return Err(Error::BlobCorrupt(
+                        partition.into(),
+                        hex(name),
+                        "atomic state restored a non-V2 header".into(),
+                    ));
+                }
+                resolved
+            }
+            None => {
+                // A parseable header implies its namespace entries were made durable first.
+                sync_dir(&parent)?;
+                sync_dir(&self.storage_directory)?;
+
+                let (region, blob_version) = if require_atomic {
+                    Header::create_atomic(&versions)
+                } else {
+                    Header::create(&versions)
+                };
+                let data_offset = region.len() as u64;
+                file.set_len(0).map_err(|error| {
+                    Error::BlobResizeFailed(partition.into(), hex(name), error.into())
+                })?;
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|_| Error::WriteFailed)?;
+                file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+                file.sync_all().map_err(|error| {
+                    Error::BlobSyncFailed(partition.into(), hex(name), error.into())
+                })?;
+                (0, blob_version, data_offset)
+            }
+        };
+
+        let atomic = if data_offset == super::Layout::V2.data_offset() {
+            match shared_atomic {
+                Some(state) => Some(state),
+                None => {
+                    let state = V2State::recover(&file, data_offset).map_err(|error| {
+                        Error::BlobCorrupt(
+                            partition.into(),
+                            hex(name),
+                            format!("atomic log recovery failed: {error}"),
+                        )
+                    })?;
+                    Some(self.namespace.insert_atomic_state(
+                        &stored_partition,
+                        name,
+                        &generation,
+                        state,
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+
+        let blob = Blob::new_with_generation(
+            stored_partition,
+            name,
+            file,
+            self.io_handle.clone(),
+            self.pool.clone(),
+            data_offset,
+            BlobContext {
+                generation,
+                namespace: Some(self.namespace.clone()),
+                atomic: atomic.clone(),
+            },
+        );
+        drop(guard);
+
+        let logical_len = if let Some(state) = atomic {
+            let state = state.lock().await;
+            if state.is_poisoned() {
+                return Err(Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    "atomic blob generation is poisoned".into(),
+                ));
+            }
+            state.logical_len()
+        } else {
+            ordinary_len
+        };
+        Ok((blob, logical_len, blob_version))
     }
 }
 
@@ -337,87 +830,40 @@ impl crate::Storage for Storage {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Blob, u64, u16), Error> {
-        super::validate_partition_name(partition)?;
-
-        // Acquire the filesystem lock
-        let _guard = self.namespace.lock.lock().await;
-        self.recover_locked()?;
-
-        // Construct the full path
-        let path = self.storage_directory.join(partition).join(hex(name));
-        let parent = path
-            .parent()
-            .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
-
-        // Create the partition directory if it does not exist
-        fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
-
-        let stored_partition = if self.namespace.knows_partition(partition) {
-            partition.to_string()
-        } else {
-            super::batch::resolve_partition_name(&self.storage_directory, partition)?
-        };
-        super::validate_partition_name(&stored_partition)?;
-
-        // Open the file, creating it if it doesn't exist
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
-
-        let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
-
-        // Handle header: existing blobs have their header read; new blobs and blobs left torn
-        // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(&mut file, raw_len, &versions, partition, name)?;
-        let (logical_len, blob_version, data_offset) = match existing {
-            Some(resolved) => resolved,
-            None => {
-                // Sync the directories before writing the header so a parseable header
-                // always implies durable directory entries (an open that parses a header
-                // never re-runs these). The storage directory is synced unconditionally:
-                // the partition directory existing in the namespace does not imply its
-                // entry is durable.
-                sync_dir(parent)?;
-                sync_dir(&self.storage_directory)?;
-
-                // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, blob_version) = Header::create(&versions);
-                let data_offset = region.len() as u64;
-                file.set_len(0)
-                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-                file.seek(SeekFrom::Start(0))
-                    .map_err(|_| Error::WriteFailed)?;
-                file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-                file.sync_all()
-                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-                (0, blob_version, data_offset)
-            }
-        };
-
-        let generation = self.namespace.generation(&stored_partition, name);
-        let blob = Blob::new_with_generation(
-            stored_partition,
-            name,
-            file,
-            self.io_handle.clone(),
-            self.pool.clone(),
-            data_offset,
-            generation,
-        );
-        Ok((blob, logical_len, blob_version))
+        self.open_versioned_inner(partition, name, versions, false)
+            .await
     }
 
-    async fn start_apply(
-        &self,
-        operations: Vec<BatchOperation<Self::Blob>>,
-    ) -> Result<Handle<()>, Error> {
-        self.start_apply_guarded(operations, || {}, || {}, || {})
-            .await
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        super::validate_partition_name(partition)?;
+
+        let _guard = self.namespace.lock.lock().await;
+        self.recover_locked()?;
+        let stored_partition =
+            super::batch::resolve_partition_name(&self.storage_directory, partition)?;
+        let path = self.storage_directory.join(&stored_partition);
+        let operation = if let Some(name) = name {
+            fs::remove_file(path.join(hex(name)))
+                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+            sync_dir(&path)?;
+            super::batch::Operation::Remove(crate::RemoveTarget::Blob {
+                partition: stored_partition.clone(),
+                name: name.to_vec(),
+            })
+        } else {
+            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            sync_dir(&self.storage_directory)?;
+            super::batch::Operation::Remove(crate::RemoveTarget::Partition(
+                stored_partition.clone(),
+            ))
+        };
+        self.namespace.invalidate_operations(&[operation]);
+        if let Some(name) = name {
+            super::atomic::discard(&self.storage_directory, &stored_partition, name)?;
+        } else {
+            super::atomic::discard_partition(&self.storage_directory, &stored_partition)?;
+        }
+        Ok(())
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -433,6 +879,7 @@ impl crate::Storage for Storage {
             std::fs::read_dir(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
 
         let mut blobs = Vec::new();
+        let mut removed_creation = false;
         for entry in entries {
             let entry = entry.map_err(|_| Error::ReadFailed)?;
             let file_type = entry.file_type().map_err(|_| Error::ReadFailed)?;
@@ -441,7 +888,13 @@ impl crate::Storage for Storage {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
 
-            if let Some(name) = entry.file_name().to_str() {
+            let file_name = entry.file_name();
+            if super::atomic::is_creation_file_name(&file_name) {
+                fs::remove_file(entry.path()).map_err(|_| Error::ReadFailed)?;
+                removed_creation = true;
+                continue;
+            }
+            if let Some(name) = file_name.to_str() {
                 // Reject anything that isn't canonical lowercase hex (no `0x`
                 // prefix, no whitespace) since `from_hex` is lenient and
                 // storage only ever writes the canonical form via `hex()`.
@@ -453,8 +906,35 @@ impl crate::Storage for Storage {
                 blobs.push(decoded);
             }
         }
+        if removed_creation {
+            sync_dir(&path)?;
+        }
 
         Ok(blobs)
+    }
+}
+
+impl crate::AtomicStorage for Storage {
+    type AtomicBlob = Blob;
+
+    async fn open_atomic_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Self::AtomicBlob, u64, u16), Error> {
+        self.open_versioned_inner(partition, name, versions, true)
+            .await
+    }
+}
+
+impl crate::BatchStorage for Storage {
+    async fn start_apply(
+        &self,
+        operations: Vec<BatchOperation<Self::AtomicBlob>>,
+    ) -> Result<Handle<()>, Error> {
+        self.start_apply_guarded(operations, || {}, || {}, || {})
+            .await
     }
 }
 
@@ -473,6 +953,18 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Namespace owner used to validate V2 commit publication.
+    namespace: Option<Arc<Namespace>>,
+    /// Log/index state shared by every open of the current V2 name generation.
+    atomic: Option<Arc<Mutex<V2State>>>,
+    /// Shared page-cache policy and learned `RWF_DONTCACHE` support.
+    cache: iouring::Cache,
+}
+
+struct BlobContext {
+    generation: Arc<super::generation::Token>,
+    namespace: Option<Arc<Namespace>>,
+    atomic: Option<Arc<Mutex<V2State>>>,
 }
 
 impl Clone for Blob {
@@ -485,6 +977,9 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
+            namespace: self.namespace.clone(),
+            atomic: self.atomic.clone(),
+            cache: self.cache.clone(),
         }
     }
 }
@@ -507,7 +1002,11 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
-            super::generation::Token::detached(),
+            BlobContext {
+                generation: super::generation::Token::detached(),
+                namespace: None,
+                atomic: None,
+            },
         )
     }
 
@@ -518,23 +1017,277 @@ impl Blob {
         io_handle: iouring::Handle,
         pool: BufferPool,
         data_offset: u64,
-        generation: Arc<super::generation::Token>,
+        context: BlobContext,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
-            generation,
+            generation: context.generation,
             file: Arc::new(file),
             io_handle,
             pool,
             data_offset,
+            namespace: context.namespace,
+            atomic: context.atomic,
+            cache: iouring::Cache::Disabled(Arc::new(AtomicBool::new(true))),
         }
     }
 
-    fn sync_blocking(&self) -> Result<(), Error> {
-        self.file.sync_all().map_err(|error| {
-            Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), error.into())
-        })
+    fn cache_for(&self, options: WriteOptions) -> iouring::Cache {
+        if options.contains(WriteOptions::DONT_CACHE) {
+            self.cache.clone()
+        } else {
+            iouring::Cache::Enabled
+        }
+    }
+
+    fn atomic_layout_required(&self) -> Error {
+        Error::BlobOpenFailed(
+            self.partition.clone(),
+            hex(&self.name),
+            IoError::new(
+                std::io::ErrorKind::Unsupported,
+                "blob was not created with atomic storage",
+            )
+            .into(),
+        )
+    }
+
+    fn poisoned(&self) -> Error {
+        Error::BlobCorrupt(
+            self.partition.clone(),
+            hex(&self.name),
+            "atomic blob generation is poisoned".into(),
+        )
+    }
+
+    fn ensure_healthy(&self, state: &V2State) -> Result<(), Error> {
+        if state.is_poisoned() {
+            return Err(self.poisoned());
+        }
+        Ok(())
+    }
+
+    fn map_sync_error(&self, error: Error) -> Error {
+        match error {
+            Error::Io(error) => {
+                Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), error)
+            }
+            error => error,
+        }
+    }
+
+    fn complete_v2_operation(
+        mut operation: V2OperationGuard,
+        result: Result<(), Error>,
+        completion: oneshot::Sender<Result<(), Error>>,
+    ) {
+        operation.complete(result.is_ok());
+        let _ = completion.send(result);
+    }
+
+    fn start_v2_write(
+        &self,
+        state: OwnedMutexGuard<V2State>,
+        request: V2WriteRequest,
+        namespace_guard: Option<OwnedMutexGuard<()>>,
+    ) -> oneshot::Receiver<Result<(), Error>> {
+        let blob = self.clone();
+        let (completion, receiver) = oneshot::channel();
+        drop(tokio::spawn(async move {
+            let _namespace_guard = namespace_guard;
+            let mut operation = V2OperationGuard::new(state);
+            let result = async {
+                blob.io_handle
+                    .write_at_retained(
+                        blob.file.clone(),
+                        request.prepared.file_offset,
+                        request.prepared.data,
+                        request.options,
+                        request.cache,
+                        request.retained,
+                    )
+                    .await?;
+                operation.state.finish_mutation(request.prepared.mutation);
+                if request.sync {
+                    blob.commit_log(&mut operation.state).await?;
+                }
+                Ok(())
+            }
+            .await;
+            Self::complete_v2_operation(operation, result, completion);
+        }));
+        receiver
+    }
+
+    async fn prepare_log(
+        &self,
+        state: &mut V2State,
+    ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
+        if !state.is_dirty() {
+            return Ok(None);
+        }
+        let materialized_previous = state.deferred_batch_root().cloned();
+        let (payload_start, payload_len, payload_ranges) = state.pending_payload()?;
+        let file = self.file.clone();
+        let preparing = tokio::task::spawn_blocking(move || {
+            super::atomic::reclaim_shadowed_payload(
+                &file,
+                payload_start,
+                payload_len,
+                &payload_ranges,
+            )?;
+            super::atomic::begin_payload_writeback(&file, payload_start, payload_len)?;
+            Ok::<_, std::io::Error>(())
+        });
+        match preparing.await {
+            Ok(result) => result?,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => return Err(Error::Closed),
+        }
+        let mut prepared = state
+            .prepare_commit()?
+            .expect("dirty atomic state always prepares a commit");
+        if let Some(candidate) = &materialized_previous {
+            self.io_handle
+                .write_at(
+                    self.file.clone(),
+                    candidate.root_offset,
+                    candidate.committed_root.to_vec().into(),
+                    WriteOptions::default(),
+                    iouring::Cache::Enabled,
+                )
+                .await?;
+        }
+        if !prepared.manifest.is_empty() {
+            let manifest = std::mem::take(&mut prepared.manifest);
+            self.io_handle
+                .write_at(
+                    self.file.clone(),
+                    prepared.manifest_offset,
+                    manifest.into(),
+                    WriteOptions::default(),
+                    iouring::Cache::Enabled,
+                )
+                .await?;
+        }
+        self.io_handle
+            .write_at(
+                self.file.clone(),
+                prepared.root_offset,
+                prepared.prepared_root.clone().into(),
+                WriteOptions::default(),
+                iouring::Cache::Enabled,
+            )
+            .await?;
+        // The first barrier makes payload and checkpoint bytes durable. Publishing the committed
+        // root with RWF_DSYNC then makes recovery metadata-only.
+        self.io_handle
+            .sync(self.file.clone())
+            .await
+            .map_err(|error| self.map_sync_error(error))?;
+        prepared.set_materialized_previous(materialized_previous);
+        Ok(Some(prepared))
+    }
+
+    async fn commit_log(&self, state: &mut V2State) -> Result<(), Error> {
+        let Some(prepared) = self.prepare_log(state).await? else {
+            return Ok(());
+        };
+        let candidate = prepared.candidate();
+        self.publish_batch_candidate(&candidate).await?;
+        state.finish_commit(prepared);
+        Ok(())
+    }
+
+    async fn publish_batch_candidate(
+        &self,
+        candidate: &super::atomic::Candidate,
+    ) -> Result<(), Error> {
+        self.io_handle
+            .write_at(
+                self.file.clone(),
+                candidate.root_offset,
+                candidate.committed_root.to_vec().into(),
+                WriteOptions::SYNC,
+                iouring::Cache::Enabled,
+            )
+            .await
+            .map_err(|error| self.map_sync_error(error))?;
+        Ok(())
+    }
+
+    async fn lock_batch_state(&self) -> Result<OwnedMutexGuard<V2State>, Error> {
+        let atomic = self
+            .atomic
+            .as_ref()
+            .ok_or_else(|| self.atomic_layout_required())?;
+        let state = lock_v2(atomic).await;
+        self.ensure_healthy(&state)?;
+        Ok(state)
+    }
+
+    async fn prepare_batch_commit(
+        &self,
+        state: &mut V2State,
+    ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
+        self.prepare_log(state).await
+    }
+
+    fn finish_batch_commit(
+        state: &mut V2State,
+        prepared: super::atomic::PreparedCommit,
+        defer_root: bool,
+    ) {
+        if defer_root {
+            state.finish_batch_commit(prepared);
+        } else {
+            state.finish_commit(prepared);
+        }
+    }
+
+    async fn lock_publication(
+        &self,
+    ) -> Result<(OwnedMutexGuard<V2State>, OwnedMutexGuard<()>), Error> {
+        let state = lock_v2(
+            self.atomic
+                .as_ref()
+                .expect("publication is only used for V2 blobs"),
+        )
+        .await;
+        self.ensure_healthy(&state)?;
+        let namespace = self
+            .namespace
+            .as_ref()
+            .expect("V2 blobs always retain their namespace")
+            .clone();
+        let namespace_guard = namespace.lock.clone().lock_owned().await;
+        namespace.recover_locked()?;
+        if !namespace.is_current(&self.partition, &self.name, &self.generation) {
+            return Err(Error::BlobMissing(self.partition.clone(), hex(&self.name)));
+        }
+        Ok((state, namespace_guard))
+    }
+
+    fn start_atomic_sync_locked(
+        &self,
+        state: OwnedMutexGuard<V2State>,
+        namespace_guard: OwnedMutexGuard<()>,
+    ) -> Handle<()> {
+        let blob = self.clone();
+        let (sender, receiver) = oneshot::channel();
+        drop(tokio::spawn(async move {
+            let _namespace_guard = namespace_guard;
+            let mut operation = V2OperationGuard::new(state);
+            let result = blob.commit_log(&mut operation.state).await;
+            Self::complete_v2_operation(operation, result, sender);
+        }));
+        Handle::from_receiver(receiver)
+    }
+
+    async fn sync_v2(&self) -> Result<(), Error> {
+        let (state, namespace_guard) = self.lock_publication().await?;
+        self.start_atomic_sync_locked(state, namespace_guard).await
     }
 }
 
@@ -555,13 +1308,68 @@ impl crate::Blob for Blob {
 
         // For single buffers, read directly into them (zero-copy).
         // For multi-chunk buffers, use a temporary and copy to preserve the input structure.
-        let (io_buf, original_bufs) = if input_bufs.is_single() {
+        let (mut io_buf, original_bufs) = if input_bufs.is_single() {
             (input_bufs.coalesce(), None)
         } else {
             // SAFETY: `len` bytes are filled via io_uring read loop below.
             let tmp = unsafe { self.pool.alloc_len(len) };
             (tmp, Some(input_bufs))
         };
+
+        if let Some(atomic) = &self.atomic {
+            let state = atomic.lock().await;
+            self.ensure_healthy(&state)?;
+            let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+            let end = offset.checked_add(len_u64).ok_or(Error::OffsetOverflow)?;
+            if end > state.logical_len() {
+                return Err(Error::BlobInsufficientLength);
+            }
+            let plan = state.read_plan(offset, len)?;
+
+            if len != 0 {
+                if plan.len() == 1 && plan[0].destination == 0 && plan[0].len == len {
+                    match plan[0].source {
+                        super::atomic::ReadSource::Zero => io_buf.as_mut().fill(0),
+                        super::atomic::ReadSource::File(file_offset) => {
+                            io_buf = self
+                                .io_handle
+                                .read_at(self.file.clone(), file_offset, len, io_buf)
+                                .await
+                                .map_err(|(_, error)| error)?;
+                        }
+                    }
+                } else {
+                    for span in plan {
+                        match span.source {
+                            super::atomic::ReadSource::Zero => io_buf.as_mut()
+                                [span.destination..span.destination + span.len]
+                                .fill(0),
+                            super::atomic::ReadSource::File(file_offset) => {
+                                let mut span_buf = self.pool.alloc(span.len);
+                                // SAFETY: `read_at` fills all `span.len` bytes before this buffer
+                                // is read below.
+                                unsafe { span_buf.set_len(span.len) };
+                                let span_buf = self
+                                    .io_handle
+                                    .read_at(self.file.clone(), file_offset, span.len, span_buf)
+                                    .await
+                                    .map_err(|(_, error)| error)?;
+                                io_buf.as_mut()[span.destination..span.destination + span.len]
+                                    .copy_from_slice(span_buf.as_ref());
+                            }
+                        }
+                    }
+                }
+            }
+
+            return match original_bufs {
+                None => Ok(io_buf.into()),
+                Some(mut bufs) => {
+                    bufs.copy_from_slice(io_buf.as_ref());
+                    Ok(bufs)
+                }
+            };
+        }
 
         let offset = offset
             .checked_add(self.data_offset)
@@ -576,7 +1384,7 @@ impl crate::Blob for Blob {
             .io_handle
             .read_at(self.file.clone(), offset, len, io_buf)
             .await
-            .map_err(|(_, err)| err)?;
+            .map_err(|(_, error)| error)?;
 
         match original_bufs {
             None => Ok(io_buf.into()),
@@ -587,28 +1395,57 @@ impl crate::Blob for Blob {
         }
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        self.io_handle
-            .write_at(self.file.clone(), offset, bufs)
-            .await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let offset = offset
+
+        if let Some(atomic) = &self.atomic {
+            if !bufs.has_remaining() {
+                return Ok(());
+            }
+
+            let mut state = lock_v2(atomic).await;
+            self.ensure_healthy(&state)?;
+            let sync = options.contains(WriteOptions::SYNC);
+            let namespace_guard = if sync {
+                let namespace = self
+                    .namespace
+                    .as_ref()
+                    .expect("V2 blobs always retain their namespace");
+                let guard = namespace.lock.clone().lock_owned().await;
+                namespace.recover_locked()?;
+                if !namespace.is_current(&self.partition, &self.name, &self.generation) {
+                    return Err(Error::BlobMissing(self.partition.clone(), hex(&self.name)));
+                }
+                Some(guard)
+            } else {
+                None
+            };
+            let prepared = state
+                .prepare_write(offset, bufs, None)?
+                .expect("nonempty writes always prepare payload storage");
+            let write_options = options.without(WriteOptions::SYNC);
+            return self
+                .start_v2_write(
+                    state,
+                    V2WriteRequest {
+                        prepared,
+                        options: write_options,
+                        cache: self.cache_for(write_options),
+                        retained: atomic.clone(),
+                        sync,
+                    },
+                    namespace_guard,
+                )
+                .await
+                .unwrap_or(Err(Error::Closed));
+        }
+
+        let physical_offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
 
@@ -617,16 +1454,29 @@ impl crate::Blob for Blob {
         }
 
         self.io_handle
-            .write_at_sync(self.file.clone(), offset, bufs)
+            .write_at(
+                self.file.clone(),
+                physical_offset,
+                bufs,
+                options,
+                self.cache_for(options),
+            )
             .await
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let len = len
+        if let Some(atomic) = &self.atomic {
+            let mut state = atomic.lock().await;
+            self.ensure_healthy(&state)?;
+            state.resize(len);
+            return Ok(());
+        }
+
+        let raw_len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-        self.file.set_len(len).map_err(|e| {
+        self.file.set_len(raw_len).map_err(|e| {
             Error::BlobResizeFailed(
                 self.partition.clone(),
                 hex(&self.name),
@@ -636,16 +1486,29 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        if self.atomic.is_some() {
+            return self.sync_v2().await;
+        }
         self.io_handle
             .sync(self.file.clone())
             .await
-            .map_err(|err| match err {
-                Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
-                err => err,
+            .map_err(|error| match error {
+                Error::Io(error) => {
+                    Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), error)
+                }
+                error => error,
             })
     }
 
     async fn start_sync(&self) -> Handle<()> {
+        if self.atomic.is_some() {
+            return match self.lock_publication().await {
+                Ok((state, namespace_guard)) => {
+                    self.start_atomic_sync_locked(state, namespace_guard)
+                }
+                Err(error) => Handle::ready(Err(error)),
+            };
+        }
         let partition = self.partition.clone();
         let name = self.name.clone();
         let receiver = self.io_handle.start_sync(self.file.clone()).await;
@@ -660,14 +1523,64 @@ impl crate::Blob for Blob {
     }
 }
 
+impl crate::AtomicBlob for Blob {
+    async fn update(
+        &self,
+        offset: u64,
+        data: impl Into<IoBufs> + Send,
+        len: u64,
+    ) -> Result<(), Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(self.atomic_layout_required());
+        };
+        let data = data.into();
+        let data_len = u64::try_from(data.remaining()).map_err(|_| Error::OffsetOverflow)?;
+        let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+        if end > len {
+            return Err(IoError::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic blob update exceeds its final logical length",
+            )
+            .into());
+        }
+
+        let mut state = lock_v2(atomic).await;
+        self.ensure_healthy(&state)?;
+        if data_len == 0 {
+            state.resize(len);
+            return Ok(());
+        }
+        let prepared = state
+            .prepare_write(offset, data, Some(len))?
+            .expect("nonempty updates always prepare payload storage");
+        self.start_v2_write(
+            state,
+            V2WriteRequest {
+                prepared,
+                options: WriteOptions::default(),
+                cache: iouring::Cache::Enabled,
+                retained: atomic.clone(),
+                sync: false,
+            },
+            None,
+        )
+        .await
+        .unwrap_or(Err(Error::Closed))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, RemoveTarget, Storage as _,
+        AtomicBlob as _, AtomicStorage as _, BatchStorage as _, Blob as _, BufferPool,
+        BufferPoolConfig, IoBuf, IoBufMut, RemoveTarget, Storage as _,
         storage::{
             Layout,
-            tests::{run_storage_foreign_handle_test, run_storage_tests},
+            tests::{
+                run_atomic_blob_tests, run_batch_storage_tests, run_storage_foreign_handle_test,
+                run_storage_tests,
+            },
         },
         telemetry::metrics::Registry,
         utils::thread,
@@ -698,18 +1611,22 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&storage_directory);
 
+        let storage = start_test_storage(storage_directory.clone());
+        (storage, storage_directory)
+    }
+
+    fn start_test_storage(storage_directory: PathBuf) -> Storage {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        let storage = Storage::start(
+        Storage::start(
             Config {
-                storage_directory: storage_directory.clone(),
+                storage_directory,
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
             &mut registry.sub_registry("storage"),
             pool,
-        );
-        (storage, storage_directory)
+        )
     }
 
     /// Build a fresh temporary directory without starting a storage loop.
@@ -784,7 +1701,13 @@ mod tests {
         // Verify the io_uring storage backend satisfies the shared storage trait suite.
         let (storage, storage_directory) = create_test_storage();
         let tested = storage.clone();
-        run_storage_tests(storage).await;
+        run_storage_tests(storage.clone()).await;
+        let (atomic, _) = storage
+            .open_atomic("atomic_storage", b"blob")
+            .await
+            .unwrap();
+        run_atomic_blob_tests(atomic).await;
+        run_batch_storage_tests(storage.clone()).await;
         let (foreign, foreign_directory) = create_test_storage();
         run_storage_foreign_handle_test(&tested, &foreign).await;
         let _ = std::fs::remove_dir_all(storage_directory);
@@ -792,17 +1715,200 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_atomic_reopen_second_open_and_sync_write() {
+        let (storage, storage_directory) = create_test_storage();
+        let (first, size) = storage.open_atomic("atomic", b"shared").await.unwrap();
+        assert_eq!(size, 0);
+        first.update(0, b"stable", 6).await.unwrap();
+
+        // An independent ordinary open shares the current generation state and must not recover
+        // the initial empty root over the first handle's pending append.
+        let (second, size) = storage.open("atomic", b"shared").await.unwrap();
+        assert_eq!(size, 6);
+        assert_eq!(second.read_at(0, 6).await.unwrap().coalesce(), b"stable");
+        second.sync().await.unwrap();
+
+        // Recovery discards the unsynced log tail and selects the last committed root.
+        first.update(0, b"losing", 6).await.unwrap();
+        drop(first);
+        drop(second);
+        drop(storage);
+        let storage = start_test_storage(storage_directory.clone());
+        let (blob, size) = storage.open("atomic", b"shared").await.unwrap();
+        assert_eq!(size, 6);
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"stable");
+
+        // A V2 SYNC write appends its payload and publishes the complete current epoch.
+        blob.write_at(0, b"synced", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        drop(blob);
+        drop(storage);
+        let storage = start_test_storage(storage_directory.clone());
+        let (blob, size) = storage.open_atomic("atomic", b"shared").await.unwrap();
+        assert_eq!(size, 6);
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"synced");
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_remove_recreate_and_stale_sync() {
+        let (storage, storage_directory) = create_test_storage();
+        let (old, _) = storage.open_atomic("atomic", b"replace").await.unwrap();
+        old.update(0, b"old", 3).await.unwrap();
+        old.sync().await.unwrap();
+
+        storage.remove("atomic", Some(b"replace")).await.unwrap();
+        let (new, size) = storage.open_atomic("atomic", b"replace").await.unwrap();
+        assert_eq!(size, 0);
+        new.update(0, b"new", 3).await.unwrap();
+        new.sync().await.unwrap();
+
+        old.update(0, b"bad", 3).await.unwrap();
+        assert!(matches!(old.sync().await, Err(Error::BlobMissing(..))));
+
+        storage
+            .apply(vec![BatchOperation::Resize {
+                blob: new.clone(),
+                len: 1,
+            }])
+            .await
+            .unwrap();
+
+        drop(old);
+        drop(new);
+        drop(storage);
+        let storage = start_test_storage(storage_directory.clone());
+        let (blob, size) = storage.open_atomic("atomic", b"replace").await.unwrap();
+        assert_eq!(size, 1);
+        assert_eq!(blob.read_at(0, 1).await.unwrap().coalesce(), b"n");
+
+        let (ordinary, _) = storage.open("ordinary", b"v1").await.unwrap();
+        drop(ordinary);
+        assert!(storage.open_atomic("ordinary", b"v1").await.is_err());
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_update_appends_payload_once() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open_atomic("atomic", b"append-once").await.unwrap();
+        let live_path = storage_directory.join("atomic").join(hex(b"append-once"));
+        assert_eq!(
+            std::fs::metadata(&live_path).unwrap().len(),
+            Layout::V2.data_offset()
+        );
+
+        blob.update(2, b"data", 6).await.unwrap();
+        let raw = std::fs::read(&live_path).unwrap();
+        assert_eq!(raw.len() as u64, Layout::V2.data_offset() + 4);
+        assert_eq!(&raw[Layout::V2.data_offset() as usize..], b"data");
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"\0\0data");
+
+        blob.sync().await.unwrap();
+        drop((blob, storage));
+        let storage = start_test_storage(storage_directory.clone());
+        let (blob, len) = storage.open_atomic("atomic", b"append-once").await.unwrap();
+        assert_eq!(len, 6);
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"\0\0data");
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_dropped_atomic_operation_guard_poisons_generation() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open_atomic("atomic", b"canceled").await.unwrap();
+        let state = blob.atomic.as_ref().unwrap().clone().lock_owned().await;
+
+        drop(V2OperationGuard::new(state));
+
+        assert!(blob.atomic.as_ref().unwrap().lock().await.is_poisoned());
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_canceled_atomic_update_before_admission_does_not_poison() {
+        let (storage, storage_directory) = create_test_storage();
+        let (mut blob, _) = storage.open_atomic("atomic", b"queued").await.unwrap();
+        let state = blob.atomic.as_ref().unwrap().clone();
+
+        // Leave a size-one submission channel full so the update cannot be admitted until the
+        // loop starts below.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config {
+                size: 1,
+                ..Default::default()
+            },
+            &mut registry.sub_registry("blocked_iouring"),
+        );
+        let blocker = submitter.start_sync(blob.file.clone()).await;
+        blob.io_handle = submitter.clone();
+
+        let update = tokio::spawn({
+            let blob = blob.clone();
+            async move { blob.update(0, b"data", 4).await }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        update.abort();
+        assert!(update.await.unwrap_err().is_cancelled());
+
+        // Draining the blocker admits any self-driving mutation that survived caller
+        // cancellation. Once it completes, the generation must remain healthy.
+        let loop_thread = std::thread::spawn(move || io_loop.run());
+        blocker.await.unwrap().unwrap();
+        let state_guard = tokio::time::timeout(Duration::from_secs(5), state.lock())
+            .await
+            .expect("atomic mutation should release its state lock");
+        assert!(!state_guard.is_poisoned());
+        assert_eq!(state_guard.logical_len(), 4);
+        drop(state_guard);
+        assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"data");
+
+        drop(blob);
+        drop(submitter);
+        loop_thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_scan_sweeps_interrupted_creation() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open_atomic("atomic", b"live").await.unwrap();
+        drop(blob);
+        let partition = storage_directory.join("atomic");
+        let staged = partition.join(".commonware-uno-create-interrupted");
+        std::fs::write(&staged, b"partial").unwrap();
+        std::fs::File::open(&partition).unwrap().sync_all().unwrap();
+
+        assert_eq!(
+            storage.scan("atomic").await.unwrap(),
+            vec![b"live".to_vec()]
+        );
+        assert!(!staged.exists());
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
     async fn test_committed_batch_survives_completion_drop() {
         let (storage, storage_directory) = create_test_storage();
         let (old, _) = storage.open("batch_start", b"victim").await.unwrap();
-        old.write_at_sync(0, b"old").await.unwrap();
-        let (resized, _) = storage.open("batch_resize", b"retained").await.unwrap();
-        resized.write_at_sync(0, b"resize").await.unwrap();
-        let (updated, _) = storage.open("batch_update", b"retained").await.unwrap();
-        updated.write_at_sync(0, b"update-old").await.unwrap();
-        let victim = storage_directory
-            .join("batch_start")
-            .join(hex(b"victim"));
+        old.write_at(0, b"old", WriteOptions::SYNC).await.unwrap();
+        let (resized, _) = storage
+            .open_atomic("batch_resize", b"retained")
+            .await
+            .unwrap();
+        resized
+            .write_at(0, b"resize", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        let victim = storage_directory.join("batch_start").join(hex(b"victim"));
         let operations = vec![
             BatchOperation::Remove(RemoveTarget::Blob {
                 partition: "batch_start".into(),
@@ -811,12 +1917,6 @@ mod tests {
             BatchOperation::Resize {
                 blob: resized.clone(),
                 len: 3,
-            },
-            BatchOperation::Update {
-                blob: updated.clone(),
-                offset: 2,
-                data: b"NEW".into(),
-                len: 5,
             },
         ];
         let (parked_tx, parked_rx) = oneshot::channel();
@@ -851,7 +1951,6 @@ mod tests {
         assert!(!victim.exists());
         assert_eq!(old.read_at(0, 3).await.unwrap().coalesce(), b"old");
         assert_eq!(resized.read_at(0, 3).await.unwrap().coalesce(), b"res");
-        assert_eq!(updated.read_at(0, 5).await.unwrap().coalesce(), b"upNEW");
 
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -877,7 +1976,9 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at the data offset
         let data = b"hello world";
-        blob.write_at(0, data.to_vec()).await.unwrap();
+        blob.write_at(0, data.to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -920,7 +2021,9 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(0, b"test data".to_vec()).await.unwrap();
+        blob.write_at(0, b"test data".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
@@ -1030,7 +2133,9 @@ mod tests {
         let mut bufs = crate::IoBufs::default();
         bufs.append(crate::IoBuf::from(vec![0xAAu8; 80]));
         bufs.append(crate::IoBuf::from(vec![0xBBu8; 80]));
-        blob.write_at(0, bufs).await.unwrap();
+        blob.write_at(0, bufs, WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Read back and verify.
@@ -1050,7 +2155,9 @@ mod tests {
         // Persist fewer bytes than the upcoming read requests so the wrapper
         // encounters EOF after the header-adjusted offset has already started reading.
         let (blob, _) = storage.open("partition", b"short").await.unwrap();
-        blob.write_at(0, b"abc".to_vec()).await.unwrap();
+        blob.write_at(0, b"abc".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // The wrapper should surface this as an insufficient-length error instead
@@ -1068,7 +2175,9 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
 
         let (blob, _) = storage.open("partition", b"multichunk").await.unwrap();
-        blob.write_at(0, b"hello world".to_vec()).await.unwrap();
+        blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Use a two-chunk destination so the read path must rebuild the original
@@ -1092,9 +2201,15 @@ mod tests {
         assert_eq!(size, 0);
 
         // Zero-length operations should succeed immediately and preserve the empty blob.
-        blob.write_at(0, IoBufs::default()).await.unwrap();
-        blob.write_at(0, IoBuf::default()).await.unwrap();
-        blob.write_at(0, Vec::<u8>::new()).await.unwrap();
+        blob.write_at(0, IoBufs::default(), WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(0, IoBuf::default(), WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(0, Vec::<u8>::new(), WriteOptions::default())
+            .await
+            .unwrap();
         let empty = blob.read_at(0, 0).await.unwrap();
         assert!(empty.is_empty());
         let _ = blob
@@ -1123,13 +2238,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_missing_targets_is_idempotent() {
+    async fn test_remove_missing_targets_preserves_errors() {
         let (storage, storage_directory) = create_test_storage();
 
-        storage.remove("missing", None).await.unwrap();
+        assert!(matches!(
+            storage.remove("missing", None).await,
+            Err(Error::PartitionMissing(_))
+        ));
 
         std::fs::create_dir_all(storage_directory.join("partition")).unwrap();
-        storage.remove("partition", Some(b"missing")).await.unwrap();
+        assert!(matches!(
+            storage.remove("partition", Some(b"missing")).await,
+            Err(Error::BlobMissing(..))
+        ));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -1281,7 +2402,7 @@ mod tests {
             "offset overflow"
         );
         assert_eq!(
-            blob.write_at(u64::MAX, b"x".to_vec())
+            blob.write_at(u64::MAX, b"x".to_vec(), WriteOptions::default())
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -1330,7 +2451,7 @@ mod tests {
             "read failed"
         );
         assert_eq!(
-            blob.write_at(0, b"x".to_vec())
+            blob.write_at(0, b"x".to_vec(), WriteOptions::default())
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -1608,7 +2729,9 @@ mod tests {
             blob.read_at(0, payload.len()).await.unwrap().coalesce(),
             payload
         );
-        blob.write_at(size, b"!".to_vec()).await.unwrap();
+        blob.write_at(size, b"!".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
