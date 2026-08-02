@@ -27,19 +27,39 @@ use commonware_utils::{
 };
 use std::num::NonZeroUsize;
 
-/// Reporter for a started marshal fixture that acknowledges every dispatched block.
-#[derive(Clone)]
-pub(crate) struct NoopReporter;
+#[derive(Clone, Copy)]
+struct FixtureReporter {
+    acknowledge: bool,
+}
 
-impl Reporter for NoopReporter {
+impl Reporter for FixtureReporter {
     type Activity = Update<TestBlock>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         if let Update::Block(_, ack) = activity {
-            ack.acknowledge();
+            if self.acknowledge {
+                ack.acknowledge();
+            } else {
+                ack.freeze();
+            }
         }
         Feedback::Ok
     }
+}
+
+#[derive(Clone, Copy)]
+enum Dispatch {
+    Stopped,
+    Acknowledge,
+    Freeze,
+}
+
+struct Options<'a> {
+    seed: Option<(&'a TestBlock, Finalization<TestScheme, Sha256Digest>)>,
+    block: Option<&'a TestBlock>,
+    floor: Option<Finalization<TestScheme, Sha256Digest>>,
+    max_pending_acks: NonZeroUsize,
+    dispatch: Dispatch,
 }
 
 /// Backfill resolver for a started marshal fixture: its archives are pre-seeded, so
@@ -156,6 +176,86 @@ pub(crate) async fn marshal_fixture(
     max_pending_acks: NonZeroUsize,
     start: bool,
 ) -> MarshalFixture {
+    let dispatch = if start {
+        Dispatch::Acknowledge
+    } else {
+        Dispatch::Stopped
+    };
+    marshal_fixture_inner(
+        context,
+        prefix,
+        scheme,
+        Options {
+            seed,
+            block: None,
+            floor: None,
+            max_pending_acks,
+            dispatch,
+        },
+    )
+    .await
+}
+
+/// Initializes a marshal actor whose finalized-block archive is pre-seeded with `block`.
+pub(crate) async fn marshal_fixture_with_finalized_block(
+    context: deterministic::Context,
+    prefix: &str,
+    scheme: TestScheme,
+    block: &TestBlock,
+    max_pending_acks: NonZeroUsize,
+    start: bool,
+) -> MarshalFixture {
+    let dispatch = if start {
+        Dispatch::Acknowledge
+    } else {
+        Dispatch::Stopped
+    };
+    marshal_fixture_inner(
+        context,
+        prefix,
+        scheme,
+        Options {
+            seed: None,
+            block: Some(block),
+            floor: None,
+            max_pending_acks,
+            dispatch,
+        },
+    )
+    .await
+}
+
+/// Initializes a started marshal actor with `block` as its floor anchor and freezes the
+/// anchor acknowledgement so the durable processed height remains at its predecessor.
+pub(crate) async fn marshal_fixture_with_floor(
+    context: deterministic::Context,
+    prefix: &str,
+    scheme: TestScheme,
+    block: &TestBlock,
+    finalization: Finalization<TestScheme, Sha256Digest>,
+    max_pending_acks: NonZeroUsize,
+) -> MarshalFixture {
+    marshal_fixture_inner(
+        context,
+        prefix,
+        scheme,
+        Options {
+            seed: None,
+            block: Some(block),
+            floor: Some(finalization),
+            max_pending_acks,
+            dispatch: Dispatch::Freeze,
+        },
+    )
+    .await
+}
+
+async fn marshal_fixture_inner(
+    context: deterministic::Context,
+    prefix: &str,
+    scheme: TestScheme,
+    options: Options<'_>,
+) -> MarshalFixture {
     let provider = ConstantProvider::new(scheme);
     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
     let mut finalizations_by_height = immutable::Archive::init(
@@ -164,13 +264,22 @@ pub(crate) async fn marshal_fixture(
     )
     .await
     .expect("failed to initialize finalizations archive");
-    let finalized_blocks = immutable::Archive::init(
+    let mut finalized_blocks = immutable::Archive::init(
         context.child("finalized_blocks"),
         archive_config(page_cache.clone(), &format!("{prefix}-blocks")),
     )
     .await
     .expect("failed to initialize blocks archive");
-    if let Some((block, finalization)) = seed {
+    if let Some(block) = options.block {
+        finalized_blocks = finalized_blocks
+            .put(block.height().get(), block.digest(), block.clone())
+            .await
+            .expect("failed to seed finalized block")
+            .sync()
+            .await
+            .expect("failed to sync finalized blocks archive");
+    }
+    if let Some((block, finalization)) = options.seed {
         finalizations_by_height = finalizations_by_height
             .put(block.height().get(), block.digest(), finalization)
             .await
@@ -187,7 +296,10 @@ pub(crate) async fn marshal_fixture(
         marshal::Config {
             provider,
             epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-            start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+            start: options.floor.map_or_else(
+                || marshal::Start::Genesis(TestBlock::new(0, 0)),
+                marshal::Start::Floor,
+            ),
             partition_prefix: format!("{prefix}-marshal"),
             mailbox_size: NZUsize!(8),
             view_retention: ViewDelta::new(1),
@@ -198,12 +310,12 @@ pub(crate) async fn marshal_fixture(
             value_write_buffer: NZUsize!(64),
             block_codec_config: (),
             max_repair: NZUsize!(1),
-            max_pending_acks,
+            max_pending_acks: options.max_pending_acks,
             strategy: Sequential,
         },
     )
     .await;
-    if !start {
+    if matches!(options.dispatch, Dispatch::Stopped) {
         return MarshalFixture {
             mailbox,
             guards: Box::new(actor),
@@ -212,7 +324,10 @@ pub(crate) async fn marshal_fixture(
 
     let (resolver_receiver, resolver_handler) =
         handler::init(context.child("resolver_handler"), NZUsize!(8));
-    let handle = actor.start_unbuffered(NoopReporter, (resolver_receiver, IgnoreResolver));
+    let reporter = FixtureReporter {
+        acknowledge: matches!(options.dispatch, Dispatch::Acknowledge),
+    };
+    let handle = actor.start_unbuffered(reporter, (resolver_receiver, IgnoreResolver));
     MarshalFixture {
         mailbox,
         guards: Box::new((resolver_handler, handle)),

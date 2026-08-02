@@ -1278,16 +1278,18 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             }
         }
 
-        // After a same-blob crash during a previous clear_to_size, the journal may recover to a
-        // stale position ahead of the requested start.
         let bounds = journal.bounds.clone();
-        if bounds.is_empty() && bounds.start > range.start {
+        // Progress that has pruned the requested start or advanced beyond the target belongs to
+        // an incompatible sync range and cannot be resumed.
+        if bounds.start > range.start || size > range.end {
+            debug!(
+                size,
+                bounds.start,
+                range.start,
+                range.end,
+                "existing journal is incompatible with sync range, resetting to start position"
+            );
             return journal.clear_to_size(range.start).await;
-        }
-
-        // Check if data exceeds the sync range
-        if size > range.end {
-            return Err(Error::ItemOutOfRange(size));
         }
 
         // If all existing data is before our sync range, reset to range start
@@ -2196,10 +2198,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// - Fresh (no data): returns an empty journal, resetting to `range.start` if needed.
     /// - Stale (all data strictly before `range.start`): resets to `range.start` using the
     ///   crash-safe clear path and returns an empty journal.
-    /// - Overlap within [`range.start`, `range.end`]:
-    ///   - Prunes toward `range.start` (blob-aligned, so some items before
-    ///     `range.start` may be retained)
-    /// - Data beyond `range.end`: returns [Error::ItemOutOfRange].
+    /// - Overlap within [`range.start`, `range.end`]: prunes toward `range.start`
+    ///   (blob-aligned, so some items before `range.start` may be retained).
+    /// - Data that has pruned `range.start` or extends beyond `range.end`: resets to
+    ///   `range.start` because it belongs to an incompatible sync target.
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -2209,8 +2211,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// # Returns
     /// A contiguous journal ready for sync operations. The journal's size will be within the range.
     ///
-    /// # Errors
-    /// Returns [Error::ItemOutOfRange] if existing data extends beyond `range.end`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_sync(
         context: E,
@@ -7057,7 +7057,6 @@ mod tests {
     }
 
     /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests that ItemOutOfRange is returned when existing data goes beyond the upper bound.
     #[test_traced]
     fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
@@ -7085,19 +7084,19 @@ mod tests {
             let journal = journal.sync().await.unwrap();
             drop(journal);
 
-            // Initialize with sync boundaries that are exceeded by existing data
+            // Initialize with sync boundaries that are exceeded by existing data.
             let lower_bound = 8; // blob 1
-            for (i, upper_bound) in (9..29).enumerate() {
-                let result = Journal::<_, u64>::init_sync(
-                    context.child("sync").with_attribute("index", i),
-                    cfg.clone(),
-                    lower_bound..upper_bound,
-                )
-                .await;
+            let upper_bound = 20;
+            let journal = Journal::<_, u64>::init_sync(
+                context.child("sync"),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to reset journal to the older sync range");
 
-                // Should return ItemOutOfRange error since data exists beyond upper_bound
-                assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
-            }
+            assert_eq!(journal.bounds(), lower_bound..lower_bound);
+            journal.destroy().await.unwrap();
         });
     }
 

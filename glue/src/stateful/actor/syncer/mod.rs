@@ -150,7 +150,7 @@ where
     }
 }
 
-/// Resolved state sync floor data derived from the selected finalization.
+/// Resolved state sync floor data derived from the selected finalization and marshal progress.
 pub(crate) struct ResolvedFloor<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -227,15 +227,14 @@ where
         }
     }
 
-    /// Marks state sync as in progress for the initial floor.
+    /// Marks state sync as in progress for the selected floor.
     ///
     /// This must be persisted before any state sync database mutation begins so the database
-    /// sync engine can reopen partial sync state after a crash. Once set, marshal's archived tip
-    /// selects newer resume targets without duplicating that progress here.
+    /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
+    /// The storage target may still advance to marshal's durable processed height during startup.
     ///
-    /// If an interrupted state sync already stored a floor, the newly selected floor must resume
-    /// from the same or a later consensus round. The original floor remains the durable bootstrap
-    /// anchor until state sync completes.
+    /// If an interrupted state sync already stored a floor, the newly selected
+    /// floor must resume from the same or a later consensus round.
     pub(crate) async fn begin_sync(mut self, floor: Finalization<S, C>) -> Self {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(existing)) => {
@@ -249,7 +248,6 @@ where
                         "selected state sync floor conflicts with the persisted in-progress round",
                     );
                 }
-                return self;
             }
             Some(SyncState::Complete(_)) => {
                 panic!("completed state sync cannot be marked in-progress");
@@ -287,41 +285,27 @@ where
     }
 }
 
-/// Selects the newest state sync floor available from marshal's finalized archive.
+/// Resolves marshal's durable processed position to the block that anchors application state.
 ///
-/// The runtime flushes storage before opening it at startup, and marshal eventually dispatches
-/// every archived finalization through its durability-gated application stream. The archive may
-/// still be empty while marshal fetches a remote startup floor, in which case the selected floor
-/// remains the target.
-pub(crate) async fn select_state_sync_floor<S, V>(
-    marshal: &MarshalMailbox<S, V>,
-    selected: &Finalization<S, V::Commitment>,
-) -> Finalization<S, V::Commitment>
+/// An acknowledgement-derived position retains the processed block itself. Installing a floor
+/// instead records the anchor's predecessor so marshal can redispatch the anchor, then prunes that
+/// predecessor. In that shape the retained block is one height after the processed position.
+async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, height: Height) -> V::Block
 where
     S: Scheme,
     V: Variant,
 {
-    let latest = loop {
-        let Some((height, _)) = marshal.get_info(Identifier::Latest).await else {
-            return selected.clone();
-        };
-        if let Some(finalization) = marshal.get_finalization(height).await {
-            break finalization;
-        }
-    };
-    if latest.round() < selected.round() {
-        return selected.clone();
+    if let Some(block) = marshal.get_block(Identifier::Height(height)).await {
+        return block;
     }
-    if latest.round() == selected.round() {
-        assert!(
-            latest.proposal.payload == selected.proposal.payload,
-            "marshal's latest finalization conflicts with the selected state sync floor",
-        );
-    }
-    latest
+    marshal
+        .get_block(Identifier::Height(height.next()))
+        .await
+        .expect("marshal must return floor anchor after processed height")
 }
 
-/// Resolves the newest available state sync floor into its anchor and targets.
+/// Resolves a state sync floor that covers both the selected finalization and marshal's
+/// durable processed height.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     finalization: &Finalization<S, V::Commitment>,
@@ -332,32 +316,24 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    let finalization = select_state_sync_floor(marshal, finalization).await;
-
     // Wait to retrieve the floor block from marshal. We use `Wait` here,
     // since marshal triggers a fetch for the floor block if it is not
     // already available.
-    let mut floor = {
+    let selected = {
         let block = marshal
             .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
             .await
             .expect("marshal must yield floor block");
         V::into_inner_shared(block)
     };
-
-    // A subscription is notified before marshal finishes the actor turn that archives a newly
-    // fetched startup floor. This follow-up mailbox round observes that completed turn and also
-    // picks up any newer archived finalization that arrived while the floor was being fetched.
-    let latest = select_state_sync_floor(marshal, &finalization).await;
-    if latest.proposal.payload != finalization.proposal.payload {
-        floor = {
-            let block = marshal
-                .subscribe_by_commitment(latest.proposal.payload, CommitmentFallback::Wait)
-                .await
-                .expect("marshal must yield latest floor block");
-            V::into_inner_shared(block)
-        };
-    }
+    // Marshal does not redeliver acknowledged blocks. A newly installed floor is the exception:
+    // its processed position is the predecessor so the retained anchor is dispatched once.
+    let floor = match marshal.get_processed_height().await {
+        Some(height) if height > selected.height() => {
+            V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+        }
+        _ => selected,
+    };
 
     ResolvedFloor {
         anchor: Anchor::from(floor.as_ref()),
@@ -416,13 +392,20 @@ where
         .chain(processed_height)
         .max()
         .unwrap_or_else(Height::zero);
-    let floor_block = {
-        let marshal_block = marshal
-            .get_block(Identifier::Height(marshal_floor))
-            .await
-            .expect("marshal must return floor block");
-        V::into_inner(marshal_block)
+    let floor_block = if processed_height == Some(marshal_floor) {
+        V::into_inner(processed_anchor(marshal, marshal_floor).await)
+    } else {
+        V::into_inner(
+            marshal
+                .get_block(Identifier::Height(marshal_floor))
+                .await
+                .expect("marshal must return completed state sync block"),
+        )
     };
+    let skip_finalized_until = skip_finalized_until
+        .into_iter()
+        .chain((floor_block.height() > marshal_floor).then_some(floor_block.height()))
+        .max();
 
     let databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);

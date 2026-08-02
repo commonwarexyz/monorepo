@@ -60,15 +60,17 @@
 //!   [`db::StateSyncSet::sync`]. The actor retains finalized blocks and their
 //!   acknowledgements until marshal's pending-ack window fills, waits for the live
 //!   sync coordinator to record the newest block's target, and releases the batch.
-//!   Marshal archives each finalized block and its certifying finalization and gates
-//!   dispatch on durability, so a restart selects marshal's latest certificate before
-//!   reopening the QMDB sync journals. If state sync completes before the window
-//!   fills, the pending blocks are handled during the transition to normal
-//!   processing. Durable metadata records the initial in-progress floor before any
-//!   database mutation and is marked complete only after the converged state and any
-//!   required handoff blocks are durable. A lagging floor sampled during restart
-//!   cannot move the initial floor backward. Subsequent restarts after completion
-//!   take the marshal sync path to ensure a contiguous stream.
+//!   If state sync completes before the window fills, the pending blocks are handled
+//!   during the transition to normal processing. Durable metadata records the selected
+//!   floor before database mutation and is marked complete only after the converged state
+//!   and any required handoff blocks are durable. A crash before completion restarts from
+//!   that floor. The storage target is advanced to the block backing marshal's durable
+//!   processed position when necessary, because marshal cannot redeliver acknowledged blocks
+//!   below that position.
+//!   Operation and Merkle journal state that no longer covers the resulting range, or extends
+//!   beyond it, is discarded and rebuilt. A lagging floor sampled during restart cannot move
+//!   the floor backward. Subsequent restarts after completion take the marshal sync path to
+//!   ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!

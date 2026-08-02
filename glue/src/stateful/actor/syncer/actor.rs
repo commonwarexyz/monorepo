@@ -225,9 +225,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Syncer};
+    use super::{Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
         Application, Input, Proposed,
+        actor::syncer::{StateSyncMetadata, init_databases_from_marshal},
         db::{Anchor, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
@@ -237,7 +238,7 @@ mod tests {
     use commonware_consensus::{
         marshal::ancestry::Ancestry,
         simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
-        types::Height,
+        types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
         ed25519,
@@ -254,21 +255,21 @@ mod tests {
 
     /// Database set whose sync holds the tip-update ring receiver without draining it, then
     /// completes once the actor has parked a forwarded update in the ring buffer.
-    #[derive(Clone)]
-    struct WedgeSet;
+    #[derive(Clone, Default)]
+    struct WedgeSet(u64);
 
     impl DatabaseSet<deterministic::Context> for WedgeSet {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
-        type Config = ();
+        type Config = u64;
         type SyncTargets = u64;
 
-        async fn init(_context: deterministic::Context, _config: Self::Config) -> Self {
-            unreachable!("WedgeSet is constructed by sync")
+        async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
+            Self(config)
         }
 
         fn initial_sync_targets() -> Self::SyncTargets {
-            unreachable!("WedgeSet only serves the syncer harness")
+            0
         }
 
         async fn new_batches(&self) -> Self::Unmerkleized {
@@ -292,11 +293,11 @@ mod tests {
         }
 
         async fn committed_targets(&self) -> Self::SyncTargets {
-            unreachable!("WedgeSet only serves the syncer harness")
+            self.0
         }
 
-        async fn rewind_to_targets(&self, _targets: Self::SyncTargets) {
-            unreachable!("WedgeSet only serves the syncer harness")
+        async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
+            assert_eq!(targets, self.0, "test database cannot rewind");
         }
     }
 
@@ -318,7 +319,7 @@ mod tests {
             // Completing then drops the receiver with the update still queued.
             context.sleep(Duration::from_secs(1)).await;
             drop(tip_updates);
-            Ok((Self, anchor))
+            Ok((Self::default(), anchor))
         }
     }
 
@@ -371,6 +372,138 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resolved_floor_covers_durable_marshal_progress() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor", 1);
+            let selected = fixtures::finalization(&fixture, 0, Sha256::fill(0));
+            let processed_block = TestBlock::new(1, 1);
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "syncer-floor",
+                fixture.schemes[0].clone(),
+                &processed_block,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+
+            while marshal.get_processed_height().await != Some(Height::new(1)) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(marshal.get_finalization(Height::new(1)).await.is_none());
+
+            let resolved = resolve_state_sync_floor::<
+                deterministic::Context,
+                WedgeApp,
+                TestScheme,
+                TestVariant,
+            >(&marshal, &selected)
+            .await;
+            assert_eq!(resolved.anchor.height, Height::new(1));
+            assert_eq!(resolved.targets, 1);
+        });
+    }
+
+    #[test]
+    fn startup_uses_floor_anchor_when_processed_predecessor_is_pruned() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-install", 1);
+            let floor = TestBlock::new(2, 2);
+            let finalization = fixtures::finalization(&fixture, 2, Sha256::fill(2));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture_with_floor(
+                context.child("marshal"),
+                "syncer-floor-install",
+                fixture.schemes[0].clone(),
+                &floor,
+                finalization,
+                NZUsize!(1),
+            )
+            .await;
+
+            while marshal.get_processed_height().await != Some(Height::new(1)) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(marshal.get_block(Height::new(1)).await.is_none());
+            assert!(marshal.get_block(Height::new(2)).await.is_some());
+
+            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                "syncer-floor-install",
+            )
+            .await;
+            let startup = init_databases_from_marshal::<
+                deterministic::Context,
+                WedgeApp,
+                TestScheme,
+                TestVariant,
+            >(&context, &marshal, 2, metadata)
+            .await;
+
+            assert_eq!(startup.sync.anchor.height, Height::new(2));
+            assert_eq!(startup.sync.databases.committed_targets().await, 2);
+            assert_eq!(startup.skip_finalized_until, Some(Height::new(2)));
+        });
+    }
+
+    #[test]
+    fn resolved_floor_uses_anchor_when_processed_predecessor_is_pruned() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-resolve", 1);
+            let selected = TestBlock::new(1, 1);
+            let selected_finalization = fixtures::finalization(&fixture, 1, Sha256::fill(1));
+            let floor = TestBlock::new(3, 3);
+            let floor_finalization = fixtures::finalization(&fixture, 3, Sha256::fill(3));
+            let MarshalFixture {
+                mailbox: marshal,
+                guards: _guards,
+            } = fixtures::marshal_fixture_with_floor(
+                context.child("marshal"),
+                "syncer-floor-resolve",
+                fixture.schemes[0].clone(),
+                &floor,
+                floor_finalization,
+                NZUsize!(1),
+            )
+            .await;
+
+            while marshal.get_processed_height().await != Some(Height::new(2)) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(marshal.get_block(Height::new(2)).await.is_none());
+            assert!(marshal.get_block(Height::new(3)).await.is_some());
+
+            let resolver = context.child("resolve").spawn({
+                let marshal = marshal.clone();
+                move |_| async move {
+                    resolve_state_sync_floor::<
+                        deterministic::Context,
+                        WedgeApp,
+                        TestScheme,
+                        TestVariant,
+                    >(&marshal, &selected_finalization)
+                    .await
+                }
+            });
+            context.sleep(Duration::from_millis(1)).await;
+            assert!(
+                marshal
+                    .verified(Round::new(Epoch::zero(), View::new(1)), selected)
+                    .await
+            );
+
+            let resolved = resolver.await.expect("floor resolution failed");
+            assert_eq!(resolved.anchor.height, Height::new(3));
+            assert_eq!(resolved.targets, 3);
+        });
+    }
+
     /// A tip update stranded in the ring buffer by sync completion must resolve through the
     /// caller's retry with the completed artifact, not wedge its observation forever.
     #[test]
@@ -396,7 +529,7 @@ mod tests {
             let (syncer, mailbox) =
                 Syncer::<_, WedgeApp, (), TestScheme, TestVariant>::new(Config {
                     context: context.child("syncer"),
-                    db_config: (),
+                    db_config: 0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
