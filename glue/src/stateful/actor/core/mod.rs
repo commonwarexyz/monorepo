@@ -199,7 +199,11 @@ where
     /// not process messages until [`Stateful::start`] is called.
     pub fn init(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
-            Pruning::random(prune_config, config.marshal.max_pending_acks(), &mut context)
+            Pruning::random(
+                prune_config,
+                config.marshal.max_pending_acks(),
+                &mut context,
+            )
         });
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -294,13 +298,7 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(
-            self.application,
-            databases,
-            anchor,
-            metrics,
-            self.pruning,
-        );
+        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
         Processing {
             context: self.context,
             mailbox: self.mailbox,
