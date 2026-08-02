@@ -684,7 +684,7 @@ pub(crate) mod test {
 
             // inactivity_floor should be at some location < op_count
             let inactivity_floor = db.inactivity_floor_loc();
-            let beyond_floor = Location::new(*inactivity_floor + 1);
+            let beyond_floor = inactivity_floor + 1;
 
             // Try to prune beyond the inactivity floor
             let Err(err) = db.prune(beyond_floor).await else {

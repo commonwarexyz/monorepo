@@ -1577,7 +1577,7 @@ mod tests {
                 let mut scan = Location::new(floor);
                 while let Some(c) = next_candidate(chain, scan, tip) {
                     want.push(c);
-                    scan = Location::new(*c + 1);
+                    scan = c + 1;
                 }
                 for split in 0..=want.len() {
                     let mut got = Vec::new();

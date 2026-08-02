@@ -356,7 +356,7 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = Location::new(*witness.with(|w| w.size()) - 1);
+        let last_commit_loc = witness.with(|w| w.size()) - 1;
         let root = witness.with(|w| w.root);
 
         Ok(Self {
@@ -411,7 +411,7 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// The [`Commitment`] committed by the database's current state.
+    /// The [`Commitment`] for the committed state of this database.
     pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
         batch_chain::Commitment::new(self.last_commit_loc + 1, self.root())
     }
@@ -571,7 +571,7 @@ where
         };
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = Location::new(*target - 1);
+        self.last_commit_loc = target - 1;
         self.root = self.witness.with(|w| w.root);
         Ok(self)
     }
@@ -1519,7 +1519,7 @@ mod tests {
             // then drop the journal. The unsynced tail must not survive reopen.
             let journal = open_witness_journal(context.child("crash"), partition).await;
             let (op_bytes, mut size, pinned_nodes) = witness::tests::tip(&journal).await;
-            size = Location::new(*size + 2);
+            size += 2;
             witness::tests::append_unsynced(journal, op_bytes, size, pinned_nodes).await;
 
             // Reopen must drop the unsynced entry and recover state A.
@@ -1543,7 +1543,7 @@ mod tests {
             let db =
                 open_db::<mmr::Family>(context.child("reopen"), "immutable-rewind-beyond").await;
             // A target past the tip is not a commit either.
-            let beyond_tip = Location::new(*db.size() + 100);
+            let beyond_tip = db.size() + 100;
             assert!(matches!(
                 db.rewind(beyond_tip).await,
                 Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
@@ -1736,7 +1736,7 @@ mod tests {
             let target = db.target();
 
             // Prune with a boundary beyond the tip: the tip entry must survive.
-            let boundary = Location::new(*db.size() + 100);
+            let boundary = db.size() + 100;
             let db = db.prune(boundary).await.unwrap();
             assert_eq!(db.target(), target);
             drop(db);

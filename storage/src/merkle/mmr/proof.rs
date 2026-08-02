@@ -139,7 +139,7 @@ mod tests {
     fn test_max_location_is_provable() {
         // MAX_LEAVES is the largest valid leaf count.
         let max_loc = Family::MAX_LEAVES;
-        let max_loc_plus_1 = Location::new(*max_loc + 1);
+        let max_loc_plus_1 = max_loc + 1;
 
         let result = Blueprint::new(max_loc, 0, Bagging::ForwardFold, max_loc - 1..max_loc);
         assert!(

@@ -342,7 +342,7 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = Location::new(*witness.with(|w| w.size()) - 1);
+        let last_commit_loc = witness.with(|w| w.size()) - 1;
         let root = witness.with(|w| w.root);
 
         Ok(Self {
@@ -396,7 +396,7 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// The [`Commitment`] committed by the database's current state.
+    /// The [`Commitment`] for the committed state of this database.
     pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
         batch_chain::Commitment::new(self.last_commit_loc + 1, self.root())
     }
@@ -547,7 +547,7 @@ where
         };
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = Location::new(*target - 1);
+        self.last_commit_loc = target - 1;
         self.root = self.witness.with(|w| w.root);
         Ok(self)
     }
@@ -682,9 +682,9 @@ mod tests {
                     max_ops: NZU64!(1),
                 };
 
-            let beyond = Location::new(*n + 1);
+            let beyond = n + 1;
             assert!(matches!(
-                db.serve(boundary(beyond, Location::new(*n))).await,
+                db.serve(boundary(beyond, n)).await,
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
             assert!(matches!(
@@ -693,8 +693,7 @@ mod tests {
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
             assert!(matches!(
-                db.serve(operations(Location::new(*n - 1), Location::new(*n - 2)))
-                    .await,
+                db.serve(operations(n - 1, n - 2)).await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
             ));
             assert!(matches!(
@@ -702,7 +701,7 @@ mod tests {
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
             assert!(matches!(
-                db.serve(boundary(n, Location::new(*n - 2))).await,
+                db.serve(boundary(n, n - 2)).await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
             ));
 
@@ -711,7 +710,7 @@ mod tests {
             let (response, feedback_tx) = db
                 .serve(Request::Operations {
                     size: n,
-                    start: Location::new(*n - 1),
+                    start: n - 1,
                     max_ops: NZU64!(5),
                 })
                 .await
@@ -721,7 +720,7 @@ mod tests {
                 panic!("operations request should get an operations response");
             };
             assert_eq!(operations.len(), 1);
-            let (response, _) = db.serve(boundary(n, Location::new(*n - 1))).await.unwrap();
+            let (response, _) = db.serve(boundary(n, n - 1)).await.unwrap();
             assert!(matches!(response, Response::Boundary { .. }));
         });
     }
@@ -1271,7 +1270,7 @@ mod tests {
                     Sequential,
                     journal,
                     (),
-                    Location::new(*size_b - 1),
+                    size_b - 1,
                     pinned_b,
                     Operation::Commit(Some(meta_b.clone()), Location::new(0)),
                 )
@@ -1733,7 +1732,7 @@ mod tests {
                 let (response, _) = source
                     .serve(Request::Boundary {
                         size: target.size,
-                        start: Location::new(*target.size - 1),
+                        start: target.size - 1,
                     })
                     .await
                     .unwrap();
@@ -1763,7 +1762,7 @@ mod tests {
                     Sequential,
                     journal,
                     (),
-                    Location::new(*target_b.size - 1),
+                    target_b.size - 1,
                     pinned_b,
                     Operation::Commit(Some(meta_b.clone()), Location::new(0)),
                 )
@@ -2026,7 +2025,7 @@ mod tests {
             let target = db.target();
 
             // Prune with a boundary beyond the tip: the tip entry must survive.
-            let boundary = Location::new(*db.size() + 100);
+            let boundary = db.size() + 100;
             let db = db.prune(boundary).await.unwrap();
             assert_eq!(db.target(), target);
             drop(db);
@@ -2050,7 +2049,7 @@ mod tests {
 
             let db = open_db::<mmr::Family>(context.child("reopen"), "keyless-rewind-beyond").await;
             // A target past the tip is not a commit either.
-            let beyond_tip = Location::new(*db.size() + 100);
+            let beyond_tip = db.size() + 100;
             assert!(matches!(
                 db.rewind(beyond_tip).await,
                 Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
@@ -2134,7 +2133,7 @@ mod tests {
             // then drop the journal. The unsynced tail must not survive reopen.
             let journal = open_witness_journal(context.child("crash"), partition).await;
             let (op_bytes, mut size, pinned_nodes) = witness::tests::tip(&journal).await;
-            size = Location::new(*size + 2);
+            size += 2;
             witness::tests::append_unsynced(journal, op_bytes, size, pinned_nodes).await;
 
             // Reopen must drop the unsynced entry and recover state A.

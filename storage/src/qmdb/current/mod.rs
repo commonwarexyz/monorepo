@@ -2855,7 +2855,7 @@ pub mod tests {
             let expected_value = db.get(&key0).await.unwrap();
 
             // 32 * 8 = 256 bits per chunk for N=32.
-            let invalid_prune_loc = Location::new(*expected_boundary + 256);
+            let invalid_prune_loc = expected_boundary + 256;
             let Err(err) = db.prune(invalid_prune_loc).await else {
                 panic!("expected prune rejection above sync boundary");
             };

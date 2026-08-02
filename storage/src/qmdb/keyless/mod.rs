@@ -181,8 +181,7 @@ where
                 .expect("last operation should be a commit with floor");
             (last_commit_loc, inactivity_floor_loc)
         };
-        let inactive_peaks =
-            F::inactive_peaks(Location::new(*last_commit_loc + 1), inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
@@ -1001,7 +1000,7 @@ pub(crate) mod tests {
 
         // Pruning beyond the current floor fails.
         let new_floor = db.inactivity_floor_loc();
-        let beyond = Location::new(*new_floor + 1);
+        let beyond = new_floor + 1;
         let result = db.prune(beyond).await;
         assert!(
             matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, floor))
@@ -1400,7 +1399,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = Location::new(*db.last_commit_loc() + 1 + ELEMENTS);
+            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await;
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -1557,7 +1556,7 @@ pub(crate) mod tests {
             for i in 0u64..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = Location::new(*db.last_commit_loc() + 1 + ELEMENTS);
+            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await;
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -1567,7 +1566,7 @@ pub(crate) mod tests {
             for i in ELEMENTS..ELEMENTS * 2 {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = Location::new(*db.last_commit_loc() + 1 + ELEMENTS);
+            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await;
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -1687,10 +1686,7 @@ pub(crate) mod tests {
         let new_loc = batch.size();
         let batch = batch.append(new_val.clone());
         assert_eq!(batch.get(new_loc, &db).await.unwrap(), Some(new_val));
-        assert_eq!(
-            batch.get(Location::new(*new_loc + 1), &db).await.unwrap(),
-            None
-        );
+        assert_eq!(batch.get(new_loc + 1, &db).await.unwrap(), None);
 
         db.destroy().await.unwrap();
     }
@@ -2498,7 +2494,7 @@ pub(crate) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let rewind_target = Location::new(*db.last_commit_loc() + 1);
+        let rewind_target = db.last_commit_loc() + 1;
 
         // Second commit: floor advances to 6.
         let floor_b = Location::<F>::new(6);
@@ -2520,7 +2516,7 @@ pub(crate) mod tests {
         let db = db.prune(floor_a).await.unwrap();
 
         // Pruning past the floor fails.
-        let beyond = Location::new(*floor_a + 1);
+        let beyond = floor_a + 1;
         let Err(err) = db.prune(beyond).await else {
             panic!("expected prune to fail");
         };
@@ -2622,7 +2618,7 @@ pub(crate) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let rewind_target = Location::new(*db.last_commit_loc() + 1);
+        let rewind_target = db.last_commit_loc() + 1;
 
         // Second commit: 2 appends + commit, floor advances to 6.
         let floor_b = Location::<F>::new(6);
@@ -2793,7 +2789,7 @@ pub(crate) mod tests {
             bounds.start <= commit_loc,
             "prune must not advance bounds.start past the floor"
         );
-        assert_eq!(bounds.end, Location::new(*commit_loc + 1));
+        assert_eq!(bounds.end, commit_loc + 1);
 
         // The commit op remains readable; its metadata is intact.
         assert_eq!(db.get(commit_loc).await.unwrap(), Some(metadata.clone()));
@@ -2806,7 +2802,7 @@ pub(crate) mod tests {
         // Persist the prune, then verify pruning one past the floor is rejected — the
         // floor is the hard ceiling.
         let db = db.sync().await.unwrap();
-        let Err(err) = db.prune(Location::new(*commit_loc + 1)).await else {
+        let Err(err) = db.prune(commit_loc + 1).await else {
             panic!("expected prune to fail");
         };
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
@@ -2815,7 +2811,7 @@ pub(crate) mod tests {
         // Reopen: `init_from_journal` must recover the floor from the last commit op.
         let db = reopen(context.child("reopened")).await;
         let reopened_bounds = db.bounds();
-        assert_eq!(reopened_bounds.end, Location::new(*commit_loc + 1));
+        assert_eq!(reopened_bounds.end, commit_loc + 1);
         assert_eq!(db.last_commit_loc(), commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);

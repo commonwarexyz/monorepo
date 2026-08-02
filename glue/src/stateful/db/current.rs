@@ -1487,10 +1487,8 @@ mod tests {
             ));
 
             let mut wrong_range = valid_target.clone();
-            wrong_range.range = non_empty_range!(
-                mmr::Location::new(*valid_target.range.start()),
-                mmr::Location::new(*valid_target.range.end() + 1)
-            );
+            wrong_range.range =
+                non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
             assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_range,
@@ -1604,10 +1602,8 @@ mod tests {
             ));
 
             let mut wrong_range = valid_target.clone();
-            wrong_range.range = non_empty_range!(
-                mmr::Location::new(*valid_target.range.start()),
-                mmr::Location::new(*valid_target.range.end() + 1)
-            );
+            wrong_range.range =
+                non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_range,

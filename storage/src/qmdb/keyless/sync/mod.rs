@@ -95,8 +95,7 @@ where
                 qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end)).await?;
             (Location::new(loc), floor)
         };
-        let inactive_peaks =
-            F::inactive_peaks(Location::new(*last_commit_loc + 1), inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);

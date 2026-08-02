@@ -171,7 +171,7 @@ where
 /// Validate that a batch can be applied to the database at the given [`Commitment`].
 ///
 /// A batch is applicable if the database has not advanced since the batch was created, if all
-/// ancestors are already committed, or if the database has advanced to one of the batch's ancestor
+/// ancestors are already applied, or if the database has advanced to one of the batch's ancestor
 /// [`Commitment`]s.
 pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
     current: Commitment<F, D>,
@@ -191,7 +191,7 @@ pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
 ///
 /// Ancestors are stored newest-first. Validation walks them in reverse so unapplied ancestors are
 /// checked oldest-to-newest, then checks the tip. Ancestors at or below `db_size` are already
-/// committed locally and are skipped.
+/// applied locally and are skipped.
 pub(crate) fn validate_commit_floors<F: Family, D: Digest>(
     starting_floor: Location<F>,
     db_size: Location<F>,

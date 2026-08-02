@@ -1224,7 +1224,7 @@ where
                 let mut reads = resolved.into_iter().flatten();
                 let mut pending = read_candidates.iter().peekable();
                 for candidate in candidates {
-                    floor = Location::new(*candidate + 1);
+                    floor = candidate + 1;
                     if pending.next_if(|&&pending| pending == candidate).is_none() {
                         continue;
                     }
@@ -2881,7 +2881,7 @@ where
         self.root = batch.root();
 
         // Return range of operations that were written to the log.
-        let end_loc = Location::new(*self.last_commit_loc + 1);
+        let end_loc = self.last_commit_loc + 1;
         let range = start_loc..end_loc;
         self.update_metrics();
         self.metrics

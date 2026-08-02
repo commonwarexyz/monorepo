@@ -1219,7 +1219,7 @@ mod tests {
         if start + width <= *leaves {
             return Location::new(start);
         }
-        Location::new(*leaves - width)
+        leaves - width
     }
 
     fn range_proofs_verify_for_supported_root_shapes<F: Family>() {
@@ -1930,7 +1930,7 @@ mod tests {
 
         // Verify mangling the location to something invalid should fail.
         let mut wrong_size_proof = multi_proof.clone();
-        wrong_size_proof.leaves = Location::new(*F::MAX_LEAVES + 2);
+        wrong_size_proof.leaves = F::MAX_LEAVES + 2;
         assert!(!wrong_size_proof.verify_multi_inclusion(
             &hasher,
             &[

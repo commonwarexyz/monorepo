@@ -269,8 +269,7 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
-        let inactive_peaks =
-            F::inactive_peaks(Location::new(*last_commit_loc + 1), inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -1086,7 +1085,7 @@ pub(super) mod test {
         let root_before = db.root();
         let bounds_before = db.bounds();
 
-        let prune_loc = Location::new(*bounds_before.end - 5);
+        let prune_loc = bounds_before.end - 5;
         let db = db.prune(prune_loc).await.unwrap();
 
         assert_eq!(db.root(), root_before);
@@ -1710,7 +1709,7 @@ pub(super) mod test {
 
             // Floor must be >= last_commit_loc for prune to succeed.
             // With 16 sets, commit is at current end + 16.
-            let floor = Location::new(*db.bounds().end + 16);
+            let floor = db.bounds().end + 16;
             (db, _) = commit_sets_with_floor(
                 db,
                 (0u64..16).map(|i| {
@@ -3408,7 +3407,7 @@ pub(super) mod test {
             bounds.start <= commit_loc,
             "prune must not advance bounds.start past the floor"
         );
-        assert_eq!(bounds.end, Location::new(*commit_loc + 1));
+        assert_eq!(bounds.end, commit_loc + 1);
 
         // State preserved across the prune; root unchanged; commit metadata still readable.
         assert_eq!(db.last_commit_loc, commit_loc);
@@ -3419,7 +3418,7 @@ pub(super) mod test {
         // Persist, then verify pruning one past the floor is rejected — the floor is
         // the hard ceiling.
         let db = db.sync().await.unwrap();
-        let Err(err) = db.prune(Location::new(*commit_loc + 1)).await else {
+        let Err(err) = db.prune(commit_loc + 1).await else {
             panic!("expected prune to fail");
         };
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
