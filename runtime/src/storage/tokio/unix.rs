@@ -276,34 +276,58 @@ impl Blob {
         Ok(end)
     }
 
-    fn prepare_log(
+    fn prepare_log_writes(
         state: &mut V2State,
         file: &File,
-        partition: &str,
-        name: &[u8],
+        materialize_previous: bool,
+        batch_prepared: bool,
     ) -> Result<Option<atomic::PreparedCommit>, Error> {
         if !state.is_dirty() {
             return Ok(None);
         }
         let materialized_previous = state.deferred_batch_root().cloned();
         let (payload_start, payload_len, payload_ranges) = state.pending_payload()?;
-        atomic::reclaim_shadowed_payload(file, payload_start, payload_len, &payload_ranges)?;
+        if atomic::reclaim_shadowed_payload(file, payload_start, payload_len, &payload_ranges)? {
+            state.invalidate_payload_checksum();
+        }
         atomic::begin_payload_writeback(file, payload_start, payload_len)?;
         let mut prepared = state
             .prepare_commit()?
             .expect("dirty atomic state always prepares a commit");
-        if let Some(candidate) = &materialized_previous {
-            file.write_all_at(&candidate.committed_root, candidate.root_offset)?;
+        if batch_prepared {
+            prepared.mark_batch_prepared();
+        }
+        if materialize_previous && let Some(candidate) = &materialized_previous {
+            let root = atomic::materialized_candidate_root(candidate)?;
+            file.write_all_at(&root, candidate.root_offset)?;
         }
         if !prepared.manifest.is_empty() {
             file.write_all_at(&prepared.manifest, prepared.manifest_offset)?;
         }
-        file.write_all_at(&prepared.prepared_root, prepared.root_offset)?;
-        // A committed root is written only after every payload and checkpoint byte is durable.
-        // Recovery can therefore accept it without rereading payload data.
-        Self::sync_inner(file, partition, name)?;
-        prepared.set_materialized_previous(materialized_previous);
+        if !batch_prepared {
+            file.write_all_at(&prepared.prepared_root, prepared.root_offset)?;
+        }
+        prepared.set_materialized_previous(if materialize_previous {
+            materialized_previous
+        } else {
+            None
+        });
         Ok(Some(prepared))
+    }
+
+    fn prepare_log(
+        state: &mut V2State,
+        file: &File,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<atomic::PreparedCommit>, Error> {
+        let prepared = Self::prepare_log_writes(state, file, true, false)?;
+        if prepared.is_some() {
+            // A committed root is written only after every payload and checkpoint byte is durable.
+            // Recovery can therefore accept it without rereading payload data.
+            Self::sync_inner(file, partition, name)?;
+        }
+        Ok(prepared)
     }
 
     fn commit_log(
@@ -331,11 +355,28 @@ impl Blob {
         Ok(state)
     }
 
-    pub(super) fn prepare_batch_commit(
+    pub(super) fn prepare_batch_commit_unflushed(
         &self,
         state: &mut V2State,
     ) -> Result<Option<atomic::PreparedCommit>, Error> {
-        Self::prepare_log(state, &self.file, &self.partition, &self.name)
+        Self::prepare_log_writes(state, &self.file, false, true)
+    }
+
+    pub(super) fn stage_batch_commit(
+        &self,
+        prepared: &mut atomic::PreparedCommit,
+        witness: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        if let Some(witness) = witness {
+            prepared.attach_batch_witness(witness)?;
+        }
+        self.file
+            .write_all_at(&prepared.prepared_root, prepared.root_offset)
+            .map_err(Error::from)
+    }
+
+    pub(super) fn sync_batch_commit(&self) -> Result<(), Error> {
+        Self::sync_inner(&self.file, &self.partition, &self.name)
     }
 
     pub(super) fn activate_batch_commit(
@@ -350,15 +391,6 @@ impl Blob {
             state.finish_commit(prepared);
             candidate
         }
-    }
-
-    pub(super) fn publish_batch_candidate(
-        &self,
-        candidate: &atomic::Candidate,
-    ) -> Result<(), Error> {
-        atomic::write_durable_at(&self.file, candidate.root_offset, &candidate.committed_root)
-            .map_err(Error::from)?;
-        Ok(())
     }
 
     pub(super) const fn poison_batch_state(state: &mut V2State) {

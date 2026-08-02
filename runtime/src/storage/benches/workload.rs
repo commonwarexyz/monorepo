@@ -2,7 +2,7 @@
 
 use crate::{
     config::{CacheMode, Config, SyncMode, Workload},
-    error::Result,
+    error::{Error, Result},
     filesystem::{
         atomic_batch_protocol, atomic_protocol, drop_page_cache, file_metrics, group_file_metrics,
         prepare_atomic_blob, prepare_blob, prepare_filled_blob, random_write_payload,
@@ -11,8 +11,8 @@ use crate::{
     report::Report,
     runner::{
         RunLimit, WritePolicy, random_blocks, run_atomic_batch_append_loop, run_atomic_write_loop,
-        run_multi_blob_append_loop, run_read_loop, run_sync_write_loop, run_write_loop,
-        sequential_blocks, warm_read_loop,
+        run_multi_blob_append_loop, run_paired_atomic_batch_append_loop, run_read_loop,
+        run_sync_write_loop, run_write_loop, sequential_blocks, warm_read_loop,
     },
 };
 use commonware_runtime::{
@@ -34,8 +34,8 @@ use std::{
 const PARTITION: &str = "storage-bench";
 /// Key for the single blob within the partition.
 const BLOB_NAME: &[u8] = b"blob";
-/// Temporary blob used to initialize the durable batch coordinator before timing.
-const COORDINATOR_WARMUP_BLOB: &[u8] = b"coordinator-warmup";
+/// Temporary blob used to exercise one-time batch initialization before timing.
+const BATCH_WARMUP_BLOB: &[u8] = b"batch-warmup";
 
 type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
 
@@ -72,12 +72,11 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
     };
     let result = result.and_then(|mut report| {
         let metrics = if cfg.workload.is_multi_blob_append() {
-            group_file_metrics(
-                &cfg.root,
-                PARTITION,
-                &multi_blob_names(cfg.blobs()),
-                cfg.workload == Workload::WriteAtomicBatchAppend,
-            )?
+            let mut names = multi_blob_names(cfg.blobs());
+            if cfg.paired_baseline {
+                names.extend(baseline_blob_names(cfg.blobs()));
+            }
+            group_file_metrics(&cfg.root, PARTITION, &names)?
         } else {
             file_metrics(&cfg.root, PARTITION, BLOB_NAME)?
         };
@@ -456,49 +455,95 @@ async fn run_write_multi_blob_append(cfg: &Config, context: &Context) -> Result<
     Ok(report)
 }
 
-/// Run atomic append groups across multiple blobs through one coordinator decision.
+/// Run atomic append groups across multiple blobs through one embedded decision.
 async fn run_write_atomic_batch_append(cfg: &Config, context: &Context) -> Result<Report> {
     let rss_before = resident_set_size();
     let names = multi_blob_names(cfg.blobs());
-    let blobs = names
+    let atomic_blobs = names
         .iter()
         .map(|name| prepare_atomic_blob(context, &cfg.root, PARTITION, name, 0))
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>()
         .await?;
-    warm_batch_coordinator(context, &cfg.root).await?;
+    warm_atomic_batch(context, &cfg.root).await?;
+
+    let ordinary_blobs = if cfg.paired_baseline {
+        let names = baseline_blob_names(cfg.blobs());
+        Some(
+            names
+                .iter()
+                .map(|name| prepare_blob(context, &cfg.root, PARTITION, name, 0))
+                .collect::<FuturesUnordered<_>>()
+                .try_collect::<Vec<_>>()
+                .await?,
+        )
+    } else {
+        None
+    };
 
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size(), cfg.write_shape);
     let start = Instant::now();
     let limit = run_limit(cfg, start);
-    let stats =
-        run_atomic_batch_append_loop(context, &blobs, limit, cfg.io_size(), payload).await?;
-    let hot_elapsed = start.elapsed();
-    let final_file_size = stats.bytes;
-
-    let mut report = Report::new(hot_elapsed, None, None, Some(vec![stats]), final_file_size);
+    let mut report = if let Some(ordinary_blobs) = ordinary_blobs {
+        let paired = run_paired_atomic_batch_append_loop(
+            context,
+            &ordinary_blobs,
+            &atomic_blobs,
+            limit,
+            cfg.io_size(),
+            payload,
+        )
+        .await?;
+        let hot_elapsed = start.elapsed();
+        let final_file_size = paired
+            .ordinary
+            .bytes
+            .checked_add(paired.atomic.bytes)
+            .ok_or_else(|| Error::Harness("paired final size exceeds u64".into()))?;
+        Report::new_paired(
+            hot_elapsed,
+            paired.ordinary,
+            paired.ordinary_elapsed,
+            paired.atomic,
+            paired.atomic_elapsed,
+            final_file_size,
+        )
+    } else {
+        let stats =
+            run_atomic_batch_append_loop(context, &atomic_blobs, limit, cfg.io_size(), payload)
+                .await?;
+        let hot_elapsed = start.elapsed();
+        let final_file_size = stats.bytes;
+        Report::new(hot_elapsed, None, None, Some(vec![stats]), final_file_size)
+    };
     report.set_resident_memory(rss_before, resident_set_size());
     Ok(report)
 }
 
-/// Force one-time coordinator creation and its first complete decision outside the timed phase.
-async fn warm_batch_coordinator(context: &Context, root: &Path) -> Result<()> {
-    let blob = prepare_atomic_blob(context, root, PARTITION, COORDINATOR_WARMUP_BLOB, 0).await?;
+/// Exercise one-time batch initialization outside the timed phase.
+async fn warm_atomic_batch(context: &Context, root: &Path) -> Result<()> {
+    let blob = prepare_atomic_blob(context, root, PARTITION, BATCH_WARMUP_BLOB, 0).await?;
     blob.write_at(0, vec![0u8], WriteOptions::default()).await?;
     context
         .apply(vec![BatchOperation::Publish(blob.clone())])
         .await?;
     drop(blob);
-    context
-        .remove(PARTITION, Some(COORDINATOR_WARMUP_BLOB))
-        .await?;
+    context.remove(PARTITION, Some(BATCH_WARMUP_BLOB)).await?;
     Ok(())
 }
 
 fn multi_blob_names(count: usize) -> Vec<Vec<u8>> {
+    blob_group_names("blob", count)
+}
+
+fn baseline_blob_names(count: usize) -> Vec<Vec<u8>> {
+    blob_group_names("baseline-blob", count)
+}
+
+fn blob_group_names(prefix: &str, count: usize) -> Vec<Vec<u8>> {
     (0..count)
-        .map(|index| format!("blob-{index:08}").into_bytes())
+        .map(|index| format!("{prefix}-{index:08}").into_bytes())
         .collect()
 }
 

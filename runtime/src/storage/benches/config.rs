@@ -6,8 +6,8 @@ use std::{env, fmt, path::PathBuf, time::Duration};
 const DEFAULT_IO_SIZE: usize = 4 * 1024;
 const DEFAULT_MULTI_BLOB_IO_SIZE: usize = 1024 * 1024;
 const DEFAULT_BLOBS: usize = 4;
-/// Largest group that fits the coordinator's fixed descriptor with benchmark-generated names.
-const MAX_BLOBS: usize = 129_055;
+/// Protocol participant bound; exact descriptor capacity can reject smaller groups.
+const MAX_BLOBS: usize = 32;
 
 /// Benchmark workload to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -208,6 +208,10 @@ pub struct Config {
     #[arg(long, value_parser = value_parser!(usize))]
     blobs: Option<usize>,
 
+    /// Run an ordinary four-blob baseline alongside each atomic batch operation.
+    #[arg(long, default_value_t = false)]
+    pub paired_baseline: bool,
+
     /// Parallel worker count for steady-state workloads.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
     pub inflight: usize,
@@ -320,6 +324,9 @@ impl Config {
         if self.blobs == Some(0) {
             return Err("--blobs must be greater than zero".into());
         }
+        if self.paired_baseline && self.workload != Workload::WriteAtomicBatchAppend {
+            return Err("--paired-baseline is only valid for write_atomic_batch_append".into());
+        }
         if !self.workload.is_multi_blob_append() && self.blobs.is_some() {
             return Err(
                 "--blobs is only valid for write_multi_blob_append or write_atomic_batch_append"
@@ -328,6 +335,11 @@ impl Config {
         }
         if self.blobs.is_some_and(|blobs| blobs > MAX_BLOBS) {
             return Err(format!("--blobs must not exceed {MAX_BLOBS}"));
+        }
+        if self.paired_baseline && self.blobs() != DEFAULT_BLOBS {
+            return Err(format!(
+                "--paired-baseline requires exactly {DEFAULT_BLOBS} blobs"
+            ));
         }
         if self.workload.is_multi_blob_append() {
             let io_size = u64::try_from(self.io_size())
@@ -535,11 +547,39 @@ mod tests {
     #[test]
     fn multi_blob_count_is_bounded_before_allocation() {
         for workload in ["write_multi_blob_append", "write_atomic_batch_append"] {
-            assert!(multi_blob_config(workload, "129055").validate().is_ok());
+            assert!(multi_blob_config(workload, "32").validate().is_ok());
             assert_eq!(
-                multi_blob_config(workload, "129056").validate(),
-                Err("--blobs must not exceed 129055".into())
+                multi_blob_config(workload, "33").validate(),
+                Err("--blobs must not exceed 32".into())
             );
         }
+    }
+
+    #[test]
+    fn paired_baseline_is_only_valid_for_four_blob_atomic_batches() {
+        let paired = |workload, blobs| {
+            Config::try_parse_from([
+                "storage_bench",
+                "--workload",
+                workload,
+                "--blobs",
+                blobs,
+                "--paired-baseline",
+                "--operations",
+                "1",
+            ])
+            .unwrap()
+            .validate()
+        };
+
+        assert!(paired("write_atomic_batch_append", "4").is_ok());
+        assert_eq!(
+            paired("write_atomic_batch_append", "3"),
+            Err("--paired-baseline requires exactly 4 blobs".into())
+        );
+        assert_eq!(
+            paired("write_multi_blob_append", "4"),
+            Err("--paired-baseline is only valid for write_atomic_batch_append".into())
+        );
     }
 }

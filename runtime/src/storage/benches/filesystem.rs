@@ -22,9 +22,6 @@ use std::{
 };
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
-#[cfg(target_os = "linux")]
-const COORDINATOR_PATH: [&str; 2] = [".commonware", "_COMMONWARE_RUNTIME_UNO_COORDINATOR"];
-
 pub const fn backend_name() -> &'static str {
     if cfg!(feature = "iouring-storage") {
         "iouring"
@@ -40,7 +37,7 @@ pub const fn atomic_protocol() -> &'static str {
 
 /// Protocol used to publish prepared roots as one multi-blob decision.
 pub const fn atomic_batch_protocol() -> &'static str {
-    "uno_r06_carried_coordinator"
+    "uno_r08_embedded_participant_witness"
 }
 
 /// On-disk footprint of the benchmark blob after the timed workload.
@@ -65,13 +62,12 @@ pub const fn file_metrics(
     Ok(None)
 }
 
-/// Aggregate on-disk footprint across multi-blob participants and the optional coordinator.
+/// Aggregate on-disk footprint across multi-blob participants.
 #[cfg(target_os = "linux")]
 pub fn group_file_metrics(
     root: &Path,
     partition: &str,
     names: &[Vec<u8>],
-    include_coordinator: bool,
 ) -> io::Result<Option<FileMetrics>> {
     let mut total = FileMetrics {
         file_count: 0,
@@ -81,11 +77,6 @@ pub fn group_file_metrics(
     for name in names {
         total.add(path_metrics(&root.join(partition).join(hex(name)))?);
     }
-    if include_coordinator {
-        total.add(path_metrics(
-            &root.join(COORDINATOR_PATH[0]).join(COORDINATOR_PATH[1]),
-        )?);
-    }
     Ok(Some(total))
 }
 
@@ -94,7 +85,6 @@ pub const fn group_file_metrics(
     _root: &Path,
     _partition: &str,
     _names: &[Vec<u8>],
-    _include_coordinator: bool,
 ) -> io::Result<Option<FileMetrics>> {
     Ok(None)
 }

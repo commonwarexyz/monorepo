@@ -3,6 +3,8 @@
 //! Duplicate removals are discarded, and a partition removal subsumes every blob removal in that
 //! partition. Identical publishes and resizes are discarded. Publishing and resizing the same
 //! blob conflict, as does any mutation covered by an exact or partition removal.
+//!
+//! The filesystem publication and recovery protocol is documented in the `coordinator` submodule.
 
 use crate::{BatchOperation, Error, RemoveTarget};
 use std::{
@@ -16,10 +18,7 @@ pub(crate) enum Operation {
     /// Remove an exact namespace target.
     Remove(RemoveTarget),
     /// Publish the pending epoch of an exact atomic blob.
-    Publish {
-        partition: String,
-        name: Vec<u8>,
-    },
+    Publish { partition: String, name: Vec<u8> },
     /// Resize an exact blob to `len` bytes.
     Resize {
         partition: String,
@@ -359,10 +358,7 @@ mod tests {
                 publish("partition", b"blob"),
                 resize("partition", b"blob", 1),
             ],
-            vec![
-                publish("partition", b"blob"),
-                remove("partition", b"blob"),
-            ],
+            vec![publish("partition", b"blob"), remove("partition", b"blob")],
         ] {
             let error = canonicalize_operations(operations).unwrap_err();
             match error {
@@ -378,12 +374,14 @@ mod tests {
 #[cfg(not(target_arch = "wasm32"))]
 mod coordinator;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use coordinator::{
-    Participant, apply_batch_with, preflight, recover, recover_notifying,
-    resolve_operation_partitions, resolve_partition_name,
-};
 #[cfg(all(test, not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
 pub(crate) use coordinator::fail_final_control_sync_for_test;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) use coordinator::interrupt_committed_for_test;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use coordinator::{
+    Participant, RemovalPublication, can_supersede_embedded, materialize_embedded, preflight,
+    prepare_embedded, prepare_removal_publication, recover, recover_embedded, recover_notifying,
+    recover_removal_witnesses, resolve_operation_partitions, resolve_partition_name,
+    supports_speculation,
+};

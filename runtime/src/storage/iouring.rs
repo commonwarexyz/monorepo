@@ -102,6 +102,7 @@ struct Namespace {
     lock: Arc<Mutex<()>>,
     recovery_required: AtomicBool,
     carried_batch_decision: AtomicBool,
+    embedded_batch_decision: SyncMutex<Option<Arc<[u8]>>>,
     storage_directory: PathBuf,
     generations: super::generation::Registry,
     atomic_states: SyncMutex<BTreeMap<(String, Vec<u8>), AtomicStateEntry>>,
@@ -175,17 +176,20 @@ impl Drop for V2OperationGuard {
 }
 
 impl Namespace {
-    /// Complete any committed coordinator decision while the caller holds `lock`.
+    /// Complete any carried embedded or removal decision while the caller holds `lock`.
     fn recover_locked(&self) -> Result<(), Error> {
         if !self.recovery_required.load(Ordering::Acquire) {
             return Ok(());
         }
+        if let Some(decision) = self.embedded_batch_decision.lock().clone() {
+            super::batch::materialize_embedded(&self.storage_directory, &decision)?;
+        }
         super::batch::recover_notifying(&self.storage_directory, |operations| {
             self.invalidate_operations(operations);
         })?;
+        *self.embedded_batch_decision.lock() = None;
         self.recovery_required.store(false, Ordering::Release);
-        self.carried_batch_decision
-            .store(false, Ordering::Release);
+        self.carried_batch_decision.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -290,6 +294,7 @@ impl Storage {
                 lock: Arc::new(Mutex::new(())),
                 recovery_required: AtomicBool::new(true),
                 carried_batch_decision: AtomicBool::new(false),
+                embedded_batch_decision: SyncMutex::new(None),
                 storage_directory: storage_directory.clone(),
                 generations: super::generation::Registry::default(),
                 atomic_states: SyncMutex::new(BTreeMap::new()),
@@ -414,20 +419,34 @@ impl Storage {
             .namespace
             .carried_batch_decision
             .load(Ordering::Acquire);
-        if !carry_decision {
+        let embedded_decision = if carry_decision {
+            self.namespace.embedded_batch_decision.lock().clone()
+        } else {
             self.recover_locked()?;
-        }
+            None
+        };
         for (partition, name, generation) in mutation_handles {
             if !self.namespace.is_current(&partition, &name, &generation) {
                 return Err(Error::BlobMissing(partition, hex(&name)));
             }
         }
-        super::batch::resolve_operation_partitions(
-            &self.storage_directory,
-            &mut filesystem_operations,
-        )?;
-        let filesystem_operations = super::batch::canonicalize_operations(filesystem_operations)?;
-        super::batch::preflight(&filesystem_operations)?;
+        let has_removals = filesystem_operations
+            .iter()
+            .any(|operation| matches!(operation, super::batch::Operation::Remove(_)));
+        // Mutation partitions come from opened blob handles and already use the stored spelling.
+        // Only externally named removal targets require filesystem-backed alias resolution.
+        let filesystem_operations = if has_removals {
+            super::batch::resolve_operation_partitions(
+                &self.storage_directory,
+                &mut filesystem_operations,
+            )?;
+            let filesystem_operations =
+                super::batch::canonicalize_operations(filesystem_operations)?;
+            super::batch::preflight(&filesystem_operations)?;
+            filesystem_operations
+        } else {
+            filesystem_operations
+        };
 
         self.namespace
             .recovery_required
@@ -473,7 +492,9 @@ impl Storage {
                     if let Some(len) = resize {
                         operation.state.resize(len);
                     }
-                    let prepared = blob.prepare_batch_commit(&mut operation.state).await;
+                    let prepared = blob
+                        .prepare_batch_commit_unflushed(&mut operation.state)
+                        .await;
                     (blob, operation, prepared)
                 }
             });
@@ -492,116 +513,342 @@ impl Storage {
                 let _ = completion_sender.send(Err(error));
                 return;
             }
-            let participants =
-                prepared_states
-                    .iter()
-                    .filter_map(|(blob, _, prepared)| {
-                        prepared.as_ref().unwrap().as_ref().map(|prepared| {
-                            super::batch::Participant {
-                                partition: blob.partition.clone(),
-                                name: blob.name.clone(),
-                                candidate: prepared.candidate(),
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-            let materialized_previous = prepared_states
+            let mut speculative_payload_bytes = Some(0u64);
+            for (_, _, prepared) in &prepared_states {
+                let Some(prepared) = prepared.as_ref().unwrap() else {
+                    continue;
+                };
+                match prepared.payload_checksum() {
+                    super::atomic::PayloadChecksumEligibility::Eligible(checksum) => {
+                        speculative_payload_bytes = speculative_payload_bytes.and_then(|total| {
+                            total.checked_add(checksum.map_or(0, |checksum| checksum.len))
+                        });
+                    }
+                    super::atomic::PayloadChecksumEligibility::Ineligible => {
+                        speculative_payload_bytes = None;
+                    }
+                }
+            }
+            let participant_count = prepared_states
+                .iter()
+                .filter(|(_, _, prepared)| prepared.as_ref().unwrap().is_some())
+                .count();
+            let verifiable = speculative_payload_bytes.is_some();
+            let embedded_eligible = verifiable
+                && speculative_payload_bytes.is_some_and(|verified_bytes| {
+                    super::batch::supports_speculation(
+                        &filesystem_operations,
+                        participant_count,
+                        verified_bytes,
+                    )
+                });
+            let participants = prepared_states
                 .iter()
                 .filter_map(|(blob, _, prepared)| {
-                    prepared
-                        .as_ref()
-                        .unwrap()
-                        .as_ref()?
-                        .materialized_previous()
-                        .cloned()
-                        .map(|candidate| super::batch::Participant {
+                    prepared.as_ref().unwrap().as_ref().map(|prepared| {
+                        let payload_checksum = if verifiable {
+                            let super::atomic::PayloadChecksumEligibility::Eligible(checksum) =
+                                prepared.payload_checksum()
+                            else {
+                                unreachable!("verifiable groups contain only eligible epochs")
+                            };
+                            checksum
+                        } else {
+                            None
+                        };
+                        super::batch::Participant {
                             partition: blob.partition.clone(),
                             name: blob.name.clone(),
-                            candidate,
-                        })
+                            candidate: prepared.candidate(),
+                            payload_start: if verifiable {
+                                prepared.payload_start()
+                            } else {
+                                0
+                            },
+                            payload_checksum,
+                        }
+                    })
                 })
                 .collect::<Vec<_>>();
-            let defer_participant_roots = filesystem_operations
-                .iter()
-                .all(|operation| !matches!(operation, super::batch::Operation::Remove(_)));
+            let embedded_witness = embedded_eligible
+                .then(|| super::batch::prepare_embedded(&participants, &filesystem_operations))
+                .transpose()
+                .ok()
+                .flatten()
+                .filter(|descriptor| {
+                    prepared_states.iter().all(|(_, _, prepared)| {
+                        prepared.as_ref().unwrap().as_ref().is_none_or(|prepared| {
+                            prepared.batch_witness_capacity() >= descriptor.len()
+                        })
+                    })
+                })
+                .map(Arc::<[u8]>::from);
 
-            let (install_sender, install_receiver) = oneshot::channel();
-            let (install_result_sender, install_result_receiver) = std::sync::mpsc::sync_channel(1);
-            let installer = tokio::spawn(async move {
-                if install_receiver.await.is_ok() {
-                    let result = if defer_participant_roots {
-                        Ok(())
-                    } else {
-                        let installs = prepared_states.iter().filter_map(|(blob, _, prepared)| {
-                            prepared.as_ref().unwrap().as_ref().map(|prepared| {
-                                let candidate = prepared.candidate();
-                                async move { blob.publish_batch_candidate(&candidate).await }
-                            })
-                        });
-                        join_all(installs)
-                            .await
-                            .into_iter()
-                            .find_map(Result::err)
-                            .map_or(Ok(()), Err)
-                    };
-                    let _ = install_result_sender.send(result);
+            if carry_decision && embedded_decision.is_none() {
+                let error: Error = IoError::new(
+                    std::io::ErrorKind::InvalidData,
+                    "carried batch decision has no embedded witness",
+                )
+                .into();
+                for (_, operation, _) in &mut prepared_states {
+                    operation.poison();
                 }
-                prepared_states
-            });
+                let _ = commit_sender.send(Err(error.clone()));
+                drop(guard);
+                on_complete();
+                let _ = completion_sender.send(Err(error));
+                return;
+            }
 
-            let invalidator = namespace.clone();
-            let coordinator_operations = filesystem_operations.clone();
-            let coordinator = tokio::task::spawn_blocking(move || {
-                let committed = std::cell::Cell::new(false);
-                let commit_sender = std::cell::Cell::new(Some(commit_sender));
-                let result = super::batch::apply_batch_with(
-                    &root,
-                    &participants,
-                    &materialized_previous,
-                    &coordinator_operations,
-                    carry_decision,
-                    |operations| {
-                        invalidator.invalidate_operations(operations);
-                        invalidator
+            let transition = embedded_decision.as_deref().map_or(Ok(None), |previous| {
+                embedded_witness
+                    .as_deref()
+                    .map_or(Ok(false), |_| {
+                        super::batch::can_supersede_embedded(previous, &participants)
+                            .map_err(Error::from)
+                    })
+                    .map(|can_supersede| (!can_supersede).then(|| previous.to_vec()))
+            });
+            let transition = match transition {
+                Ok(transition) => transition,
+                Err(error) => {
+                    for (_, operation, _) in &mut prepared_states {
+                        operation.poison();
+                    }
+                    let _ = commit_sender.send(Err(error.clone()));
+                    drop(guard);
+                    on_complete();
+                    let _ = completion_sender.send(Err(error));
+                    return;
+                }
+            };
+            let retire_embedded = transition.is_some();
+            let transition_result = if let Some(previous) = transition {
+                let transition_root = root.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::batch::materialize_embedded(&transition_root, &previous)
+                })
+                .await
+            } else {
+                Ok(Ok(()))
+            };
+            match transition_result {
+                Ok(Ok(())) => {
+                    if retire_embedded {
+                        *namespace.embedded_batch_decision.lock() = None;
+                        namespace
                             .carried_batch_decision
                             .store(false, Ordering::Release);
-                        committed.set(true);
-                        if let Some(sender) = commit_sender.take() {
-                            let _ = sender.send(Ok(()));
-                        }
-                        on_commit();
-                    },
-                    move || {
-                        install_sender.send(()).map_err(|_| {
-                            IoError::other("io_uring batch installer is unavailable")
-                        })?;
-                        install_result_receiver
-                            .recv()
-                            .map_err(|_| {
-                                IoError::other("io_uring batch installer did not complete")
-                            })?
-                            .map_err(|error| IoError::other(error.to_string()))
-                    },
-                )
-                .map_err(Error::from);
-                (result, committed.get(), commit_sender.into_inner())
-            });
-            let (mut result, committed, commit_sender) = match coordinator.await {
-                Ok(result) => result,
-                Err(error) if error.is_panic() => {
-                    std::panic::resume_unwind(error.into_panic());
+                    }
                 }
-                Err(_) => (Err(Error::Closed), false, None),
-            };
-            let mut prepared_states = match installer.await {
-                Ok(prepared_states) => prepared_states,
+                Ok(Err(error)) => {
+                    let error = Error::from(error);
+                    for (_, operation, _) in &mut prepared_states {
+                        operation.poison();
+                    }
+                    let _ = commit_sender.send(Err(error.clone()));
+                    drop(guard);
+                    on_complete();
+                    let _ = completion_sender.send(Err(error));
+                    return;
+                }
                 Err(error) if error.is_panic() => {
                     std::panic::resume_unwind(error.into_panic());
                 }
                 Err(_) => {
-                    result = Err(Error::Closed);
-                    Vec::new()
+                    let error = Error::Closed;
+                    for (_, operation, _) in &mut prepared_states {
+                        operation.poison();
+                    }
+                    let _ = commit_sender.send(Err(error.clone()));
+                    drop(guard);
+                    on_complete();
+                    let _ = completion_sender.send(Err(error));
+                    return;
                 }
+            }
+
+            let mut removal_publication: Option<super::batch::RemovalPublication> = None;
+            let mut eligibility_error = None;
+            if has_removals {
+                if participant_count != 0 && !verifiable {
+                    eligibility_error = Some(
+                        IoError::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "removal batch payload cannot be verified after a crash",
+                        )
+                        .into(),
+                    );
+                } else {
+                    let publication_root = root.clone();
+                    let publication_participants = participants.clone();
+                    let publication_operations = filesystem_operations.clone();
+                    let publication = tokio::task::spawn_blocking(move || {
+                        super::batch::recover_removal_witnesses(
+                            &publication_root,
+                            &publication_operations,
+                        )?;
+                        super::batch::prepare_removal_publication(
+                            &publication_root,
+                            &publication_participants,
+                            &publication_operations,
+                        )
+                    })
+                    .await;
+                    match publication {
+                        Ok(Ok(publication))
+                            if prepared_states.iter().all(|(_, _, prepared)| {
+                                prepared.as_ref().unwrap().as_ref().is_none_or(|prepared| {
+                                    prepared.batch_witness_capacity()
+                                        >= publication.descriptor().len()
+                                })
+                            }) =>
+                        {
+                            removal_publication = Some(publication);
+                        }
+                        Ok(Ok(_)) => {
+                            eligibility_error = Some(
+                                IoError::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "removal batch descriptor exceeds a participant root slot",
+                                )
+                                .into(),
+                            );
+                        }
+                        Ok(Err(error)) => eligibility_error = Some(Error::from(error)),
+                        Err(error) if error.is_panic() => {
+                            std::panic::resume_unwind(error.into_panic());
+                        }
+                        Err(_) => eligibility_error = Some(Error::Closed),
+                    }
+                }
+            } else if participant_count != 0 && embedded_witness.is_none() {
+                eligibility_error = Some(
+                    IoError::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "write batch is not eligible for embedded crash recovery",
+                    )
+                    .into(),
+                );
+            }
+            if let Some(error) = eligibility_error {
+                for (_, operation, _) in &mut prepared_states {
+                    operation.poison();
+                }
+                let _ = commit_sender.send(Err(error.clone()));
+                drop(guard);
+                on_complete();
+                let _ = completion_sender.send(Err(error));
+                return;
+            }
+
+            let stage_witness = embedded_witness.clone().or_else(|| {
+                removal_publication
+                    .as_ref()
+                    .map(|publication| Arc::<[u8]>::from(publication.descriptor()))
+            });
+            let removal_persist = removal_publication.map(|publication| {
+                tokio::task::spawn_blocking(move || {
+                    let result = publication.persist();
+                    (publication, result)
+                })
+            });
+
+            let stages = prepared_states
+                .iter_mut()
+                .filter_map(|(blob, _, prepared)| {
+                    let prepared = prepared.as_mut().unwrap().as_mut()?;
+                    Some(blob.stage_batch_commit(prepared, stage_witness.as_deref()))
+                });
+            let stage_error = join_all(stages).await.into_iter().find_map(Result::err);
+            let participant_syncs = prepared_states.iter().filter_map(|(blob, _, prepared)| {
+                prepared
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .map(|_| blob.sync_batch_commit())
+            });
+            let sync_error = join_all(participant_syncs)
+                .await
+                .into_iter()
+                .find_map(Result::err);
+            let (removal_publication, removal_error) = match removal_persist {
+                Some(persist) => match persist.await {
+                    Ok((publication, result)) => (Some(publication), result.err().map(Error::from)),
+                    Err(error) if error.is_panic() => {
+                        std::panic::resume_unwind(error.into_panic());
+                    }
+                    Err(_) => (None, Some(Error::Closed)),
+                },
+                None => (None, None),
+            };
+            if let Some(error) = stage_error.or(sync_error).or(removal_error) {
+                for (_, operation, _) in &mut prepared_states {
+                    operation.poison();
+                }
+                let _ = commit_sender.send(Err(error.clone()));
+                drop(guard);
+                on_complete();
+                let _ = completion_sender.send(Err(error));
+                return;
+            }
+
+            if let Some(witness) = embedded_witness {
+                *namespace.embedded_batch_decision.lock() = Some(witness);
+                namespace.invalidate_operations(&filesystem_operations);
+                namespace
+                    .carried_batch_decision
+                    .store(false, Ordering::Release);
+                let _ = commit_sender.send(Ok(()));
+                match tokio::task::spawn_blocking(on_commit).await {
+                    Ok(()) => {}
+                    Err(error) if error.is_panic() => {
+                        std::panic::resume_unwind(error.into_panic());
+                    }
+                    Err(_) => {}
+                }
+                for (_, mut operation, prepared) in prepared_states {
+                    if let Some(prepared) = prepared.unwrap() {
+                        Blob::finish_batch_commit(&mut operation.state, prepared, true);
+                    }
+                    operation.finish();
+                }
+                namespace.recovery_required.store(true, Ordering::Release);
+                namespace
+                    .carried_batch_decision
+                    .store(true, Ordering::Release);
+                drop(guard);
+                on_complete();
+                let _ = completion_sender.send(Ok(()));
+                return;
+            }
+
+            namespace.invalidate_operations(&filesystem_operations);
+            namespace
+                .carried_batch_decision
+                .store(false, Ordering::Release);
+            let _ = commit_sender.send(Ok(()));
+            match tokio::task::spawn_blocking(on_commit).await {
+                Ok(()) => {}
+                Err(error) if error.is_panic() => {
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                Err(_) => {}
+            }
+
+            let result = match removal_publication {
+                Some(publication) => match tokio::task::spawn_blocking(move || {
+                    publication.finish(|_| {}).map_err(Error::from)
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) if error.is_panic() => {
+                        std::panic::resume_unwind(error.into_panic());
+                    }
+                    Err(_) => Err(Error::Closed),
+                },
+                None => Ok(()),
             };
 
             if result.is_ok() {
@@ -609,11 +856,7 @@ impl Storage {
                     if let Some(prepared) = std::mem::replace(prepared, Ok(None))
                         .expect("successful preparation retains no error")
                     {
-                        Blob::finish_batch_commit(
-                            &mut operation.state,
-                            prepared,
-                            defer_participant_roots,
-                        );
+                        Blob::finish_batch_commit(&mut operation.state, prepared, false);
                     }
                     operation.finish();
                 }
@@ -622,21 +865,8 @@ impl Storage {
                     operation.poison();
                 }
             }
-            if !committed {
-                if result.is_ok() {
-                    namespace.invalidate_operations(&filesystem_operations);
-                }
-                if let Some(sender) = commit_sender {
-                    let _ = sender.send(result.clone().map(|_| ()));
-                }
-            }
-            if let Ok(carried) = &result {
-                namespace
-                    .recovery_required
-                    .store(*carried, Ordering::Release);
-                namespace
-                    .carried_batch_decision
-                    .store(*carried, Ordering::Release);
+            if result.is_ok() {
+                namespace.recovery_required.store(false, Ordering::Release);
             }
             drop(guard);
             on_complete();
@@ -770,7 +1000,17 @@ impl Storage {
             match shared_atomic {
                 Some(state) => Some(state),
                 None => {
-                    let state = V2State::recover(&file, data_offset).map_err(|error| {
+                    let state = (|| {
+                        super::batch::recover_embedded(
+                            &self.storage_directory,
+                            &stored_partition,
+                            name,
+                            &file,
+                            data_offset,
+                        )?;
+                        V2State::recover(&file, data_offset)
+                    })()
+                    .map_err(|error| {
                         Error::BlobCorrupt(
                             partition.into(),
                             hex(name),
@@ -842,6 +1082,23 @@ impl crate::Storage for Storage {
         let stored_partition =
             super::batch::resolve_partition_name(&self.storage_directory, partition)?;
         let path = self.storage_directory.join(&stored_partition);
+        let recovery_operation = name.map_or_else(
+            || {
+                super::batch::Operation::Remove(crate::RemoveTarget::Partition(
+                    stored_partition.clone(),
+                ))
+            },
+            |name| {
+                super::batch::Operation::Remove(crate::RemoveTarget::Blob {
+                    partition: stored_partition.clone(),
+                    name: name.to_vec(),
+                })
+            },
+        );
+        super::batch::recover_removal_witnesses(
+            &self.storage_directory,
+            std::slice::from_ref(&recovery_operation),
+        )?;
         let operation = if let Some(name) = name {
             fs::remove_file(path.join(hex(name)))
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
@@ -1120,9 +1377,11 @@ impl Blob {
         receiver
     }
 
-    async fn prepare_log(
+    async fn prepare_log_writes(
         &self,
         state: &mut V2State,
+        materialize_previous: bool,
+        batch_prepared: bool,
     ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
         if !state.is_dirty() {
             return Ok(None);
@@ -1131,29 +1390,36 @@ impl Blob {
         let (payload_start, payload_len, payload_ranges) = state.pending_payload()?;
         let file = self.file.clone();
         let preparing = tokio::task::spawn_blocking(move || {
-            super::atomic::reclaim_shadowed_payload(
+            let reclaimed = super::atomic::reclaim_shadowed_payload(
                 &file,
                 payload_start,
                 payload_len,
                 &payload_ranges,
             )?;
             super::atomic::begin_payload_writeback(&file, payload_start, payload_len)?;
-            Ok::<_, std::io::Error>(())
+            Ok::<_, std::io::Error>(reclaimed)
         });
-        match preparing.await {
+        let reclaimed = match preparing.await {
             Ok(result) => result?,
             Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
             Err(_) => return Err(Error::Closed),
+        };
+        if reclaimed {
+            state.invalidate_payload_checksum();
         }
         let mut prepared = state
             .prepare_commit()?
             .expect("dirty atomic state always prepares a commit");
-        if let Some(candidate) = &materialized_previous {
+        if batch_prepared {
+            prepared.mark_batch_prepared();
+        }
+        if materialize_previous && let Some(candidate) = &materialized_previous {
+            let root = super::atomic::materialized_candidate_root(candidate)?;
             self.io_handle
                 .write_at(
                     self.file.clone(),
                     candidate.root_offset,
-                    candidate.committed_root.to_vec().into(),
+                    root.to_vec().into(),
                     WriteOptions::default(),
                     iouring::Cache::Enabled,
                 )
@@ -1171,23 +1437,36 @@ impl Blob {
                 )
                 .await?;
         }
-        self.io_handle
-            .write_at(
-                self.file.clone(),
-                prepared.root_offset,
-                prepared.prepared_root.clone().into(),
-                WriteOptions::default(),
-                iouring::Cache::Enabled,
-            )
-            .await?;
-        // The first barrier makes payload and checkpoint bytes durable. Publishing the committed
-        // root with RWF_DSYNC then makes recovery metadata-only.
-        self.io_handle
-            .sync(self.file.clone())
-            .await
-            .map_err(|error| self.map_sync_error(error))?;
-        prepared.set_materialized_previous(materialized_previous);
+        if !batch_prepared {
+            self.io_handle
+                .write_at(
+                    self.file.clone(),
+                    prepared.root_offset,
+                    prepared.prepared_root.clone().into(),
+                    WriteOptions::default(),
+                    iouring::Cache::Enabled,
+                )
+                .await?;
+        }
+        prepared.set_materialized_previous(if materialize_previous {
+            materialized_previous
+        } else {
+            None
+        });
         Ok(Some(prepared))
+    }
+
+    async fn prepare_log(
+        &self,
+        state: &mut V2State,
+    ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
+        let prepared = self.prepare_log_writes(state, true, false).await?;
+        if prepared.is_some() {
+            // The first barrier makes payload and checkpoint bytes durable. Publishing the
+            // committed root with RWF_DSYNC then makes recovery metadata-only.
+            self.sync_batch_commit().await?;
+        }
+        Ok(prepared)
     }
 
     async fn commit_log(&self, state: &mut V2State) -> Result<(), Error> {
@@ -1227,11 +1506,38 @@ impl Blob {
         Ok(state)
     }
 
-    async fn prepare_batch_commit(
+    async fn prepare_batch_commit_unflushed(
         &self,
         state: &mut V2State,
     ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
-        self.prepare_log(state).await
+        self.prepare_log_writes(state, false, true).await
+    }
+
+    async fn stage_batch_commit(
+        &self,
+        prepared: &mut super::atomic::PreparedCommit,
+        witness: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        if let Some(witness) = witness {
+            prepared.attach_batch_witness(witness)?;
+        }
+        self.io_handle
+            .write_at(
+                self.file.clone(),
+                prepared.root_offset,
+                prepared.prepared_root.clone().into(),
+                WriteOptions::default(),
+                iouring::Cache::Enabled,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn sync_batch_commit(&self) -> Result<(), Error> {
+        self.io_handle
+            .sync(self.file.clone())
+            .await
+            .map_err(|error| self.map_sync_error(error))
     }
 
     fn finish_batch_commit(

@@ -20,8 +20,8 @@ pub struct Stats {
     pub syncs: u64,
     /// Wall time spent awaiting those barriers.
     pub sync_elapsed: Duration,
-    /// Time from batch publication start until the durable coordinator return.
-    pub coordinator_return_samples: Vec<Duration>,
+    /// Time from batch publication start until the durable decision return.
+    pub decision_return_samples: Vec<Duration>,
     /// Time from batch publication start through full completion-handle cleanup.
     pub full_completion_samples: Vec<Duration>,
 }
@@ -44,8 +44,8 @@ impl Stats {
         self.latency_samples.append(&mut other.latency_samples);
         self.syncs += other.syncs;
         self.sync_elapsed += other.sync_elapsed;
-        self.coordinator_return_samples
-            .append(&mut other.coordinator_return_samples);
+        self.decision_return_samples
+            .append(&mut other.decision_return_samples);
         self.full_completion_samples
             .append(&mut other.full_completion_samples);
     }
@@ -57,8 +57,8 @@ impl Stats {
     }
 
     /// Record the durable-decision and completion-handle boundaries of one atomic batch.
-    pub fn record_publication(&mut self, coordinator_return: Duration, full_completion: Duration) {
-        self.coordinator_return_samples.push(coordinator_return);
+    pub fn record_publication(&mut self, decision_return: Duration, full_completion: Duration) {
+        self.decision_return_samples.push(decision_return);
         self.full_completion_samples.push(full_completion);
     }
 }
@@ -114,6 +114,8 @@ impl PhaseReport {
 
 /// Derived metrics for one operation class.
 struct OperationReport {
+    /// Elapsed operation time used as the throughput denominator.
+    elapsed: Duration,
     /// Completed operations.
     ops: u64,
     /// Total bytes transferred.
@@ -131,8 +133,8 @@ struct OperationReport {
     /// Durability barriers and total time spent awaiting them.
     syncs: u64,
     sync_elapsed: Duration,
-    /// Atomic-batch durable coordinator-return latency.
-    coordinator_return: Option<PhaseReport>,
+    /// Atomic-batch durable decision-return latency.
+    decision_return: Option<PhaseReport>,
     /// Atomic-batch latency through full completion-handle cleanup.
     full_completion: Option<PhaseReport>,
 }
@@ -153,6 +155,7 @@ impl OperationReport {
             merged.latency_samples[(merged.latency_samples.len() - 1) * pct / 100]
         };
         Self {
+            elapsed,
             ops: merged.ops,
             bytes: merged.bytes,
             ops_per_sec: merged.ops as f64 / elapsed_secs,
@@ -162,7 +165,7 @@ impl OperationReport {
             p99_latency: percentile(99),
             syncs: merged.syncs,
             sync_elapsed: merged.sync_elapsed,
-            coordinator_return: PhaseReport::new(merged.coordinator_return_samples),
+            decision_return: PhaseReport::new(merged.decision_return_samples),
             full_completion: PhaseReport::new(merged.full_completion_samples),
         }
     }
@@ -186,8 +189,8 @@ impl OperationReport {
                 self.sync_elapsed.as_nanos() as f64 / self.syncs as f64 / 1_000.0,
             );
         }
-        if let Some(coordinator_return) = &self.coordinator_return {
-            coordinator_return.print(&format!("{label}_coordinator_return"));
+        if let Some(decision_return) = &self.decision_return {
+            decision_return.print(&format!("{label}_decision_return"));
         }
         if let Some(full_completion) = &self.full_completion {
             full_completion.print(&format!("{label}_full_completion"));
@@ -205,9 +208,53 @@ impl OperationReport {
             "p99_latency_ns": self.p99_latency.as_nanos() as u64,
             "sync_count": self.syncs,
             "sync_elapsed_ns": self.sync_elapsed.as_nanos() as u64,
-            "coordinator_return": self.coordinator_return.as_ref().map(PhaseReport::to_json),
+            "decision_return": self.decision_return.as_ref().map(PhaseReport::to_json),
             "full_completion": self.full_completion.as_ref().map(PhaseReport::to_json),
         })
+    }
+
+    fn to_paired_json(&self) -> serde_json::Value {
+        let mut report = self.to_json();
+        report
+            .as_object_mut()
+            .expect("operation report must serialize as an object")
+            .insert("elapsed_ns".into(), json!(self.elapsed.as_nanos() as u64));
+        report
+    }
+}
+
+/// Per-side metrics for an in-process ordinary-versus-atomic comparison.
+struct PairedReport {
+    ordinary: OperationReport,
+    atomic: OperationReport,
+}
+
+impl PairedReport {
+    fn new(
+        ordinary: Stats,
+        ordinary_elapsed: Duration,
+        atomic: Stats,
+        atomic_elapsed: Duration,
+    ) -> Self {
+        Self {
+            ordinary: OperationReport::new(vec![ordinary], ordinary_elapsed),
+            atomic: OperationReport::new(vec![atomic], atomic_elapsed),
+        }
+    }
+
+    fn throughput_ratio(&self) -> f64 {
+        self.atomic.ops_per_sec / self.ordinary.ops_per_sec.max(f64::EPSILON)
+    }
+
+    fn print(&self) {
+        println!(
+            "paired_baseline=true ordinary_elapsed_s={:.6} atomic_elapsed_s={:.6} atomic_to_ordinary_throughput_ratio={:.6}",
+            self.ordinary.elapsed.as_secs_f64(),
+            self.atomic.elapsed.as_secs_f64(),
+            self.throughput_ratio(),
+        );
+        self.ordinary.print("ordinary");
+        self.atomic.print("atomic");
     }
 }
 
@@ -223,6 +270,8 @@ pub struct Report {
     read: Option<OperationReport>,
     /// Write-side metrics, when present.
     write: Option<OperationReport>,
+    /// Side-specific metrics for paired ordinary and atomic operations.
+    paired: Option<PairedReport>,
     /// Final logical file size.
     final_file_size: u64,
     /// Atomic-update protocol selected by the filesystem, when applicable.
@@ -251,6 +300,35 @@ impl Report {
             frontier_sync_elapsed,
             read: read_workers.map(|w| OperationReport::new(w, hot_elapsed)),
             write: write_workers.map(|w| OperationReport::new(w, hot_elapsed)),
+            paired: None,
+            final_file_size,
+            atomic_protocol: None,
+            file_metrics: None,
+            resident_memory: None,
+        }
+    }
+
+    /// Build a report whose paired sides use independent throughput denominators.
+    pub fn new_paired(
+        hot_elapsed: Duration,
+        ordinary: Stats,
+        ordinary_elapsed: Duration,
+        atomic: Stats,
+        atomic_elapsed: Duration,
+        final_file_size: u64,
+    ) -> Self {
+        Self {
+            elapsed: hot_elapsed,
+            hot_elapsed,
+            frontier_sync_elapsed: None,
+            read: None,
+            write: None,
+            paired: Some(PairedReport::new(
+                ordinary,
+                ordinary_elapsed,
+                atomic,
+                atomic_elapsed,
+            )),
             final_file_size,
             atomic_protocol: None,
             file_metrics: None,
@@ -305,7 +383,9 @@ impl Report {
         }
         if cfg.workload.is_multi_blob_append() {
             let bytes_per_op = cfg.io_size() as u64 * cfg.blobs() as u64;
-            let completion = if cfg.workload == Workload::WriteAtomicBatchAppend {
+            let completion = if cfg.paired_baseline {
+                "side_specific"
+            } else if cfg.workload == Workload::WriteAtomicBatchAppend {
                 "full_batch_handle"
             } else {
                 "all_blob_syncs"
@@ -315,6 +395,11 @@ impl Report {
                 cfg.blobs(),
                 bytes_per_op
             );
+            if cfg.paired_baseline {
+                println!(
+                    "ordinary_operation_latency=all_blob_syncs atomic_operation_latency=full_batch_handle"
+                );
+            }
         }
         println!("root={}", cfg.root.display());
         if let Some(cache) = cfg.cache {
@@ -339,7 +424,7 @@ impl Report {
         if let Some(protocol) = self.atomic_protocol {
             if cfg.workload == Workload::WriteAtomicBatchAppend {
                 println!(
-                    "atomic_protocol={protocol} atomic_phase=prepared_root durability_frontier=coordinator_return full_completion=batch_handle byte_accounting=logical_group_payload"
+                    "atomic_protocol={protocol} atomic_phase=prepared_root durability_frontier=decision_return full_completion=batch_handle byte_accounting=logical_group_payload"
                 );
             } else {
                 println!(
@@ -368,6 +453,9 @@ impl Report {
         if let Some(write) = &self.write {
             write.print("write");
         }
+        if let Some(paired) = &self.paired {
+            paired.print();
+        }
         println!("final_file_size={}", self.final_file_size);
     }
 
@@ -375,7 +463,16 @@ impl Report {
     pub fn print_json(&self, cfg: &Config) {
         let is_group = cfg.workload.is_multi_blob_append();
         let is_atomic_batch = cfg.workload == Workload::WriteAtomicBatchAppend;
-        let json = json!({
+        let paired_baseline = self.paired.as_ref().map(|paired| {
+            json!({
+                "ordinary_operation_latency": "all_blob_syncs",
+                "atomic_operation_latency": "full_batch_handle",
+                "ordinary": paired.ordinary.to_paired_json(),
+                "atomic": paired.atomic.to_paired_json(),
+                "atomic_to_ordinary_throughput_ratio": paired.throughput_ratio(),
+            })
+        });
+        let mut json = json!({
             "backend": backend_name(),
             "workload": cfg.workload.to_string(),
             "duration_seconds": cfg.operations.is_none().then(|| cfg.duration().as_secs()),
@@ -384,7 +481,9 @@ impl Report {
             "blobs": is_group.then(|| cfg.blobs()),
             "bytes_per_op": is_group.then(|| cfg.io_size() as u64 * cfg.blobs() as u64),
             "operation_unit": is_group.then_some("n_blob_durable_group"),
-            "operation_latency": is_group.then_some(if is_atomic_batch {
+            "operation_latency": is_group.then_some(if cfg.paired_baseline {
+                "side_specific"
+            } else if is_atomic_batch {
                 "full_batch_handle"
             } else {
                 "all_blob_syncs"
@@ -411,7 +510,7 @@ impl Report {
                 "volatile_update"
             }),
             "durability_frontier": if is_group {
-                Some(if is_atomic_batch { "coordinator_return" } else { "all_blob_syncs" })
+                Some(if is_atomic_batch { "decision_return" } else { "all_blob_syncs" })
             } else {
                 self.atomic_protocol.map(|_| "blob_sync")
             },
@@ -438,8 +537,17 @@ impl Report {
             "read": self.read.as_ref().map(OperationReport::to_json),
             "write": self.write.as_ref().map(OperationReport::to_json),
             "final_file_size": self.final_file_size,
-            "final_file_size_scope": is_group.then_some("all_participants"),
+            "final_file_size_scope": is_group.then_some(if cfg.paired_baseline {
+                "both_groups_all_participants"
+            } else {
+                "all_participants"
+            }),
         });
+        if let Some(paired_baseline) = paired_baseline {
+            json.as_object_mut()
+                .expect("benchmark report must serialize as an object")
+                .insert("paired_baseline".into(), paired_baseline);
+        }
         println!("{json}");
     }
 }

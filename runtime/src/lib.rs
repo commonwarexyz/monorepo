@@ -765,6 +765,13 @@ stability_scope!(BETA {
     }
 
     /// Opt-in interface for publishing atomic blobs and applying namespace mutations atomically.
+    ///
+    /// The filesystem implementations publish write-only batches without a separate coordinator.
+    /// Each dirty participant retains the same exact group descriptor in its atomic root slot, so
+    /// opening any participant after a restart discovers and repairs the complete group before the
+    /// blob is returned. Batches containing removals retain a separate namespace coordinator
+    /// because a removed blob cannot witness its own removal. Recovery does not scan unrelated
+    /// blobs.
     pub trait BatchStorage: AtomicStorage {
         /// Start publishing atomic blobs and applying removals and resizes as one durable batch.
         ///
@@ -780,15 +787,26 @@ stability_scope!(BETA {
         /// until the committed logical state is active and any required namespace effects finish.
         /// A conflicting namespace operation waits for the batch to finish. Rejecting an invalid
         /// batch leaves every target unchanged. Other errors, or cancellation of this future, may
-        /// leave the outcome indeterminate; only `Ok` proves the batch is durably committed.
+        /// leave the outcome indeterminate. Only `Ok` proves the batch is durably committed.
         ///
         /// Publishing or resizing a blob makes its pending updates durable. A resize preserves
         /// existing bytes below `len` and zero-fills an extension. Once this method returns `Ok`,
-        /// retained participant handles may begin their next pending epoch; implementations
+        /// retained participant handles may begin their next pending epoch. Implementations
         /// serialize that access until the committed in-memory epoch is active. Implementations may
-        /// retain the durable batch decision while participant roots are folded into a later batch;
-        /// reopening or performing a conflicting non-batch operation completes that bounded repair
-        /// transparently. Operations on disjoint, already-open blobs may proceed concurrently.
+        /// retain the durable batch decision while participant roots are folded into a later batch.
+        /// Reopening or performing a conflicting non-batch operation completes that bounded repair
+        /// transparently. An unresolved write-only batch may verify a bounded amount of newly
+        /// written payload during that repair. It never scans whole blobs or historical payload.
+        /// Operations on disjoint, already-open blobs may proceed concurrently.
+        ///
+        /// # Filesystem Eligibility
+        ///
+        /// The Tokio and io_uring implementations currently limit a batch to 32 dirty mutation
+        /// participants and 64 MiB of newly appended payload across those participants. If a dirty
+        /// participant appends payload, those bytes must form one CRC32C-verifiable physical range.
+        /// The exact descriptor must fit in the unused portion of every participant's 4 KiB root
+        /// slot. A batch outside these bounds returns an `InvalidInput` error before durable
+        /// commitment. Clean publishes do not count as participants.
         fn start_apply(
             &self,
             operations: Vec<BatchOperation<Self::AtomicBlob>>,

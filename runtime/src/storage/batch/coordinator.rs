@@ -1,26 +1,104 @@
-//! Fixed-slot coordinator for crash-atomic multi-blob publication.
+//! Crash recovery publication for atomic storage batches.
 //!
-//! Every participant first makes its transaction-ineligible root and referenced payload durable.
-//! The coordinator then publishes one checksummed decision record. The common case needs one
-//! ordered durability round for all participants followed by one small coordinator write. A valid
-//! decision is sufficient to install every candidate without reading payload bytes; an absent or
-//! torn decision leaves every ordinary blob root at the preceding epoch.
+//! This module implements a coordinator-free fast path for batches containing only writes and
+//! resizes, plus a fixed-slot coordinator for batches containing namespace removals. Both paths use
+//! the same exact descriptor format and candidate validation rules.
 //!
-//! A write-only decision may remain authoritative after its in-memory state is activated. The next
-//! preparation folds each prior committed root into that participant's existing durability
-//! barrier, and installs any absent participants before a newer decision supersedes it. Recovery
-//! and non-batch namespace operations install the decision and publish an idle root. Decisions
-//! containing removals are always installed and retired before recreation can proceed.
+//! # Coordinator-free write-only groups
+//!
+//! Every dirty participant stores the complete descriptor in its own prepared V2 root slot. The
+//! descriptor names every participant by partition and blob name, then records its exact candidate
+//! root and the CRC32C-covered range of newly appended payload. The descriptor bytes, including the
+//! participant order, are identical in every participant.
+//!
+//! ```text
+//! participant A root slot                 participant B root slot
+//! +-----------------------------+         +-----------------------------+
+//! | prepared root for A         |         | prepared root for B         |
+//! | checkpoint                  |         | checkpoint                  |
+//! | descriptor { A, B, ... }    |<------->| descriptor { A, B, ... }    |
+//! +-----------------------------+         +-----------------------------+
+//!              |                                      |
+//!              +------ concurrent durability ---------+
+//! ```
+//!
+//! The canonical `CWUNOD08` descriptor has this logical layout. Variable-length partition and blob
+//! names carry unsigned 32-bit lengths, and participants are sorted by their exact path.
+//!
+//! ```text
+//! descriptor  = header | participant* | removal*
+//! header      = magic | participant_count | removal_count | decision_kind
+//! participant = partition | name | base_generation | root_slot
+//!             | prepared_root | committed_root
+//!             | payload_start | payload_length | payload_crc32c
+//! ```
+//!
+//! The batch prepares all candidates before constructing the descriptor. It then attaches the
+//! descriptor, writes each prepared root, and runs the participants' existing durability barriers
+//! concurrently. Once every barrier completes, the replicated descriptor set is the durable group
+//! decision. On the repeated same-participant hot path, write-only publication performs no
+//! coordinator write and requires no additional durability barrier. A participant-set transition
+//! may first materialize the preceding decision as described below.
+//!
+//! # Restart discovery
+//!
+//! Opening a V2 blob reads its two fixed root slots before ordinary blob recovery. An intact
+//! batch-prepared root contains the exact descriptor, so the opened participant identifies the
+//! group without an application-supplied transaction identifier or a namespace scan. Recovery
+//! checks that the local path and candidate match the descriptor, then opens each peer by its exact
+//! path and requires the same descriptor and candidate from every peer. Candidates are considered
+//! newest first, with the other root slot retained as a complete fallback.
+//!
+//! Before installation starts, recovery selects the new group only if every witness, candidate,
+//! and bounded payload CRC32C validates. Otherwise it ignores that descriptor and retains the
+//! preceding complete generation. Once any candidate has been installed as an independently
+//! recoverable root, rollback is no longer safe. Recovery then requires every witness and finishes
+//! installing the group. A missing witness after installation starts is corruption.
+//!
+//! | Durable state found after restart | Recovery result |
+//! | --- | --- |
+//! | At least one incomplete participant and no installation | Retain the old group |
+//! | Every participant is complete | Materialize the new group |
+//! | Any participant installation started | Finish materializing every participant |
+//!
+//! Materialization rewrites only the candidate root header. It leaves the descriptor in that slot
+//! until a later generation safely reuses it, which lets any materialized participant finish peers
+//! after another crash. Consecutive groups with the same exact participant set can alternate the
+//! two root slots. A participant-set change materializes the preceding group before replacing its
+//! witness.
+//!
+//! # Removal-bearing groups
+//!
+//! A removed blob cannot retain a witness for its own removal. A removal-bearing batch therefore
+//! writes one fixed-slot coordinator descriptor concurrently with participant barriers. Recovery
+//! accepts that descriptor only when all exact participant witnesses, candidates, and payload
+//! checksums validate. A pure-removal descriptor has no participants and is authoritative once its
+//! coordinator publication is durable.
+//!
+//! # Bounds and fault model
+//!
+//! Coordinator-free recovery is limited to 32 dirty participants and 64 MiB of newly appended
+//! payload across the group. Any newly appended participant payload must be representable by one
+//! physically contiguous CRC32C range. The complete descriptor must also fit beside any inline
+//! checkpoint in every participant's 4 KiB root slot. Ineligible write-only batches fail with
+//! `InvalidInput` before a durable group decision.
+//!
+//! Until a file durability barrier succeeds, a crash may preserve any subset of issued payload,
+//! checkpoint, descriptor, or root-overwrite bytes. Prepared roots are invisible to ordinary blob
+//! recovery, exact root-transition validation rejects unrelated byte combinations, and payload plus
+//! descriptor checksums determine whether the complete new group survived. The trusted local-disk
+//! model treats matching CRC32C values as intact, subject to the checksum's collision probability.
+//! CRC32C does not authenticate storage against an actor who can also rewrite checksums.
 
 use super::{Operation, is_canonical_operations};
 use crate::{RemoveTarget, storage::atomic};
 use commonware_cryptography::{Crc32, Hasher as _};
-use commonware_formatting::hex;
+use commonware_formatting::{from_hex, hex};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{self, ErrorKind},
-    os::unix::fs::{FileExt as _, OpenOptionsExt as _},
+    os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _},
     path::{Path, PathBuf},
 };
 
@@ -28,8 +106,8 @@ const CONTROL_DIRECTORY: &str = ".commonware";
 const COORDINATOR_FILE: &str = "_COMMONWARE_RUNTIME_UNO_COORDINATOR";
 const CREATION_FILE: &str = "_COMMONWARE_RUNTIME_UNO_COORDINATOR_CREATING";
 const REMOVAL_DIRECTORY_PREFIX: &str = "_COMMONWARE_RUNTIME_UNO_REMOVALS_";
-const ROOT_MAGIC: &[u8; 8] = b"CWUNOC06";
-const DESCRIPTOR_MAGIC: &[u8; 8] = b"CWUNOD06";
+const ROOT_MAGIC: &[u8; 8] = b"CWUNOC08";
+const DESCRIPTOR_MAGIC: &[u8; 8] = b"CWUNOD08";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_UNO_COORDINATOR_ROOT";
 const ROOT_BODY_LEN: usize = 36;
 const ROOT_LEN: usize = 40;
@@ -38,16 +116,13 @@ const ROOT_OFFSETS: [u64; 2] = [0, SLOT_LEN];
 const FILE_LEN: u64 = SLOT_LEN * 2;
 const MAX_DESCRIPTOR_LEN: usize = SLOT_LEN as usize - ROOT_LEN;
 const MAX_RECORDS: usize = 1_000_000;
-const DESCRIPTOR_HEADER_LEN: usize = 16;
+const DESCRIPTOR_HEADER_LEN: usize = 20;
 const TAG_PARTITION_REMOVE: u8 = 0;
 const TAG_BLOB_REMOVE: u8 = 1;
-
-#[cfg(test)]
-std::thread_local! {
-    static TRACKED_READ_BYTES: std::cell::Cell<Option<u64>> = const {
-        std::cell::Cell::new(None)
-    };
-}
+const DECISION_SPECULATIVE: u32 = 1;
+const PAYLOAD_CHECKSUM_LEN: usize = 8 + 8 + 4;
+const MAX_SPECULATIVE_PARTICIPANTS: usize = 32;
+const MAX_SPECULATIVE_BYTES: u64 = atomic::MAX_VALIDATED_PAYLOAD_LEN;
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
@@ -85,33 +160,19 @@ fn read_exact_at(file: &File, mut offset: u64, mut output: &mut [u8]) -> io::Res
             ));
         }
         offset = checked_end(offset, read as u64)?;
-        #[cfg(test)]
-        TRACKED_READ_BYTES.with(|tracked| {
-            if let Some(bytes) = tracked.get() {
-                tracked.set(Some(bytes + read as u64));
-            }
-        });
         output = &mut output[read..];
     }
     Ok(())
 }
 
-#[cfg(test)]
-fn track_read_bytes<T>(operation: impl FnOnce() -> T) -> (T, u64) {
-    TRACKED_READ_BYTES.with(|tracked| {
-        assert!(tracked.replace(Some(0)).is_none());
-    });
-    let result = operation();
-    let bytes = TRACKED_READ_BYTES.with(|tracked| tracked.replace(None).unwrap());
-    (result, bytes)
-}
-
-/// Per-blob durable candidate referenced by a coordinator decision.
+/// Per-blob durable candidate named by an exact batch descriptor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Participant {
     pub(crate) partition: String,
     pub(crate) name: Vec<u8>,
     pub(crate) candidate: atomic::Candidate,
+    pub(crate) payload_start: u64,
+    pub(crate) payload_checksum: Option<atomic::PayloadChecksum>,
 }
 
 impl Participant {
@@ -248,6 +309,7 @@ fn encode_descriptor(
     encoded.extend_from_slice(DESCRIPTOR_MAGIC);
     encoded.extend_from_slice(&(participants.len() as u32).to_be_bytes());
     encoded.extend_from_slice(&(removals.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&DECISION_SPECULATIVE.to_be_bytes());
     for participant in participants {
         push_len(
             &mut encoded,
@@ -265,6 +327,14 @@ fn encode_descriptor(
         encoded.extend_from_slice(&participant.candidate.root_offset.to_be_bytes());
         encoded.extend_from_slice(&participant.candidate.prepared_root);
         encoded.extend_from_slice(&participant.candidate.committed_root);
+        if let Some(checksum) = participant.payload_checksum {
+            encoded.extend_from_slice(&checksum.offset.to_be_bytes());
+            encoded.extend_from_slice(&checksum.len.to_be_bytes());
+            encoded.extend_from_slice(&checksum.checksum.to_be_bytes());
+        } else {
+            encoded.extend_from_slice(&participant.payload_start.to_be_bytes());
+            encoded.extend_from_slice(&[0u8; 12]);
+        }
     }
     for target in removals {
         match target {
@@ -347,10 +417,13 @@ fn decode_descriptor(encoded: &[u8]) -> io::Result<Decision> {
         .map_err(|_| invalid_data("coordinator participant count overflow"))?;
     let removal_count = usize::try_from(cursor.read_u32()?)
         .map_err(|_| invalid_data("coordinator removal count overflow"))?;
+    if cursor.read_u32()? != DECISION_SPECULATIVE {
+        return Err(invalid_data("coordinator decision kind is invalid"));
+    }
     if participant_count > MAX_RECORDS || removal_count > MAX_RECORDS {
         return Err(invalid_data("coordinator has too many records"));
     }
-    const MIN_PARTICIPANT_LEN: usize = 4 + 4 + 8 + 8 + atomic::ROOT_LEN * 2;
+    const MIN_PARTICIPANT_LEN: usize = 4 + 4 + 8 + 8 + atomic::ROOT_LEN * 2 + PAYLOAD_CHECKSUM_LEN;
     const MIN_REMOVAL_LEN: usize = 1 + 4;
     let minimum = participant_count
         .checked_mul(MIN_PARTICIPANT_LEN)
@@ -370,6 +443,30 @@ fn decode_descriptor(encoded: &[u8]) -> io::Result<Decision> {
         let root_offset = cursor.read_u64()?;
         let prepared_root = cursor.read(atomic::ROOT_LEN)?.try_into().unwrap();
         let committed_root = cursor.read(atomic::ROOT_LEN)?.try_into().unwrap();
+        let payload_offset = cursor.read_u64()?;
+        let payload_len = cursor.read_u64()?;
+        let payload_checksum = cursor.read_u32()?;
+        let payload_checksum = match (payload_len, payload_checksum) {
+            (0, 0) => None,
+            (len, checksum) if len != 0 => Some(atomic::PayloadChecksum {
+                offset: payload_offset,
+                len,
+                checksum,
+            }),
+            _ => {
+                return Err(invalid_data(
+                    "coordinator payload checksum has an invalid empty range",
+                ));
+            }
+        };
+        if payload_checksum
+            .as_ref()
+            .is_some_and(|checksum| checksum.offset != payload_offset)
+        {
+            return Err(invalid_data(
+                "coordinator payload checksum start is inconsistent",
+            ));
+        }
         participants.push(Participant {
             partition,
             name,
@@ -379,6 +476,8 @@ fn decode_descriptor(encoded: &[u8]) -> io::Result<Decision> {
                 prepared_root,
                 committed_root,
             },
+            payload_start: payload_offset,
+            payload_checksum,
         });
     }
 
@@ -408,6 +507,26 @@ fn decode_descriptor(encoded: &[u8]) -> io::Result<Decision> {
 }
 
 fn validate_decision(participants: &[Participant], removals: &[RemoveTarget]) -> io::Result<()> {
+    if participants.len() > MAX_SPECULATIVE_PARTICIPANTS {
+        return Err(invalid_data(
+            "speculative batch decision has too many participants",
+        ));
+    }
+    let verified_bytes = participants.iter().try_fold(0u64, |total, participant| {
+        total
+            .checked_add(
+                participant
+                    .payload_checksum
+                    .as_ref()
+                    .map_or(0, |checksum| checksum.len),
+            )
+            .ok_or_else(|| invalid_data("speculative payload length overflow"))
+    })?;
+    if verified_bytes > MAX_SPECULATIVE_BYTES {
+        return Err(invalid_data(
+            "speculative batch payload exceeds the recovery bound",
+        ));
+    }
     let mut previous = None;
     for participant in participants {
         super::super::validate_partition_name(&participant.partition)
@@ -442,6 +561,33 @@ fn validate_decision(participants: &[Participant], removals: &[RemoveTarget]) ->
             return Err(invalid_data(
                 "coordinator removes one of its publication participants",
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_operation_participants(
+    participants: &[Participant],
+    operations: &[Operation],
+) -> io::Result<()> {
+    let mut operations = operations.iter().filter_map(|operation| match operation {
+        Operation::Publish { partition, name }
+        | Operation::Resize {
+            partition, name, ..
+        } => Some((partition.as_str(), name.as_slice())),
+        Operation::Remove(_) => None,
+    });
+    for participant in participants {
+        loop {
+            match operations.next() {
+                Some(operation) if operation < participant.key() => continue,
+                Some(operation) if operation == participant.key() => break,
+                _ => {
+                    return Err(invalid_input(
+                        "storage batch participant has no matching write operation",
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -527,7 +673,12 @@ fn open_or_create(root: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn read_state(file: &File) -> io::Result<State> {
+struct ReadStates {
+    states: Vec<State>,
+    max_generation: u64,
+}
+
+fn read_states(file: &File) -> io::Result<ReadStates> {
     let mut roots = Vec::new();
     let mut has_zero_slot = false;
     for offset in ROOT_OFFSETS {
@@ -542,15 +693,18 @@ fn read_state(file: &File) -> io::Result<State> {
         }
     }
     roots.sort_by_key(|(root, _, _)| std::cmp::Reverse(root.generation));
+    let max_generation = roots.first().map_or(0, |(root, _, _)| root.generation);
 
     let mut invalid_committed = None;
+    let mut states = Vec::with_capacity(roots.len() + usize::from(has_zero_slot));
     for (root, offset, encoded) in roots {
         if root.descriptor_len == 0 {
-            return Ok(State::Idle(Some(Publication {
+            states.push(State::Idle(Some(Publication {
                 root,
                 offset,
                 record: encoded.to_vec(),
             })));
+            continue;
         }
         let mut descriptor = vec![0u8; root.descriptor_len];
         if let Err(error) = read_exact_at(file, offset + ROOT_LEN as u64, &mut descriptor) {
@@ -572,7 +726,7 @@ fn read_state(file: &File) -> io::Result<State> {
         let mut record = Vec::with_capacity(ROOT_LEN + descriptor.len());
         record.extend_from_slice(&encoded);
         record.extend_from_slice(&descriptor);
-        return Ok(State::Committed(
+        states.push(State::Committed(
             Publication {
                 root,
                 offset,
@@ -582,9 +736,23 @@ fn read_state(file: &File) -> io::Result<State> {
         ));
     }
     if has_zero_slot {
-        return Ok(State::Idle(None));
+        states.push(State::Idle(None));
+    }
+    if !states.is_empty() {
+        return Ok(ReadStates {
+            states,
+            max_generation,
+        });
     }
     Err(invalid_committed.unwrap_or_else(|| invalid_data("coordinator has no recoverable root")))
+}
+
+fn read_state(file: &File) -> io::Result<State> {
+    read_states(file)?
+        .states
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid_data("coordinator has no recoverable root"))
 }
 
 fn validate_v2_header(file: &File) -> io::Result<()> {
@@ -603,7 +771,7 @@ fn validate_v2_header(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn install_participant(root: &Path, participant: &Participant) -> io::Result<()> {
+fn open_participant(root: &Path, participant: &Participant) -> io::Result<File> {
     let path = root
         .join(&participant.partition)
         .join(hex(&participant.name));
@@ -619,51 +787,124 @@ fn install_participant(root: &Path, participant: &Participant) -> io::Result<()>
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     validate_v2_header(&file)?;
-    atomic::install_candidate(
+    Ok(file)
+}
+
+fn inspect_participant(root: &Path, participant: &Participant) -> io::Result<Option<File>> {
+    let path = root
+        .join(&participant.partition)
+        .join(hex(&participant.name));
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(invalid_data(
+                "coordinator participant is not a regular file",
+            ));
+        }
+        Err(error) if path_is_missing(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if metadata.len() < 6 {
+        return Ok(None);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let mut prefix = [0u8; 6];
+    read_exact_at(&file, 0, &mut prefix)?;
+    if &prefix[..4] != b"CWIL" || u16::from_be_bytes(prefix[4..6].try_into().unwrap()) != 2 {
+        return Ok(None);
+    }
+    validate_v2_header(&file)?;
+    Ok(Some(file))
+}
+
+fn materialize_participant(root: &Path, participant: &Participant) -> io::Result<()> {
+    let file = open_participant(root, participant)?;
+    atomic::materialize_candidate(
         &file,
         super::super::Layout::V2.data_offset(),
         &participant.candidate,
     )
 }
 
+fn validate_speculative_participant(
+    root: &Path,
+    participant: &Participant,
+    embedded_descriptor: Option<&[u8]>,
+) -> io::Result<bool> {
+    let file = match open_participant(root, participant) {
+        Ok(file) => file,
+        Err(error)
+            if path_is_missing(&error)
+                || matches!(
+                    error.kind(),
+                    ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+                ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(descriptor) = embedded_descriptor
+        && !atomic::candidate_has_embedded_batch_witness(&file, &participant.candidate, descriptor)?
+    {
+        return Ok(false);
+    }
+    let metadata = match atomic::validate_candidate(
+        &file,
+        super::super::Layout::V2.data_offset(),
+        &participant.candidate,
+    ) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    match atomic::validate_payload_checksum(
+        &file,
+        super::super::Layout::V2.data_offset(),
+        &metadata,
+        participant.payload_start,
+        participant.payload_checksum.as_ref(),
+    ) {
+        Ok(()) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_speculative_decision(
+    root: &Path,
+    decision: &Decision,
+    descriptor: &[u8],
+) -> io::Result<bool> {
+    for participant in &decision.participants {
+        if !validate_speculative_participant(root, participant, Some(descriptor))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 fn install_participants(root: &Path, participants: &[Participant]) -> io::Result<()> {
     for participant in participants {
-        install_participant(root, participant)?;
-    }
-    Ok(())
-}
-
-/// Make every root from the currently authoritative decision independently durable before the
-/// coordinator slot is reused. Roots folded into a later participant preparation already crossed
-/// that file's durability barrier; participants absent from the later batch are installed here.
-fn materialize_carried_decision(
-    root: &Path,
-    decision: &Decision,
-    materialized: &[Participant],
-) -> io::Result<()> {
-    let mut materialized = materialized.iter().peekable();
-    for participant in &decision.participants {
-        // A retained participant can keep its folded marker after a disjoint batch independently
-        // installs that older root. Such markers no longer belong to the current decision and are
-        // harmless; an equal-key marker must still identify the exact current candidate.
-        while materialized
-            .peek()
-            .is_some_and(|candidate| candidate.key() < participant.key())
-        {
-            materialized.next();
-        }
-        match materialized.peek() {
-            Some(candidate) if candidate.key() == participant.key() => {
-                if candidate.candidate != participant.candidate {
-                    return Err(invalid_data(
-                        "materialized candidate does not match the carried decision",
-                    ));
-                }
-                materialized.next();
-            }
-            _ => install_participant(root, participant)?,
-        }
+        materialize_participant(root, participant)?;
     }
     Ok(())
 }
@@ -675,7 +916,7 @@ fn install_participants(root: &Path, participants: &[Participant]) -> io::Result
         std::thread::scope(|scope| {
             let handles = chunk
                 .iter()
-                .map(|participant| scope.spawn(move || install_participant(root, participant)))
+                .map(|participant| scope.spawn(move || materialize_participant(root, participant)))
                 .collect::<Vec<_>>();
             for handle in handles {
                 match handle.join() {
@@ -802,6 +1043,7 @@ fn finish_namespace(
     file: &File,
     root: &Path,
     root_record: Root,
+    retire_after_generation: u64,
     removals: &[RemoveTarget],
 ) -> io::Result<Option<PathBuf>> {
     for (index, target) in removals.iter().enumerate() {
@@ -810,8 +1052,7 @@ fn finish_namespace(
     if !removals.is_empty() {
         sync_removals(root, root_record.generation, removals)?;
     }
-    let idle_generation = root_record
-        .generation
+    let idle_generation = retire_after_generation
         .checked_add(1)
         .ok_or_else(|| invalid_data("coordinator generation overflow"))?;
     let idle_root = encode_root(idle_generation, &[])?;
@@ -835,11 +1076,18 @@ fn finish_decision(
     file: &File,
     root: &Path,
     root_record: Root,
+    retire_after_generation: u64,
     decision: &Decision,
 ) -> io::Result<()> {
     install_participants(root, &decision.participants)?;
-    finish_namespace(file, root, root_record, &decision.removals)?;
-    Ok(())
+    let removal_path = finish_namespace(
+        file,
+        root,
+        root_record,
+        retire_after_generation,
+        &decision.removals,
+    )?;
+    reclaim_removals(root, removal_path)
 }
 
 /// Validate that a canonical operation set can fit in one bounded coordinator slot.
@@ -865,7 +1113,7 @@ pub(crate) fn preflight(operations: &[Operation]) -> io::Result<()> {
             } => (
                 partition,
                 Some(name.as_slice()),
-                4 + 4 + 8 + 8 + atomic::ROOT_LEN * 2,
+                4 + 4 + 8 + 8 + atomic::ROOT_LEN * 2 + PAYLOAD_CHECKSUM_LEN,
             ),
         };
         u32::try_from(partition.len())
@@ -940,20 +1188,437 @@ pub(crate) fn resolve_partition_name(root: &Path, requested: &str) -> io::Result
         .expect("the requested partition was resolved"))
 }
 
-/// Publish and materialize a prepared multi-blob decision.
-pub(crate) fn apply_batch_with<C, I>(
+/// Return whether a write-only group fits the bounded speculative recovery path.
+pub(crate) fn supports_speculation(
+    operations: &[Operation],
+    participant_count: usize,
+    verified_bytes: u64,
+) -> bool {
+    participant_count != 0
+        && participant_count <= MAX_SPECULATIVE_PARTICIPANTS
+        && verified_bytes <= MAX_SPECULATIVE_BYTES
+        && operations
+            .iter()
+            .all(|operation| !matches!(operation, Operation::Remove(_)))
+}
+
+/// Encode an exact speculative decision for duplication inside every participant root slot.
+pub(crate) fn prepare_embedded(
+    participants: &[Participant],
+    operations: &[Operation],
+) -> io::Result<Vec<u8>> {
+    preflight(operations)?;
+    if operations
+        .iter()
+        .any(|operation| matches!(operation, Operation::Remove(_)))
+    {
+        return Err(invalid_input(
+            "removal-bearing batches require namespace publication",
+        ));
+    }
+    validate_operation_participants(participants, operations)?;
+    validate_decision(participants, &[]).map_err(|error| {
+        if error.kind() == ErrorKind::InvalidData {
+            invalid_input(error.to_string())
+        } else {
+            error
+        }
+    })?;
+    let verified_bytes = participants.iter().try_fold(0u64, |total, participant| {
+        total.checked_add(
+            participant
+                .payload_checksum
+                .as_ref()
+                .map_or(0, |checksum| checksum.len),
+        )
+    });
+    if !supports_speculation(
+        operations,
+        participants.len(),
+        verified_bytes.ok_or_else(|| invalid_input("speculative payload length overflow"))?,
+    ) {
+        return Err(invalid_input(
+            "storage batch is not eligible for embedded publication",
+        ));
+    }
+    encode_descriptor(participants, operations)
+}
+
+/// Return whether a new exact group can replace the preceding embedded decision in two slots.
+pub(crate) fn can_supersede_embedded(
+    encoded: &[u8],
+    participants: &[Participant],
+) -> io::Result<bool> {
+    let previous = decode_descriptor(encoded)?;
+    if !previous.removals.is_empty() {
+        return Err(invalid_data("embedded decision is not speculative"));
+    }
+    Ok(previous.participants.len() == participants.len()
+        && previous
+            .participants
+            .iter()
+            .zip(participants)
+            .all(|(previous, current)| {
+                previous.key() == current.key()
+                    && previous.candidate.root_offset != current.candidate.root_offset
+                    && previous.candidate.base_generation.checked_add(1)
+                        == Some(current.candidate.base_generation)
+            }))
+}
+
+/// Install a successfully completed embedded decision before its participant set changes.
+pub(crate) fn materialize_embedded(root: &Path, encoded: &[u8]) -> io::Result<()> {
+    let decision = decode_descriptor(encoded)?;
+    if !decision.removals.is_empty() {
+        return Err(invalid_data("embedded decision is not speculative"));
+    }
+    install_participants(root, &decision.participants)
+}
+
+/// Resolve participant-embedded decisions before opening one V2 blob's logical state.
+///
+/// A decision becomes authoritative only when every exact participant retains the same descriptor,
+/// candidate metadata, and bounded payload CRC32C. Invalid newest candidates are skipped so the
+/// other root slot remains a complete fallback. The local descriptor names every peer directly, so
+/// this does not require application transaction state or a namespace scan.
+pub(crate) fn recover_embedded(
+    root: &Path,
+    partition: &str,
+    name: &[u8],
+    file: &File,
+    data_offset: u64,
+) -> io::Result<()> {
+    for embedded in atomic::embedded_batch_candidates(file, data_offset)? {
+        let decision = match decode_descriptor(&embedded.descriptor) {
+            Ok(decision) if decision.removals.is_empty() => decision,
+            Ok(_) => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(local) = decision
+            .participants
+            .iter()
+            .find(|participant| participant.partition == partition && participant.name == name)
+        else {
+            continue;
+        };
+        if local.candidate != embedded.candidate {
+            continue;
+        }
+        if !atomic::candidate_has_embedded_batch_witness(
+            file,
+            &embedded.candidate,
+            &embedded.descriptor,
+        )? {
+            continue;
+        }
+        let mut install_started = atomic::candidate_is_committed(file, &embedded.candidate)?;
+        let mut witnesses_complete = true;
+        for participant in &decision.participants {
+            let participant_file = match open_participant(root, participant) {
+                Ok(file) => file,
+                Err(error)
+                    if path_is_missing(&error)
+                        || matches!(
+                            error.kind(),
+                            ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+                        ) =>
+                {
+                    witnesses_complete = false;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if !atomic::candidate_has_embedded_batch_witness(
+                &participant_file,
+                &participant.candidate,
+                &embedded.descriptor,
+            )? {
+                witnesses_complete = false;
+                continue;
+            }
+            install_started |=
+                atomic::candidate_is_committed(&participant_file, &participant.candidate)?
+                    || atomic::candidate_is_materialized(
+                        &participant_file,
+                        &participant.candidate,
+                    )?;
+        }
+        if install_started {
+            if !witnesses_complete {
+                return Err(invalid_data(
+                    "partially materialized embedded group lost a participant witness",
+                ));
+            }
+            install_participants(root, &decision.participants)?;
+            return Ok(());
+        }
+
+        let mut complete = true;
+        for participant in &decision.participants {
+            if !validate_speculative_participant(root, participant, Some(&embedded.descriptor))? {
+                complete = false;
+                break;
+            }
+        }
+        if complete {
+            install_participants(root, &decision.participants)?;
+            return Ok(());
+        }
+    }
+    recover_materialized_witnesses(root, partition, name, file)
+}
+
+fn recover_named_embedded(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
+    let path = root.join(partition).join(hex(name));
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Ok(()),
+        Err(error) if path_is_missing(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.len() < 6 {
+        return Ok(());
+    }
+    let inspected = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)?;
+    let mut prefix = [0u8; 6];
+    read_exact_at(&inspected, 0, &mut prefix)?;
+    if &prefix[..4] != b"CWIL" || u16::from_be_bytes(prefix[4..6].try_into().unwrap()) != 2 {
+        return Ok(());
+    }
+    let inspected_metadata = inspected.metadata()?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let writable_metadata = file.metadata()?;
+    if inspected_metadata.dev() != writable_metadata.dev()
+        || inspected_metadata.ino() != writable_metadata.ino()
+    {
+        return Err(invalid_data("removal target changed during recovery"));
+    }
+    validate_v2_header(&file)?;
+    recover_embedded(
+        root,
+        partition,
+        name,
+        &file,
+        super::super::Layout::V2.data_offset(),
+    )
+}
+
+/// Use a materialized participant's retained descriptor to make any dependent peers independent.
+///
+/// This transfer runs before the local participant can fence or remove the retained witness.
+fn recover_materialized_witnesses(
+    root: &Path,
+    partition: &str,
+    name: &[u8],
+    file: &File,
+) -> io::Result<()> {
+    let data_offset = super::super::Layout::V2.data_offset();
+    for embedded in atomic::materialized_batch_candidates(file, data_offset)? {
+        let decision = match decode_descriptor(&embedded.descriptor) {
+            Ok(decision) if decision.removals.is_empty() => decision,
+            Ok(_) => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(local) = decision
+            .participants
+            .iter()
+            .find(|participant| participant.partition == partition && participant.name == name)
+        else {
+            continue;
+        };
+        if local.candidate != embedded.candidate
+            || !atomic::candidate_has_embedded_batch_witness(
+                file,
+                &embedded.candidate,
+                &embedded.descriptor,
+            )?
+        {
+            continue;
+        }
+
+        let mut dependent = Vec::new();
+        for participant in &decision.participants {
+            let participant_file = match inspect_participant(root, participant)? {
+                Some(file) => file,
+                None => continue,
+            };
+            if !atomic::candidate_is_materialized(&participant_file, &participant.candidate)?
+                && atomic::candidate_has_embedded_batch_witness(
+                    &participant_file,
+                    &participant.candidate,
+                    &embedded.descriptor,
+                )?
+            {
+                dependent.push(participant.clone());
+            }
+        }
+        install_participants(root, &dependent)?;
+    }
+    Ok(())
+}
+
+fn recover_partition_embedded(root: &Path, partition: &str) -> io::Result<()> {
+    let path = root.join(partition);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Ok(()),
+        Err(error) if path_is_missing(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let entries = match fs::read_dir(&path) {
+        Ok(entries) => entries,
+        Err(error) if path_is_missing(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        if atomic::is_creation_file_name(&file_name) {
+            continue;
+        }
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(name) = from_hex(file_name) else {
+            continue;
+        };
+        if hex(&name) != file_name {
+            continue;
+        }
+        recover_named_embedded(root, partition, &name)?;
+    }
+    Ok(())
+}
+
+/// Materialize embedded decisions before removing any participant that may witness them.
+pub(crate) fn recover_removal_witnesses(root: &Path, operations: &[Operation]) -> io::Result<()> {
+    for operation in operations {
+        let Operation::Remove(target) = operation else {
+            continue;
+        };
+        match target {
+            RemoveTarget::Blob { partition, name } => {
+                recover_named_embedded(root, partition, name)?;
+            }
+            RemoveTarget::Partition(partition) => {
+                recover_partition_embedded(root, partition)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A prepared removal-bearing namespace publication.
+pub(crate) struct RemovalPublication(RemovalPublicationInner);
+
+enum RemovalPublicationInner {
+    Durable {
+        root: PathBuf,
+        file: File,
+        publication: Publication,
+        decision: Decision,
+        operations: Vec<Operation>,
+    },
+    /// The entire storage root is already absent, so removals need no crash witness.
+    Satisfied { operations: Vec<Operation> },
+}
+
+impl RemovalPublication {
+    /// Exact descriptor that mixed-batch participants must carry as their witness.
+    pub(crate) fn descriptor(&self) -> &[u8] {
+        match self {
+            Self(RemovalPublicationInner::Durable { publication, .. }) => {
+                &publication.record[ROOT_LEN..]
+            }
+            Self(RemovalPublicationInner::Satisfied { .. }) => &[],
+        }
+    }
+
+    /// Durably publish this descriptor after participant staging begins.
+    pub(crate) fn persist(&self) -> io::Result<()> {
+        match &self.0 {
+            RemovalPublicationInner::Durable {
+                file, publication, ..
+            } => atomic::write_durable_at(file, publication.offset, &publication.record),
+            RemovalPublicationInner::Satisfied { .. } => Ok(()),
+        }
+    }
+
+    /// Notify and idempotently materialize a durably persisted removal decision.
+    pub(crate) fn finish<C>(self, on_commit: C) -> io::Result<()>
+    where
+        C: FnOnce(&[Operation]),
+    {
+        let RemovalPublicationInner::Durable {
+            root,
+            file,
+            publication,
+            decision: prepared_decision,
+            operations,
+        } = self.0
+        else {
+            let RemovalPublicationInner::Satisfied { operations } = self.0 else {
+                unreachable!()
+            };
+            on_commit(&operations);
+            return Ok(());
+        };
+        let state = read_state(&file)?;
+        let State::Committed(current, decision) = state else {
+            return Err(invalid_data("removal publication is not durable"));
+        };
+        if current.root.generation != publication.root.generation
+            || current.record != publication.record
+            || decision != prepared_decision
+        {
+            return Err(invalid_data(
+                "durable removal publication does not match its preparation",
+            ));
+        }
+
+        on_commit(&operations);
+        finish_decision(
+            &file,
+            &root,
+            current.root,
+            current.root.generation,
+            &decision,
+        )
+    }
+}
+
+/// Prepare a speculative removal publication for a concurrent durability stage.
+pub(crate) fn prepare_removal_publication(
     root: &Path,
     participants: &[Participant],
-    materialized_previous: &[Participant],
     operations: &[Operation],
-    carry_decision: bool,
-    on_commit: C,
-    install_participants: I,
-) -> io::Result<bool>
-where
-    C: FnOnce(&[Operation]),
-    I: FnOnce() -> io::Result<()>,
-{
+) -> io::Result<RemovalPublication> {
     preflight(operations)?;
     let removals = operations
         .iter()
@@ -962,44 +1627,42 @@ where
             Operation::Publish { .. } | Operation::Resize { .. } => None,
         })
         .collect::<Vec<_>>();
-    validate_decision(participants, &removals)?;
-    if participants.is_empty() && removals.is_empty() {
-        return Ok(carry_decision);
+    if removals.is_empty() {
+        return Err(invalid_input(
+            "namespace publication requires at least one removal",
+        ));
     }
+    validate_operation_participants(participants, operations)?;
+    validate_decision(participants, &removals).map_err(|error| {
+        if error.kind() == ErrorKind::InvalidData {
+            invalid_input(error.to_string())
+        } else {
+            error
+        }
+    })?;
 
-    let root_metadata = match fs::metadata(root) {
+    let metadata = match fs::metadata(root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound && participants.is_empty() => {
-            return Ok(false);
+            return Ok(RemovalPublication(RemovalPublicationInner::Satisfied {
+                operations: operations.to_vec(),
+            }));
         }
         Err(error) => return Err(error),
     };
-    if !root_metadata.is_dir() {
-        if participants.is_empty() {
-            return Ok(false);
-        }
+    if !metadata.is_dir() {
         return Err(invalid_data("storage batch root is not a directory"));
     }
-
     let file = open_or_create(root)?;
-    // Backends recover the coordinator before entering this helper under the namespace lock. An
-    // idle root here was therefore stabilized during recovery or durably completed by the prior
-    // batch, so the hot path does not need an extra publication barrier.
     let state = read_state(&file)?;
     let current_generation = state.generation();
     let generation = match state {
         State::Idle(_) => current_generation
             .checked_add(1)
             .ok_or_else(|| invalid_data("coordinator generation overflow"))?,
-        State::Committed(_, decision) if carry_decision && decision.removals.is_empty() => {
-            materialize_carried_decision(root, &decision, materialized_previous)?;
-            current_generation
-                .checked_add(1)
-                .ok_or_else(|| invalid_data("coordinator generation overflow"))?
-        }
         State::Committed(_, _) => {
             return Err(invalid_data(
-                "a committed coordinator decision must be recovered first",
+                "a committed removal decision must be recovered first",
             ));
         }
     };
@@ -1009,23 +1672,28 @@ where
     {
         prepare_removal_directory(root, generation)?;
     }
-    let descriptor = encode_descriptor(participants, operations)?;
-    let root_record = encode_root(generation, &descriptor)?;
-    let mut record = Vec::with_capacity(ROOT_LEN + descriptor.len());
-    record.extend_from_slice(&root_record);
-    record.extend_from_slice(&descriptor);
-    let offset = ROOT_OFFSETS[(generation as usize) & 1];
-    atomic::write_durable_at(&file, offset, &record)?;
 
-    on_commit(operations);
-    install_participants()?;
-    let root_record = decode_root(&root_record).expect("newly encoded coordinator root is valid");
-    if removals.is_empty() {
-        return Ok(true);
-    }
-    let removal_path = finish_namespace(&file, root, root_record, &removals)?;
-    reclaim_removals(root, removal_path)?;
-    Ok(false)
+    let descriptor = encode_descriptor(participants, operations)?;
+    let encoded_root = encode_root(generation, &descriptor)?;
+    let root_record = decode_root(&encoded_root).expect("newly encoded coordinator root is valid");
+    let mut record = Vec::with_capacity(ROOT_LEN + descriptor.len());
+    record.extend_from_slice(&encoded_root);
+    record.extend_from_slice(&descriptor);
+    let publication = Publication {
+        root: root_record,
+        offset: ROOT_OFFSETS[(generation as usize) & 1],
+        record,
+    };
+    Ok(RemovalPublication(RemovalPublicationInner::Durable {
+        root: root.to_path_buf(),
+        file,
+        publication,
+        decision: Decision {
+            participants: participants.to_vec(),
+            removals,
+        },
+        operations: operations.to_vec(),
+    }))
 }
 
 fn recover_with<C>(root: &Path, on_commit: C) -> io::Result<()>
@@ -1043,14 +1711,55 @@ where
     let Some(file) = open_existing(root)? else {
         return Ok(());
     };
-    let state = read_state(&file)?;
-    state.stabilize(&file)?;
-    let State::Committed(publication, decision) = state else {
-        return Ok(());
-    };
-    let operations = decision.operations();
-    on_commit(&operations);
-    finish_decision(&file, root, publication.root, &decision)
+    let ReadStates {
+        states,
+        max_generation,
+    } = read_states(&file)?;
+    let mut rejected_speculation = false;
+    let mut on_commit = Some(on_commit);
+    for state in states {
+        match state {
+            State::Idle(publication) => {
+                if rejected_speculation {
+                    let idle_generation = max_generation
+                        .checked_add(2)
+                        .ok_or_else(|| invalid_data("coordinator generation overflow"))?;
+                    let idle_root = encode_root(idle_generation, &[])?;
+                    // Fence the rejected record in its own parity slot. The older idle slot must
+                    // remain intact if this repair is itself torn by another crash.
+                    return atomic::write_durable_at(
+                        &file,
+                        ROOT_OFFSETS[(idle_generation as usize) & 1],
+                        &idle_root,
+                    );
+                }
+                return State::Idle(publication).stabilize(&file);
+            }
+            State::Committed(publication, decision) => {
+                let descriptor = publication
+                    .record
+                    .get(ROOT_LEN..)
+                    .expect("committed records contain their descriptor");
+                if decision.removals.is_empty()
+                    || !validate_speculative_decision(root, &decision, descriptor)?
+                {
+                    rejected_speculation = true;
+                    continue;
+                }
+                atomic::write_durable_at(&file, publication.offset, &publication.record)?;
+                let operations = decision.operations();
+                on_commit
+                    .take()
+                    .expect("coordinator recovery commits at most one decision")(
+                    &operations
+                );
+                return finish_decision(&file, root, publication.root, max_generation, &decision);
+            }
+        }
+    }
+    Err(invalid_data(
+        "coordinator has no recoverable decision after speculative validation",
+    ))
 }
 
 /// Complete a durable decision before exposing the storage namespace.
@@ -1072,16 +1781,9 @@ pub(crate) fn interrupt_committed_for_test(
     operations: &[Operation],
     _after_operations: usize,
 ) -> io::Result<()> {
-    apply_batch_with(
-        root,
-        &[],
-        &[],
-        operations,
-        false,
-        |_| {},
-        || Err(io::Error::other("injected coordinator interruption")),
-    )
-    .map(|_| ())
+    let publication = prepare_removal_publication(root, &[], operations)?;
+    publication.persist()?;
+    Err(io::Error::other("injected coordinator interruption"))
 }
 
 #[cfg(all(test, not(feature = "iouring-storage")))]
@@ -1093,12 +1795,12 @@ pub(crate) fn fail_final_control_sync_for_test<C>(
 where
     C: FnOnce(&[Operation]),
 {
-    apply_batch_with(root, &[], &[], operations, false, on_commit, || {
-        Err(io::Error::other(
-            "injected coordinator materialization failure",
-        ))
-    })
-    .map(|_| ())
+    let publication = prepare_removal_publication(root, &[], operations)?;
+    publication.persist()?;
+    on_commit(operations);
+    Err(io::Error::other(
+        "injected coordinator materialization failure",
+    ))
 }
 
 #[cfg(test)]
@@ -1130,6 +1832,157 @@ mod tests {
         }
     }
 
+    fn write_prepared(file: &File, prepared: &atomic::PreparedCommit) {
+        if !prepared.manifest.is_empty() {
+            file.write_all_at(&prepared.manifest, prepared.manifest_offset)
+                .unwrap();
+        }
+        file.write_all_at(&prepared.prepared_root, prepared.root_offset)
+            .unwrap();
+    }
+
+    fn write_payload(file: &File, state: &mut atomic::State, offset: u64, data: &[u8]) {
+        let prepared = state
+            .prepare_write(offset, IoBufs::from(data.to_vec()), None)
+            .unwrap()
+            .unwrap();
+        file.write_all_at(
+            prepared.data.as_single().unwrap().as_ref(),
+            prepared.file_offset,
+        )
+        .unwrap();
+        state.finish_mutation(prepared.mutation);
+    }
+
+    fn commit_state(file: &File, state: &mut atomic::State) {
+        let prepared = state.prepare_commit().unwrap().unwrap();
+        write_prepared(file, &prepared);
+        file.sync_all().unwrap();
+        atomic::write_durable_at(file, prepared.root_offset, &prepared.committed_root).unwrap();
+        state.finish_commit(prepared);
+    }
+
+    fn read_blob_state(file: &File, state: &atomic::State) -> Vec<u8> {
+        let mut output = vec![0u8; state.logical_len() as usize];
+        for span in state.read_plan(0, output.len()).unwrap() {
+            match span.source {
+                atomic::ReadSource::Zero => {
+                    output[span.destination..span.destination + span.len].fill(0);
+                }
+                atomic::ReadSource::File(offset) => file
+                    .read_exact_at(
+                        &mut output[span.destination..span.destination + span.len],
+                        offset,
+                    )
+                    .unwrap(),
+            }
+        }
+        output
+    }
+
+    fn prepared_group_parts(
+        label: &str,
+    ) -> (
+        PathBuf,
+        Vec<File>,
+        Vec<Participant>,
+        Vec<Operation>,
+        Vec<atomic::PreparedCommit>,
+    ) {
+        let root = test_root(label);
+        let partition_path = root.join("group");
+        fs::create_dir_all(&partition_path).unwrap();
+        let mut files = Vec::new();
+        let mut participants = Vec::new();
+        let mut operations = Vec::new();
+        let mut prepared_commits = Vec::new();
+
+        for (name, old, new) in [
+            (
+                b"first".as_slice(),
+                b"old-1".as_slice(),
+                b"new-1".as_slice(),
+            ),
+            (
+                b"second".as_slice(),
+                b"old-2".as_slice(),
+                b"new-2".as_slice(),
+            ),
+        ] {
+            let live_path = partition_path.join(hex(name));
+            let region = Header::create_atomic(&(0..=0)).0;
+            let file = atomic::create_live(&root, "group", name, &live_path, &region).unwrap();
+            let mut state =
+                atomic::State::recover(&file, super::super::super::Layout::V2.data_offset())
+                    .unwrap();
+            write_payload(&file, &mut state, 0, old);
+            commit_state(&file, &mut state);
+            write_payload(&file, &mut state, old.len() as u64, new);
+            let mut prepared = state.prepare_commit().unwrap().unwrap();
+            prepared.mark_batch_prepared();
+            let atomic::PayloadChecksumEligibility::Eligible(payload_checksum) =
+                prepared.payload_checksum()
+            else {
+                panic!("contiguous append must be speculatively verifiable");
+            };
+            participants.push(Participant {
+                partition: "group".into(),
+                name: name.to_vec(),
+                candidate: prepared.candidate(),
+                payload_start: prepared.payload_start(),
+                payload_checksum,
+            });
+            operations.push(Operation::Publish {
+                partition: "group".into(),
+                name: name.to_vec(),
+            });
+            files.push(file);
+            prepared_commits.push(prepared);
+        }
+        (root, files, participants, operations, prepared_commits)
+    }
+
+    fn prepared_speculative_group(
+        label: &str,
+    ) -> (PathBuf, Vec<File>, Vec<Participant>, Vec<Operation>) {
+        let (root, files, participants, operations, prepared_commits) = prepared_group_parts(label);
+        let descriptor = prepare_embedded(&participants, &operations).unwrap();
+        for (file, mut prepared) in files.iter().zip(prepared_commits) {
+            prepared.attach_batch_witness(&descriptor).unwrap();
+            write_prepared(file, &prepared);
+        }
+        (root, files, participants, operations)
+    }
+
+    fn prepared_removal_group(
+        label: &str,
+    ) -> (
+        PathBuf,
+        Vec<File>,
+        Vec<Participant>,
+        RemovalPublication,
+        PathBuf,
+    ) {
+        let (root, files, participants, mut operations, prepared_commits) =
+            prepared_group_parts(label);
+        let victim_partition = root.join("victim");
+        fs::create_dir(&victim_partition).unwrap();
+        let victim = victim_partition.join(hex(b"old"));
+        fs::write(&victim, b"remove me").unwrap();
+        operations.push(Operation::Remove(RemoveTarget::Blob {
+            partition: "victim".into(),
+            name: b"old".to_vec(),
+        }));
+        let publication = prepare_removal_publication(&root, &participants, &operations).unwrap();
+        for (file, mut prepared) in files.iter().zip(prepared_commits) {
+            prepared
+                .attach_batch_witness(publication.descriptor())
+                .unwrap();
+            write_prepared(file, &prepared);
+        }
+        (root, files, participants, publication, victim)
+    }
+
     #[test]
     fn descriptor_round_trip_is_bounded_and_canonical() {
         let participants = vec![
@@ -1137,11 +1990,19 @@ mod tests {
                 partition: "alpha".into(),
                 name: b"one".to_vec(),
                 candidate: candidate(1),
+                payload_start: 100,
+                payload_checksum: Some(atomic::PayloadChecksum {
+                    offset: 100,
+                    len: 10,
+                    checksum: 123,
+                }),
             },
             Participant {
                 partition: "beta".into(),
                 name: b"two".to_vec(),
                 candidate: candidate(2),
+                payload_start: 0,
+                payload_checksum: None,
             },
         ];
         let operations = vec![Operation::Remove(RemoveTarget::Blob {
@@ -1165,6 +2026,450 @@ mod tests {
             decode_descriptor(&corrupted).unwrap_err().kind(),
             ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn publication_surfaces_reject_the_wrong_operation_shape() {
+        let removal = vec![Operation::Remove(RemoveTarget::Partition("victim".into()))];
+        assert_eq!(
+            prepare_embedded(&[], &removal).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+
+        let write = vec![Operation::Resize {
+            partition: "group".into(),
+            name: b"blob".to_vec(),
+            len: 1,
+        }];
+        assert_eq!(
+            prepare_removal_publication(Path::new("unused"), &[], &write)
+                .err()
+                .expect("write-only publication must be rejected")
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn speculative_recovery_commits_only_a_complete_group() {
+        let (root, files, _participants, _operations) =
+            prepared_speculative_group("speculative-complete");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+
+        let (result, read_bytes) = atomic::track_read_bytes(|| {
+            recover_embedded(
+                &root,
+                "group",
+                b"first",
+                &files[0],
+                super::super::super::Layout::V2.data_offset(),
+            )
+        });
+        result.unwrap();
+        assert!(read_bytes < 64 * 1024);
+        for (file, expected) in files.iter().zip([b"old-1new-1", b"old-2new-2"]) {
+            let state = atomic::State::recover(file, super::super::super::Layout::V2.data_offset())
+                .unwrap();
+            assert_eq!(read_blob_state(file, &state), expected);
+        }
+        let (result, reopened_reads) = atomic::track_read_bytes(|| {
+            recover_embedded(
+                &root,
+                "group",
+                b"first",
+                &files[0],
+                super::super::super::Layout::V2.data_offset(),
+            )
+        });
+        result.unwrap();
+        assert!(reopened_reads < 32 * 1024);
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn speculative_recovery_is_atomic_for_every_participant_persistence_subset() {
+        const PAYLOAD: u8 = 1;
+        const WITNESS: u8 = 2;
+        const COMPLETE: u8 = PAYLOAD | WITNESS;
+
+        for first_state in 0..=COMPLETE {
+            for second_state in 0..=COMPLETE {
+                for opener in 0..2 {
+                    let label =
+                        format!("speculative-subset-{first_state}-{second_state}-open-{opener}");
+                    let (root, files, participants, _operations) =
+                        prepared_speculative_group(&label);
+                    let persisted = [first_state, second_state];
+                    for ((file, participant), state) in
+                        files.iter().zip(&participants).zip(persisted)
+                    {
+                        if state & WITNESS == 0 {
+                            file.write_all_at(&[0u8; 4096], participant.candidate.root_offset)
+                                .unwrap();
+                        }
+                        if state & PAYLOAD == 0 {
+                            file.set_len(participant.payload_start).unwrap();
+                        }
+                        file.sync_all().unwrap();
+                    }
+
+                    recover_embedded(
+                        &root,
+                        "group",
+                        participants[opener].name.as_slice(),
+                        &files[opener],
+                        super::super::super::Layout::V2.data_offset(),
+                    )
+                    .unwrap();
+                    recover_embedded(
+                        &root,
+                        "group",
+                        participants[1 - opener].name.as_slice(),
+                        &files[1 - opener],
+                        super::super::super::Layout::V2.data_offset(),
+                    )
+                    .unwrap();
+
+                    let committed = persisted == [COMPLETE, COMPLETE];
+                    let expected: [&[u8]; 2] = if committed {
+                        [b"old-1new-1", b"old-2new-2"]
+                    } else {
+                        [b"old-1", b"old-2"]
+                    };
+                    for (file, expected) in files.iter().zip(expected) {
+                        let state = atomic::State::recover(
+                            file,
+                            super::super::super::Layout::V2.data_offset(),
+                        )
+                        .unwrap();
+                        assert_eq!(read_blob_state(file, &state), expected, "{label}");
+                    }
+                    assert!(!coordinator_path(&root).exists(), "{label}");
+
+                    drop(files);
+                    fs::remove_dir_all(root).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_embedded_materialization_converges_the_whole_group() {
+        let (root, files, participants, _operations) =
+            prepared_speculative_group("speculative-partial-materialization");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+        let descriptor = atomic::embedded_batch_candidates(
+            &files[0],
+            super::super::super::Layout::V2.data_offset(),
+        )
+        .unwrap()
+        .remove(0)
+        .descriptor;
+        for participant in &participants {
+            assert!(
+                validate_speculative_participant(&root, participant, Some(&descriptor)).unwrap()
+            );
+        }
+
+        // Simulate a crash after only the first validated participant was durably installed.
+        atomic::install_candidate(
+            &files[0],
+            super::super::super::Layout::V2.data_offset(),
+            &participants[0].candidate,
+        )
+        .unwrap();
+        assert!(atomic::candidate_is_committed(&files[0], &participants[0].candidate).unwrap());
+        assert!(!atomic::candidate_is_committed(&files[1], &participants[1].candidate).unwrap());
+
+        recover_embedded(
+            &root,
+            "group",
+            b"first",
+            &files[0],
+            super::super::super::Layout::V2.data_offset(),
+        )
+        .unwrap();
+
+        for ((file, participant), expected) in files
+            .iter()
+            .zip(&participants)
+            .zip([b"old-1new-1", b"old-2new-2"])
+        {
+            assert!(atomic::candidate_is_materialized(file, &participant.candidate).unwrap());
+            assert!(
+                atomic::embedded_batch_candidates(
+                    file,
+                    super::super::super::Layout::V2.data_offset()
+                )
+                .unwrap()
+                .is_empty()
+            );
+            let state = atomic::State::recover(file, super::super::super::Layout::V2.data_offset())
+                .unwrap();
+            assert_eq!(read_blob_state(file, &state), expected);
+        }
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reopening_a_materialized_participant_converges_the_whole_group() {
+        let (root, files, participants, _operations) =
+            prepared_speculative_group("speculative-materialized-opener");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+
+        // Production materialization uses a distinct independently recoverable root spelling.
+        // Reopening that participant must transfer its retained witness before another local
+        // commit can fence the group decision.
+        atomic::materialize_candidate(
+            &files[0],
+            super::super::super::Layout::V2.data_offset(),
+            &participants[0].candidate,
+        )
+        .unwrap();
+        assert!(atomic::candidate_is_materialized(&files[0], &participants[0].candidate).unwrap());
+        assert!(!atomic::candidate_is_materialized(&files[1], &participants[1].candidate).unwrap());
+
+        recover_embedded(
+            &root,
+            "group",
+            b"first",
+            &files[0],
+            super::super::super::Layout::V2.data_offset(),
+        )
+        .unwrap();
+
+        for (file, participant) in files.iter().zip(&participants) {
+            assert!(atomic::candidate_is_materialized(file, &participant.candidate).unwrap());
+        }
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn removal_retry_transfers_a_materialized_witness_before_delete() {
+        let (root, files, participants, _operations) =
+            prepared_speculative_group("materialized-removal-retry");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+
+        // Simulate the first crash after the removal target became independently recoverable,
+        // but before its peer was materialized.
+        atomic::materialize_candidate(
+            &files[0],
+            super::super::super::Layout::V2.data_offset(),
+            &participants[0].candidate,
+        )
+        .unwrap();
+        assert!(atomic::candidate_is_materialized(&files[0], &participants[0].candidate).unwrap());
+        assert!(!atomic::candidate_is_materialized(&files[1], &participants[1].candidate).unwrap());
+
+        recover_removal_witnesses(
+            &root,
+            &[Operation::Remove(RemoveTarget::Blob {
+                partition: "group".into(),
+                name: b"first".to_vec(),
+            })],
+        )
+        .unwrap();
+
+        // A retry must transfer the target's witness before unlinking it. A second crash after
+        // the unlink must still leave the acknowledged peer independently recoverable.
+        assert!(atomic::candidate_is_materialized(&files[1], &participants[1].candidate).unwrap());
+        fs::remove_file(root.join("group").join(hex(b"first"))).unwrap();
+        let recovered =
+            atomic::State::recover(&files[1], super::super::super::Layout::V2.data_offset())
+                .unwrap();
+        assert_eq!(read_blob_state(&files[1], &recovered), b"old-2new-2");
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_materialized_witness_ignores_a_recreated_legacy_peer() {
+        let (root, files, participants, _operations) =
+            prepared_speculative_group("materialized-recreated-legacy-peer");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+        recover_embedded(
+            &root,
+            "group",
+            b"first",
+            &files[0],
+            super::super::super::Layout::V2.data_offset(),
+        )
+        .unwrap();
+        for (file, participant) in files.iter().zip(&participants) {
+            assert!(atomic::candidate_is_materialized(file, &participant.candidate).unwrap());
+        }
+
+        let second_path = root.join("group").join(hex(b"second"));
+        fs::remove_file(&second_path).unwrap();
+        fs::write(&second_path, Header::create(&(0..=0)).0).unwrap();
+
+        recover_removal_witnesses(
+            &root,
+            &[Operation::Remove(RemoveTarget::Blob {
+                partition: "group".into(),
+                name: b"first".to_vec(),
+            })],
+        )
+        .unwrap();
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_bad_speculative_payload_rolls_back_every_participant() {
+        let (root, files, participants, _operations) =
+            prepared_speculative_group("speculative-rollback");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+        let corrupt_offset = participants[1].payload_checksum.unwrap().offset;
+        files[1].write_all_at(&[0xff], corrupt_offset).unwrap();
+        files[1].sync_all().unwrap();
+
+        let (result, durable_writes) = atomic::track_durable_writes(|| {
+            recover_embedded(
+                &root,
+                "group",
+                b"first",
+                &files[0],
+                super::super::super::Layout::V2.data_offset(),
+            )
+        });
+        result.unwrap();
+        assert!(durable_writes.is_empty(), "no participant may be installed");
+        for (file, expected) in files.iter().zip([b"old-1".as_slice(), b"old-2".as_slice()]) {
+            let state = atomic::State::recover(file, super::super::super::Layout::V2.data_offset())
+                .unwrap();
+            assert_eq!(read_blob_state(file, &state), expected);
+        }
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mixed_removal_recovery_commits_the_complete_group() {
+        let (root, files, _participants, publication, victim) =
+            prepared_removal_group("removal-complete");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+        publication.persist().unwrap();
+        drop(publication);
+
+        recover(&root).unwrap();
+        assert!(!victim.exists());
+        for (file, expected) in files.iter().zip([b"old-1new-1", b"old-2new-2"]) {
+            let state = atomic::State::recover(file, super::super::super::Layout::V2.data_offset())
+                .unwrap();
+            assert_eq!(read_blob_state(file, &state), expected);
+        }
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retired_removal_durably_materializes_every_participant() {
+        let (root, files, participants, publication, victim) =
+            prepared_removal_group("removal-retired-durable-participants");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+        publication.persist().unwrap();
+        let (result, durable_records) =
+            atomic::track_durable_records(|| publication.finish(|_| {}));
+        result.unwrap();
+        assert!(!victim.exists());
+
+        recover(&root).unwrap();
+        for ((file, participant), expected) in files
+            .iter()
+            .zip(&participants)
+            .zip([b"old-1new-1", b"old-2new-2"])
+        {
+            let mut materialized = [0u8; atomic::ROOT_LEN];
+            read_exact_at(file, participant.candidate.root_offset, &mut materialized).unwrap();
+            assert!(atomic::candidate_is_materialized(file, &participant.candidate).unwrap());
+            assert!(durable_records.iter().any(|(offset, record)| {
+                *offset == participant.candidate.root_offset && record == &materialized
+            }));
+            let state = atomic::State::recover(file, super::super::super::Layout::V2.data_offset())
+                .unwrap();
+            assert_eq!(read_blob_state(file, &state), expected);
+        }
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bad_mixed_payload_rolls_back_writes_and_removal() {
+        let (root, files, participants, publication, victim) =
+            prepared_removal_group("removal-rollback");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+        let corrupt_offset = participants[1].payload_checksum.unwrap().offset;
+        files[1].write_all_at(&[0xff], corrupt_offset).unwrap();
+        files[1].sync_all().unwrap();
+        publication.persist().unwrap();
+        drop(publication);
+
+        recover(&root).unwrap();
+        assert!(victim.exists());
+        for (file, expected) in files.iter().zip([b"old-1".as_slice(), b"old-2".as_slice()]) {
+            let state = atomic::State::recover(file, super::super::super::Layout::V2.data_offset())
+                .unwrap();
+            assert_eq!(read_blob_state(file, &state), expected);
+        }
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejected_speculation_fences_its_own_slot() {
+        let (root, files, participants, publication, _victim) =
+            prepared_removal_group("removal-rejection-fence");
+        for file in &files {
+            file.sync_all().unwrap();
+        }
+        let corrupt_offset = participants[1].payload_checksum.unwrap().offset;
+        files[1].write_all_at(&[0xff], corrupt_offset).unwrap();
+        files[1].sync_all().unwrap();
+        let rejected_offset = match &publication.0 {
+            RemovalPublicationInner::Durable { publication, .. } => publication.offset,
+            RemovalPublicationInner::Satisfied { .. } => unreachable!(),
+        };
+        publication.persist().unwrap();
+        drop(publication);
+
+        let (result, durable_records) = atomic::track_durable_records(|| recover(&root));
+        result.unwrap();
+        assert_eq!(durable_records.len(), 1);
+        assert_eq!(durable_records[0].0, rejected_offset);
+
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -1284,100 +2589,32 @@ mod tests {
     }
 
     #[test]
-    fn committed_group_recovery_reads_only_candidate_metadata() {
-        let root = test_root("group-recovery");
-        let partition_path = root.join("group");
-        fs::create_dir_all(&partition_path).unwrap();
-        let payload = vec![7u8; 4 * 1024 * 1024];
-        let mut participants = Vec::new();
-        let mut files = Vec::new();
+    fn pure_removal_persists_then_finishes() {
+        let root = test_root("pure-removal-finish");
+        let partition = root.join("group");
+        fs::create_dir_all(&partition).unwrap();
+        let name = b"victim";
+        let blob = partition.join(hex(name));
+        fs::write(&blob, b"old").unwrap();
+        let operations = vec![Operation::Remove(RemoveTarget::Blob {
+            partition: "group".into(),
+            name: name.to_vec(),
+        })];
+        let publication = prepare_removal_publication(&root, &[], &operations).unwrap();
 
-        for name in [b"first".as_slice(), b"second".as_slice()] {
-            let live_path = partition_path.join(hex(name));
-            let region = Header::create_atomic(&(0..=0)).0;
-            let file = atomic::create_live(&root, "group", name, &live_path, &region).unwrap();
-            let mut state =
-                atomic::State::recover(&file, super::super::super::Layout::V2.data_offset())
-                    .unwrap();
-            let mutation = state
-                .prepare_write(0, IoBufs::from(payload.clone()), Some(payload.len() as u64))
-                .unwrap()
-                .unwrap();
-            file.write_all_at(
-                mutation.data.as_single().unwrap().as_ref(),
-                mutation.file_offset,
-            )
-            .unwrap();
-            state.finish_mutation(mutation.mutation);
-            let prepared = state.prepare_commit().unwrap().unwrap();
-            if !prepared.manifest.is_empty() {
-                file.write_all_at(&prepared.manifest, prepared.manifest_offset)
-                    .unwrap();
-            }
-            file.write_all_at(&prepared.prepared_root, prepared.root_offset)
-                .unwrap();
-            file.sync_all().unwrap();
-            participants.push(Participant {
-                partition: "group".into(),
-                name: name.to_vec(),
-                candidate: prepared.candidate(),
-            });
-            files.push(file);
-        }
-
-        let operations = vec![
-            Operation::Publish {
-                partition: "group".into(),
-                name: b"first".to_vec(),
-            },
-            Operation::Publish {
-                partition: "group".into(),
-                name: b"second".to_vec(),
-            },
-        ];
-        let descriptor_len = encode_descriptor(&participants, &operations).unwrap().len();
-        assert!(
-            apply_batch_with(
-                &root,
-                &participants,
-                &[],
-                &operations,
-                false,
-                |_| {},
-                || { Err(io::Error::other("stop after durable decision")) }
-            )
-            .is_err()
-        );
-
-        let (((result, durable_writes), atomic_read_bytes), coordinator_read_bytes) =
-            track_read_bytes(|| {
-                atomic::track_read_bytes(|| atomic::track_durable_writes(|| recover(&root)))
-            });
+        let (result, durable_writes) = atomic::track_durable_writes(|| publication.persist());
         result.unwrap();
-        assert_eq!(
-            durable_writes.first(),
-            Some(&(ROOT_OFFSETS[1], ROOT_LEN + descriptor_len))
-        );
-        assert_eq!(
-            atomic_read_bytes,
-            2 * (atomic::ROOT_LEN + 40 + 24) as u64
-        );
-        assert_eq!(
-            coordinator_read_bytes,
-            (ROOT_LEN * 2 + descriptor_len + 4096 * 2) as u64
-        );
-        for file in files {
-            let recovered =
-                atomic::State::recover(&file, super::super::super::Layout::V2.data_offset())
-                    .unwrap();
-            assert_eq!(recovered.logical_len(), payload.len() as u64);
-        }
+        assert_eq!(durable_writes.len(), 1);
+        publication
+            .finish(|committed| assert_eq!(committed, operations.as_slice()))
+            .unwrap();
+        assert!(!blob.exists());
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn partition_recovery_renames_before_deferred_reclamation() {
+    fn durable_partition_removal_replays_and_is_idempotent() {
         let root = test_root("partition-tombstone");
         let victim = root.join("victim");
         fs::create_dir_all(&victim).unwrap();
@@ -1387,15 +2624,17 @@ mod tests {
         let operations = vec![Operation::Remove(RemoveTarget::Partition("victim".into()))];
         assert!(interrupt_committed_for_test(&root, &operations, 0).is_err());
 
-        recover(&root).unwrap();
+        let notified = std::cell::Cell::new(false);
+        recover_notifying(&root, |recovered| {
+            assert_eq!(recovered, operations.as_slice());
+            notified.set(true);
+        })
+        .unwrap();
+        assert!(notified.get());
         assert!(!victim.exists());
         let tombstone = removal_directory(&root, 1);
-        assert!(tombstone.is_dir());
-        assert_eq!(fs::read_dir(&tombstone).unwrap().count(), 1);
-
-        let next = vec![Operation::Remove(RemoveTarget::Partition("missing".into()))];
-        apply_batch_with(&root, &[], &[], &next, false, |_| {}, || Ok(())).unwrap();
         assert!(!tombstone.exists());
+        recover_notifying(&root, |_| panic!("idle recovery must not notify")).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }
