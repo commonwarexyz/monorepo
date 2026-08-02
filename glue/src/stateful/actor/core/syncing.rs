@@ -1,9 +1,9 @@
 use crate::stateful::{
-    Application, PruneConfig,
+    Application,
     actor::{
         core::{Deferred, mailbox::Message, processing::Processing},
         metrics::Metrics as StatefulMetrics,
-        processor::{Applied, Processor},
+        processor::{Applied, Processor, PruningConfig},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -36,6 +36,7 @@ pub(super) struct HeldVerify<C, B: Block> {
 type HeldVerifyRequest<E, A> =
     HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
 
+/// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
     Covered(B, Deferred),
     Reflected(B, Deferred),
@@ -51,6 +52,7 @@ pub(super) struct PendingFinalization<B> {
     acknowledgement: Deferred,
 }
 
+/// Serves application requests while coordinating state sync and its handoff.
 pub(super) struct Syncing<E, A, S, V, R>
 where
     E: Rng + Spawner + Context,
@@ -100,7 +102,7 @@ where
     pub(super) pending_finalizations: VecDeque<PendingFinalization<Arc<A::Block>>>,
 
     /// Periodic prune configuration.
-    pub(super) prune_config: Option<PruneConfig>,
+    pub(super) prune_config: Option<PruningConfig>,
 
     /// Metrics shared across syncing and processing.
     pub(super) metrics: StatefulMetrics,
@@ -326,7 +328,6 @@ where
             artifact.anchor,
             self.metrics,
             self.prune_config,
-            self.marshal.max_pending_acks(),
         );
 
         let mut pending_prune = None;
@@ -363,6 +364,8 @@ where
             }
         }
 
+        // Every applied handoff is durable, so completion can advance through the last one before
+        // pruning or exposing the databases to other actors.
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
             prune.run(processor.databases_mut(), &self.marshal).await;
@@ -416,6 +419,7 @@ mod tests {
         PruneConfig,
         actor::{
             metrics::Metrics as StatefulMetrics,
+            processor::PruningConfig,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
         db::{Anchor, AttachableResolver, Shared},
@@ -728,11 +732,15 @@ mod tests {
             };
             let mut harness =
                 TestHarness::new_on(context.child("harness"), delayed, anchor(7, 9)).await;
-            harness.syncing.prune_config = Some(PruneConfig {
-                maintenance_interval: NZUsize!(1),
-                retained_marshal_blocks: 0,
-                retained_qmdb_blocks: 0,
-            });
+            harness.syncing.prune_config = Some(PruningConfig::fixed(
+                PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                },
+                harness.syncing.marshal.max_pending_acks(),
+                0,
+            ));
             let control = FlushControl::default();
             harness
                 .syncing

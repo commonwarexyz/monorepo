@@ -1278,9 +1278,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             }
         }
 
-        let bounds = journal.bounds.clone();
         // Progress that has pruned the requested start or advanced beyond the target belongs to
         // an incompatible sync range and cannot be resumed.
+        let bounds = journal.bounds.clone();
         if bounds.start > range.start || size > range.end {
             debug!(
                 size,

@@ -49,7 +49,6 @@ use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
-    num::NonZeroUsize,
     sync::Arc,
 };
 use tracing::{debug, info_span, warn};
@@ -95,16 +94,15 @@ pub(super) struct Applied<T> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Prune<T> {
     marshal_height: Height,
+    pub(super) barrier_height: Height,
     qmdb_target: T,
 }
 
 impl<T> Prune<T> {
     /// Run database and marshal pruning.
     ///
-    /// The caller first observes every outstanding finalize barrier (see
-    /// [`DatabaseSet::prune`]). The durable commit justifying this target sits
-    /// at or above the oldest retained block, so the marshal prune that follows
-    /// retains every block a restart could replay.
+    /// Every finalize barrier through `barrier_height` is durable before this runs. The marshal
+    /// prune that follows retains every later block a restart could replay.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &mut DBs, marshal: &MarshalMailbox<S, V>)
     where
         E: Rng + Spawner + Metrics + Clock,
@@ -119,16 +117,30 @@ impl<T> Prune<T> {
 
 /// Tracks the configured prune cadence and finalized sync targets needed to
 /// make pruning safe.
-struct Pruning<T> {
-    maintenance_interval: NonZeroUsize,
+#[derive(Clone, Copy)]
+pub(super) struct PruningConfig {
+    maintenance_interval: u64,
+    maintenance_offset: u64,
     marshal_retention_window: usize,
     qmdb_retention_window: usize,
-    retained_targets: VecDeque<(Height, T)>,
 }
 
-impl<T: Clone> Pruning<T> {
-    const fn new(config: PruneConfig, max_pending_acks: usize) -> Self {
+impl PruningConfig {
+    pub(super) fn random(config: PruneConfig, max_pending_acks: usize, rng: &mut impl Rng) -> Self {
+        let interval = u64::try_from(config.maintenance_interval.get())
+            .expect("prune interval should fit in u64");
+        let offset = rng.next_u64() % interval;
+        Self::build(config, max_pending_acks, offset)
+    }
+
+    fn build(config: PruneConfig, max_pending_acks: usize, maintenance_offset: u64) -> Self {
         config.assert_valid();
+        let maintenance_interval = u64::try_from(config.maintenance_interval.get())
+            .expect("prune interval should fit in u64");
+        assert!(
+            maintenance_offset < maintenance_interval,
+            "prune maintenance offset must be within the interval",
+        );
         let base_retention_window = max_pending_acks
             .checked_add(1)
             .expect("max_pending_acks retention window overflowed");
@@ -139,9 +151,38 @@ impl<T: Clone> Pruning<T> {
             .checked_add(config.retained_qmdb_blocks)
             .expect("qmdb prune retention window overflowed");
         Self {
-            maintenance_interval: config.maintenance_interval,
+            maintenance_interval,
+            maintenance_offset,
             marshal_retention_window,
             qmdb_retention_window,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixed(
+        config: PruneConfig,
+        max_pending_acks: usize,
+        maintenance_offset: u64,
+    ) -> Self {
+        Self::build(config, max_pending_acks, maintenance_offset)
+    }
+}
+
+struct Pruning<T> {
+    maintenance_interval: u64,
+    maintenance_offset: u64,
+    marshal_retention_window: usize,
+    qmdb_retention_window: usize,
+    retained_targets: VecDeque<(Height, T)>,
+}
+
+impl<T: Clone> Pruning<T> {
+    const fn new(config: PruningConfig) -> Self {
+        Self {
+            maintenance_interval: config.maintenance_interval,
+            maintenance_offset: config.maintenance_offset,
+            marshal_retention_window: config.marshal_retention_window,
+            qmdb_retention_window: config.qmdb_retention_window,
             retained_targets: VecDeque::new(),
         }
     }
@@ -151,16 +192,14 @@ impl<T: Clone> Pruning<T> {
     /// Pruning first retains the last `max_pending_acks + 1` finalized targets
     /// plus the configured retained block windows. It then prunes only when the
     /// largest required window is populated and the current finalized height
-    /// matches the configured maintenance interval.
+    /// matches the selected phase of the configured maintenance interval.
     fn observe_finalized(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
         self.retained_targets.push_back((height, targets));
         if self.retained_targets.len() > self.marshal_retention_window {
             self.retained_targets.pop_front();
         }
 
-        let interval = u64::try_from(self.maintenance_interval.get())
-            .expect("prune interval should fit in u64");
-        if !height.get().is_multiple_of(interval) {
+        if height.get() % self.maintenance_interval != self.maintenance_offset {
             return None;
         }
 
@@ -180,16 +219,15 @@ impl<T: Clone> Pruning<T> {
             .len()
             .checked_sub(self.qmdb_retention_window)
             .expect("qmdb retention window must not exceed marshal window");
-        let qmdb_target = self
+        let (barrier_height, qmdb_target) = self
             .retained_targets
             .get(qmdb_index)
-            .expect("qmdb prune target must exist")
-            .1
-            .clone();
+            .expect("qmdb prune target must exist");
 
         Some(Prune {
             marshal_height,
-            qmdb_target,
+            barrier_height: *barrier_height,
+            qmdb_target: qmdb_target.clone(),
         })
     }
 }
@@ -220,8 +258,7 @@ where
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: StatefulMetrics,
-        prune_config: Option<PruneConfig>,
-        max_pending_acks: usize,
+        prune_config: Option<PruningConfig>,
     ) -> Self {
         Self {
             app,
@@ -229,7 +266,7 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
-            pruning: prune_config.map(|config| Pruning::new(config, max_pending_acks)),
+            pruning: prune_config.map(Pruning::new),
         }
     }
 
@@ -925,7 +962,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Applied, PrepareBatchesError, Processor, Prune, Pruning, await_or_cancel, fetch_ancestor,
+        Applied, PrepareBatchesError, Processor, Prune, Pruning, PruningConfig, await_or_cancel,
+        fetch_ancestor,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -1354,7 +1392,6 @@ mod tests {
                     },
                     metrics,
                     None,
-                    1,
                 ),
                 provider,
                 db_config: config,
@@ -1584,7 +1621,7 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::new(config, 2);
+        let mut pruning = Pruning::new(PruningConfig::fixed(config, 2, 0));
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1593,6 +1630,7 @@ mod tests {
             pruning.observe_finalized(Height::new(4), 40_u64),
             Some(Prune {
                 marshal_height: Height::new(1),
+                barrier_height: Height::new(1),
                 qmdb_target: 10,
             }),
         );
@@ -1605,7 +1643,7 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::new(config, 1);
+        let mut pruning = Pruning::new(PruningConfig::fixed(config, 1, 0));
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1613,6 +1651,7 @@ mod tests {
             pruning.observe_finalized(Height::new(3), 30_u64),
             Some(Prune {
                 marshal_height: Height::new(1),
+                barrier_height: Height::new(1),
                 qmdb_target: 10,
             }),
         );
@@ -1620,6 +1659,7 @@ mod tests {
             pruning.observe_finalized(Height::new(4), 40_u64),
             Some(Prune {
                 marshal_height: Height::new(2),
+                barrier_height: Height::new(2),
                 qmdb_target: 20,
             }),
         );
@@ -1632,7 +1672,7 @@ mod tests {
             retained_marshal_blocks: 3,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::new(config, 1);
+        let mut pruning = Pruning::new(PruningConfig::fixed(config, 1, 0));
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None);
@@ -1643,46 +1683,47 @@ mod tests {
             pruning.observe_finalized(Height::new(6), 60_u64),
             Some(Prune {
                 marshal_height: Height::new(2),
+                barrier_height: Height::new(4),
                 qmdb_target: 40,
             }),
         );
     }
 
     #[test]
-    fn pruning_only_runs_on_maintenance_interval() {
+    fn pruning_uses_maintenance_phase() {
         let config = PruneConfig {
             maintenance_interval: NZUsize!(5),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 0,
         };
-        let mut pruning = Pruning::new(config, 1);
+        let mut pruning = Pruning::new(PruningConfig::fixed(config, 1, 2));
 
-        // Window fills at height 3, but pruning only fires on multiples of the
-        // maintenance interval regardless of how small the retention window is.
-        for height in 1..=4 {
+        for height in 1..=6 {
             assert_eq!(
                 pruning.observe_finalized(Height::new(height), height * 10),
                 None,
             );
         }
         assert_eq!(
-            pruning.observe_finalized(Height::new(5), 50),
+            pruning.observe_finalized(Height::new(7), 70),
             Some(Prune {
-                marshal_height: Height::new(3),
-                qmdb_target: 40,
+                marshal_height: Height::new(5),
+                barrier_height: Height::new(6),
+                qmdb_target: 60,
             }),
         );
-        for height in 6..=9 {
+        for height in 8..=11 {
             assert_eq!(
                 pruning.observe_finalized(Height::new(height), height * 10),
                 None,
             );
         }
         assert_eq!(
-            pruning.observe_finalized(Height::new(10), 100),
+            pruning.observe_finalized(Height::new(12), 120),
             Some(Prune {
-                marshal_height: Height::new(8),
-                qmdb_target: 90,
+                marshal_height: Height::new(10),
+                barrier_height: Height::new(11),
+                qmdb_target: 110,
             }),
         );
     }
@@ -1724,12 +1765,15 @@ mod tests {
                     digest: Block::genesis().digest(),
                 },
                 StatefulMetrics::new(harness.context_cell.as_present()),
-                Some(PruneConfig {
-                    maintenance_interval: NZUsize!(1),
-                    retained_marshal_blocks: 1,
-                    retained_qmdb_blocks: 1,
-                }),
-                1,
+                Some(PruningConfig::fixed(
+                    PruneConfig {
+                        maintenance_interval: NZUsize!(1),
+                        retained_marshal_blocks: 1,
+                        retained_qmdb_blocks: 1,
+                    },
+                    1,
+                    0,
+                )),
             );
 
             let genesis = Block::genesis();

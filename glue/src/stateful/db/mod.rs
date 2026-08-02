@@ -319,9 +319,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Prune the database to a previously finalized sync target.
     ///
-    /// Databases that do not retain pruneable operation history can rely on
-    /// the default no-op. This call makes changes durable and ensures they
-    /// will be present on startup without replay.
+    /// Handles returned while finalizing later state may still be pending. Implementations that
+    /// discard history must coordinate pruning with those in-flight writes. Databases that do not
+    /// retain pruneable operation history can rely on the default no-op. Any pruning effects must
+    /// be durable before returning.
     fn prune(
         self,
         _target: &Self::SyncTarget,
@@ -346,9 +347,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 ///
 /// Holds one [`ManagedDb::finalize`] handle per database in the set. Deferred
 /// flush failures surface only here, so every barrier must be awaited via
-/// [`durable`](Self::durable), typically on a futures pool. Every outstanding
-/// barrier must also resolve before [`DatabaseSet::prune`] runs (see its
-/// contract).
+/// [`durable`](Self::durable), typically on a futures pool. Before
+/// [`DatabaseSet::prune`] runs, every barrier through its target must resolve.
+/// Barriers for later state may remain pending.
 ///
 /// # Examples
 ///
@@ -468,14 +469,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Prune each database to the provided per-database targets.
     ///
-    /// This call makes changes durable and ensures they will be present on
-    /// startup without replay.
-    ///
-    /// Callers must first observe every outstanding [`Barrier`] from
-    /// [`finalize`](Self::finalize): pruning may discard the history a restart
-    /// would need to recover unflushed state, so deferred flush failures must
-    /// surface (fatally) before it runs. Waiting outside the write lock also
-    /// keeps reads live while the flush backlog drains.
+    /// The finalized state represented by `targets` must already be durable. Barriers for later
+    /// finalized state may still be pending, so implementations must coordinate pruning with those
+    /// in-flight writes. Pruning effects must be durable before this call returns.
     ///
     /// Acquires a write lock on each database. Cancelling the future mid-flight loses the
     /// databases whose mutations were in progress (see [Shared]); every later access panics.

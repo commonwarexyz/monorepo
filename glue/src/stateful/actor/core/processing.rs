@@ -23,7 +23,7 @@ use futures::{
     poll,
 };
 use rand_core::Rng;
-use std::{sync::mpsc::TryRecvError, task::Poll};
+use std::{collections::BTreeSet, sync::mpsc::TryRecvError, task::Poll};
 use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: either a mailbox message to
@@ -31,6 +31,15 @@ use tracing::{Instrument as _, debug, info_span};
 enum Step<M, P> {
     Message(M),
     Prune(P),
+}
+
+/// Records a tracked flush completion and returns whether it is durable.
+fn complete(pending: &mut BTreeSet<Height>, (height, durable): (Height, bool)) -> bool {
+    assert!(
+        pending.remove(&height),
+        "completed flush must have a pending height",
+    );
+    durable
 }
 
 pub(super) struct Processing<E, A, S, V>
@@ -73,7 +82,8 @@ where
 
         // Deferred finalize flushes, each releasing its block's marshal
         // acknowledgement once the flush completes (see `Barrier`).
-        let mut syncs = Pool::<bool>::default();
+        let mut syncs = Pool::<(Height, bool)>::default();
+        let mut pending_syncs = BTreeSet::new();
         select_loop! {
             self.context,
             on_start => {
@@ -81,8 +91,8 @@ where
                 // acknowledgement) before taking the next unit of work, so
                 // acknowledgements keep flowing even while the mailbox is
                 // never idle.
-                while let Poll::Ready(durable) = poll!(syncs.next_completed()) {
-                    if !durable {
+                while let Poll::Ready(completion) = poll!(syncs.next_completed()) {
+                    if !complete(&mut pending_syncs, completion) {
                         return;
                     }
                 }
@@ -101,14 +111,15 @@ where
                         None => {
                             let mailbox = &mut self.mailbox;
                             let syncs = &mut syncs;
+                            let pending_syncs = &mut pending_syncs;
                             Either::Right(async move {
                                 loop {
                                     select! {
                                         message = mailbox.recv() => {
                                             break message.map(Step::Message);
                                         },
-                                        durable = syncs.next_completed() => {
-                                            if !durable {
+                                        completion = syncs.next_completed() => {
+                                            if !complete(pending_syncs, completion) {
                                                 return None;
                                             }
                                         },
@@ -207,12 +218,17 @@ where
                         // Marshal's ack window bounds the flush backlog. A
                         // false `Barrier::durable` leaves the block
                         // unacknowledged, and marshal redelivers it on restart.
+                        let height = block.height();
+                        assert!(
+                            pending_syncs.insert(height),
+                            "finalize flush height must be unique",
+                        );
                         syncs.push(async move {
                             let durable = barrier.durable().await;
                             if durable {
                                 acknowledgement.acknowledge();
                             }
-                            durable
+                            (height, durable)
                         });
                         if let Some(prune) = prune {
                             pending_prune = Some(prune);
@@ -225,10 +241,14 @@ where
                     response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
-                    // Observe every deferred flush before pruning can discard
-                    // history a restart would need to recover unflushed state.
-                    while !syncs.is_empty() {
-                        if !syncs.next_completed().await {
+                    // The prune target must be durable, but later blocks remain available in
+                    // marshal for replay and do not delay maintenance.
+                    while pending_syncs
+                        .first()
+                        .is_some_and(|height| *height <= prune.barrier_height)
+                    {
+                        let completion = syncs.next_completed().await;
+                        if !complete(&mut pending_syncs, completion) {
                             return;
                         }
                     }
@@ -261,7 +281,9 @@ mod tests {
     use crate::stateful::{
         PruneConfig,
         actor::{
-            core::mailbox::Mailbox, metrics::Metrics as StatefulMetrics, processor::Processor,
+            core::mailbox::Mailbox,
+            metrics::Metrics as StatefulMetrics,
+            processor::{Processor, PruningConfig},
         },
         db::Shared,
         tests::{
@@ -311,13 +333,14 @@ mod tests {
 
         let control = FlushControl::default();
         let databases = Shared::new("test", TestDb::gated(control.clone()));
+        let prune_config = prune_config
+            .map(|config| PruningConfig::fixed(config, marshal.mailbox.max_pending_acks(), 0));
         let processor = Processor::new(
             TestApp,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
             prune_config,
-            marshal.mailbox.max_pending_acks(),
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
@@ -332,12 +355,9 @@ mod tests {
         (Mailbox::new(sender), control, marshal.guards, actor)
     }
 
-    /// The loop keeps applying finalized blocks while earlier flushes are
-    /// still pending, acknowledges each block only once its flush completes
-    /// (so marshal's floor never runs ahead of flushed state), and waits for
-    /// those flushes before pruning.
+    /// Pruning waits for the flush that covers its target without waiting for newer state.
     #[test]
-    fn acks_and_prune_wait_for_flushes() {
+    fn prune_waits_only_for_target_flush() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
             let (mut mailbox, control, _marshal, _actor) = spawn_processing(
@@ -371,8 +391,8 @@ mod tests {
                 "acknowledgements must wait for pending flushes",
             );
 
-            // Block 2 filled the retention window, but pruning must remain
-            // blocked behind both parked flushes.
+            // Block 2 filled the retention window, but pruning must remain blocked behind the
+            // target at block 1.
             context.sleep(Duration::from_millis(50)).await;
             assert!(control.pruned.lock().is_empty());
             assert!(
@@ -380,11 +400,15 @@ mod tests {
                 "acknowledgements must keep waiting for pending flushes",
             );
 
-            // Releasing block 1's flush releases only its acknowledgement.
+            // Releasing block 1 makes the prune target durable. Block 2 remains retained in
+            // marshal and must not delay pruning.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter1.await.expect("block 1 acknowledgement");
-            assert!(control.pruned.lock().is_empty());
+            while control.pruned.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.pruned.lock().clone(), vec![1]);
             assert!(
                 poll!(&mut waiter2).is_pending(),
                 "block 2 must stay unacknowledged while its flush is pending",
@@ -394,20 +418,12 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
-
-            // Once all flushes are durable, the deferred prune targets the
-            // oldest retained sync target.
-            while control.pruned.lock().is_empty() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert_eq!(control.pruned.lock().clone(), vec![1]);
         });
     }
 
-    /// An aborted flush must stop processing before pruning can discard the history needed to
-    /// replay its unflushed block.
+    /// An aborted target flush must stop processing before pruning can discard its recovery state.
     #[test]
-    fn aborted_flush_prevents_prune() {
+    fn aborted_target_flush_prevents_prune() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, _marshal, actor) = spawn_processing(
                 &context,
@@ -420,7 +436,7 @@ mod tests {
             )
             .await;
 
-            let (acknowledgement, waiter1) = Exact::handle();
+            let (acknowledgement, mut waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(1, 1)),
                 acknowledgement,
@@ -434,15 +450,11 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let release = control.flushes.lock().remove(0);
-            let _ = release.send(Ok(()));
-            waiter1.await.expect("durable block acknowledgement");
-
             drop(control.flushes.lock().remove(0));
             actor.await.expect("processing actor should stop");
             assert!(
-                poll!(&mut waiter2).is_pending(),
-                "aborted flush must leave its acknowledgement pending",
+                poll!(&mut waiter1).is_pending() && poll!(&mut waiter2).is_pending(),
+                "aborted target flush must leave acknowledgements pending",
             );
             assert!(
                 control.pruned.lock().is_empty(),

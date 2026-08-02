@@ -9,7 +9,7 @@ use crate::stateful::{
     actor::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
-        processor::Processor,
+        processor::{Processor, PruningConfig},
         syncer::{self, SyncPlan, SyncResult},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
@@ -67,11 +67,10 @@ impl Drop for Deferred {
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneConfig {
-    /// Prune databases and marshal every `maintenance_interval` finalized blocks.
+    /// Finalized blocks between database and marshal pruning attempts.
     ///
-    /// This controls only how often pruning runs, not how much history is retained. Each prune
-    /// always leaves at least the configured retention windows in place, so a small interval
-    /// prunes more frequently but never below those floors.
+    /// Stateful selects a random phase within the interval when it starts. This controls only how
+    /// often pruning runs, not how much history is retained.
     pub maintenance_interval: NonZeroUsize,
 
     /// Finalized blocks to retain in marshal beyond its acknowledgement window plus one.
@@ -181,7 +180,7 @@ where
     sync_config: SyncEngineConfig,
 
     /// Periodic prune configuration.
-    prune_config: Option<PruneConfig>,
+    prune_config: Option<PruningConfig>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -198,10 +197,14 @@ where
     ///
     /// This only wires dependencies and allocates the mailbox. The actor does
     /// not process messages until [`Stateful::start`] is called.
-    pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
-        if let Some(prune_config) = config.prune_config {
-            prune_config.assert_valid();
-        }
+    pub fn init(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+        let prune_config = config.prune_config.map(|prune_config| {
+            PruningConfig::random(
+                prune_config,
+                config.marshal.max_pending_acks(),
+                &mut context,
+            )
+        });
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -215,7 +218,7 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
-                prune_config: config.prune_config,
+                prune_config,
             },
             Mailbox::new(sender),
         )
@@ -301,7 +304,6 @@ where
             anchor,
             metrics,
             self.prune_config,
-            self.marshal.max_pending_acks(),
         );
         Processing {
             context: self.context,
