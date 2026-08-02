@@ -27,12 +27,13 @@
 //! more durable data than the checkpoint claims, never less.
 
 use crate::{
-    Context,
+    Context, SyncCompletion,
     journal::Error,
     metadata::{Config as MetadataConfig, Metadata},
 };
 use commonware_runtime::Handle;
 use commonware_utils::sequence::VecU64;
+use futures::FutureExt as _;
 
 /// Key for the mid-blob pruning boundary. Absent when the boundary is blob-aligned (it is then
 /// derived from the oldest blob).
@@ -47,6 +48,11 @@ const RECOVERY_WATERMARK_KEY: u64 = 3;
 /// The journal's durable recovery checkpoint.
 pub(super) struct Checkpoint<E: Context> {
     metadata: Metadata<E, u64, VecU64>,
+    /// The highest watermark proven durable, and any in-flight watermark write. A staged value
+    /// must never be reported durable: a successful handle from a later call would otherwise
+    /// mask an earlier write's failure.
+    durable_watermark: u64,
+    pending_watermark: Option<(u64, SyncCompletion)>,
 }
 
 impl<E: Context> Checkpoint<E> {
@@ -60,7 +66,37 @@ impl<E: Context> Checkpoint<E> {
             },
         )
         .await?;
-        Ok(Self { metadata })
+        let durable_watermark = metadata
+            .get(&RECOVERY_WATERMARK_KEY)
+            .copied()
+            .map(u64::from)
+            .unwrap_or(0);
+        Ok(Self {
+            metadata,
+            durable_watermark,
+            pending_watermark: None,
+        })
+    }
+
+    /// Observe the outcome of the last started watermark write without blocking. On success,
+    /// advance the proven watermark.
+    fn observe_watermark(&mut self) {
+        let Some((watermark, completion)) = &self.pending_watermark else {
+            return;
+        };
+        let Some(result) = completion.clone().now_or_never() else {
+            return;
+        };
+        if result.is_ok() {
+            self.durable_watermark = self.durable_watermark.max(*watermark);
+        }
+        self.pending_watermark = None;
+    }
+
+    /// Record that every staged entry (including the watermark) became durable.
+    fn mark_durable(&mut self) {
+        self.durable_watermark = self.watermark().unwrap_or(0);
+        self.pending_watermark = None;
     }
 
     /// Read a `u64`-valued entry, if present.
@@ -107,22 +143,33 @@ impl<E: Context> Checkpoint<E> {
         self.sync().await
     }
 
-    /// Begin raising the watermark to `watermark`, returning a completion handle. A `watermark`
-    /// at or below the current one is ignored, returning a resolved handle.
-    /// A started advance's failure leaves the raised value staged: later advances at or below
-    /// it are ignored, and the next checkpoint write observes the failure and fails.
+    /// Begin raising the watermark to `watermark`, returning a completion handle whose success
+    /// proves a watermark at or above `watermark` is durable. A `watermark` already proven
+    /// durable returns a resolved handle; one covered by an in-flight write returns a handle
+    /// observing that write, so an earlier failure is never masked by a later call.
+    /// A started advance's failure leaves the raised value staged: the next checkpoint write
+    /// observes the failure and fails.
     /// Invariant: all items below `watermark` are durable.
     pub(super) async fn start_watermark_sync(
         mut self,
         watermark: u64,
     ) -> Result<(Self, Handle<()>), Error> {
-        if matches!(self.watermark(), Some(current) if current >= watermark) {
+        self.observe_watermark();
+        if self.durable_watermark >= watermark {
             return Ok((self, Handle::ready(Ok(()))));
+        }
+        if let Some((pending, completion)) = &self.pending_watermark
+            && *pending >= watermark
+        {
+            let completion = completion.clone();
+            return Ok((self, Handle::from_future(completion)));
         }
         self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
         let (metadata, handle) = self.metadata.start_sync().await?;
         self.metadata = metadata;
-        Ok((self, handle))
+        let completion: SyncCompletion = handle.boxed().shared();
+        self.pending_watermark = Some((watermark, completion.clone()));
+        Ok((self, Handle::from_future(completion)))
     }
 
     /// Lower the watermark to at most `limit`, returning whether it changed. Called before
@@ -159,6 +206,7 @@ impl<E: Context> Checkpoint<E> {
     /// Make staged entries durable.
     pub(super) async fn sync(mut self) -> Result<Self, Error> {
         self.metadata = self.metadata.sync().await?;
+        self.mark_durable();
         Ok(self)
     }
 
