@@ -273,12 +273,8 @@ impl<
 
     /// Syncs the journal section written by this iteration, if any.
     ///
-    /// Invoked once per event loop iteration, after [Self::construct] and before
-    /// [Self::notify] (regardless of whether anything will be broadcast), so
-    /// every vote and certificate we tell the network about is recoverable after
-    /// a restart. Deferring syncs to this boundary (rather than syncing after
-    /// each append) coalesces all appends in the same loop iteration into a
-    /// single sync.
+    /// Called after construction and before publication so every appended artifact
+    /// is durable by the end of the iteration. A single sync coalesces all appends.
     async fn sync_journal(mut self) -> Self {
         let Some(view) = self.dirty_section else {
             return self;
@@ -299,19 +295,16 @@ impl<
 
     /// Publishes a durable local vote to the batcher and every peer.
     ///
-    /// Callers must sync pending journal appends first (via [Self::sync_journal]).
-    /// A vote must be durable before it reaches either destination: a restart
-    /// that forgets a published vote can sign a conflicting one, and conflicting
-    /// votes from the same signer allow conflicting certificates to form (a
-    /// safety failure).
+    /// Callers must first sync pending journal appends. Otherwise a restart may
+    /// forget the vote and sign a conflicting one, allowing conflicting certificates.
     fn publish_vote<T: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         sender: &mut WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
-        // Do not suppress retries here: batcher state is not persisted, so the first
-        // retry of a replayed nullify may be its first copy of that vote.
+        // Every nullify retry refreshes volatile batcher state. The first retry after
+        // replay may be the batcher's first copy of the vote.
         batcher.constructed(vote.clone());
 
         // Update outbound metrics
@@ -808,8 +801,8 @@ impl<
 
     /// Builds and records any votes or certificates that became available for `view`.
     ///
-    /// Everything returned must be synced to the journal (via [Self::sync_journal])
-    /// before it reaches the batcher, reporter, or network (via [Self::notify]).
+    /// Returned artifacts must be synced through [Self::sync_journal] before
+    /// [Self::notify] publishes them.
     ///
     /// We don't need to iterate over all views to check for new actions because messages we receive
     /// only affect a single view. In particular, healing the same-term finalize gate does not
@@ -842,10 +835,10 @@ impl<
         )
     }
 
-    /// Publishes everything constructed this iteration to the batcher and network.
+    /// Publishes the staged votes and certificates.
     ///
-    /// Callers must sync pending journal appends first (via [Self::sync_journal])
-    /// so no locally constructed vote is reported or broadcast before it is durable.
+    /// Callers must first sync pending journal appends so locally constructed votes
+    /// are durable before reaching the batcher, reporter, or network.
     fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,

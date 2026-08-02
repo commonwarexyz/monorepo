@@ -8484,12 +8484,11 @@ mod tests {
         first_view_progress_without_timeout::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    /// Tests that certification and finalize are coalesced into one durable section sync.
+    /// Certification and the finalize vote share one durable section sync.
     ///
-    /// 1. First run: gate the section sync after certification and verify finalize is neither
-    ///    handed to the batcher nor broadcast.
-    /// 2. Release the only section sync, observe the finalize reach both, and abort the voter.
-    /// 3. Second run: replay both artifacts and advance without re-certifying.
+    /// 1. Gate the sync and verify the finalize reaches neither batcher nor network.
+    /// 2. Release the sync, observe both deliveries, and abort the voter.
+    /// 3. Restart, replay both artifacts, and advance without re-certifying.
     fn successful_certification_replayed_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,

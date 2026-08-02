@@ -103,10 +103,10 @@ impl<
 
     /// Records a verified certificate.
     ///
-    /// Marks its verifier phase complete and releases full votes no longer needed
-    /// for certificate assembly. A notarization or finalization may also establish
-    /// authoritative proposal evidence. Returns `true` when a notarization selects
-    /// a new proposal, making its buffered finalize votes eligible for processing.
+    /// Completes its verifier phase and applies the configured vote retention
+    /// policy. A notarization or finalization also establishes authoritative
+    /// proposal evidence. Returns `true` when a notarization selects a new proposal,
+    /// making buffered finalize votes eligible for processing.
     pub fn record_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
         let process_votes = match certificate {
             Certificate::Notarization(notarization) => {
@@ -126,7 +126,7 @@ impl<
         process_votes
     }
 
-    /// Releases full votes that are no longer needed for certificate assembly.
+    /// Applies the configured retention policy to a certified vote phase.
     fn release_votes(&mut self, kind: Kind) {
         match kind {
             Kind::Notarization => {
@@ -147,12 +147,11 @@ impl<
         }
     }
 
-    /// Accepts and reports a vote after sender and conflict checks.
+    /// Records and reports a vote after source-specific admission checks.
     ///
-    /// Full votes are forwarded to the verifier and retained while needed for
-    /// certification. When extended conflict reporting is disabled, compact
-    /// state preserves duplicate suppression and proposal forwarding without
-    /// reallocating the released vote map.
+    /// Retained votes are forwarded to the verifier for certificate assembly.
+    /// Compacted phases preserve duplicate suppression and proposal forwarding
+    /// without recreating their released vote maps.
     pub(super) fn accept_vote(&mut self, message: Vote<S, D>, constructed: bool) -> Outcome {
         if constructed && let Vote::Finalize(finalize) = &message {
             // The voter only constructs a finalize after independently
@@ -180,8 +179,8 @@ impl<
             }
         };
 
-        // A compacted phase already has its certificate. Report newly observed signer
-        // evidence, but only retained full votes can contribute to certificate assembly.
+        // Completed phases report new signer evidence without forwarding votes
+        // to the verifier.
         let verifier_message = retained.then(|| message.clone());
         let activity = match message {
             Vote::Notarize(notarize) => Activity::Notarize(notarize),
@@ -382,18 +381,16 @@ impl<
 
     /// Returns whether `signer` has a retained nullify vote.
     ///
-    /// Compact state is reached only after the corresponding certificate has
-    /// been forwarded to the voter, so it does not drive the leader fast path.
+    /// Compact state exists only after certification, which supersedes the
+    /// leader-nullify fast path.
     pub fn has_retained_nullify(&self, signer: Participant) -> bool {
         self.votes.has_nullify(signer)
     }
 
     /// Returns whether `participant` has not voted for `proposal` locally.
     ///
-    /// Uses the vote tracker and compact post-certificate membership rather
-    /// than the verified vote vectors because we only verify the first quorum
-    /// of votes. A peer whose matching vote arrived after quorum is still
-    /// tracked for forwarding.
+    /// Uses tracker membership, including compact state, because verification stops
+    /// after the first quorum. Matching votes received later still inform forwarding.
     ///
     /// Both notarize and finalize votes are checked: a participant who sent
     /// either for the same proposal already has the block and does not need
@@ -407,18 +404,7 @@ impl<
         !self.votes.has_finalize_for(participant, proposal)
     }
 
-    /// Returns participant indices whose matching vote for `proposal` was not
-    /// observed locally.
-    ///
-    /// Uses the vote tracker and compact post-certificate membership rather
-    /// than the verified vote vectors because we only verify the first quorum
-    /// of votes. A peer whose matching vote arrived after quorum is still
-    /// tracked for forwarding.
-    ///
-    /// Both notarize and finalize votes are checked: a participant who sent
-    /// either for the same proposal already has the block and does not need
-    /// it forwarded. Votes for a conflicting proposal are treated as missing
-    /// because those peers still need the winning block forwarded.
+    /// Returns participant indices for which [`Self::is_missing_voter`] is true.
     pub fn missing_voters(&self, proposal: &Proposal<D>) -> Vec<Participant> {
         (0..self.verifier.participants().len())
             .map(Participant::from_usize)

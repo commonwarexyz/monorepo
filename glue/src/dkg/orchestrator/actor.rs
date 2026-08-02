@@ -129,9 +129,11 @@ pub struct SimplexConfig<L> {
 
     /// Report historical conflicts after certification.
     ///
-    /// By default, conflicts that require full vote evidence can be reported only
-    /// until the corresponding certificate is constructed or received. Enabling
-    /// this retains those votes at the cost of higher per-view memory usage.
+    /// By default, full vote evidence is released when the corresponding certificate
+    /// is constructed or received, making later conflict reporting and peer blocking
+    /// best effort. Enabling this retains each recorded vote until its round is
+    /// pruned, increasing memory usage. Forwarding and duplicate suppression remain
+    /// available either way.
     pub historical_conflict_reporting: bool,
 
     /// Policy for proactively forwarding certified blocks.

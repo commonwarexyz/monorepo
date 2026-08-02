@@ -170,7 +170,7 @@ impl<T: Attributable> AttributableMap<T> {
     }
 }
 
-/// Full vote storage for a phase, or its compacted lifecycle marker.
+/// Full vote storage for a phase, or a marker that its certificate was recorded.
 #[cfg(not(target_arch = "wasm32"))]
 enum Phase<T: Attributable> {
     Full(AttributableMap<T>),
@@ -228,22 +228,19 @@ impl<T: Attributable> Phase<T> {
 /// Tracks notarize/nullify/finalize votes for a view.
 ///
 /// Each vote type is stored in its own lazily allocated phase so a validator can
-/// contribute at most one vote per phase. Once certified, a phase can drop its full
-/// votes while compact signer facts preserve forwarding and duplicate suppression.
+/// contribute at most one vote per phase. After certification, compact signer facts
+/// can replace full votes while preserving forwarding, duplicate suppression, and
+/// compact conflict detection.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct VoteTracker<S: Scheme, D: Digest> {
     participants: usize,
     retain_votes_after_certification: bool,
     /// Compact state records whether a signer voted and whether the vote carried the
-    /// authoritative proposal. The former suppresses duplicates and cross-phase
-    /// conflicts; the latter avoids forwarding blocks to validators that already have them.
+    /// authoritative proposal. The first fact suppresses duplicates and cross-phase
+    /// conflicts. The second avoids forwarding a block to validators that already have it.
     compacted: Vec<u8>,
-    /// Per-signer notarize phase.
     notarizes: Phase<Notarize<S, D>>,
-    /// Per-signer nullify phase.
     nullifies: Phase<Nullify<S>>,
-    /// Per-signer finalize phase.
-    ///
     /// Finalize votes include the proposal digest so the entire certificate can be
     /// reconstructed once the quorum threshold is hit.
     finalizes: Phase<Finalize<S, D>>,
@@ -260,12 +257,10 @@ pub(crate) enum Outcome {
     Conflicting,
 }
 
-/// A recorded vote that may no longer be retained in full.
+/// A recorded vote retained in full or represented by compact signer state.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) enum ObservedVote<'a, T> {
-    /// The full vote remains available.
     Retained(&'a T),
-    /// Only compact signer state remains.
     Compacted,
 }
 
@@ -279,8 +274,9 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Creates a tracker sized for `participants` validators.
     ///
-    /// If `retain_votes_after_certification` is false, full votes are released
-    /// once their phase certifies.
+    /// When `retain_votes_after_certification` is false, full votes are released
+    /// once their phase certifies. Otherwise they remain until explicitly cleared
+    /// or the tracker is dropped.
     pub const fn new(participants: usize, retain_votes_after_certification: bool) -> Self {
         Self {
             participants,
@@ -295,11 +291,10 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
-    /// Records signer facts after the phase's full vote map has been released.
+    /// Records monotonic signer facts after a phase releases its full vote map.
     ///
-    /// The facts are monotonic until the phase is cleared. In particular, a matching
-    /// vote may establish that the signer has the authoritative proposal even when a
-    /// vote from that signer was already observed.
+    /// A later matching vote can record that the signer has the authoritative
+    /// proposal even when the signer was already observed.
     fn remember(
         participants: usize,
         compacted: &mut Vec<u8>,
@@ -373,8 +368,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Records a vote in full or as compact post-certificate state.
     ///
-    /// `proposal` is the authoritative proposal, when known, and preserves
-    /// proposal-match state when the full vote is not retained.
+    /// `proposal` identifies the authoritative proposal used for compact match state.
     pub(crate) fn record(&mut self, vote: &Vote<S, D>, proposal: Option<&Proposal<D>>) -> Outcome {
         match vote {
             Vote::Notarize(notarize) => Self::record_phase(
@@ -408,8 +402,8 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 
     /// Moves a phase from full vote storage to compact signer state.
     ///
-    /// Taking the map makes the transition idempotent. Empty phases stay
-    /// allocation-free, while existing signer and proposal-ownership facts survive.
+    /// Taking the map makes the transition idempotent. Empty phases remain
+    /// allocation-free, while existing signer and proposal-match facts survive.
     fn release<T: Attributable>(
         participants: usize,
         compacted: &mut Vec<u8>,
@@ -428,7 +422,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             compacted.resize(participants, 0);
         }
 
-        // Proposal bits are relative to the certificate-backed authoritative proposal.
+        // Proposal-match bits are relative to the certificate-backed proposal.
         for vote in votes.iter() {
             let flags = &mut compacted[usize::from(vote.signer())];
             *flags |= seen;
@@ -438,7 +432,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
     }
 
-    /// Returns a previously observed nullify vote, including compact state.
+    /// Returns the retained or compact state for a previously observed nullify vote.
     pub(crate) fn saw_nullify(&self, signer: Participant) -> Option<ObservedVote<'_, Nullify<S>>> {
         self.nullify(signer)
             .map(ObservedVote::Retained)
@@ -448,7 +442,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             })
     }
 
-    /// Returns a previously observed finalize vote, including compact state.
+    /// Returns the retained or compact state for a previously observed finalize vote.
     pub(crate) fn saw_finalize(
         &self,
         signer: Participant,
@@ -461,7 +455,8 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             })
     }
 
-    /// Returns whether `signer` is known to have the authoritative proposal from notarizing it.
+    /// Returns whether `signer` is known to have the authoritative proposal
+    /// from notarizing it.
     pub(crate) fn has_notarize_for(&self, signer: Participant, proposal: &Proposal<D>) -> bool {
         self.remembered(signer, Self::NOTARIZE_HAS_PROPOSAL)
             || self
@@ -469,7 +464,8 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
                 .is_some_and(|vote| &vote.proposal == proposal)
     }
 
-    /// Returns whether `signer` is known to have the authoritative proposal from finalizing it.
+    /// Returns whether `signer` is known to have the authoritative proposal
+    /// from finalizing it.
     pub(crate) fn has_finalize_for(&self, signer: Participant, proposal: &Proposal<D>) -> bool {
         self.remembered(signer, Self::FINALIZE_HAS_PROPOSAL)
             || self
@@ -477,7 +473,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
                 .is_some_and(|vote| &vote.proposal == proposal)
     }
 
-    /// Releases notarize votes while retaining compact signer state.
+    /// Releases notarize votes unless full evidence is configured for retention.
     pub(crate) fn release_notarizes(&mut self, proposal: &Proposal<D>) {
         if self.retain_votes_after_certification {
             return;
@@ -492,7 +488,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         );
     }
 
-    /// Releases nullify votes while retaining compact signer state.
+    /// Releases nullify votes unless full evidence is configured for retention.
     pub(crate) fn release_nullifies(&mut self) {
         if self.retain_votes_after_certification {
             return;
@@ -507,7 +503,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         );
     }
 
-    /// Releases finalize votes while retaining compact signer state.
+    /// Releases finalize votes unless full evidence is configured for retention.
     pub(crate) fn release_finalizes(&mut self, proposal: &Proposal<D>) {
         if self.retain_votes_after_certification {
             return;

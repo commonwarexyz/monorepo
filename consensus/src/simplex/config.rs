@@ -144,21 +144,17 @@ where
     /// and verify activities based on scheme attributability.
     ///
     /// Locally constructed votes are exported only after their journal entries are
-    /// durable. Votes received from the network are not persisted and may be exported
-    /// again after a restart. If the sender equivocates, a vote exported after restart
-    /// may differ from the one exported before the crash.
+    /// durable. Network votes are not persisted, so an equivocating sender may have
+    /// different votes exported before and after a restart.
     pub reporter: F,
 
     /// Report historical conflicts after certification.
     ///
-    /// By default, conflicts that require full vote evidence can be reported only
-    /// until the corresponding certificate is constructed or received. Enabling
-    /// this retains those votes so the conflicts can still be reported. Compact
-    /// signer data remains available for forwarding and duplicate suppression
-    /// either way.
-    ///
-    /// Historical conflict reporting increases per-view memory usage, especially
-    /// when certificates arrive far ahead of the current view.
+    /// By default, full vote evidence is released when the corresponding certificate
+    /// is constructed or received, making later conflict reporting and peer blocking
+    /// best effort. Enabling this retains each recorded vote until its round is
+    /// pruned, increasing memory usage. Forwarding and duplicate suppression remain
+    /// available either way.
     pub historical_conflict_reporting: bool,
 
     /// Strategy for parallel operations.
