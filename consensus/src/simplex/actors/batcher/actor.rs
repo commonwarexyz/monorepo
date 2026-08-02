@@ -59,7 +59,7 @@ where
 
     blocker: B,
     reporter: Re,
-    historical_conflict_reporting: bool,
+    track_historical_votes: bool,
     relay: Rl,
     strategy: T,
 
@@ -145,7 +145,7 @@ where
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
-                historical_conflict_reporting: cfg.historical_conflict_reporting,
+                track_historical_votes: cfg.track_historical_votes,
                 relay: cfg.relay,
                 strategy: cfg.strategy,
 
@@ -176,7 +176,7 @@ where
             Arc::clone(&self.scheme),
             self.blocker.clone(),
             self.reporter.clone(),
-            self.historical_conflict_reporting,
+            self.track_historical_votes,
         )
     }
 

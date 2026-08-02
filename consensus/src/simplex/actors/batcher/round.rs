@@ -61,7 +61,7 @@ impl<
         scheme: Arc<S>,
         blocker: B,
         reporter: R,
-        historical_conflict_reporting: bool,
+        track_historical_votes: bool,
     ) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
         let len = scheme.participants().len();
@@ -70,7 +70,7 @@ impl<
             reporter,
             verifier: Verifier::new(round, scheme, quorum),
 
-            votes: VoteTracker::new(len, historical_conflict_reporting),
+            votes: VoteTracker::new(len, track_historical_votes),
 
             proposal_sent: false,
 

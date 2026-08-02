@@ -226,7 +226,7 @@ fn main() {
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
             forwarding: simplex::ForwardingPolicy::Disabled,
-            historical_conflict_reporting: false,
+            track_historical_votes: false,
         };
         let engine = simplex::Engine::new(context.child("engine"), cfg);
 

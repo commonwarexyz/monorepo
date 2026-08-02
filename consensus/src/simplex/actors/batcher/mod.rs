@@ -22,7 +22,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
     pub blocker: B,
     pub reporter: Re,
-    pub historical_conflict_reporting: bool,
+    pub track_historical_votes: bool,
     pub relay: Rl,
 
     /// Strategy for parallel operations.
@@ -184,7 +184,7 @@ mod tests {
         skip_timeout: Duration,
         term_length: TermLength,
         forwarding: ForwardingPolicy,
-        historical_conflict_reporting: bool,
+        track_historical_votes: bool,
         floor: View,
     }
 
@@ -195,7 +195,7 @@ mod tests {
                 skip_timeout: Duration::from_secs(5),
                 term_length: TermLength::ONE,
                 forwarding: ForwardingPolicy::Disabled,
-                historical_conflict_reporting: false,
+                track_historical_votes: false,
                 floor: View::zero(),
             }
         }
@@ -215,7 +215,7 @@ mod tests {
             scheme,
             blocker,
             reporter,
-            historical_conflict_reporting: options.historical_conflict_reporting,
+            track_historical_votes: options.track_historical_votes,
             relay,
             strategy: Sequential,
             view_retention: options.view_retention,
@@ -480,7 +480,7 @@ mod tests {
     }
 
     fn certified_conflict_outcome(
-        historical_conflict_reporting: bool,
+        track_historical_votes: bool,
         kind: Kind,
         first_matches: bool,
     ) -> (bool, bool) {
@@ -505,7 +505,7 @@ mod tests {
             Arc::new(schemes[0].clone()),
             RecordingBlocker(blocked.clone()),
             RecordingReporter(activities.clone()),
-            historical_conflict_reporting,
+            track_historical_votes,
         );
 
         match kind {

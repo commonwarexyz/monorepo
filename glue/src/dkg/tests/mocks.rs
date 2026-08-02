@@ -501,7 +501,7 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         view_retention: ViewDelta::new(8),
         skip_timeout: Duration::from_secs(1),
         forwarding: simplex::ForwardingPolicy::Disabled,
-        historical_conflict_reporting: false,
+        track_historical_votes: false,
     }
 }
 

@@ -148,14 +148,13 @@ where
     /// different votes exported before and after a restart.
     pub reporter: F,
 
-    /// Report historical conflicts after certification.
+    /// Track individual votes after certification.
     ///
     /// By default, full vote evidence is released when the corresponding certificate
     /// is constructed or received, making later conflict reporting and peer blocking
     /// best effort. Enabling this retains each recorded vote until its round is
-    /// pruned, increasing memory usage. Forwarding and duplicate suppression remain
-    /// available either way.
-    pub historical_conflict_reporting: bool,
+    /// pruned, increasing memory usage.
+    pub track_historical_votes: bool,
 
     /// Strategy for parallel operations.
     pub strategy: T,

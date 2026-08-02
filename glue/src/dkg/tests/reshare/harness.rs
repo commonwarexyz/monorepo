@@ -1027,7 +1027,7 @@ impl EngineDefinition for ReshareEngine {
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(5),
                     forwarding: ForwardingPolicy::Disabled,
-                    historical_conflict_reporting: false,
+                    track_historical_votes: false,
                 },
                 gate,
                 state_sync,

@@ -127,14 +127,13 @@ pub struct SimplexConfig<L> {
     /// Time a leader may remain inactive before triggering immediate nullification.
     pub skip_timeout: Duration,
 
-    /// Report historical conflicts after certification.
+    /// Track individual votes after certification.
     ///
     /// By default, full vote evidence is released when the corresponding certificate
     /// is constructed or received, making later conflict reporting and peer blocking
     /// best effort. Enabling this retains each recorded vote until its round is
-    /// pruned, increasing memory usage. Forwarding and duplicate suppression remain
-    /// available either way.
-    pub historical_conflict_reporting: bool,
+    /// pruned, increasing memory usage.
+    pub track_historical_votes: bool,
 
     /// Policy for proactively forwarding certified blocks.
     pub forwarding: ForwardingPolicy,
@@ -727,7 +726,7 @@ where
                 view_retention: self.simplex.view_retention,
                 skip_timeout: self.simplex.skip_timeout,
                 forwarding: self.simplex.forwarding,
-                historical_conflict_reporting: self.simplex.historical_conflict_reporting,
+                track_historical_votes: self.simplex.track_historical_votes,
             },
         );
 
