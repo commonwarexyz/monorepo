@@ -215,11 +215,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             else {
                 return false;
             };
-            node_positions.extend(bp.fold_prefix.iter().map(|s| s.pos));
-            node_positions.extend(&bp.fetch_nodes);
-            if let Some(suffix_peaks) = bp.suffix_peaks() {
-                node_positions.extend(suffix_peaks);
-            }
+            node_positions.extend(bp.required_positions());
             blueprints.insert(*loc, bp);
         }
 
@@ -255,9 +251,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 });
                 digests.push(acc);
             }
-            let prefix_active_count = bp.prefix_active_count();
-            let after_count = bp.after_peaks_count();
-            for &pos in &bp.fetch_nodes[..prefix_active_count + after_count] {
+            let sibling_start = bp.sibling_start();
+            for &pos in &bp.fetch_nodes[..sibling_start] {
                 let d = node_digests.get(&pos).expect("must exist by construction");
                 digests.push(*d);
             }
@@ -274,7 +269,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 }
                 digests.push(acc);
             }
-            for &pos in &bp.fetch_nodes[prefix_active_count + after_count..] {
+            for &pos in &bp.fetch_nodes[sibling_start..] {
                 let d = node_digests.get(&pos).expect("must exist by construction");
                 digests.push(*d);
             }
@@ -925,19 +920,25 @@ impl<F: Family> Blueprint<F> {
         out
     }
 
-    /// Return the number of active prefix peak digests stored before after-peak digests.
-    pub(crate) const fn prefix_active_count(&self) -> usize {
-        self.prefix_active_peaks.len()
-    }
-
-    /// Return the number of non-collapsed after-peak digests in the proof layout.
-    pub(crate) const fn after_peaks_count(&self) -> usize {
-        self.after_peaks.len()
+    /// The index within `fetch_nodes` where the DFS sibling nodes begin, following the
+    /// prefix-active peaks and the after-peaks.
+    pub(crate) const fn sibling_start(&self) -> usize {
+        self.prefix_active_peaks.len() + self.after_peaks.len()
     }
 
     /// Return active after-peaks that are collapsed into a backward-folded suffix accumulator.
     pub(crate) fn suffix_peaks(&self) -> Option<&[Position<F>]> {
         (!self.suffix_peaks.is_empty()).then_some(&self.suffix_peaks)
+    }
+
+    /// All node positions this blueprint needs from the tree: fold-prefix peaks, fetch nodes,
+    /// and suffix peaks. Order is unspecified; callers collect into a set.
+    pub(crate) fn required_positions(&self) -> impl Iterator<Item = Position<F>> + '_ {
+        self.fold_prefix
+            .iter()
+            .map(|s| s.pos)
+            .chain(self.fetch_nodes.iter().copied())
+            .chain(self.suffix_peaks.iter().copied())
     }
 
     /// Split a proof's digest vector according to this blueprint's range-proof layout.
@@ -957,14 +958,13 @@ impl<F: Family> Blueprint<F> {
 
         let prefix_start = fold_count;
         let after_start = prefix_start + self.prefix_active_peaks.len();
-        let siblings_start = after_start + self.after_peaks.len();
-        let suffix_start = siblings_start;
+        let suffix_start = after_start + self.after_peaks.len();
         let suffix_end = suffix_start + suffix_count;
 
         Ok(ProofDigestLayout {
             fold_prefix: (!self.fold_prefix.is_empty()).then(|| &digests[0]),
             prefix_active_peaks: &digests[prefix_start..after_start],
-            after_peaks: &digests[after_start..siblings_start],
+            after_peaks: &digests[after_start..suffix_start],
             suffix_acc: (!self.suffix_peaks.is_empty()).then(|| &digests[suffix_start]),
             siblings: &digests[suffix_end..],
         })
@@ -1032,7 +1032,7 @@ impl<F: Family> Blueprint<F> {
             digests.push(acc);
         }
 
-        let sibling_start = self.prefix_active_peaks.len() + self.after_peaks.len();
+        let sibling_start = self.sibling_start();
         for &pos in &self.fetch_nodes[sibling_start..] {
             digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
         }
@@ -1094,11 +1094,7 @@ pub(crate) fn nodes_required_for_multi_proof<F: Family>(
             return Err(super::Error::LocationOverflow(*loc));
         }
         let bp = Blueprint::new(leaves, inactive_peaks, bagging, *loc..*loc + 1)?;
-        if let Some(suffix_peaks) = bp.suffix_peaks() {
-            acc.extend(suffix_peaks);
-        }
-        acc.extend(bp.fold_prefix.into_iter().map(|s| s.pos));
-        acc.extend(bp.fetch_nodes);
+        acc.extend(bp.required_positions());
         Ok(acc)
     })
 }
