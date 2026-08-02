@@ -283,7 +283,7 @@ where
             return false;
         };
         work.get(&current.view)
-            .is_some_and(|round| round.has_retained_nullify(leader))
+            .is_some_and(|round| round.has_nullify(leader))
     }
 
     pub fn start(

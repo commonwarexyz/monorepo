@@ -379,11 +379,8 @@ impl<
         self.verifier.try_verify_finalizes(rng, strategy).await
     }
 
-    /// Returns whether `signer` has a retained nullify vote.
-    ///
-    /// Compact state exists only after certification, which supersedes the
-    /// leader-nullify fast path.
-    pub fn has_retained_nullify(&self, signer: Participant) -> bool {
+    /// Returns whether `signer` has a nullify vote.
+    pub fn has_nullify(&self, signer: Participant) -> bool {
         self.votes.has_nullify(signer)
     }
 

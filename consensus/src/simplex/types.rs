@@ -614,12 +614,6 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         self.clear_compacted(Self::NOTARIZE_SEEN | Self::NOTARIZE_HAS_PROPOSAL);
     }
 
-    /// Clears all nullify votes and releases their storage.
-    pub fn clear_nullifies(&mut self) {
-        self.nullifies.reset(self.participants);
-        self.clear_compacted(Self::NULLIFY_SEEN);
-    }
-
     /// Clears all finalize votes and releases their storage.
     pub fn clear_finalizes(&mut self) {
         self.finalizes.reset(self.participants);
@@ -3846,18 +3840,12 @@ mod tests {
         let scheme = &fixture.schemes[usize::from(signer)];
         let proposal = Proposal::new(round, View::zero(), sample_digest(1));
         let notarize = Vote::Notarize(Notarize::sign(scheme, proposal.clone()).unwrap());
-        let nullify = Vote::Nullify(Nullify::sign::<Sha256>(scheme, round).unwrap());
         let finalize = Vote::Finalize(Finalize::sign(scheme, proposal.clone()).unwrap());
 
         tracker.release_notarizes(&proposal);
-        tracker.release_nullifies();
         tracker.release_finalizes(&proposal);
         assert!(matches!(
             tracker.record(&notarize, Some(&proposal)),
-            Outcome::Added { retained: false }
-        ));
-        assert!(matches!(
-            tracker.record(&nullify, Some(&proposal)),
             Outcome::Added { retained: false }
         ));
         assert!(matches!(
@@ -3865,23 +3853,12 @@ mod tests {
             Outcome::Added { retained: false }
         ));
         assert!(tracker.has_notarize_for(signer, &proposal));
-        assert!(matches!(
-            tracker.saw_nullify(signer),
-            Some(ObservedVote::Compacted)
-        ));
         assert!(tracker.has_finalize_for(signer, &proposal));
 
         tracker.clear_notarizes();
         assert!(!tracker.has_notarize_for(signer, &proposal));
         assert!(matches!(
             tracker.record(&notarize, Some(&proposal)),
-            Outcome::Added { retained: true }
-        ));
-
-        tracker.clear_nullifies();
-        assert!(tracker.saw_nullify(signer).is_none());
-        assert!(matches!(
-            tracker.record(&nullify, Some(&proposal)),
             Outcome::Added { retained: true }
         ));
 
