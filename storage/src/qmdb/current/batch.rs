@@ -21,7 +21,7 @@ use crate::{
         batch_chain::Bounds,
         bitmap::{Shared, fill_from},
         current::{
-            db::{compute_db_root, read_graft_inputs},
+            db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
         },
         operation::Key,
@@ -880,16 +880,7 @@ where
     // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
     // coexist; this branch only handles partial. The pending chunk (when present) is read
     // from the bitmap inside `compute_db_root` via `pending_chunk()`.
-    let partial = {
-        let rem = bitmap_batch.len() % BitmapBatch::<N>::CHUNK_SIZE_BITS;
-        if rem == 0 {
-            None
-        } else {
-            let idx = new_complete_chunks;
-            let chunk = bitmap_batch.get_chunk(idx);
-            Some((chunk, rem))
-        }
-    };
+    let partial = partial_chunk::<_, N>(&bitmap_batch);
     let canonical_root = compute_db_root::<F, H, _, _, N>(
         &bitmap_batch,
         &grafted_storage,

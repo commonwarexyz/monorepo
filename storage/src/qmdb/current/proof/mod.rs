@@ -571,9 +571,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
             range_proof,
         })
     }
-}
 
-impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     /// Verify that the proof proves that `operation` is active in the database with the given
     /// `root`.
     pub fn verify<H: Hasher<Digest = D>, O: Codec>(&self, operation: O, root: &D) -> bool {

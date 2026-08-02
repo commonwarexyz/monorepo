@@ -61,9 +61,7 @@ impl<F: Family> Request<F> {
             Self::Boundary { .. } => NonZeroU64::MIN,
         }
     }
-}
 
-impl<F: Family> Request<F> {
     /// Total-order key for map lookups. The final component separates the variants.
     fn order_key(&self) -> (u64, u64, u64, bool) {
         (

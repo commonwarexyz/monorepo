@@ -20,7 +20,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -48,7 +48,7 @@ impl<
     S: Strategy,
 > Db<F, E, K, V, H, T, N, S>
 where
-    Operation<F, K, V>: Codec,
+    Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -97,7 +97,7 @@ pub mod partitioned {
         S: Strategy,
     > Db<F, E, K, V, H, T, P, N, S>
     where
-        Operation<F, K, V>: Codec,
+        Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
         pub async fn init(
