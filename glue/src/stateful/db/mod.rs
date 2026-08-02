@@ -366,7 +366,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 /// assert!(barrier.durable().await);
 /// # }
 /// ```
-#[must_use = "deferred flush failures surface only here; await `durable`"]
+#[must_use = "await `durable` to surface deferred flush failures"]
 pub struct Barrier {
     syncs: Vec<(&'static str, Option<usize>, Handle<()>)>,
 }
