@@ -1,0 +1,14 @@
+.git
+.jj
+target
+**/target
+benchmark-tracking-results
+examples/log-multimmit/deploy
+examples/log-multimmit/aws
+**/fuzz/artifacts
+**/fuzz/corpus
+**/fuzz/coverage
+**/.DS_Store
+**/*.swp
+**/.idea
+**/.vscode
