@@ -89,6 +89,7 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
@@ -98,9 +99,61 @@ mod tests {
             fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::sequence::U64;
+    use commonware_utils::sequence::{U64, Unit};
     use futures::FutureExt as _;
     use rand::{Rng, RngExt as _};
+    use std::num::NonZeroUsize;
+
+    #[test_traced]
+    fn test_bounded_init_discards_oversized_blob() {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.resize(65).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            let metadata = Metadata::<_, Unit, Unit>::init_bounded(
+                context.child("open"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: (),
+                },
+                NonZeroUsize::new(64).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(metadata.get(&Unit), None);
+            drop(metadata);
+
+            let (_, len) = context.open("test", b"left").await.unwrap();
+            assert_eq!(len, 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_checksum_valid_zero_progress_encoding_is_discarded() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut encoded = 0u64.to_be_bytes().to_vec();
+            encoded.push(1);
+            let checksum = Crc32::checksum(&encoded);
+            encoded.extend_from_slice(&checksum.to_be_bytes());
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.write_at(0, encoded, WriteOptions::SYNC)
+                .await
+                .unwrap();
+
+            let metadata = Metadata::<_, Unit, Unit>::init(
+                context.child("open"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(metadata.get(&Unit), None);
+        });
+    }
 
     #[test_traced]
     fn test_start_sync_pipelined_destroy() {

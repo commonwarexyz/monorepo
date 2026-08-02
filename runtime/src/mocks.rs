@@ -367,6 +367,8 @@ struct State {
     entered: usize,
     /// Started syncs that completed durably.
     completions: usize,
+    /// Start the inner sync before parking its completion.
+    completion_delayed: bool,
 }
 
 impl State {
@@ -631,11 +633,19 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
     async fn start_sync(&self) -> Handle<()> {
         let pending = self.pending.clone();
         let inner = self.inner.clone();
-        let waiter = {
+        let (waiter, completion_delayed) = {
             let mut state = pending.state.lock();
             state.starts += 1;
             // An armed gate takes precedence over parking.
-            state.observe().or_else(|| state.park())
+            (
+                state.observe().or_else(|| state.park()),
+                state.completion_delayed,
+            )
+        };
+        let started = if completion_delayed {
+            Some(self.inner.start_sync().await)
+        } else {
+            None
         };
         Handle::from_future(async move {
             let fail = {
@@ -648,7 +658,10 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
                 None if fail => return Err(injected_sync_failure()),
                 None => {}
             }
-            inner.sync().await?;
+            match started {
+                Some(started) => started.await?,
+                None => inner.sync().await?,
+            }
             pending.state.lock().completions += 1;
             Ok(())
         })
@@ -734,6 +747,13 @@ struct SyncGateState {
 }
 
 impl PendingSyncs {
+    /// Creates a gate that starts inner syncs immediately and delays only their completion.
+    pub fn completion_delayed() -> Self {
+        let pending = Self::default();
+        pending.state.lock().completion_delayed = true;
+        pending
+    }
+
     /// Locks the deferred sync queue.
     pub fn lock(&self) -> commonware_utils::sync::MappedMutexGuard<'_, Vec<DeferredSync>> {
         commonware_utils::sync::MutexGuard::map(self.state.lock(), |state| &mut state.syncs)
@@ -1039,6 +1059,37 @@ mod tests {
     use crate::{Clock, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
+
+    #[test]
+    fn completion_delayed_sync_starts_before_release() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let storage =
+                crate::storage::memory::Storage::new(context.storage_buffer_pool().clone());
+            let (inner, _) = storage.open("partition", b"blob").await.unwrap();
+            inner.write_at(0, b"old").await.unwrap();
+
+            let pending = PendingSyncs::completion_delayed();
+            let blob = DelayedSyncBlob {
+                inner,
+                pending: pending.clone(),
+            };
+            let completion = blob.start_sync().await;
+
+            assert_eq!(pending.starts(), 1);
+            assert_eq!(pending.lock().len(), 1);
+
+            blob.write_at(0, b"new").await.unwrap();
+            drop(blob);
+
+            let (reopened, len) = storage.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 3);
+            assert_eq!(reopened.read_at(0, 3).await.unwrap().coalesce(), b"old");
+
+            release_pending_syncs(&pending);
+            completion.await.unwrap();
+        });
+    }
 
     #[test]
     fn test_send_recv() {

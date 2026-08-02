@@ -716,8 +716,8 @@ mod tests {
     // (elector, scheme) fixture.
     macro_rules! for_each_fixture {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, bls12381_threshold_vrf_min_pk, Random, bls12381_threshold_vrf::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_threshold_vrf_min_sig, Random, bls12381_threshold_vrf::fixture::<MinSig, _>);
+            $cb!($($args)*, bls12381_threshold_vrf_min_pk, Random<MinPk>, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            $cb!($($args)*, bls12381_threshold_vrf_min_sig, Random<MinSig>, bls12381_threshold_vrf::fixture::<MinSig, _>);
             $cb!($($args)*, bls12381_threshold_std_min_pk, RoundRobin, bls12381_threshold_std::fixture::<MinPk, _>);
             $cb!($($args)*, bls12381_threshold_std_min_sig, RoundRobin, bls12381_threshold_std::fixture::<MinSig, _>);
             $cb!($($args)*, bls12381_multisig_min_pk, RoundRobin, bls12381_multisig::fixture::<MinPk, _>);
@@ -1051,7 +1051,7 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
         T: Strategy,
     {
         // Create context
@@ -1289,16 +1289,17 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
-        all_online::<_, _, Random, _>(bls12381_threshold_vrf::fixture::<MinPk, _>, |context| {
-            context.strategy(NZUsize!(2))
-        });
+        all_online::<_, _, Random<MinPk>, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            |context| context.strategy(NZUsize!(2)),
+        );
     }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         non_genesis_floor_joiner_catches_tip_with_term::<S, F, L>(L::default(), fixture);
     }
@@ -1307,7 +1308,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // First let a quorum finalize beyond genesis so the joiner has a real
         // floor certificate and existing tip to catch.
@@ -1582,7 +1583,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        RoundRobin: elector::Config<S>,
+        RoundRobin: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let required_containers = View::new(50);
@@ -1824,10 +1825,8 @@ mod tests {
             engine.start(pending, recovered, resolver);
         }
 
-        let participants_set = participants.clone().try_into().unwrap();
-        let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
-            elector.build(&participants_set);
-        let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+        let built_elector = elector.rotation(participants.len());
+        let leader_idx = usize::from(built_elector.leader(Round::new(epoch, View::new(1))));
 
         (reporters, leader_idx, oracle)
     }
@@ -1991,7 +1990,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n_active = 5;
@@ -2143,7 +2142,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         unclean_shutdown_with_term::<S, F, L>(L::default(), fixture);
     }
@@ -2152,7 +2151,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 5;
@@ -2362,7 +2361,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         backfill_with_term::<S, F, L>(L::default(), fixture);
     }
@@ -2371,7 +2370,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 4;
@@ -2633,7 +2632,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         one_offline_with_term::<S, F, L>(L::default(), fixture);
     }
@@ -2642,7 +2641,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 5;
@@ -2881,7 +2880,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 5;
@@ -3053,7 +3052,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 5;
@@ -3248,7 +3247,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 4;
@@ -3482,7 +3481,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         partition_with_term::<S, F, L>(L::default(), fixture);
     }
@@ -3491,7 +3490,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 10;
@@ -3682,7 +3681,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         slow_and_lossy_links_seeded_with_term::<S, F, L>(L::default(), seed, fixture)
     }
@@ -3695,7 +3694,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 5;
@@ -3834,7 +3833,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         slow_and_lossy_links_seeded::<_, _, L>(6, fixture)
     }
@@ -3859,7 +3858,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -3898,7 +3897,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 4;
@@ -4063,7 +4062,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 4;
@@ -4111,7 +4110,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = wrapped::Config(L::default());
+            let elector = wrapped::Config::<_, S>::new(L::default());
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -4228,7 +4227,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 4;
         let required_containers = View::new(10);
@@ -4394,7 +4393,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 4;
         let epoch = Epoch::new(333);
@@ -4534,7 +4533,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 4;
@@ -4683,7 +4682,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         equivocator_seeded_with_term::<S, F, L>(seed, L::default(), fixture)
     }
@@ -4692,7 +4691,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 7;
@@ -4926,7 +4925,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let detected = (0..5).any(|seed| equivocator_seeded::<_, _, L>(seed, fixture));
         assert!(
@@ -4961,7 +4960,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 4;
@@ -5109,7 +5108,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 4;
@@ -5270,7 +5269,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 4;
@@ -5411,7 +5410,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 10;
@@ -5547,7 +5546,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 1;
         let namespace = b"consensus".to_vec();
@@ -5678,7 +5677,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         engine_shutdown::<S, F, L>(seed, fixture, false);
     }
@@ -5689,7 +5688,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         engine_shutdown::<S, F, L>(seed, fixture, true);
     }
@@ -5700,7 +5699,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 3;
         let required_containers = View::new(10);
@@ -5883,7 +5882,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Scenario:
         // - View F: Finalization of B_1 seen by all participants.
@@ -6252,7 +6251,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6537,7 +6536,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6827,7 +6826,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7117,7 +7116,7 @@ mod tests {
     fn tle<V, L>()
     where
         V: Variant,
-        L: elector::Config<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
+        L: elector::Config<PublicKey, bls12381_threshold_vrf::Certificate<V>>,
     {
         // Create context
         let n = 4;
@@ -7254,8 +7253,8 @@ mod tests {
 
     #[test_traced]
     fn test_tle() {
-        tle::<MinPk, Random>();
-        tle::<MinSig, Random>();
+        tle::<MinPk, Random<MinPk>>();
+        tle::<MinSig, Random<MinSig>>();
     }
 
     fn run_hailstorm<S, F, L>(
@@ -7268,7 +7267,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // Create context
         let n = 5;
@@ -7575,7 +7574,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         assert_eq!(
             run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
@@ -7673,7 +7672,7 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
@@ -8212,7 +8211,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         twins_campaign::<_, _, L>(
             &mut test_rng(),

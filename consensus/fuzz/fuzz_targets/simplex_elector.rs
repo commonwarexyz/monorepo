@@ -38,7 +38,7 @@ struct FuzzInput {
 fn fuzz<S, L>(input: &FuzzInput, elector_config: L, certificate: Option<&S::Certificate>)
 where
     S: Scheme<PublicKey = PublicKey>,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
 {
     let Ok(participants) = (1..=input.participants_count)
         .map(|i| {
@@ -92,10 +92,18 @@ fuzz_target!(|input: FuzzInput| {
             fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }
         FuzzElector::RandomMinPk(certificate) => {
-            fuzz::<bls12381_threshold_vrf::Scheme<_, MinPk>, _>(&input, Random, Some(certificate));
+            fuzz::<bls12381_threshold_vrf::Scheme<_, MinPk>, _>(
+                &input,
+                Random::<MinPk>::default(),
+                Some(certificate),
+            );
         }
         FuzzElector::RandomMinSig(certificate) => {
-            fuzz::<bls12381_threshold_vrf::Scheme<_, MinSig>, _>(&input, Random, Some(certificate));
+            fuzz::<bls12381_threshold_vrf::Scheme<_, MinSig>, _>(
+                &input,
+                Random::<MinSig>::default(),
+                Some(certificate),
+            );
         }
     }
 });

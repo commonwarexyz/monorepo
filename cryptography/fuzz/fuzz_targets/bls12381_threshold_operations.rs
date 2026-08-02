@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G2, Share},
-    ops::threshold,
+    ops::{aggregate, threshold},
     sharing::Sharing,
     variant::{MinPk, MinSig, PartialSignature},
 };
@@ -106,11 +106,21 @@ enum FuzzOperation {
     SerializeShare {
         share: Share,
     },
+    VerifyAggregateMinPk {
+        sharing: Sharing<MinPk>,
+        transcript: Vec<(Participant, Vec<u8>, Vec<u8>)>,
+        signature: aggregate::Signature<MinPk>,
+    },
+    VerifyAggregateMinSig {
+        sharing: Sharing<MinSig>,
+        transcript: Vec<(Participant, Vec<u8>, Vec<u8>)>,
+        signature: aggregate::Signature<MinSig>,
+    },
 }
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=16)?;
+        let choice = u.int_in_range(0..=18)?;
 
         match choice {
             0 => Ok(FuzzOperation::SignProofOfPossessionMinPk {
@@ -219,6 +229,34 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             16 => Ok(FuzzOperation::SerializeShare {
                 share: arbitrary_share(u)?,
+            }),
+            17 => Ok(FuzzOperation::VerifyAggregateMinPk {
+                sharing: u.arbitrary()?,
+                transcript: arbitrary_messages(u, 0, 10)?
+                    .into_iter()
+                    .map(|(namespace, message)| {
+                        Ok((
+                            Participant::new(u.int_in_range(0..=100)?),
+                            namespace,
+                            message,
+                        ))
+                    })
+                    .collect::<Result<_, arbitrary::Error>>()?,
+                signature: u.arbitrary()?,
+            }),
+            18 => Ok(FuzzOperation::VerifyAggregateMinSig {
+                sharing: u.arbitrary()?,
+                transcript: arbitrary_messages(u, 0, 10)?
+                    .into_iter()
+                    .map(|(namespace, message)| {
+                        Ok((
+                            Participant::new(u.int_in_range(0..=100)?),
+                            namespace,
+                            message,
+                        ))
+                    })
+                    .collect::<Result<_, arbitrary::Error>>()?,
+                signature: u.arbitrary()?,
             }),
             _ => {
                 panic!("Unsupported operation type");
@@ -458,6 +496,38 @@ fn fuzz(op: FuzzOperation) {
             if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
                 assert_eq!(share, decoded);
             }
+        }
+
+        FuzzOperation::VerifyAggregateMinPk {
+            sharing,
+            transcript,
+            signature,
+        } => {
+            let transcript = transcript.iter().map(|(signer, namespace, message)| {
+                (*signer, namespace.as_slice(), message.as_slice())
+            });
+            let _ = threshold::verify_partial_signature_aggregate::<MinPk>(
+                &sharing,
+                transcript,
+                &signature,
+                &Sequential,
+            );
+        }
+
+        FuzzOperation::VerifyAggregateMinSig {
+            sharing,
+            transcript,
+            signature,
+        } => {
+            let transcript = transcript.iter().map(|(signer, namespace, message)| {
+                (*signer, namespace.as_slice(), message.as_slice())
+            });
+            let _ = threshold::verify_partial_signature_aggregate::<MinSig>(
+                &sharing,
+                transcript,
+                &signature,
+                &Sequential,
+            );
         }
     }
 }

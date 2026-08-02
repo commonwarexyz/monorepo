@@ -18,7 +18,11 @@ use commonware_utils::ordered::Quorum;
 use rand::{Rng, RngExt as _, seq::IteratorRandom};
 use std::{collections::HashSet, sync::Arc};
 
-pub struct Config<S: certificate::Scheme, L: elector::Config<S>, H: Hasher> {
+pub struct Config<
+    S: certificate::Scheme,
+    L: elector::Config<S::PublicKey, S::Certificate>,
+    H: Hasher,
+> {
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
@@ -28,7 +32,7 @@ pub struct Config<S: certificate::Scheme, L: elector::Config<S>, H: Hasher> {
 pub struct Equivocator<
     E: Clock + Rng + Spawner,
     S: Scheme<H::Digest>,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     H: Hasher,
 > {
     context: ContextCell<E>,
@@ -39,8 +43,12 @@ pub struct Equivocator<
     sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: Hasher>
-    Equivocator<E, S, L, H>
+impl<
+    E: Clock + Rng + Spawner,
+    S: Scheme<H::Digest>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
+    H: Hasher,
+> Equivocator<E, S, L, H>
 {
     pub fn new(context: E, cfg: Config<S, L, H>) -> Self {
         let elector = cfg.elector.build(cfg.scheme.participants());

@@ -68,7 +68,7 @@ mod tests {
         simplex::{
             self, Plan,
             config::ForwardingPolicy,
-            elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
+            elector::{RoundRobin, RoundRobinElector},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
                 Certificate, Finalization, Notarization, Notarize, Nullification, Nullify,
@@ -2108,12 +2108,12 @@ mod tests {
             let byzantine = participants[3].clone();
             let victim = participants[1].clone();
             let observer = participants[0].clone();
-            let elector: RoundRobinElector<S> =
-                RoundRobin::<Sha256>::default().build(schemes[1].participants());
+            let elector: RoundRobinElector =
+                RoundRobin::<Sha256>::default().rotation(schemes[1].participants().len());
             assert_eq!(
                 schemes[1]
                     .participants()
-                    .key(elector.elect(Round::new(Epoch::zero(), View::new(3)), None)),
+                    .key(elector.leader(Round::new(Epoch::zero(), View::new(3)))),
                 Some(&byzantine),
             );
 

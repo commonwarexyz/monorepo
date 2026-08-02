@@ -10,6 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{Participant, modulo, test_rng};
+use std::marker::PhantomData;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
@@ -26,11 +27,30 @@ pub struct Scheme<S> {
 #[derive(Clone, Debug)]
 pub struct Elector<E, S> {
     inner: E,
-    _phantom: std::marker::PhantomData<S>,
+    _phantom: PhantomData<S>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Config<L>(pub L);
+#[derive(Debug)]
+pub struct Config<L, S>(pub L, pub PhantomData<S>);
+
+impl<L: Clone, S> Clone for Config<L, S> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData)
+    }
+}
+
+impl<L: Default, S> Default for Config<L, S> {
+    fn default() -> Self {
+        Self(L::default(), PhantomData)
+    }
+}
+
+impl<L, S> Config<L, S> {
+    /// Wraps `inner` for the mutating [`Scheme`] wrapper.
+    pub const fn new(inner: L) -> Self {
+        Self(inner, PhantomData)
+    }
+}
 
 impl<S> Scheme<S> {
     pub const fn new(inner: S, behavior: Behavior) -> Self {
@@ -108,10 +128,10 @@ impl<S> Scheme<S> {
     }
 }
 
-impl<S, L> elector::Config<Scheme<S>> for Config<L>
+impl<S, L> elector::Config<S::PublicKey, <Scheme<S> as Verifier>::Certificate> for Config<L, S>
 where
     S: CertificateScheme,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
 {
     type Elector = Elector<L::Elector, S>;
 
@@ -126,10 +146,10 @@ where
     }
 }
 
-impl<S, E> elector::Elector<Scheme<S>> for Elector<E, S>
+impl<S, E> elector::Elector<<Scheme<S> as Verifier>::Certificate> for Elector<E, S>
 where
     S: CertificateScheme,
-    E: elector::Elector<S>,
+    E: elector::Elector<S::Certificate>,
 {
     fn terms(&self) -> Terms {
         self.inner.terms()

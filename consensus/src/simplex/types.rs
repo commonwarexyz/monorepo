@@ -1,5 +1,6 @@
 //! Types used in [crate::simplex].
 
+pub use crate::types::{Attributable, AttributableMap};
 use crate::{
     Epochable, Viewable,
     simplex::scheme::{self, CertificateVerifier},
@@ -89,84 +90,6 @@ where
             leader: P::arbitrary(u)?,
             parent: (View::arbitrary(u)?, D::arbitrary(u)?),
         })
-    }
-}
-
-/// Attributable is a trait that provides access to the signer index.
-/// This is used to identify which participant signed a given message.
-pub trait Attributable {
-    /// Returns the index of the signer (validator) who produced this message.
-    fn signer(&self) -> Participant;
-}
-
-/// A map of [Attributable] items keyed by their signer index.
-///
-/// The key for each item is automatically inferred from [Attributable::signer()].
-/// Each signer can insert at most one item.
-pub struct AttributableMap<T: Attributable> {
-    participants: usize,
-    data: Vec<Option<T>>,
-    added: usize,
-}
-
-impl<T: Attributable> AttributableMap<T> {
-    /// Creates a new [AttributableMap] with the given number of participants.
-    pub const fn new(participants: usize) -> Self {
-        Self {
-            participants,
-            data: Vec::new(),
-            added: 0,
-        }
-    }
-
-    /// Clears all existing items and releases their storage.
-    pub fn clear(&mut self) {
-        self.data = Vec::new();
-        self.added = 0;
-    }
-
-    /// Inserts an item into the map, using [Attributable::signer()] as the key,
-    /// if it has not been added yet.
-    ///
-    /// Returns `true` if the item was inserted, `false` if an item from this
-    /// signer already exists or if the signer index is out of bounds.
-    pub fn insert(&mut self, item: T) -> bool {
-        let index: usize = item.signer().into();
-        if index >= self.participants {
-            return false;
-        }
-        if self.data.is_empty() {
-            // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
-            self.data.reserve_exact(self.participants);
-            self.data.resize_with(self.participants, || None);
-        }
-        if self.data[index].is_some() {
-            return false;
-        }
-        self.data[index] = Some(item);
-        self.added += 1;
-        true
-    }
-
-    /// Returns the number of items in the [AttributableMap].
-    pub const fn len(&self) -> usize {
-        self.added
-    }
-
-    /// Returns `true` if the [AttributableMap] is empty.
-    pub const fn is_empty(&self) -> bool {
-        self.added == 0
-    }
-
-    /// Returns a reference to the item associated with the given signer, if present.
-    pub fn get(&self, signer: Participant) -> Option<&T> {
-        self.data.get(<usize>::from(signer))?.as_ref()
-    }
-
-    /// Returns an iterator over items in the map, ordered by signer index
-    /// ([Attributable::signer()]).
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.data.iter().filter_map(|o| o.as_ref())
     }
 }
 
@@ -3761,91 +3684,6 @@ mod tests {
         finalization_verify_wrong_scheme(bls12381_threshold_std::fixture::<MinSig, _>);
     }
 
-    struct MockAttributable(Participant);
-
-    impl Attributable for MockAttributable {
-        fn signer(&self) -> Participant {
-            self.0
-        }
-    }
-
-    #[test]
-    fn test_attributable_map() {
-        let mut map = AttributableMap::new(5);
-        assert_eq!(map.len(), 0);
-        assert!(map.is_empty());
-        assert_eq!(map.data.capacity(), 0, "empty maps should allocate lazily");
-
-        // Test get on empty map
-        for i in 0..5 {
-            assert!(map.get(Participant::new(i)).is_none());
-        }
-
-        assert!(map.insert(MockAttributable(Participant::new(3))));
-        assert!(map.data.capacity() >= 5);
-        assert_eq!(map.len(), 1);
-        assert!(!map.is_empty());
-        let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(3)));
-        assert!(iter.next().is_none());
-        drop(iter);
-
-        // Test get on existing item
-        assert!(
-            matches!(map.get(Participant::new(3)), Some(a) if a.signer() == Participant::new(3))
-        );
-
-        assert!(map.insert(MockAttributable(Participant::new(1))));
-        assert_eq!(map.len(), 2);
-        assert!(!map.is_empty());
-        let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(1)));
-        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(3)));
-        assert!(iter.next().is_none());
-        drop(iter);
-
-        // Test get on both items
-        assert!(
-            matches!(map.get(Participant::new(1)), Some(a) if a.signer() == Participant::new(1))
-        );
-        assert!(
-            matches!(map.get(Participant::new(3)), Some(a) if a.signer() == Participant::new(3))
-        );
-
-        // Test get on non-existing items
-        assert!(map.get(Participant::new(0)).is_none());
-        assert!(map.get(Participant::new(2)).is_none());
-        assert!(map.get(Participant::new(4)).is_none());
-
-        assert!(!map.insert(MockAttributable(Participant::new(3))));
-        assert_eq!(map.len(), 2);
-        assert!(!map.is_empty());
-        let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(1)));
-        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(3)));
-        assert!(iter.next().is_none());
-        drop(iter);
-
-        // Test out-of-bounds signer indices
-        assert!(!map.insert(MockAttributable(Participant::new(5))));
-        assert!(!map.insert(MockAttributable(Participant::new(100))));
-        assert_eq!(map.len(), 2);
-
-        // Test clear
-        map.clear();
-        assert_eq!(map.len(), 0);
-        assert!(map.is_empty());
-        assert!(map.iter().next().is_none());
-        assert_eq!(map.data.capacity(), 0, "clear should release vote storage");
-
-        // Verify can insert after clear
-        assert!(map.insert(MockAttributable(Participant::new(2))));
-        assert_eq!(map.len(), 1);
-        let mut iter = map.iter();
-        assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(2)));
-        assert!(iter.next().is_none());
-    }
-
     #[test]
     fn test_vote_tracker_clears_compacted_state() {
         let mut rng = test_rng();
@@ -3948,10 +3786,9 @@ mod tests {
             releasing.record(&vote, Some(&proposal)),
             Outcome::Added { retained: true }
         ));
-        let Phase::Full(votes) = &releasing.notarizes else {
+        let Phase::Full(_votes) = &releasing.notarizes else {
             panic!("notarize phase compacted before certification");
         };
-        assert!(votes.data.capacity() >= 2);
         releasing.release_notarizes(&proposal);
         assert!(matches!(&releasing.notarizes, Phase::Compacted));
         assert!(matches!(
@@ -3978,15 +3815,13 @@ mod tests {
             retaining.record(&vote, Some(&proposal)),
             Outcome::Added { retained: true }
         ));
-        let Phase::Full(votes) = &retaining.notarizes else {
+        let Phase::Full(_votes) = &retaining.notarizes else {
             panic!("retained notarize phase compacted");
         };
-        let retained_capacity = votes.data.capacity();
         retaining.release_notarizes(&proposal);
-        let Phase::Full(votes) = &retaining.notarizes else {
+        let Phase::Full(_votes) = &retaining.notarizes else {
             panic!("retained notarize phase compacted");
         };
-        assert_eq!(votes.data.capacity(), retained_capacity);
         assert!(retaining.notarize(signer).is_some());
     }
 

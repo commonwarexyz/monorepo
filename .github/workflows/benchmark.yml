@@ -54,6 +54,9 @@ jobs:
           - package: commonware-utils
             cargo_flags: ""
             benchmark_name: "commonware-utils"
+          - package: commonware-consensus
+            cargo_flags: ""
+            benchmark_name: "commonware-consensus"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Run setup
@@ -106,6 +109,8 @@ jobs:
             benchmark_name: "commonware-formatting"
           - package: commonware-utils
             benchmark_name: "commonware-utils"
+          - package: commonware-consensus
+            benchmark_name: "commonware-consensus"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Download benchmark result
@@ -138,3 +143,6 @@ jobs:
           benchmark-data-dir-path: 'docs'
           auto-push: true
           max-items-in-chart: 60
+          alert-threshold: ${{ matrix.package == 'commonware-consensus' && '105%' || '200%' }}
+          fail-threshold: ${{ matrix.package == 'commonware-consensus' && '105%' || '200%' }}
+          fail-on-alert: ${{ matrix.package == 'commonware-consensus' }}

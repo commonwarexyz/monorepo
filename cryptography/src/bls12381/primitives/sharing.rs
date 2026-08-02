@@ -311,9 +311,16 @@ impl<V: Variant> Sharing<V> {
         }
     }
 
-    /// Get the mode used for this sharing.
+    /// Get the mode used for this sharing within the cryptography crate.
     #[cfg(feature = "std")]
     pub(crate) const fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Returns how participants are assigned sharing evaluation points.
+    #[cfg(feature = "std")]
+    #[stability(ALPHA)]
+    pub const fn evaluation_mode(&self) -> Mode {
         self.mode
     }
 

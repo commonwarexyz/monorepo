@@ -8,6 +8,8 @@
 //! Threshold signatures allow a group of participants to collectively sign a message
 //! where at least `t` out of `n` participants must contribute partial signatures.
 
+#[stability(ALPHA)]
+use super::aggregate;
 use super::{
     super::{
         Error,
@@ -20,9 +22,39 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
+use commonware_macros::stability;
+#[stability(ALPHA)]
+use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
 use commonware_utils::{Participant, ordered::Map, union_unique};
+#[stability(ALPHA)]
+use hashbrown::HashSet;
 use rand_core::CryptoRng;
+
+#[stability(ALPHA)]
+fn validate_aggregate_signers<V: Variant>(
+    sharing: &Sharing<V>,
+    signers: impl IntoIterator<Item = Participant>,
+) -> Result<(), Error> {
+    let mut participants = HashSet::new();
+    let mut publics = HashSet::new();
+
+    for signer in signers {
+        if !participants.insert(signer) {
+            return Err(Error::DuplicateEval);
+        }
+
+        let public = sharing.partial_public(signer)?;
+        if public == V::Public::zero() || !publics.insert(public) {
+            return Err(Error::InvalidSignature);
+        }
+    }
+
+    if participants.is_empty() {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(())
+}
 
 /// Prepares partial signature evaluations for threshold recovery.
 fn prepare_evaluations<'a, V: Variant>(
@@ -91,6 +123,70 @@ pub fn verify_message<V: Variant>(
         message,
         &partial.value,
     )
+}
+
+/// Verifies and aggregates partial signatures without threshold recovery.
+///
+/// Each entry contains the namespace, exact message, and attributed partial signature. Signers must
+/// be unique and belong to `sharing`. Unlike [`recover`], this operation does not require or imply
+/// that the recovery threshold has been reached.
+///
+/// Aggregating already-invalid partials can hide cancelling errors. This constructor verifies every
+/// partial before combining it and should be used when assembling an aggregate from untrusted input.
+#[stability(ALPHA)]
+pub fn aggregate_partial_signatures<'a, V: Variant>(
+    sharing: &Sharing<V>,
+    entries: impl IntoIterator<Item = (&'a [u8], &'a [u8], &'a PartialSignature<V>)>,
+    strategy: &impl Strategy,
+) -> Result<aggregate::Signature<V>, Error> {
+    let entries: Vec<_> = entries.into_iter().collect();
+    validate_aggregate_signers::<V>(sharing, entries.iter().map(|entry| entry.2.index))?;
+
+    strategy.try_map_collect_vec(entries.iter(), |(namespace, message, partial)| {
+        verify_message::<V>(sharing, namespace, message, partial)
+    })?;
+
+    let signature =
+        aggregate::combine_signatures::<V, _>(entries.iter().map(|entry| &entry.2.value));
+    verify_partial_signature_aggregate::<V>(
+        sharing,
+        entries
+            .iter()
+            .map(|entry| (entry.2.index, entry.0, entry.1)),
+        &signature,
+        strategy,
+    )?;
+    Ok(signature)
+}
+
+/// Verifies an aggregate of threshold partial signatures over an exact attributed transcript.
+///
+/// Public keys are derived from `sharing`; callers cannot substitute independent keys or detach a
+/// signer from its message. The transcript may contain repeated messages, but every signer must be
+/// unique. This verifies aggregate participation evidence and never performs threshold recovery.
+///
+/// # Security
+///
+/// This function proves only the aggregate equation for the supplied transcript. In particular, it
+/// does not make same-message threshold shares permanently attributable after enough shares have
+/// been disclosed to recover the threshold signature.
+#[stability(ALPHA)]
+pub fn verify_partial_signature_aggregate<'a, V: Variant>(
+    sharing: &Sharing<V>,
+    transcript: impl IntoIterator<Item = (Participant, &'a [u8], &'a [u8])>,
+    signature: &aggregate::Signature<V>,
+    strategy: &impl Strategy,
+) -> Result<(), Error> {
+    let transcript: Vec<_> = transcript.into_iter().collect();
+    validate_aggregate_signers::<V>(sharing, transcript.iter().map(|entry| entry.0))?;
+    let transcript = transcript
+        .into_iter()
+        .map(|(signer, namespace, message)| {
+            Ok((sharing.partial_public(signer)?, namespace, message))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    aggregate::verify_transcript_inner::<V>(transcript, signature, strategy)
 }
 
 /// Verifies the proof of possession for the provided public polynomial.
@@ -355,7 +451,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{Faults, N3f1, NZU32, NZUsize, test_rng, union_unique};
+    use commonware_utils::{Faults, N3f1, N5f1, NZU32, NZUsize, test_rng, union_unique};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
@@ -1251,5 +1347,313 @@ mod tests {
     fn test_batch_verify_same_signer_rejects_malleability() {
         batch_verify_same_signer_rejects_malleability::<MinPk>();
         batch_verify_same_signer_rejects_malleability::<MinSig>();
+    }
+
+    fn aggregate_shape<V: Variant>(messages: &[(&[u8], &[u8])]) {
+        let mut rng = test_rng();
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(6));
+        let partials: Vec<_> = shares
+            .iter()
+            .zip(messages)
+            .map(|(share, (namespace, message))| sign_message::<V>(share, namespace, message))
+            .collect();
+        let entries: Vec<_> = messages
+            .iter()
+            .zip(&partials)
+            .map(|((namespace, message), partial)| (*namespace, *message, partial))
+            .collect();
+
+        let aggregate =
+            aggregate_partial_signatures::<V>(&sharing, entries.iter().copied(), &Sequential)
+                .expect("valid partials should aggregate");
+        let transcript = entries
+            .iter()
+            .map(|(namespace, message, partial)| (partial.index, *namespace, *message));
+        verify_partial_signature_aggregate::<V>(&sharing, transcript, &aggregate, &Sequential)
+            .expect("valid aggregate should verify");
+
+        let reversed =
+            aggregate_partial_signatures::<V>(&sharing, entries.iter().rev().copied(), &Sequential)
+                .expect("entry order should not affect aggregation");
+        assert_eq!(aggregate, reversed);
+    }
+
+    fn aggregate_partial_signatures_support_message_shapes<V: Variant>() {
+        let namespace: &[u8] = b"test";
+        let same: &[u8] = b"same";
+        aggregate_shape::<V>(&[(namespace, same); 4]);
+        aggregate_shape::<V>(&[
+            (namespace, b"one"),
+            (namespace, b"two"),
+            (namespace, b"three"),
+            (namespace, b"four"),
+        ]);
+        aggregate_shape::<V>(&[
+            (namespace, b"same"),
+            (namespace, b"same"),
+            (namespace, b"other"),
+            (b"other-domain", b"same"),
+        ]);
+    }
+
+    #[test]
+    fn test_aggregate_partial_signatures_support_message_shapes() {
+        aggregate_partial_signatures_support_message_shapes::<MinPk>();
+        aggregate_partial_signatures_support_message_shapes::<MinSig>();
+    }
+
+    fn aggregate_partial_signatures_reject_invalid_input<V: Variant>() {
+        let mut rng = test_rng();
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(6));
+        let namespace: &[u8] = b"test";
+        let messages: [&[u8]; 3] = [b"one", b"two", b"three"];
+        let partials: Vec<_> = shares
+            .iter()
+            .zip(messages)
+            .map(|(share, message)| sign_message::<V>(share, namespace, message))
+            .collect();
+        let entries: Vec<_> = partials
+            .iter()
+            .zip(messages)
+            .map(|(partial, message)| (namespace, message, partial))
+            .collect();
+        let aggregate =
+            aggregate_partial_signatures::<V>(&sharing, entries.iter().copied(), &Sequential)
+                .expect("valid partials should aggregate");
+
+        let duplicate = [entries[0], entries[0]];
+        assert!(matches!(
+            aggregate_partial_signatures::<V>(&sharing, duplicate, &Sequential),
+            Err(Error::DuplicateEval)
+        ));
+        assert!(matches!(
+            verify_partial_signature_aggregate::<V>(
+                &sharing,
+                [
+                    (partials[0].index, namespace, messages[0]),
+                    (partials[0].index, namespace, messages[1]),
+                ],
+                &aggregate,
+                &Sequential,
+            ),
+            Err(Error::DuplicateEval)
+        ));
+
+        let out_of_range = Participant::new(sharing.total().get());
+        assert!(matches!(
+            verify_partial_signature_aggregate::<V>(
+                &sharing,
+                [(out_of_range, namespace, messages[0])],
+                &aggregate,
+                &Sequential,
+            ),
+            Err(Error::InvalidIndex)
+        ));
+        assert!(
+            verify_partial_signature_aggregate::<V>(&sharing, [], &aggregate, &Sequential).is_err()
+        );
+        assert!(
+            verify_partial_signature_aggregate::<V>(
+                &sharing,
+                [(partials[0].index, namespace, messages[0])],
+                &aggregate::Signature::zero(),
+                &Sequential,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_partial_signature_aggregate::<V>(
+                &sharing,
+                entries.iter().map(|(_, message, partial)| (
+                    partial.index,
+                    b"wrong".as_slice(),
+                    *message
+                )),
+                &aggregate,
+                &Sequential,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_partial_signature_aggregate::<V>(
+                &sharing,
+                entries
+                    .iter()
+                    .rev()
+                    .zip(entries.iter())
+                    .map(|(signer, message)| (signer.2.index, message.0, message.1)),
+                &aggregate,
+                &Sequential,
+            )
+            .is_err()
+        );
+
+        let wrong_share = PartialSignature {
+            index: partials[0].index,
+            value: partials[1].value,
+        };
+        assert!(
+            aggregate_partial_signatures::<V>(
+                &sharing,
+                [(namespace, messages[0], &wrong_share)],
+                &Sequential,
+            )
+            .is_err()
+        );
+
+        let mut corrupted = aggregate;
+        corrupted.add(&V::Signature::generator());
+        assert!(
+            verify_partial_signature_aggregate::<V>(
+                &sharing,
+                entries.iter().map(|(namespace, message, partial)| (
+                    partial.index,
+                    *namespace,
+                    *message
+                )),
+                &corrupted,
+                &Sequential,
+            )
+            .is_err()
+        );
+
+        let delta = V::Signature::generator() * &Scalar::random(&mut rng);
+        let forged_first = PartialSignature {
+            index: partials[0].index,
+            value: partials[0].value - &delta,
+        };
+        let forged_second = PartialSignature {
+            index: partials[1].index,
+            value: partials[1].value + &delta,
+        };
+        assert_eq!(
+            forged_first.value + &forged_second.value,
+            partials[0].value + &partials[1].value
+        );
+        assert!(
+            aggregate_partial_signatures::<V>(
+                &sharing,
+                [
+                    (namespace, messages[0], &forged_first),
+                    (namespace, messages[1], &forged_second),
+                ],
+                &Sequential,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_aggregate_partial_signatures_reject_invalid_input() {
+        aggregate_partial_signatures_reject_invalid_input::<MinPk>();
+        aggregate_partial_signatures_reject_invalid_input::<MinSig>();
+    }
+
+    fn aggregate_and_recovery_remain_distinct<V: Variant>() {
+        let mut rng = test_rng();
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(6));
+        let required = sharing.required() as usize;
+        let vote_namespace: &[u8] = b"vote";
+        let finalize_namespace: &[u8] = b"finalize";
+        let mut vote_messages: Vec<Vec<u8>> = (0..required)
+            .map(|i| format!("vote-{i}").into_bytes())
+            .collect();
+        let vote_partials: Vec<_> = shares
+            .iter()
+            .take(required)
+            .zip(&vote_messages)
+            .map(|(share, message)| sign_message::<V>(share, vote_namespace, message))
+            .collect();
+        let finalize_partials: Vec<_> = shares
+            .iter()
+            .take(required)
+            .map(|share| sign_message::<V>(share, finalize_namespace, b"leader"))
+            .collect();
+
+        let participation = aggregate_partial_signatures::<V>(
+            &sharing,
+            vote_partials
+                .iter()
+                .zip(&vote_messages)
+                .map(|(partial, message)| (vote_namespace, message.as_slice(), partial)),
+            &Sequential,
+        )
+        .expect("heterogeneous vote bodies should aggregate");
+        verify_partial_signature_aggregate::<V>(
+            &sharing,
+            vote_partials
+                .iter()
+                .zip(&vote_messages)
+                .map(|(partial, message)| (partial.index, vote_namespace, message.as_slice())),
+            &participation,
+            &Sequential,
+        )
+        .expect("participation aggregate should verify");
+
+        let finalization = recover(&sharing, &finalize_partials, &Sequential)
+            .expect("the configured threshold should recover");
+        ops::verify_message::<V>(
+            sharing.public(),
+            finalize_namespace,
+            b"leader",
+            &finalization,
+        )
+        .expect("recovered finalization should verify");
+
+        assert!(matches!(
+            recover(&sharing, &finalize_partials[..required - 1], &Sequential),
+            Err(Error::NotEnoughPartialSignatures(_, _))
+        ));
+        let below_threshold = aggregate_partial_signatures::<V>(
+            &sharing,
+            vote_partials[..required - 1]
+                .iter()
+                .zip(&vote_messages[..required - 1])
+                .map(|(partial, message)| (vote_namespace, message.as_slice(), partial)),
+            &Sequential,
+        )
+        .expect("aggregation should not imply threshold recovery");
+        verify_partial_signature_aggregate::<V>(
+            &sharing,
+            vote_partials[..required - 1]
+                .iter()
+                .zip(&vote_messages[..required - 1])
+                .map(|(partial, message)| (partial.index, vote_namespace, message.as_slice())),
+            &below_threshold,
+            &Sequential,
+        )
+        .expect("a below-threshold aggregate remains valid participation evidence");
+
+        vote_messages[0][0] ^= 1;
+        assert!(
+            verify_partial_signature_aggregate::<V>(
+                &sharing,
+                vote_partials
+                    .iter()
+                    .zip(&vote_messages)
+                    .map(|(partial, message)| {
+                        (partial.index, vote_namespace, message.as_slice())
+                    }),
+                &participation,
+                &Sequential,
+            )
+            .is_err()
+        );
+        ops::verify_message::<V>(
+            sharing.public(),
+            finalize_namespace,
+            b"leader",
+            &finalization,
+        )
+        .expect("participation tampering must not change finalization proof");
+    }
+
+    #[test]
+    fn test_aggregate_and_recovery_remain_distinct() {
+        aggregate_and_recovery_remain_distinct::<MinPk>();
+        aggregate_and_recovery_remain_distinct::<MinSig>();
     }
 }
