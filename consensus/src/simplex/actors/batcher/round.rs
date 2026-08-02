@@ -26,7 +26,7 @@ enum Outcome {
     /// The signer was already recorded with the same known vote state.
     Duplicate,
     /// Compact state proves the signer changed its relation to the authoritative proposal.
-    ConflictingProposal,
+    Conflicting,
 }
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -184,6 +184,8 @@ impl<
             VoteRecord::NewCompacted => false,
             VoteRecord::DuplicateRetained => {
                 if constructed {
+                    // Nullify is reconstructed for each retry. Notarize and finalize
+                    // are one-shot local actions, so constructing either twice is a bug.
                     match &message {
                         Vote::Notarize(_) => panic!("duplicate notarize"),
                         Vote::Nullify(_) => {}
@@ -193,9 +195,11 @@ impl<
                 return Outcome::Duplicate;
             }
             VoteRecord::DuplicateCompacted => return Outcome::Duplicate,
-            VoteRecord::ConflictingProposal => return Outcome::ConflictingProposal,
+            VoteRecord::ConflictingProposal => return Outcome::Conflicting,
         };
 
+        // A compacted phase already has its certificate. Report newly observed signer
+        // evidence, but only retained full votes can contribute to certificate assembly.
         let verifier_message = retained.then(|| message.clone());
         let activity = match message {
             Vote::Notarize(notarize) => Activity::Notarize(notarize),
@@ -212,10 +216,7 @@ impl<
     /// Adds a durable locally constructed vote.
     pub fn add_constructed(&mut self, message: Vote<S, D>) {
         assert!(
-            !matches!(
-                self.accept_vote(message, true),
-                Outcome::ConflictingProposal
-            ),
+            !matches!(self.accept_vote(message, true), Outcome::Conflicting),
             "conflicting constructed vote"
         );
     }
@@ -276,7 +277,7 @@ impl<
                     None => match self.accept_vote(Vote::Notarize(notarize), false) {
                         Outcome::Added => true,
                         Outcome::Duplicate => false,
-                        Outcome::ConflictingProposal => {
+                        Outcome::Conflicting => {
                             commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
                             false
                         }
@@ -311,7 +312,7 @@ impl<
                     None => match self.accept_vote(Vote::Nullify(nullify), false) {
                         Outcome::Added => true,
                         Outcome::Duplicate => false,
-                        Outcome::ConflictingProposal => {
+                        Outcome::Conflicting => {
                             unreachable!("nullify votes do not carry proposals")
                         }
                     },
@@ -350,7 +351,7 @@ impl<
                     None => match self.accept_vote(Vote::Finalize(finalize), false) {
                         Outcome::Added => true,
                         Outcome::Duplicate => false,
-                        Outcome::ConflictingProposal => {
+                        Outcome::Conflicting => {
                             commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
                             false
                         }
