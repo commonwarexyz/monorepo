@@ -80,6 +80,9 @@ const NODE_EXPORTER_ARGS: &[&str] = &[
     "--path.sysfs=/host/sys",
     "--path.rootfs=/host/rootfs",
     "--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/.+)($|/)",
+    "--collector.ethtool",
+    "--collector.ethtool.device-exclude=^(lo|docker.*|veth.*|br-.*)$",
+    "--collector.qdisc",
 ];
 
 const NODE_EXPORTER_VOLUMES: &[&str] = &[
@@ -1555,6 +1558,9 @@ mod tests {
         assert!(!setup.contains("docker login"));
         assert!(setup.contains("sudo tee /etc/systemd/system/promtail.service"));
         assert!(setup.contains("sudo tee /etc/systemd/system/node_exporter.service"));
+        assert!(setup.contains("--collector.ethtool"));
+        assert!(setup.contains("--collector.ethtool.device-exclude="));
+        assert!(setup.contains("--collector.qdisc"));
         assert!(setup.contains("ExecStartPre=-/usr/local/bin/docker rm -f promtail"));
         assert!(setup.contains("ExecStart=/usr/local/bin/docker run --rm --name promtail"));
         assert!(!setup.contains("/usr/bin/docker"));
