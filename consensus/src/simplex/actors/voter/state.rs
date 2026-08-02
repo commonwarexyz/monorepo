@@ -1,4 +1,4 @@
-use super::round::Round;
+use super::{super::Purpose, round::Round};
 use crate::{
     Viewable,
     simplex::{
@@ -80,6 +80,18 @@ impl ParentPayloadError {
             Self::MissingNullification { .. } | Self::ParentNotCertified { .. } => false,
         }
     }
+}
+
+/// Outcome of [State::try_verify].
+pub enum Verify<S: Scheme<D>, D: Digest> {
+    Ready(Context<D, S::PublicKey>, Proposal<D>),
+    Resolve {
+        proposal_view: View,
+        view: View,
+        purpose: Purpose,
+        target: S::PublicKey,
+    },
+    Wait,
 }
 
 /// Configuration for initializing [`State`].
@@ -723,13 +735,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Attempt to verify a proposed block.
     ///
-    /// Unlike during proposal, we don't use a verification opportunity
-    /// to backfill missing certificates (a malicious proposer could
-    /// ask us to fetch junk).
-    #[allow(clippy::type_complexity)]
-    pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
+    /// Missing ancestry is requested from the proposal's elected leader.
+    pub fn try_verify(&mut self) -> Verify<S, D> {
         let view = self.view;
-        let (leader, proposal) = self.views.get(&view)?.should_verify()?;
+        let Some((leader, proposal)) = self
+            .views
+            .get(&view)
+            .and_then(|round| round.should_verify())
+        else {
+            return Verify::Wait;
+        };
         let parent_payload = match self.parent_payload(&proposal) {
             Ok(parent_payload) => parent_payload,
             Err(err) => {
@@ -744,18 +759,47 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         "proposal exists but ancestry is not yet certified"
                     );
                 }
-                return None;
+                let (requested, purpose) = match err {
+                    ParentPayloadError::MissingNullification { missing_view, .. } => {
+                        (missing_view, Purpose::Nullification)
+                    }
+                    ParentPayloadError::ParentNotCertified { parent_view, .. } => {
+                        (parent_view, Purpose::Parent)
+                    }
+                    ParentPayloadError::ParentNotBeforeProposal { .. }
+                    | ParentPayloadError::IntraTermProposalSkipsViews { .. }
+                    | ParentPayloadError::ParentBeforeFinalized { .. } => return Verify::Wait,
+                };
+                if !self
+                    .views
+                    .get_mut(&view)
+                    .expect("current round must exist")
+                    .request(requested)
+                {
+                    return Verify::Wait;
+                }
+                return Verify::Resolve {
+                    proposal_view: proposal.view(),
+                    view: requested,
+                    purpose,
+                    target: leader.key,
+                };
             }
         };
-        if !self.views.get_mut(&view)?.try_verify() {
-            return None;
+        if !self
+            .views
+            .get_mut(&view)
+            .expect("current round must exist")
+            .try_verify()
+        {
+            return Verify::Wait;
         }
         let context = Context {
             round: proposal.round,
             leader: leader.key,
             parent: (proposal.parent, parent_payload),
         };
-        Some((context, proposal))
+        Verify::Ready(context, proposal)
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
@@ -987,22 +1031,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 proposal_view: view,
                 parent_view: parent,
             })
-    }
-
-    /// Returns the certificate for the parent of the proposal at the given view.
-    pub fn parent_certificate(&mut self, view: View) -> Option<Certificate<S, D>> {
-        let parent = {
-            let view = self.views.get(&view)?.proposal()?.parent;
-            self.views.get(&view)?
-        };
-
-        if let Some(f) = parent.finalization().cloned() {
-            return Some(Certificate::Finalization(f));
-        }
-        if let Some(n) = parent.notarization().cloned() {
-            return Some(Certificate::Notarization(n));
-        }
-        None
     }
 }
 
@@ -1507,7 +1535,7 @@ mod tests {
                     Sha256Digest::from(payload),
                 );
                 assert!(state.set_proposal(view, proposal.clone()));
-                assert!(state.try_verify().is_some());
+                assert!(matches!(state.try_verify(), Verify::Ready(..)));
                 assert!(state.verified(view));
                 let notarization = build_notarization(verifier, schemes, &proposal);
                 assert!(state.add_notarization(notarization).0);
@@ -1544,7 +1572,7 @@ mod tests {
                 Sha256Digest::from([3u8; 32]),
             );
             assert!(state.set_proposal(View::new(3), proposal_v3));
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(3)));
 
             assert_eq!(
@@ -2186,56 +2214,6 @@ mod tests {
     }
 
     #[test]
-    fn parent_certificate_prefers_finalization() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let local_scheme = schemes[1].clone(); // leader of view 2
-            let cfg = Config {
-                scheme: local_scheme.clone(),
-                elector: round_robin(&local_scheme),
-                epoch: Epoch::new(7),
-                view_retention: ViewDelta::new(3),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            // Add notarization for parent view
-            let parent_round = Rnd::new(state.epoch(), View::new(1));
-            let parent_proposal =
-                Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
-            let notarization = build_notarization(&verifier, &schemes, &parent_proposal);
-            state.add_notarization(notarization.clone());
-
-            // Insert proposal at view 2 with parent at view 1
-            let proposal = Proposal::new(
-                Rnd::new(state.epoch(), View::new(2)),
-                View::new(1),
-                Sha256Digest::from([22u8; 32]),
-            );
-            state.set_proposal(View::new(2), proposal);
-
-            // parent_certificate returns the notarization
-            let cert = state.parent_certificate(View::new(2)).unwrap();
-            assert!(matches!(cert, Certificate::Notarization(n) if n == notarization));
-
-            // Add finalization for the same parent view
-            let finalization = build_finalization(&verifier, &schemes, &parent_proposal);
-            state.add_finalization(finalization.clone());
-
-            // parent_certificate now returns the finalization (preferred)
-            let cert = state.parent_certificate(View::new(2)).unwrap();
-            assert!(matches!(cert, Certificate::Finalization(f) if f == finalization));
-        });
-    }
-
-    #[test]
     fn parent_payload_errors_without_nullification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -2663,7 +2641,7 @@ mod tests {
             assert!(initial_deadline.0 > context.current());
 
             // Permanent ancestry error should immediately expire the timeout.
-            assert!(state.try_verify().is_none());
+            assert!(!matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.next_timeout().0 <= context.current());
         });
     }
@@ -2715,7 +2693,7 @@ mod tests {
             assert!(initial_deadline.0 > context.current());
 
             // Permanent ancestry errors should immediately expire the timeout.
-            assert!(state.try_verify().is_none());
+            assert!(!matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.next_timeout().0 <= context.current());
         });
     }
@@ -2756,7 +2734,7 @@ mod tests {
             assert!(initial_deadline.0 > context.current());
 
             // Missing parent certification should wait instead of forcing an immediate timeout.
-            assert!(state.try_verify().is_none());
+            assert!(!matches!(state.try_verify(), Verify::Ready(..)));
             assert_eq!(state.next_timeout(), initial_deadline);
         });
     }
@@ -2814,7 +2792,7 @@ mod tests {
             );
 
             // No verification request should be emitted (leader-owned).
-            assert!(state.try_verify().is_none());
+            assert!(!matches!(state.try_verify(), Verify::Ready(..)));
 
             let notarization = build_notarization(&verifier, &schemes, &proposal);
             let (added, _) = state.add_notarization(notarization);
@@ -3003,7 +2981,9 @@ mod tests {
             assert_eq!(next, View::new(2));
             let child = Proposal::new(Rnd::new(epoch, next), view, Sha256Digest::from([3u8; 32]));
             assert!(state.set_proposal(next, child.clone()));
-            let (context, proposal) = state.try_verify().expect("verification context");
+            let Verify::Ready(context, proposal) = state.try_verify() else {
+                panic!("verification context missing");
+            };
             assert_eq!(proposal, child);
             assert_eq!(context.parent, (view, proposal_y.payload));
         });
@@ -3333,9 +3313,9 @@ mod tests {
             assert!(Notarize::sign(&schemes[0], bad_proposal.clone()).is_some());
 
             assert!(state.set_proposal(view, bad_proposal.clone()));
-            let (verify_context, verify_proposal) = state
-                .try_verify()
-                .expect("bad header should reach verification");
+            let Verify::Ready(verify_context, verify_proposal) = state.try_verify() else {
+                panic!("bad header should reach verification");
+            };
             assert_eq!(verify_proposal, bad_proposal);
             assert_eq!(verify_context.parent, (certified_view, certified_payload));
 
@@ -3473,13 +3453,13 @@ mod tests {
             assert!(state.set_proposal(child_view, child_proposal.clone()));
 
             // Before late certification of parent, follower cannot verify this child proposal.
-            assert!(state.try_verify().is_none());
+            assert!(!matches!(state.try_verify(), Verify::Ready(..)));
 
             // Late certification after nullification should unblock parent check for verification.
             assert!(state.certified(parent_view, true).is_some());
-            let verified = state.try_verify();
-            assert!(verified.is_some());
-            let (ctx, proposal) = verified.expect("verify context should exist");
+            let Verify::Ready(ctx, proposal) = state.try_verify() else {
+                panic!("verify context should exist");
+            };
             assert_eq!(ctx.round.view(), child_view);
             assert_eq!(ctx.parent, (parent_view, parent_payload));
             assert_eq!(proposal, child_proposal);
@@ -3645,7 +3625,7 @@ mod tests {
             // Missing nullification should stall verification without expiring the timeout.
             let initial_deadline = state.next_timeout();
             assert!(initial_deadline.0 > context.current());
-            assert!(state.try_verify().is_none());
+            assert!(!matches!(state.try_verify(), Verify::Ready(..)));
             assert_eq!(state.next_timeout(), initial_deadline);
 
             // Once the intermediate nullification arrives, the same proposal should become verifiable.
@@ -3653,11 +3633,423 @@ mod tests {
                 build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), blocked_view));
             assert!(state.add_nullification(nullification));
 
-            let verified = state.try_verify().expect("verify context should exist");
-            let (ctx, proposal) = verified;
+            let Verify::Ready(ctx, proposal) = state.try_verify() else {
+                panic!("verify context should exist");
+            };
             assert_eq!(ctx.round.view(), child_view);
             assert_eq!(ctx.parent, (parent_view, parent_payload));
             assert_eq!(proposal, child_proposal);
+        });
+    }
+
+    /// Builds a follower state at view 3 (RoundRobin with epoch 1 elects
+    /// index 0, so signer index 1 follows) for ancestry-resolution tests.
+    fn setup_follower_state(
+        context: &mut deterministic::Context,
+    ) -> (Fixture<ed25519::Scheme>, TestState) {
+        let namespace = b"ns".to_vec();
+        let fixture = ed25519::fixture(context, &namespace, 4);
+        let local_scheme = fixture.schemes[1].clone();
+        let cfg = Config {
+            scheme: local_scheme.clone(),
+            elector: round_robin(&local_scheme),
+            epoch: Epoch::new(1),
+            view_retention: ViewDelta::new(10),
+            leader_timeout: Duration::from_secs(10),
+            certification_timeout: Duration::from_secs(10),
+            timeout_retry: Duration::from_secs(30),
+        };
+        let mut state = State::new(context.child("state"), cfg);
+        state.set_genesis(test_genesis());
+        (fixture, state)
+    }
+
+    #[test]
+    fn resolution_requests_first_missing_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_follower_state(&mut context);
+            let expected_leader = fixture.participants[0].clone();
+            let (schemes, verifier) = (fixture.schemes, fixture.verifier);
+
+            // Certify view 2, entering view 3.
+            let skipped_view = View::new(2);
+            let skipped_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), skipped_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([88u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &skipped_proposal);
+            let (added, _) = state.add_notarization(notarization.clone());
+            assert!(added);
+            assert!(state.certified(skipped_view, true).is_some());
+            let child_view = View::new(3);
+            state.set_leader(child_view, None);
+            assert_eq!(state.current_view(), child_view);
+
+            // A proposal that skips the certified view requires its leader's
+            // Nullification(2).
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                View::new(1),
+                Sha256Digest::from([89u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal_view,
+                    view,
+                    purpose,
+                    target,
+                }
+                    if proposal_view == child_view
+                        && view == skipped_view
+                        && purpose == Purpose::Nullification
+                        && target == expected_leader
+            ));
+
+            // A kindless response can validly contain the leader's preferred
+            // notarization, which is already known and does not provide the
+            // nullification this proposal needs. It must neither permit a
+            // vote nor create a request loop in the same round.
+            let (added, _) = state.add_notarization(notarization);
+            assert!(!added);
+            assert!(matches!(state.try_verify(), Verify::Wait));
+        });
+    }
+
+    #[test]
+    fn resolution_requests_uncertified_parent() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_follower_state(&mut context);
+            let (schemes, verifier) = (fixture.schemes, fixture.verifier);
+
+            // Track nullifications for views 1 and 2, entering view 3.
+            let parent_view = View::new(1);
+            let nullification_1 =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), parent_view));
+            assert!(state.add_nullification(nullification_1.clone()));
+            let nullification_2 =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), View::new(2)));
+            assert!(state.add_nullification(nullification_2));
+            let child_view = View::new(3);
+            assert_eq!(state.current_view(), child_view);
+
+            // The leader must hold a certificate for the parent it named.
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                parent_view,
+                Sha256Digest::from([90u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal_view,
+                    view,
+                    purpose,
+                    ..
+                }
+                    if proposal_view == child_view
+                        && view == parent_view
+                        && purpose == Purpose::Parent
+            ));
+
+            // A kindless response can instead contain the leader's preferred
+            // covering nullification. It is valid evidence for the key but
+            // does not certify the named parent, so it must neither permit a
+            // vote nor create a same-round request loop.
+            assert!(!state.add_nullification(nullification_1));
+            assert!(matches!(state.try_verify(), Verify::Wait));
+        });
+    }
+
+    #[test]
+    fn resolution_silent_for_parent_below_floor() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_follower_state(&mut context);
+            let (schemes, verifier) = (fixture.schemes, fixture.verifier);
+
+            // Finalize view 2, entering view 3.
+            let finalized_view = View::new(2);
+            let finalized_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), finalized_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([91u8; 32]),
+            );
+            let finalization = build_finalization(&verifier, &schemes, &finalized_proposal);
+            let (added, _) = state.add_finalization(finalization);
+            assert!(added);
+            let child_view = View::new(3);
+            assert_eq!(state.current_view(), child_view);
+
+            // A proposal built below the finalization floor is invalid and
+            // draws no request. An honest proposer reaches this state only
+            // while holding a nullification that same-term vote safety rules
+            // out alongside our finalization. There is no honest peer to
+            // converge with.
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                View::new(1),
+                Sha256Digest::from([92u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(matches!(state.try_verify(), Verify::Wait));
+        });
+    }
+
+    #[test]
+    fn resolution_starts_at_first_gap_before_displaced_certificate() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_follower_state(&mut context);
+            let (schemes, verifier) = (fixture.schemes, fixture.verifier);
+
+            // Certify view 3 from gossip without covering views 1 and 2. A
+            // notarization needs no ancestry. Certification advances the view.
+            // Then track a nullification for view 4 to reach view 5 as a
+            // follower.
+            let displaced_view = View::new(3);
+            let displaced_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), displaced_view),
+                View::new(1),
+                Sha256Digest::from([95u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &displaced_proposal);
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(state.certified(displaced_view, true).is_some());
+            let nullification_4 =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), View::new(4)));
+            assert!(state.add_nullification(nullification_4));
+            let child_view = View::new(5);
+            assert_eq!(state.current_view(), child_view);
+
+            // Repair starts at the first missing view, independently of the
+            // displaced certificate above it.
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                View::new(1),
+                Sha256Digest::from([96u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal_view,
+                    view,
+                    purpose,
+                    ..
+                }
+                    if proposal_view == child_view
+                        && view == View::new(2)
+                        && purpose == Purpose::Nullification
+            ));
+        });
+    }
+
+    #[test]
+    fn resolution_rearms_in_next_round() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_follower_state(&mut context);
+            let (schemes, verifier) = (fixture.schemes, fixture.verifier);
+
+            // Certify view 2 and request its missing nullification at view 3.
+            let skipped_view = View::new(2);
+            let skipped_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), skipped_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([97u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &skipped_proposal);
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(state.certified(skipped_view, true).is_some());
+            state.set_leader(View::new(3), None);
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(3)),
+                View::new(1),
+                Sha256Digest::from([98u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(3), child_proposal));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    view,
+                    purpose: Purpose::Nullification,
+                    ..
+                } if view == skipped_view
+            ));
+
+            // Advance two views (we lead view 4, so a proposal there would
+            // not be verified) and encounter the same gap again. The new
+            // round must emit the request afresh.
+            for view in 3..=4 {
+                let nullification = build_nullification(
+                    &verifier,
+                    &schemes,
+                    Rnd::new(Epoch::new(1), View::new(view)),
+                );
+                assert!(state.add_nullification(nullification));
+            }
+            let retry_view = View::new(5);
+            assert_eq!(state.current_view(), retry_view);
+            let retry_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), retry_view),
+                View::new(1),
+                Sha256Digest::from([99u8; 32]),
+            );
+            assert!(state.set_proposal(retry_view, retry_proposal));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal_view,
+                    view,
+                    purpose,
+                    ..
+                }
+                    if proposal_view == retry_view
+                        && view == skipped_view
+                        && purpose == Purpose::Nullification
+            ));
+        });
+    }
+
+    #[test]
+    fn resolution_does_not_wait_for_local_conflict() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_follower_state(&mut context);
+            let (schemes, verifier) = (fixture.schemes, fixture.verifier);
+
+            // Track a notarization for view 2 without certifying it.
+            let skipped_view = View::new(2);
+            let skipped_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), skipped_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([100u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &skipped_proposal);
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+            let child_view = View::new(3);
+            assert!(state.enter_view(child_view));
+            state.set_leader(child_view, None);
+
+            // The leader's proposal is enough evidence to request the missing
+            // view. No conflicting local certificate is required.
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                View::new(1),
+                Sha256Digest::from([101u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal_view,
+                    view,
+                    purpose,
+                    ..
+                }
+                    if proposal_view == child_view
+                        && view == skipped_view
+                        && purpose == Purpose::Nullification
+            ));
+
+            // Certification does not duplicate the still-active request.
+            assert!(state.certified(skipped_view, true).is_some());
+            assert!(matches!(state.try_verify(), Verify::Wait));
+        });
+    }
+
+    #[test]
+    fn resolution_requests_named_parent_with_term_cover() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            // Stable leaders use three-view terms. A nullification covers the
+            // rest of its term. The covering certificate for a parent may sit
+            // at an earlier view.
+            let (fixture, mut state) = setup_state(&mut context, 4, 1, 10, 3);
+            let (schemes, verifier) = (fixture.schemes, fixture.verifier);
+
+            // A nullification at view 1 covers views 1..=3 and advances to
+            // the next term start (view 4).
+            let nullification_1 =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), View::new(1)));
+            assert!(state.add_nullification(nullification_1));
+            let child_view = View::new(4);
+            assert_eq!(state.current_view(), child_view);
+
+            // A proposal built on covered, uncertified view 2 asks its leader
+            // for that named parent.
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                View::new(2),
+                Sha256Digest::from([102u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal_view,
+                    view,
+                    purpose,
+                    ..
+                }
+                    if proposal_view == child_view
+                        && view == View::new(2)
+                        && purpose == Purpose::Parent
+            ));
+        });
+    }
+
+    #[test]
+    fn resolution_requests_absent_certificate() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_follower_state(&mut context);
+            let (schemes, verifier) = (fixture.schemes, fixture.verifier);
+
+            // Certify view 1 and move into view 3 with nothing for view 2.
+            let parent_view = View::new(1);
+            let parent_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), parent_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([93u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &parent_proposal);
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(state.certified(parent_view, true).is_some());
+            let child_view = View::new(3);
+            assert!(state.enter_view(child_view));
+            state.set_leader(child_view, None);
+
+            // The proposal identifies the leader that must hold the missing
+            // certificate even when we hold no conflicting evidence.
+            let child_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), child_view),
+                parent_view,
+                Sha256Digest::from([94u8; 32]),
+            );
+            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal_view,
+                    view,
+                    purpose,
+                    ..
+                }
+                    if proposal_view == child_view
+                        && view == View::new(2)
+                        && purpose == Purpose::Nullification
+            ));
         });
     }
 
@@ -3689,7 +4081,7 @@ mod tests {
             state.set_proposal(view, proposal);
 
             // We should not want to verify (already timeout)
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(view));
 
             // Timeout path emits a first-attempt nullify.
@@ -3887,7 +4279,7 @@ mod tests {
                 Sha256Digest::from([43u8; 32]),
             );
             assert!(state.set_proposal(view, proposal_v2.clone()));
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(view));
 
             let notarization = build_notarization(&verifier, &schemes, &proposal_v2);
@@ -3959,7 +4351,7 @@ mod tests {
                 Sha256Digest::from([43u8; 32]),
             );
             assert!(state.set_proposal(View::new(2), proposal_v2));
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(2)));
 
             assert!(
@@ -4098,7 +4490,7 @@ mod tests {
                     Sha256Digest::from([11u8; 32]),
                 );
                 assert!(state.set_proposal(view, proposal.clone()));
-                assert!(state.try_verify().is_some());
+                assert!(matches!(state.try_verify(), Verify::Ready(..)));
                 assert!(state.verified(view));
 
                 let notarization = build_notarization(&verifier, &schemes, &proposal);
@@ -4194,7 +4586,7 @@ mod tests {
                 Sha256Digest::from([55u8; 32]),
             );
             state.set_proposal(view4, proposal_v4.clone());
-            assert!(state.try_verify().is_some());
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(view4));
 
             let notarization = build_notarization(&verifier, &schemes, &proposal_v4);

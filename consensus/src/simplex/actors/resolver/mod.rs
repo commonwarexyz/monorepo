@@ -24,6 +24,18 @@
 //! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
 //! pending, which the resolver engine deduplicates).
 //!
+//! # Proposal Ancestry
+//!
+//! Background repair cannot detect a split where one participant certifies a notarization while
+//! another holds a covering nullification. Proposal verification exposes the missing ancestry and
+//! targets the first gap at the proposal's leader. Matching evidence or finalization retires that
+//! request; a certified-floor raise retires only background work.
+//!
+//! The wire key remains the requested view. A cryptographically valid response that does not satisfy
+//! every attached purpose is ambiguous, so the resolver retries without faulting its peer. A valid
+//! notarization may wait up to the certification timeout for its local verdict while other deliveries
+//! continue independently.
+//!
 //! # Mid-Term Floor Raises
 //!
 //! A floor raise landing inside a term (a certified notarization or a finalization at a mid-term
@@ -85,6 +97,7 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
     pub mailbox_size: NonZeroUsize,
     pub fetch_concurrent: NonZeroUsize,
     pub fetch_timeout: Duration,
+    pub certification_timeout: Duration,
     pub term_length: TermLength,
 }
 
