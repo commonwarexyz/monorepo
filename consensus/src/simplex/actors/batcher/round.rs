@@ -103,23 +103,12 @@ impl<
 
     /// Records a verified certificate.
     ///
-    /// The first notarization or finalization establishes an authoritative
-    /// proposal and may replace one learned from the leader's vote. Returns
-    /// `true` when a notarization selects a new proposal, making its buffered
-    /// finalize votes eligible for processing.
+    /// Marks its verifier phase complete and releases full votes no longer needed
+    /// for certificate assembly. A notarization or finalization may also establish
+    /// authoritative proposal evidence. Returns `true` when a notarization selects
+    /// a new proposal, making its buffered finalize votes eligible for processing.
     pub fn record_certificate(&mut self, certificate: &Certificate<S, D>) -> bool {
-        let process_votes = self.adopt_certificate_proposal(certificate);
-        self.verifier.record_certificate(certificate.kind());
-        self.release_votes(certificate.kind());
-        process_votes
-    }
-
-    /// Makes a certificate's proposal authoritative.
-    ///
-    /// Returns whether a notarization made buffered finalize votes eligible
-    /// for processing.
-    fn adopt_certificate_proposal(&mut self, certificate: &Certificate<S, D>) -> bool {
-        match certificate {
+        let process_votes = match certificate {
             Certificate::Notarization(notarization) => {
                 self.set_authoritative_proposal(&notarization.proposal)
             }
@@ -131,7 +120,10 @@ impl<
                 false
             }
             Certificate::Nullification(_) => false,
-        }
+        };
+        self.verifier.record_certificate(certificate.kind());
+        self.release_votes(certificate.kind());
+        process_votes
     }
 
     /// Releases full votes that are no longer needed for certificate assembly.
@@ -450,8 +442,7 @@ impl<
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
         let certificate = self.verifier.try_construct_certificate(strategy).await?;
-        self.adopt_certificate_proposal(&certificate);
-        self.release_votes(certificate.kind());
+        self.record_certificate(&certificate);
         Some(certificate)
     }
 }
