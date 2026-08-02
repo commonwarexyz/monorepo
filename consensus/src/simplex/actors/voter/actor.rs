@@ -310,6 +310,8 @@ impl<
         sender: &mut WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
+        // Do not suppress retries here: batcher state is not persisted, so the first
+        // retry of a replayed nullify may be its first copy of that vote.
         batcher.constructed(vote.clone());
 
         // Update outbound metrics
