@@ -268,7 +268,7 @@ where
     pub peer_provider: D,
 }
 
-/// A cached reconstructed block and the consensus round that produced it.
+/// A cached reconstructed block and its latest consensus round.
 struct ReconstructedBlock<B, C, H>
 where
     B: Block,
@@ -534,8 +534,8 @@ where
                             response,
                         );
                     }
-                    Message::Prune { through } => {
-                        self.prune(through);
+                    Message::Prune { round, commitment } => {
+                        self.prune(round, commitment);
                     }
                 }
             },
@@ -710,7 +710,13 @@ where
         // redundant, unless notarized recovery created leaderless state first.
         // In that case, the leader announcement must still populate the
         // leader-dependent path.
-        if self.reconstructed_blocks.contains_key(&commitment)
+        let block_cached = if let Some(entry) = self.reconstructed_blocks.get_mut(&commitment) {
+            entry.round = entry.round.max(round);
+            true
+        } else {
+            false
+        };
+        if block_cached
             && self
                 .state
                 .get(&commitment)
@@ -728,6 +734,7 @@ where
             return;
         }
         if let Some(state) = self.state.get_mut(&commitment) {
+            state.observe(round);
             if let Some(existing) = state.leader() {
                 if existing != &leader {
                     warn!(
@@ -767,10 +774,12 @@ where
         commitment: Commitment,
         round: Round,
     ) {
-        if self.reconstructed_blocks.contains_key(&commitment) {
+        if let Some(entry) = self.reconstructed_blocks.get_mut(&commitment) {
+            entry.round = entry.round.max(round);
             return;
         }
-        if self.state.contains_key(&commitment) {
+        if let Some(state) = self.state.get_mut(&commitment) {
+            state.observe(round);
             let buffered_progress = self.ingest_buffered_shards(commitment);
             if buffered_progress {
                 self.try_advance(sender, commitment);
@@ -885,13 +894,13 @@ where
         block: Arc<CodedBlock<B, C, H>>,
     ) -> Arc<CodedBlock<B, C, H>> {
         let commitment = block.commitment();
-        self.reconstructed_blocks.insert(
-            commitment,
-            ReconstructedBlock {
+        self.reconstructed_blocks
+            .entry(commitment)
+            .and_modify(|entry| entry.round = entry.round.max(round))
+            .or_insert_with(|| ReconstructedBlock {
                 round,
                 block: Arc::clone(&block),
-            },
-        );
+            });
         self.notify_block_subscribers(Arc::clone(&block));
         block
     }
@@ -1151,37 +1160,32 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment));
     }
 
-    /// Evicts cached blocks and reconstruction state through `through`.
+    /// Prunes cached blocks and reconstruction state after finalization.
     ///
     /// Pruning waits for finalization because a Byzantine leader may produce multiple valid
     /// commitments in one round.
-    fn prune(&mut self, through: Commitment) {
-        let cached = self
-            .reconstructed_blocks
-            .get(&through)
-            .map(|entry| (entry.round, entry.block.height()));
-        if let Some((_, height)) = cached {
-            self.reconstructed_blocks
-                .retain(|_, entry| entry.block.height() > height);
-        }
-
+    fn prune(&mut self, round: Round, finalized: Commitment) {
         // Finalization makes existing exact-commitment and assigned-shard waits for these states
         // obsolete. Digest waits are not commitment-specific.
-        self.drop_commitment_subscriptions(through);
-        let state_round = self.state.remove(&through).map(|state| state.round());
-        let cached_round = cached.map(|(round, _)| round);
-        let Some(round) = state_round.or(cached_round) else {
-            return;
-        };
+        self.drop_commitment_subscriptions(finalized);
 
+        // Evict the finalized block and blocks last observed no later than its finalization round.
+        // Blocks observed in later rounds may still be needed for certification.
+        self.reconstructed_blocks
+            .retain(|commitment, entry| *commitment != finalized && entry.round > round);
+
+        // Evict incomplete reconstructions by the same round rule. Later observations refresh
+        // their round so a delayed application acknowledgment cannot retire a live re-proposal.
         let mut pruned_commitments = Vec::new();
         self.state.retain(|c, s| {
-            let keep = s.round() > round;
+            let keep = *c != finalized && s.round() > round;
             if !keep {
                 pruned_commitments.push(*c);
             }
             keep
         });
+
+        // Close exact subscriptions after `retain` releases the mutable borrow.
         for pruned in pruned_commitments {
             self.drop_commitment_subscriptions(pruned);
         }
@@ -1237,7 +1241,7 @@ where
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a shard.
     contributed: BitMap,
-    /// The round for which this commitment was externally proposed.
+    /// The latest consensus round in which this commitment was observed.
     round: Round,
     /// Raw shard data received per index, retained for equivocation detection.
     /// Keyed by shard index.
@@ -1477,12 +1481,22 @@ where
         Ok(())
     }
 
+    /// Refreshes the round used to decide whether this state can be pruned.
+    ///
+    /// Re-proposals reuse commitments, and application acknowledgments can lag consensus.
+    /// Retaining the latest observed round prevents an older acknowledgment from retiring
+    /// reconstruction still needed by a later proposal.
+    fn observe(&mut self, round: Round) {
+        let common = self.common_mut();
+        common.round = common.round.max(round);
+    }
+
     /// Returns whether the leader's shard for our index has been verified.
     const fn is_assigned_shard_verified(&self) -> bool {
         self.common().assigned_shard_verified
     }
 
-    /// Return the proposal round associated with this state.
+    /// Return the latest consensus round associated with this state.
     const fn round(&self) -> Round {
         self.common().round
     }
@@ -2287,69 +2301,86 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_durable_prunes_reconstructed_blocks() {
+    fn test_durable_prune_uses_consensus_round() {
         let fixture = Fixture::<C>::default();
         fixture.start(|_, context, _, mut peers, _, coding_config| async move {
-            // Create 3 blocks at heights 1, 2, 3.
-            let block1 = CodedBlock::<B, C, H>::new(
+            // The commitment was cached in its original proposal round and later
+            // finalized by a re-proposal. A malicious candidate arrived in between.
+            let finalized = CodedBlock::<B, C, H>::new(
                 B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let block2 = CodedBlock::<B, C, H>::new(
+            let malicious = CodedBlock::<B, C, H>::new(
+                B::new::<H>((), Sha256Digest::EMPTY, Height::new(u64::MAX), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let later = CodedBlock::<B, C, H>::new(
                 B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let block3 = CodedBlock::<B, C, H>::new(
-                B::new::<H>((), Sha256Digest::EMPTY, Height::new(3), 100),
-                coding_config,
-                &STRATEGY,
-            );
-            let commitment1 = block1.commitment();
-            let commitment2 = block2.commitment();
-            let commitment3 = block3.commitment();
+            let finalized_commitment = finalized.commitment();
+            let malicious_commitment = malicious.commitment();
+            let later_commitment = later.commitment();
 
             // Cache all blocks via `proposed`.
             let peer = &mut peers[0];
-            let round = Round::new(Epoch::zero(), View::new(1));
-            peer.mailbox.proposed(round, block1);
-            peer.mailbox.proposed(round, block2);
-            peer.mailbox.proposed(round, block3);
+            peer.mailbox.proposed(
+                Round::new(Epoch::zero(), View::new(1)),
+                finalized,
+            );
+            peer.mailbox.proposed(
+                Round::new(Epoch::zero(), View::new(2)),
+                malicious,
+            );
+            peer.mailbox.proposed(
+                Round::new(Epoch::zero(), View::new(1)),
+                later,
+            );
+            // A later notarization makes the same canonical block live in a
+            // newer round while the application still processes older blocks.
+            peer.mailbox.notarized(
+                later_commitment,
+                Round::new(Epoch::zero(), View::new(4)),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             // Verify all blocks are in the cache.
             assert!(
-                peer.mailbox.get(commitment1).await.is_some(),
-                "block1 should be cached"
+                peer.mailbox.get(finalized_commitment).await.is_some(),
+                "finalized block should be cached"
             );
             assert!(
-                peer.mailbox.get(commitment2).await.is_some(),
-                "block2 should be cached"
+                peer.mailbox.get(malicious_commitment).await.is_some(),
+                "malicious block should be cached"
             );
             assert!(
-                peer.mailbox.get(commitment3).await.is_some(),
-                "block3 should be cached"
+                peer.mailbox.get(later_commitment).await.is_some(),
+                "later block should be cached"
             );
 
-            // Prune at height 2 (blocks with height <= 2 should be removed).
-            peer.mailbox.prune(commitment2);
+            // The authoritative finalization round retires every earlier candidate,
+            // regardless of its height or the target's original cache round.
+            peer.mailbox.prune(
+                Round::new(Epoch::zero(), View::new(3)),
+                finalized_commitment,
+            );
             context.sleep(Duration::from_millis(10)).await;
 
-            // Blocks at heights 1 and 2 should be pruned.
             assert!(
-                peer.mailbox.get(commitment1).await.is_none(),
-                "block1 should be pruned"
+                peer.mailbox.get(finalized_commitment).await.is_none(),
+                "finalized block should be pruned"
             );
             assert!(
-                peer.mailbox.get(commitment2).await.is_none(),
-                "block2 should be pruned"
+                peer.mailbox.get(malicious_commitment).await.is_none(),
+                "earlier malicious block should be pruned"
             );
 
-            // Block at height 3 should still be cached.
             assert!(
-                peer.mailbox.get(commitment3).await.is_some(),
-                "block3 should still be cached"
+                peer.mailbox.get(later_commitment).await.is_some(),
+                "later-round block should still be cached"
             );
         });
     }
@@ -3038,6 +3069,89 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_later_notarization_refreshes_reconstruction_state_round() {
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _, mut peers, _, coding_config| async move {
+                let live = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let finalized = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let live_commitment = live.commitment();
+                let finalized_commitment = finalized.commitment();
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                peers[receiver_idx].mailbox.discovered(
+                    live_commitment,
+                    leader,
+                    Round::new(Epoch::zero(), View::new(1)),
+                );
+                let mut live_sub = peers[receiver_idx].mailbox.subscribe(live_commitment);
+
+                // The same commitment becomes live in a later round while the application
+                // still has an older finalization to acknowledge.
+                peers[receiver_idx].mailbox.notarized(
+                    live_commitment,
+                    Round::new(Epoch::zero(), View::new(4)),
+                );
+                context.sleep(Duration::from_millis(10)).await;
+                peers[receiver_idx].mailbox.prune(
+                    Round::new(Epoch::zero(), View::new(3)),
+                    finalized_commitment,
+                );
+                context.sleep(Duration::from_millis(10)).await;
+
+                assert!(
+                    matches!(live_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "later-round reconstruction subscription should remain open"
+                );
+
+                let leader_shard = live
+                    .shard(peers[receiver_idx].index.get() as u16)
+                    .expect("missing leader shard");
+                peers[0].sender.send(
+                    Recipients::One(receiver_pk.clone()),
+                    leader_shard.encode(),
+                    true,
+                );
+                for i in [1usize, 2usize, 4usize] {
+                    let shard = live
+                        .shard(peers[i].index.get() as u16)
+                        .expect("missing gossip shard");
+                    peers[i].sender.send(
+                        Recipients::One(receiver_pk.clone()),
+                        shard.encode(),
+                        true,
+                    );
+                }
+
+                select! {
+                    result = live_sub => {
+                        let reconstructed =
+                            result.expect("later-round reconstruction should remain live");
+                        assert_eq!(reconstructed.commitment(), live_commitment);
+                    },
+                    _ = context.sleep(config.link.latency * 10) => {
+                        panic!("later-round reconstruction did not complete");
+                    },
+                }
+            },
+        );
+    }
+
+    #[test_traced]
     fn test_local_proposal_prune_clears_older_reconstruction_state() {
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
@@ -3091,7 +3205,7 @@ mod tests {
                     peers[2].mailbox.get(commitment_b).await.is_some(),
                     "local proposal should be cached before pruning"
                 );
-                peers[2].mailbox.prune(commitment_b);
+                peers[2].mailbox.prune(round_b, commitment_b);
 
                 select! {
                     result = block_sub => {

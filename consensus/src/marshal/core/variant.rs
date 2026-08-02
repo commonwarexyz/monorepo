@@ -168,10 +168,13 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         commitment: V::Commitment,
     ) -> Option<oneshot::Receiver<Arc<V::Block>>>;
 
-    /// Notify the buffer that a block has been finalized.
+    /// Notify the buffer that a block has been finalized in `round`.
+    ///
+    /// A re-proposal retains the block's original commitment, so `round` may differ from the
+    /// consensus context bound by `commitment`.
     ///
     /// This allows the buffer to perform variant-specific cleanup operations.
-    fn finalized(&self, commitment: V::Commitment);
+    fn finalized(&self, round: Round, commitment: V::Commitment);
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: Arc<V::Block>, recipients: Recipients<Self::PublicKey>);
@@ -227,7 +230,7 @@ where
         None
     }
 
-    fn finalized(&self, _: V::Commitment) {}
+    fn finalized(&self, _: Round, _: V::Commitment) {}
 
     fn send(&self, _: Round, _: Arc<V::Block>, _: Recipients<Self::PublicKey>) {}
 }

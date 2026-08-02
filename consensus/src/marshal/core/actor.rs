@@ -530,7 +530,7 @@ where
     {
         // Start with the ack that woke this `select_loop!` arm.
         let mut pending = Some(self.pending_acks.complete_current(result));
-        let last_acked_commitment = loop {
+        let (processed_round, last_acked_commitment) = loop {
             let (height, commitment, result) = pending.take().expect("pending ack must exist");
             match result {
                 Ok(()) => {
@@ -549,7 +549,7 @@ where
             // can persist one metadata sync for the whole batch below.
             match self.pending_acks.pop_ready() {
                 Some(next) => pending = Some(next),
-                None => break commitment,
+                None => break (self.floor.processed_round(), commitment),
             }
         };
 
@@ -560,9 +560,9 @@ where
             .await
             .expect("failed to sync application progress");
 
-        // Anything below the last acknowledged commitment is safe for the
-        // buffer to prune.
-        buffer.finalized(last_acked_commitment);
+        // Anything through the last acknowledged finalization round is safe
+        // for the buffer to prune.
+        buffer.finalized(processed_round, last_acked_commitment);
 
         // Refill the application dispatch pipeline.
         self.try_dispatch_blocks(application).await

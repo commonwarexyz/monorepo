@@ -193,7 +193,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn finalized(&self, _commitment: Digest) {}
+        fn finalized(&self, _round: Round, _commitment: Digest) {}
 
         fn send(&self, _round: Round, _block: Arc<TestBlock>, _recipients: Recipients<PublicKey>) {}
     }

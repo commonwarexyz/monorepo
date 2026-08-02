@@ -175,7 +175,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn finalized(&self, _commitment: Commitment) {}
+        fn finalized(&self, _round: Round, _commitment: Commitment) {}
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
@@ -1800,7 +1800,7 @@ mod tests {
             // Ensure the certification gate task has registered its subscription, then
             // force cancellation by pruning the missing commitment.
             context.sleep(Duration::from_millis(100)).await;
-            shards.prune(missing_payload);
+            shards.prune(round, missing_payload);
 
             select! {
                 result = verify_rx => {
@@ -1877,7 +1877,7 @@ mod tests {
 
             // Prune the missing commitment in the shard engine, which should cancel
             // the underlying buffer subscription.
-            shards.prune(missing_commitment);
+            shards.prune(round, missing_commitment);
 
             // The core actor must surface cancellation by closing the subscription,
             // not by panicking or leaving the waiter parked indefinitely.

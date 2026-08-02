@@ -94,10 +94,12 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to evict cached blocks and reconstruction state relative to a commitment.
+    /// A request to prune cached blocks and reconstruction state after finalization.
     Prune {
-        /// Inclusive prune target [`Commitment`].
-        through: Commitment,
+        /// The finalized consensus round.
+        round: Round,
+        /// The finalized [`Commitment`].
+        commitment: Commitment,
     },
 }
 
@@ -324,11 +326,14 @@ where
         receiver
     }
 
-    /// Evict cached blocks and reconstruction state through `through`.
+    /// Prune cached blocks and reconstruction state after finalization.
+    ///
+    /// The finalized commitment and entries last associated with `round` or earlier are retired.
+    /// The round is supplied separately because a re-proposal retains its original commitment.
     ///
     /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
     /// subscriptions remain open, and later consensus notifications may recreate state.
-    pub fn prune(&self, through: Commitment) {
-        let _ = self.sender.enqueue(Message::Prune { through });
+    pub fn prune(&self, round: Round, commitment: Commitment) {
+        let _ = self.sender.enqueue(Message::Prune { round, commitment });
     }
 }

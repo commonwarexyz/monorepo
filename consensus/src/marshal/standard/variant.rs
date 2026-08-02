@@ -110,8 +110,8 @@ where
         self.subscribe_by_digest(commitment)
     }
 
-    fn finalized(&self, _commitment: B::Digest) {
-        // No cleanup needed in standard mode - the buffer handles its own pruning
+    fn finalized(&self, _round: Round, _commitment: B::Digest) {
+        // Standard's cache is already bounded and evicted per authenticated sender.
     }
 
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
