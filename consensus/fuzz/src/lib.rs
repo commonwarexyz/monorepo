@@ -1332,6 +1332,7 @@ where
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forwarding,
+        track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
     let engine_handle = engine.start(
@@ -2922,6 +2923,7 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
                 forwarding: self.input.forwarding,
+                track_historical_votes: false,
             },
         );
         engine.start(vote, certificate, resolver);

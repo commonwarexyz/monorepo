@@ -25,7 +25,7 @@ use crate::{
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
-        operation::Operation as _,
+        operation::Floored as _,
     },
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
@@ -225,6 +225,15 @@ where
         self.any.bounds()
     }
 
+    /// Returns a read-only view of the activity bitmap.
+    ///
+    /// Pruning does not renumber the retained chunks. Only chunks at or after `pruned_chunks()`
+    /// that contain a bit below `len()` are readable. Calling `get_chunk()` or `get_bit()` for a
+    /// pruned or out-of-bounds location panics.
+    pub fn bitmap(&self) -> &impl bitmap::Readable<N> {
+        self.any.bitmap.as_ref()
+    }
+
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
@@ -250,10 +259,12 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Returns a virtual [grafting::Storage] over the grafted tree and ops tree. For positions at
-    /// or above the grafting height, returns the grafted node. For positions below the grafting
-    /// height, the ops tree is used.
-    fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
+    /// Returns a virtual [`crate::merkle::storage::Storage`] view over the grafted tree and ops
+    /// tree.
+    ///
+    /// Positions and `size()` use ops-tree coordinates. Positions at or above the grafting height
+    /// return bitmap-authenticated grafted nodes, while positions below it use the ops tree.
+    pub fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
@@ -598,7 +609,8 @@ where
     /// this database handle after any `Err` from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
+    /// completes.
     #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
@@ -665,30 +677,14 @@ where
         // the caller; reads through them now return inconsistent data.
         self.any = self.any.rewind(size).await?;
 
-        let ops_size = self.any.log.merkle.size();
-        let ops_leaves = Location::<F>::try_from(ops_size)?;
-        let grafted_tree = build_grafted_tree::<F, H, S, N>(
+        // Rebuild the grafted tree and canonical root from the rewound `any` state.
+        let (grafted_tree, root) = rebuild_grafted_tree::<F, H, S, N>(
             self.any.bitmap.as_ref(),
             &pinned_nodes,
             &self.any.log.merkle,
-            ops_leaves,
-            &self.strategy,
-        )
-        .await?;
-        let storage = grafting::Storage::<F, H, _, _>::new(
-            &grafted_tree,
-            grafting::height::<N>(),
-            &self.any.log.merkle,
-        );
-        let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
-        let ops_root = self.any.root();
-        let root = compute_db_root::<F, H, _, _, N>(
-            self.any.bitmap.as_ref(),
-            &storage,
-            ops_leaves,
-            partial_chunk,
             self.any.inactivity_floor_loc,
-            &ops_root,
+            self.any.root(),
+            &self.strategy,
         )
         .await?;
 
@@ -874,9 +870,9 @@ where
     /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
     /// more details).
     ///
-    /// This publishes the batch to the in-memory Current view and appends it to the journal,
-    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
-    /// durability.
+    /// This publishes the batch to the in-memory Current view and appends it to the journal, but
+    /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
+    /// returned by [`Db::start_sync`], to guarantee durability.
     #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
     #[boxed]
     pub async fn apply_batch(
@@ -1042,6 +1038,40 @@ pub(super) async fn compute_db_root<
         pending.as_ref(),
         partial.as_ref().map(|(nb, d)| (*nb, d)),
     ))
+}
+
+/// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
+/// bitmap. Returns the rebuilt grafted tree and the db root.
+pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
+    bitmap: &impl bitmap::Readable<N>,
+    pinned_nodes: &[H::Digest],
+    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    inactivity_floor: Location<F>,
+    ops_root: H::Digest,
+    strategy: &S,
+) -> Result<(Mem<F, H::Digest>, H::Digest), Error<F>>
+where
+    F: merkle::Graftable,
+    H: Hasher,
+    S: Strategy,
+{
+    let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
+    let grafted_tree =
+        build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
+            .await?;
+    let storage =
+        grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
+    let partial_chunk = partial_chunk(bitmap);
+    let root = compute_db_root::<F, H, _, _, N>(
+        bitmap,
+        &storage,
+        ops_leaves,
+        partial_chunk,
+        inactivity_floor,
+        &ops_root,
+    )
+    .await?;
+    Ok((grafted_tree, root))
 }
 
 /// Compute the root of the grafted structure represented by `storage`.

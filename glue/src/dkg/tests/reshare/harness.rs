@@ -21,7 +21,7 @@ use crate::{
         SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p::standard as qmdb_resolver,
+            p2p as qmdb_resolver,
         },
     },
 };
@@ -982,7 +982,7 @@ impl EngineDefinition for ReshareEngine {
                 resolvers: qmdb_sync_resolver,
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
-                    apply_batch_size: 64,
+                    apply_batch_size: NZU64!(64),
                     max_outstanding_requests: 8,
                     update_channel_size: NZUsize!(256),
                     max_retained_roots: 8,
@@ -1027,6 +1027,7 @@ impl EngineDefinition for ReshareEngine {
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(5),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 },
                 gate,
                 state_sync,

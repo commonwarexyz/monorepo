@@ -33,8 +33,6 @@ jobs:
             flags: "--features commonware-runtime/iouring-network"
           - os: ubuntu-latest
             flags: ""
-          - os: windows-latest
-            flags: ""
           - os: macos-latest
             flags: ""
     steps:
@@ -100,7 +98,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest]
         partition: [1, 2]
         flags:
           - "--features commonware-runtime/iouring-storage"
@@ -109,17 +107,11 @@ jobs:
           - ""
         exclude:
           # Only run io_uring features on Ubuntu
-          - os: windows-latest
-            flags: "--features commonware-runtime/iouring-storage"
           - os: macos-latest
             flags: "--features commonware-runtime/iouring-storage"
-          - os: windows-latest
-            flags: "--features commonware-runtime/iouring-network"
           - os: macos-latest
             flags: "--features commonware-runtime/iouring-network"
           # Only run --no-default-features on Ubuntu
-          - os: windows-latest
-            flags: "--no-default-features"
           - os: macos-latest
             flags: "--no-default-features"
     steps:
@@ -151,9 +143,6 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            package: commonware-runtime
-            flags: "--features commonware-runtime/external"
-          - os: windows-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
           - os: macos-latest

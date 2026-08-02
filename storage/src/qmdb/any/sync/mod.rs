@@ -48,7 +48,7 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
 use commonware_utils::{Array, range::NonEmptyRange};
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU64, NonZeroUsize};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -62,7 +62,7 @@ async fn build_db<F, E, U, I, H, C, T, S>(
     translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
-    apply_batch_size: usize,
+    apply_batch_size: NonZeroU64,
     init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
@@ -96,7 +96,7 @@ where
         merkle,
         log,
         hasher,
-        apply_batch_size as u64,
+        apply_batch_size.get(),
     )
     .await?;
     let snapshot_context = context.child("snapshot");
@@ -146,7 +146,7 @@ macro_rules! impl_sync_database {
                 log: Self::Journal,
                 pinned_nodes: Option<Vec<Self::Digest>>,
                 range: NonEmptyRange<Location<F>>,
-                apply_batch_size: usize,
+                apply_batch_size: NonZeroU64,
             ) -> Result<Self, qmdb::Error<F>> {
                 let merkle_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
@@ -168,7 +168,11 @@ macro_rules! impl_sync_database {
                 .await
             }
 
-            async fn local_boundary_nodes(
+            async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+                Ok(self)
+            }
+
+            async fn local_pinned_nodes(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
@@ -181,7 +185,7 @@ macro_rules! impl_sync_database {
                 }
 
                 // The target's range starts at the inactivity floor.
-                qmdb::sync::local_boundary_nodes::<F, _, H, S>(
+                qmdb::sync::local_pinned_nodes::<F, _, H, S>(
                     context,
                     config.merkle_config.clone(),
                     target,

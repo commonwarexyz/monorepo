@@ -88,7 +88,9 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
     fn is_delete(&self) -> bool {
         matches!(self, Self::Delete(_))
     }
+}
 
+impl<F: Family, S: Update> crate::qmdb::operation::Floored<F> for Operation<F, S> {
     fn has_floor(&self) -> Option<Location<F>> {
         match self {
             Self::CommitFloor(_, loc) => Some(*loc),

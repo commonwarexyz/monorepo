@@ -17,19 +17,24 @@
 
 use super::types::AckSubject;
 use commonware_cryptography::{Digest, PublicKey, certificate};
+use commonware_utils::N3f1;
 
 /// Marker trait for signing schemes compatible with `ordered_broadcast`.
 ///
 /// This trait binds a [`certificate::Scheme`] to the [`AckSubject`] subject
-/// type used by the ordered broadcast protocol. It is automatically implemented
-/// for any scheme whose subject type matches `AckSubject<'a, P, D>`.
+/// type and [`N3f1`] fault model used by the ordered broadcast protocol. It is
+/// automatically implemented for any compatible scheme.
 pub trait Scheme<P: PublicKey, D: Digest>:
-    for<'a> certificate::Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P>
+    for<'a> certificate::Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P, Faults = N3f1>
 {
 }
 
 impl<P: PublicKey, D: Digest, S> Scheme<P, D> for S where
-    S: for<'a> certificate::Scheme<Subject<'a, D> = AckSubject<'a, P, D>, PublicKey = P>
+    S: for<'a> certificate::Scheme<
+            Subject<'a, D> = AckSubject<'a, P, D>,
+            PublicKey = P,
+            Faults = N3f1,
+        >
 {
 }
 
@@ -43,8 +48,9 @@ pub mod bls12381_multisig {
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_bls12381_multisig;
+    use commonware_utils::N3f1;
 
-    impl_certificate_bls12381_multisig!(AckSubject<'a, P, D>, AckNamespace);
+    impl_certificate_bls12381_multisig!(AckSubject<'a, P, D>, AckNamespace, N3f1);
 }
 
 pub mod bls12381_threshold {
@@ -58,8 +64,9 @@ pub mod bls12381_threshold {
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_bls12381_threshold;
+    use commonware_utils::N3f1;
 
-    impl_certificate_bls12381_threshold!(AckSubject<'a, P, D>, AckNamespace);
+    impl_certificate_bls12381_threshold!(AckSubject<'a, P, D>, AckNamespace, N3f1);
 }
 
 pub mod ed25519 {
@@ -72,8 +79,9 @@ pub mod ed25519 {
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::{ed25519, impl_certificate_ed25519};
+    use commonware_utils::N3f1;
 
-    impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>, AckNamespace);
+    impl_certificate_ed25519!(AckSubject<'a, ed25519::PublicKey, D>, AckNamespace, N3f1);
 }
 
 pub mod secp256r1 {
@@ -86,6 +94,7 @@ pub mod secp256r1 {
 
     use crate::ordered_broadcast::types::{AckNamespace, AckSubject};
     use commonware_cryptography::impl_certificate_secp256r1;
+    use commonware_utils::N3f1;
 
-    impl_certificate_secp256r1!(AckSubject<'a, P, D>, AckNamespace);
+    impl_certificate_secp256r1!(AckSubject<'a, P, D>, AckNamespace, N3f1);
 }

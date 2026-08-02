@@ -59,14 +59,14 @@ enum State<V> {
 }
 
 impl<V> Certification<V> {
-    /// Creates an empty [State::Incomplete] with buffers sized for `quorum` votes.
-    fn new(quorum: usize, batchable: bool) -> Self {
+    /// Creates an empty [State::Incomplete] whose vote buffers allocate lazily.
+    const fn new(quorum: usize, batchable: bool) -> Self {
         Self {
             quorum,
             batchable,
             state: State::Incomplete {
-                pending: Vec::with_capacity(quorum),
-                verified: Vec::with_capacity(quorum),
+                pending: Vec::new(),
+                verified: Vec::new(),
             },
         }
     }
@@ -74,8 +74,21 @@ impl<V> Certification<V> {
     /// Buffers a vote for verification (or, if already verified, for
     /// certificate recovery). Dropped once complete.
     fn add(&mut self, vote: V, is_verified: bool) {
+        // Completed certifications drop subsequent votes without allocating.
         if let State::Incomplete { pending, verified } = &mut self.state {
-            if is_verified { verified } else { pending }.push(vote);
+            // Verified votes may accumulate to quorum. A batchable pending buffer
+            // only needs the remaining unverified slots, while a non-batchable
+            // pending buffer is consumed after each vote.
+            let initial_capacity = if is_verified || self.batchable {
+                self.quorum.saturating_sub(verified.len()).max(1)
+            } else {
+                1
+            };
+            let votes = if is_verified { verified } else { pending };
+            if votes.capacity() == 0 {
+                votes.reserve_exact(initial_capacity);
+            }
+            votes.push(vote);
         }
     }
 
@@ -154,17 +167,53 @@ impl<V> Certification<V> {
     }
 }
 
-/// The leader lifecycle for one view.
-enum Leader<D: Digest> {
-    /// Not yet announced by the voter.
+/// How the selected proposal changed after an update.
+pub(super) struct ProposalUpdate {
+    /// Whether the selected proposal changed.
+    pub(super) changed: bool,
+    /// Whether an existing proposal was replaced with a different one.
+    pub(super) replaced: bool,
+}
+
+/// What the round knows about its proposal, and how it was learned.
+pub(super) enum ProposalState<D: Digest> {
+    /// No proposal is known.
     Unknown,
-    /// Announced, but their proposal is not yet known.
-    Known(Participant),
-    /// Their proposal is known. Notarize and finalize votes filter to it.
-    Proposed {
-        leader: Participant,
-        proposal: Proposal<D>,
-    },
+    /// Learned from the leader's notarize vote. An authoritative proposal may
+    /// replace it.
+    Leader(Proposal<D>),
+    /// Learned from a verified certificate or locally constructed finalize.
+    /// Never replaced.
+    Certificate(Proposal<D>),
+}
+
+impl<D: Digest> ProposalState<D> {
+    /// Returns the proposal, if known.
+    const fn proposal(&self) -> Option<&Proposal<D>> {
+        match self {
+            Self::Unknown => None,
+            Self::Leader(proposal) | Self::Certificate(proposal) => Some(proposal),
+        }
+    }
+
+    /// Updates the proposal from a leader vote or authoritative evidence.
+    ///
+    /// An unknown proposal accepts either source. An authoritative proposal
+    /// may supersede a leader vote. All other transitions are ignored.
+    ///
+    /// Returns the selected proposal if its value changed. Certifying the
+    /// leader-selected proposal returns `None`.
+    fn update(&mut self, next: Self) -> Option<&Proposal<D>> {
+        match (&*self, &next) {
+            (Self::Unknown, Self::Leader(_) | Self::Certificate(_)) => {}
+            (Self::Leader(_), Self::Certificate(_)) => {}
+            _ => return None,
+        }
+
+        let changed = self.proposal() != next.proposal();
+        *self = next;
+        changed.then(|| self.proposal().expect("updated proposal must be known"))
+    }
 }
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
@@ -192,8 +241,15 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// The round being certified.
     round: Rnd,
 
-    /// The leader lifecycle.
-    leader: Leader<D>,
+    /// The round's leader, once identified.
+    leader: Option<Participant>,
+
+    /// The round's proposal, once known.
+    ///
+    /// A known leader's notarize vote may supply the initial proposal. An
+    /// independently authenticated proposal is authoritative and may replace
+    /// it, or be established before the leader is identified.
+    proposal: ProposalState<D>,
 
     /// Notarize certification progress.
     notarize: Certification<Notarize<S, D>>,
@@ -220,7 +276,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
             round,
 
-            leader: Leader::Unknown,
+            leader: None,
+            proposal: ProposalState::Unknown,
 
             notarize: Certification::new(quorum, batchable),
             nullify: Certification::new(quorum, batchable),
@@ -231,6 +288,16 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Returns the ordered participant set.
     pub(super) fn participants(&self) -> &Set<S::PublicKey> {
         self.scheme.participants()
+    }
+
+    /// Returns the round's leader, once known.
+    pub const fn leader(&self) -> Option<Participant> {
+        self.leader
+    }
+
+    /// Returns the round's proposal, once known.
+    pub const fn proposal(&self) -> Option<&Proposal<D>> {
+        self.proposal.proposal()
     }
 
     /// Attempts to construct a certificate from verified votes: the first kind
@@ -309,28 +376,38 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Learns the leader's proposal from `notarize`, dropping buffered votes
-    /// for any other proposal (they cannot contribute to a certificate).
-    /// Does nothing unless the leader is [Leader::Known] and the vote is theirs.
-    fn try_learn_proposal(&mut self, notarize: &Notarize<S, D>) {
-        let Leader::Known(leader) = &self.leader else {
-            return;
-        };
-        let leader = *leader;
-        if leader != notarize.signer() {
+    /// Tries to set the proposal from the known leader's notarize, dropping
+    /// buffered votes for any other proposal (they cannot contribute to a
+    /// certificate).
+    ///
+    /// Does nothing if the leader is unknown, `notarize` is not from the
+    /// leader, or the proposal state rejects the transition.
+    fn try_set_proposal_from_leader(&mut self, notarize: &Notarize<S, D>) {
+        if self.leader != Some(notarize.signer()) {
             return;
         }
-        let proposal = notarize.proposal.clone();
-        self.notarize.retain(|n| n.proposal == proposal);
-        self.finalize.retain(|f| f.proposal == proposal);
-        self.leader = Leader::Proposed { leader, proposal };
+        self.set_proposal(ProposalState::Leader(notarize.proposal.clone()));
     }
 
-    /// Returns the leader and their proposal, once known.
-    pub const fn get_leader_proposal(&self) -> Option<(Participant, &Proposal<D>)> {
-        match &self.leader {
-            Leader::Proposed { leader, proposal } => Some((*leader, proposal)),
-            _ => None,
+    /// Updates the proposal state and, if the selected proposal changes, drops
+    /// buffered notarize and finalize votes for any other proposal.
+    ///
+    /// Returns whether the selected proposal changed and whether the accepted
+    /// change replaced an existing proposal. Rejected transitions and a
+    /// provenance-only change return `false` for both.
+    pub(super) fn set_proposal(&mut self, proposal: ProposalState<D>) -> ProposalUpdate {
+        let replaced = self.proposal.proposal().is_some();
+        let Some(proposal) = self.proposal.update(proposal) else {
+            return ProposalUpdate {
+                changed: false,
+                replaced: false,
+            };
+        };
+        self.notarize.retain(|n| &n.proposal == proposal);
+        self.finalize.retain(|f| &f.proposal == proposal);
+        ProposalUpdate {
+            changed: true,
+            replaced,
         }
     }
 
@@ -339,7 +416,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// If the message has already been verified (e.g., we built it), it is stored
     /// directly for certificate recovery. Otherwise, it is added to the appropriate
     /// pending queue. Notarize and finalize votes for a proposal other than the
-    /// known leader's are dropped since they cannot contribute to a certificate.
+    /// known proposal are dropped since they cannot contribute to a certificate.
     ///
     /// If a leader is known and the message is a [Vote::Notarize] from that leader,
     /// this method may reveal the leader proposal.
@@ -351,10 +428,10 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn add(&mut self, msg: Vote<S, D>, verified: bool) {
         match msg {
             Vote::Notarize(notarize) => {
-                self.try_learn_proposal(&notarize);
+                self.try_set_proposal_from_leader(&notarize);
 
-                // If the leader's proposal is known and the message is not for it, drop it
-                if let Leader::Proposed { proposal, .. } = &self.leader
+                // If the proposal is known and the message is not for it, drop it
+                if let Some(proposal) = self.proposal()
                     && proposal != &notarize.proposal
                 {
                     return;
@@ -365,8 +442,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 self.nullify.add(nullify, verified);
             }
             Vote::Finalize(finalize) => {
-                // If the leader's proposal is known and the message is not for it, drop it
-                if let Leader::Proposed { proposal, .. } = &self.leader
+                // If the proposal is known and the message is not for it, drop it
+                if let Some(proposal) = self.proposal()
                     && proposal != &finalize.proposal
                 {
                     return;
@@ -378,25 +455,26 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
     /// Sets the leader for the current consensus view.
     ///
-    /// `notarize` carries the leader's already-received vote, if any. Their
-    /// proposal is learned from it and votes for other proposals are dropped.
+    /// `notarize` carries the leader's already-received vote, if any. Its
+    /// proposal is learned when none is known. An authoritative proposal is
+    /// never replaced.
     ///
     /// # Panics
     ///
     /// Panics if a leader was already set or if `notarize` is not from
     /// `leader`.
     pub fn set_leader(&mut self, leader: Participant, notarize: Option<&Notarize<S, D>>) {
-        assert!(matches!(self.leader, Leader::Unknown));
-        self.leader = Leader::Known(leader);
+        assert!(self.leader.is_none(), "leader already set");
+        self.leader = Some(leader);
         if let Some(notarize) = notarize {
             assert_eq!(notarize.signer(), leader, "notarize must be from leader");
-            self.try_learn_proposal(notarize);
+            self.try_set_proposal_from_leader(notarize);
         }
     }
 
     /// Batch verifies pending [Vote::Notarize] messages, if worthwhile: the
-    /// leader's proposal is known (notarizes reference one proposal) and the
-    /// buffers warrant a batch (see [Certification::should_verify]).
+    /// proposal is known (notarizes reference one proposal) and the buffers
+    /// warrant a batch (see [Certification::should_verify]).
     ///
     /// It uses `S::verify_attestations` for efficient batch verification, run as one CPU-bound job
     /// submitted through [Strategy::spawn] so a parallel strategy hosts it on its own pool
@@ -415,9 +493,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        // Until the leader's proposal is known, notarizes may reference many
-        // different proposals.
-        if !matches!(self.leader, Leader::Proposed { .. }) {
+        // Until the proposal is known, notarizes may reference many different
+        // proposals.
+        if matches!(self.proposal, ProposalState::Unknown) {
             return None;
         }
         self.notarize
@@ -435,7 +513,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                         .map(|n| (n.proposal, n.attestation))
                         .unzip();
                     // All proposals here are equal: pending votes are filtered to the
-                    // leader's proposal before verification becomes ready.
+                    // selected proposal before verification becomes ready.
                     let proposal = &proposals[0];
 
                     let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
@@ -507,8 +585,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 
     /// Batch verifies pending [Vote::Finalize] messages, if worthwhile: the
-    /// leader's proposal is known (finalizes reference one proposal) and the
-    /// buffers warrant a batch (see [Certification::should_verify]).
+    /// proposal is known (finalizes reference one proposal) and the buffers
+    /// warrant a batch (see [Certification::should_verify]).
     ///
     /// It uses `S::verify_attestations` for efficient batch verification, run as one CPU-bound job
     /// submitted through [Strategy::spawn] so a parallel strategy hosts it on its own pool
@@ -527,9 +605,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        // Until the leader's proposal is known, finalizes may reference many
-        // different proposals.
-        if !matches!(self.leader, Leader::Proposed { .. }) {
+        // Until the proposal is known, finalizes may reference many different
+        // proposals.
+        if matches!(self.proposal, ProposalState::Unknown) {
             return None;
         }
         self.finalize
@@ -609,6 +687,74 @@ mod tests {
                 State::Complete => &[],
             }
         }
+
+        /// Returns the capacities of the pending and verified vote buffers.
+        fn capacities(&self) -> (usize, usize) {
+            match &self.state {
+                State::Incomplete { pending, verified } => {
+                    (pending.capacity(), verified.capacity())
+                }
+                State::Complete => (0, 0),
+            }
+        }
+    }
+
+    #[test]
+    fn test_certification_allocates_vote_buffers_lazily() {
+        let mut certification = Certification::new(4, true);
+        assert_eq!(certification.capacities(), (0, 0));
+
+        certification.add(1u8, false);
+        let (pending, verified) = certification.capacities();
+        assert!(pending >= 4);
+        assert_eq!(verified, 0);
+
+        certification.complete();
+        assert_eq!(certification.capacities(), (0, 0));
+    }
+
+    #[test_async]
+    async fn test_non_batchable_certification_avoids_repeated_quorum_reservations() {
+        let quorum = 64;
+        let mut certification = Certification::new(quorum, false);
+        certification.add(1u8, false);
+        certification
+            .try_verify(|pending, mut verified| async move {
+                verified.extend(pending);
+                (verified, Vec::new())
+            })
+            .await
+            .expect("non-batchable pending votes must verify eagerly");
+
+        certification.add(2u8, false);
+        let (pending, _) = certification.capacities();
+        assert!(
+            pending < quorum,
+            "a single eagerly verified vote should not reserve a quorum-sized buffer"
+        );
+    }
+
+    #[test_async]
+    async fn test_batchable_certification_reserves_only_remaining_quorum() {
+        let quorum = 64;
+        let mut certification = Certification::new(quorum, true);
+        for vote in 0..quorum {
+            certification.add(vote, false);
+        }
+        certification
+            .try_verify(|mut pending, _| async move {
+                pending.pop().expect("quorum batch must be non-empty");
+                (pending, Vec::new())
+            })
+            .await
+            .expect("a quorum of pending votes must trigger batch verification");
+
+        certification.add(quorum, false);
+        let (pending, _) = certification.capacities();
+        assert!(
+            pending < quorum,
+            "one replacement vote should not reserve a quorum-sized buffer"
+        );
     }
 
     // Helper function to create a sample digest
@@ -671,10 +817,8 @@ mod tests {
         assert_eq!(verifier.notarize.verified().len(), 1);
 
         verifier.set_leader(notarize1.signer(), Some(&notarize1));
-        assert_eq!(
-            verifier.get_leader_proposal(),
-            Some((notarize1.signer(), &notarize1.proposal))
-        );
+        assert_eq!(verifier.leader(), Some(notarize1.signer()));
+        assert_eq!(verifier.proposal(), Some(&notarize1.proposal));
         assert_eq!(verifier.notarize.pending().len(), 1);
 
         verifier.add(Vote::Notarize(notarize2), false);
@@ -694,14 +838,12 @@ mod tests {
 
         verifier2.set_leader(notarize_leader.signer(), None);
         verifier2.add(Vote::Notarize(notarize_non_leader), false);
-        assert!(verifier2.get_leader_proposal().is_none());
+        assert_eq!(verifier2.leader(), Some(notarize_leader.signer()));
+        assert!(verifier2.proposal().is_none());
         assert_eq!(verifier2.notarize.pending().len(), 1);
 
         verifier2.add(Vote::Notarize(notarize_leader.clone()), false);
-        assert_eq!(
-            verifier2.get_leader_proposal(),
-            Some((notarize_leader.signer(), &notarize_leader.proposal))
-        );
+        assert_eq!(verifier2.proposal(), Some(&notarize_leader.proposal));
         assert_eq!(verifier2.notarize.pending().len(), 2);
     }
 
@@ -740,15 +882,12 @@ mod tests {
 
         let leader = leader_notarize.signer();
         verifier.set_leader(leader, None);
-        assert!(matches!(verifier.leader, Leader::Known(l) if l == leader));
-        assert!(verifier.get_leader_proposal().is_none());
+        assert_eq!(verifier.leader(), Some(leader));
+        assert!(verifier.proposal().is_none());
         assert_eq!(verifier.notarize.pending().len(), 1);
 
         verifier.add(Vote::Notarize(leader_notarize.clone()), false);
-        assert_eq!(
-            verifier.get_leader_proposal(),
-            Some((leader, &leader_notarize.proposal))
-        );
+        assert_eq!(verifier.proposal(), Some(&leader_notarize.proposal));
         assert_eq!(verifier.notarize.pending().len(), 2);
 
         let mut verifier2 = Verifier::<S, Sha256>::new(
@@ -758,10 +897,53 @@ mod tests {
         );
         verifier2.add(Vote::Notarize(leader_notarize.clone()), true);
         verifier2.set_leader(leader, Some(&leader_notarize));
-        assert_eq!(
-            verifier2.get_leader_proposal(),
-            Some((leader, &leader_notarize.proposal))
+        assert_eq!(verifier2.leader(), Some(leader));
+        assert_eq!(verifier2.proposal(), Some(&leader_notarize.proposal));
+
+        // A verified notarization supersedes a conflicting proposal learned
+        // from the leader's vote.
+        let notarized_proposal = Proposal::new(round, View::new(0), sample_digest(2));
+        assert_ne!(notarized_proposal, leader_notarize.proposal);
+        assert!(
+            verifier2
+                .set_proposal(ProposalState::Certificate(notarized_proposal.clone()))
+                .changed
         );
+        assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
+
+        // Re-adopting the same proposal reports no change.
+        assert!(
+            !verifier2
+                .set_proposal(ProposalState::Certificate(notarized_proposal.clone()))
+                .changed
+        );
+
+        // The first notarization remains authoritative.
+        let conflicting_notarized_proposal = Proposal::new(round, View::new(0), sample_digest(3));
+        assert!(
+            !verifier2
+                .set_proposal(ProposalState::Certificate(conflicting_notarized_proposal))
+                .changed
+        );
+        assert_eq!(verifier2.proposal(), Some(&notarized_proposal));
+
+        // If the notarization arrives first, setting the leader cannot replace
+        // its proposal with a conflicting buffered leader vote.
+        let mut verifier3 = Verifier::<S, Sha256>::new(
+            Round::new(Epoch::new(0), View::new(1)),
+            schemes[0].clone(),
+            quorum,
+        );
+        assert!(
+            verifier3
+                .set_proposal(ProposalState::Certificate(notarized_proposal.clone()))
+                .changed
+        );
+        assert!(verifier3.leader().is_none());
+        assert_eq!(verifier3.proposal(), Some(&notarized_proposal));
+        verifier3.set_leader(leader, Some(&leader_notarize));
+        assert_eq!(verifier3.leader(), Some(leader));
+        assert_eq!(verifier3.proposal(), Some(&notarized_proposal));
     }
 
     #[test]
@@ -985,9 +1167,9 @@ mod tests {
         assert_eq!(verifier.finalize.pending().len(), 2);
 
         verifier.set_leader(finalize_a.signer(), None);
-        assert!(verifier.get_leader_proposal().is_none());
+        assert!(verifier.proposal().is_none());
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
-        verifier.try_learn_proposal(&leader_notarize);
+        verifier.try_set_proposal_from_leader(&leader_notarize);
         assert_eq!(verifier.finalize.pending().len(), 1);
         assert_eq!(verifier.finalize.pending()[0], finalize_a);
         assert_eq!(verifier.finalize.verified().len(), 0);
@@ -1149,49 +1331,49 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Leader::Unknown")]
+    #[should_panic(expected = "leader already set")]
     fn test_set_leader_twice_panics_bls_threshold_minsig() {
         set_leader_twice_panics(bls12381_threshold_vrf::fixture::<MinSig, _>);
     }
 
     #[test]
-    #[should_panic(expected = "Leader::Unknown")]
+    #[should_panic(expected = "leader already set")]
     fn test_set_leader_twice_panics_bls_threshold_minpk() {
         set_leader_twice_panics(bls12381_threshold_vrf::fixture::<MinPk, _>);
     }
 
     #[test]
-    #[should_panic(expected = "Leader::Unknown")]
+    #[should_panic(expected = "leader already set")]
     fn test_set_leader_twice_panics_bls_threshold_std_minsig() {
         set_leader_twice_panics(bls12381_threshold_std::fixture::<MinSig, _>);
     }
 
     #[test]
-    #[should_panic(expected = "Leader::Unknown")]
+    #[should_panic(expected = "leader already set")]
     fn test_set_leader_twice_panics_bls_threshold_std_minpk() {
         set_leader_twice_panics(bls12381_threshold_std::fixture::<MinPk, _>);
     }
 
     #[test]
-    #[should_panic(expected = "Leader::Unknown")]
+    #[should_panic(expected = "leader already set")]
     fn test_set_leader_twice_panics_bls_multisig_minsig() {
         set_leader_twice_panics(bls12381_multisig::fixture::<MinSig, _>);
     }
 
     #[test]
-    #[should_panic(expected = "Leader::Unknown")]
+    #[should_panic(expected = "leader already set")]
     fn test_set_leader_twice_panics_bls_multisig_minpk() {
         set_leader_twice_panics(bls12381_multisig::fixture::<MinPk, _>);
     }
 
     #[test]
-    #[should_panic(expected = "Leader::Unknown")]
+    #[should_panic(expected = "leader already set")]
     fn test_set_leader_twice_panics_ed() {
         set_leader_twice_panics(ed25519::fixture);
     }
 
     #[test]
-    #[should_panic(expected = "Leader::Unknown")]
+    #[should_panic(expected = "leader already set")]
     fn test_set_leader_twice_panics_secp() {
         set_leader_twice_panics(secp256r1::fixture);
     }
@@ -1318,21 +1500,27 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let quorum = N3f1::quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
-        let round = Round::new(Epoch::new(0), View::new(1));
-        let finalizes: Vec<_> = schemes
-            .iter()
-            .take(quorum as usize)
-            .map(|scheme| create_finalize(scheme, round, View::new(0), 1))
-            .collect();
+        let test_verifier_finalize = || {
+            let mut verifier = Verifier::<S, Sha256>::new(
+                Round::new(Epoch::new(0), View::new(1)),
+                schemes[0].clone(),
+                quorum,
+            );
+            let round = Round::new(Epoch::new(0), View::new(1));
+            let finalizes: Vec<_> = schemes
+                .iter()
+                .take(quorum as usize)
+                .map(|scheme| create_finalize(scheme, round, View::new(0), 1))
+                .collect();
 
-        for finalize in finalizes.iter() {
-            verifier.add(Vote::Finalize(finalize.clone()), false);
-        }
+            for finalize in finalizes.iter() {
+                verifier.add(Vote::Finalize(finalize.clone()), false);
+            }
+
+            (verifier, finalizes[0].clone())
+        };
+
+        let (mut verifier, finalize) = test_verifier_finalize();
 
         assert!(
             verifier
@@ -1342,15 +1530,27 @@ mod tests {
             "Should not verify without leader/proposal set"
         );
 
-        verifier.set_leader(finalizes[0].signer(), None);
+        verifier.set_leader(finalize.signer(), None);
         assert!(
             verifier
                 .try_verify_finalizes(&mut rng, &Sequential)
                 .await
                 .is_none(),
-            "Should not verify without leader_proposal set"
+            "Should not verify with a leader but no proposal"
         );
         assert_eq!(verifier.finalize.pending().len(), quorum as usize);
+
+        let (mut verifier, finalize) = test_verifier_finalize();
+
+        verifier.set_proposal(ProposalState::Certificate(finalize.proposal.clone()));
+        assert!(verifier.leader.is_none());
+        assert!(
+            verifier
+                .try_verify_finalizes(&mut rng, &Sequential)
+                .await
+                .is_some(),
+            "Should verify with a proposal and no leader"
+        );
     }
 
     #[test_async]
@@ -1882,15 +2082,13 @@ mod tests {
 
         verifier.record_certificate(Kind::Notarization);
         verifier.set_leader(Participant::new(0), None);
-        assert!(verifier.get_leader_proposal().is_none());
+        assert_eq!(verifier.leader(), Some(Participant::new(0)));
+        assert!(verifier.proposal().is_none());
 
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
         let proposal = leader_notarize.proposal.clone();
         verifier.add(Vote::Notarize(leader_notarize), false);
-        assert_eq!(
-            verifier.get_leader_proposal(),
-            Some((Participant::new(0), &proposal))
-        );
+        assert_eq!(verifier.proposal(), Some(&proposal));
         assert!(verifier.notarize.pending().is_empty());
 
         // Certifying one kind leaves the others accumulating

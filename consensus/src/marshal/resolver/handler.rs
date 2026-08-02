@@ -138,6 +138,7 @@ impl<D: Digest> Consumer for Handler<D> {
     type Key = Key<D>;
     type Value = Bytes;
     type Subscriber = Annotation;
+    type Outcome = bool;
 
     fn deliver(
         &mut self,

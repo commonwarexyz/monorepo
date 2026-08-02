@@ -1031,7 +1031,7 @@ where
             Err(err) => {
                 warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
                 self.state.remove(&commitment);
-                self.drop_subscriptions(commitment);
+                self.drop_commitment_subscriptions(commitment);
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -1140,30 +1140,21 @@ where
         }
     }
 
-    /// Drops all subscriptions associated with a commitment.
+    /// Drops subscriptions bound to an exact commitment.
     ///
-    /// Removing these entries drops all senders, causing receivers to resolve
-    /// with cancellation (`RecvError`) instead of hanging indefinitely.
-    fn drop_subscriptions(&mut self, commitment: Commitment) {
+    /// Before marshal accepts a block, a candidate can claim a digest it cannot reconstruct.
+    /// Retiring it therefore does not prove the digest unavailable.
+    fn drop_commitment_subscriptions(&mut self, commitment: Commitment) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
         self.block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(commitment));
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(
-                commitment.block::<B::Digest>(),
-            ));
     }
 
-    /// Prunes all blocks in the reconstructed block cache that are older than the block
-    /// with the given commitment. Also cleans up stale reconstruction state
-    /// and subscriptions.
+    /// Evicts cached blocks and reconstruction state through `through`.
     ///
-    /// This is the only place reconstruction state is pruned by round. We
-    /// intentionally avoid pruning on reconstruction success because a
-    /// Byzantine leader can equivocate, producing multiple valid commitments
-    /// in the same round. Both must remain recoverable until finalization
-    /// determines which one is canonical.
+    /// Pruning waits for finalization because a Byzantine leader may produce multiple valid
+    /// commitments in one round.
     fn prune(&mut self, through: Commitment) {
         let cached = self
             .reconstructed_blocks
@@ -1174,10 +1165,9 @@ where
                 .retain(|_, entry| entry.block.height() > height);
         }
 
-        // Always clear direct state/subscriptions for the pruned commitment.
-        // This avoids dangling waiters when prune is called for a commitment
-        // that was never reconstructed locally.
-        self.drop_subscriptions(through);
+        // Finalization makes existing exact-commitment and assigned-shard waits for these states
+        // obsolete. Digest waits are not commitment-specific.
+        self.drop_commitment_subscriptions(through);
         let state_round = self.state.remove(&through).map(|state| state.round());
         let cached_round = cached.map(|(round, _)| round);
         let Some(round) = state_round.or(cached_round) else {
@@ -1193,7 +1183,7 @@ where
             keep
         });
         for pruned in pruned_commitments {
-            self.drop_subscriptions(pruned);
+            self.drop_commitment_subscriptions(pruned);
         }
     }
 }
@@ -1691,7 +1681,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
     };
     use std::{
         future::Future,
@@ -1721,7 +1711,7 @@ mod tests {
         }
     }
 
-    impl_certificate_ed25519!(TestSubject, Vec<u8>);
+    impl_certificate_ed25519!(TestSubject, Vec<u8>, N3f1);
 
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
@@ -4221,8 +4211,9 @@ mod tests {
         // decoded blob has a different digest than what the commitment claims. This triggers
         // Error::DigestMismatch in try_reconstruct. Verify that:
         //   1. The failed commitment's state is cleaned up
-        //   2. Subscriptions for the failed commitment never resolve
-        //   3. A subsequent valid commitment reconstructs successfully
+        //   2. The exact commitment subscription closes
+        //   3. The digest subscription survives the invalid candidate
+        //   4. The valid commitment later reconstructs the claimed digest
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -4239,7 +4230,8 @@ mod tests {
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
                 let real_commitment2 = coded_block2.commitment();
 
-                // Build a fake commitment: block1's digest + block2's coding root/context/config.
+                // This is an invalid claim, not a second accepted commitment for block1.
+                // Build it from block1's digest and block2's coding root/context/config.
                 // Shards from block2 will verify against block2's root (present in the fake
                 // commitment), but try_reconstruct will decode block2 and find its digest != D1.
                 let fake_commitment = Commitment::from((
@@ -4303,16 +4295,16 @@ mod tests {
                     "block should not be available after DigestMismatch"
                 );
 
-                // Block subscription should be closed after failed reconstruction cleanup.
+                // Commitment validity governs the exact-commitment subscription.
+                // The digest subscription accepts another valid commitment.
                 assert!(
                     matches!(block_sub.try_recv(), Err(TryRecvError::Closed)),
                     "subscription should close for failed reconstruction"
                 );
                 assert!(
-                    matches!(digest_sub.try_recv(), Err(TryRecvError::Closed)),
-                    "digest subscription should close after failed reconstruction"
+                    matches!(digest_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "digest subscription should survive failed reconstruction"
                 );
-
                 // Now verify the engine is not stuck: send valid shards for block1's real
                 // commitment and confirm reconstruction succeeds.
                 let real_commitment1 = coded_block1.commitment();
@@ -4348,6 +4340,10 @@ mod tests {
                     .await
                     .expect("valid block should reconstruct after prior failure");
                 assert_eq!(reconstructed.commitment(), real_commitment1);
+                let by_digest = digest_sub
+                    .await
+                    .expect("valid commitment should satisfy digest subscription");
+                assert_eq!(by_digest.commitment(), real_commitment1);
             },
         );
     }

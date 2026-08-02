@@ -57,7 +57,10 @@ mod logger;
 
 use clap::{Arg, Command, value_parser};
 use commonware_cryptography::{Signer as _, ed25519};
-use commonware_p2p::{Manager as _, authenticated::discovery};
+use commonware_p2p::{
+    Manager as _,
+    authenticated::{self, discovery},
+};
 use commonware_runtime::{Quota, Runner as _, Supervisor as _, tokio};
 use commonware_utils::{NZU32, TryCollect, ordered::Set, sync::Mutex};
 use std::{
@@ -167,6 +170,13 @@ fn main() {
         // Initialize network
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
+        // Configure channel capacity
+        //
+        // The rate is enforced independently for each peer. All peers share the channel's inbound
+        // mailbox, so size its backlog for one full burst from every peer.
+        let message_rate = Quota::per_second(NZU32!(128));
+        let message_backlog = authenticated::backlog(recipients.len(), message_rate);
+
         // Provide authorized peers
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
@@ -174,12 +184,8 @@ fn main() {
         oracle.track(0, recipients);
 
         // Initialize chat
-        const MAX_MESSAGE_BACKLOG: usize = 128;
-        let (chat_sender, chat_receiver) = network.register(
-            handler::CHANNEL,
-            Quota::per_second(NZU32!(128)),
-            MAX_MESSAGE_BACKLOG,
-        );
+        let (chat_sender, chat_receiver) =
+            network.register(handler::CHANNEL, message_rate, message_backlog);
 
         // Start network
         let network_handler = network.start();
