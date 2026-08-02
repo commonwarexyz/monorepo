@@ -710,12 +710,10 @@ where
         // redundant, unless notarized recovery created leaderless state first.
         // In that case, the leader announcement must still populate the
         // leader-dependent path.
-        let block_cached = if let Some(entry) = self.reconstructed_blocks.get_mut(&commitment) {
-            entry.round = entry.round.max(round);
-            true
-        } else {
-            false
-        };
+        let block_cached = self.reconstructed_blocks.contains_key(&commitment);
+        if block_cached {
+            self.observe_existing_commitment(commitment, round);
+        }
         if block_cached
             && self
                 .state
@@ -733,8 +731,10 @@ where
             warn!(?leader, %commitment, "leader update for non-participant, ignoring");
             return;
         }
+        if !block_cached {
+            self.observe_existing_commitment(commitment, round);
+        }
         if let Some(state) = self.state.get_mut(&commitment) {
-            state.observe(round);
             if let Some(existing) = state.leader() {
                 if existing != &leader {
                     warn!(
@@ -774,12 +774,10 @@ where
         commitment: Commitment,
         round: Round,
     ) {
-        if let Some(entry) = self.reconstructed_blocks.get_mut(&commitment) {
-            entry.round = entry.round.max(round);
+        if self.observe_existing_commitment(commitment, round) {
             return;
         }
-        if let Some(state) = self.state.get_mut(&commitment) {
-            state.observe(round);
+        if self.state.contains_key(&commitment) {
             let buffered_progress = self.ingest_buffered_shards(commitment);
             if buffered_progress {
                 self.try_advance(sender, commitment);
@@ -887,6 +885,25 @@ where
         progressed
     }
 
+    /// Records a consensus observation on every existing owner of a commitment.
+    ///
+    /// A cached block may retain reconstruction state while assigned-shard verification is
+    /// pending. Updating both owners together keeps their pruning decisions consistent.
+    ///
+    /// Returns whether the block is already cached.
+    fn observe_existing_commitment(&mut self, commitment: Commitment, round: Round) -> bool {
+        let block_cached = if let Some(entry) = self.reconstructed_blocks.get_mut(&commitment) {
+            entry.round = entry.round.max(round);
+            true
+        } else {
+            false
+        };
+        if let Some(state) = self.state.get_mut(&commitment) {
+            state.observe(round);
+        }
+        block_cached
+    }
+
     /// Cache a block and notify all subscribers waiting on it.
     fn cache_block(
         &mut self,
@@ -894,9 +911,9 @@ where
         block: Arc<CodedBlock<B, C, H>>,
     ) -> Arc<CodedBlock<B, C, H>> {
         let commitment = block.commitment();
+        self.observe_existing_commitment(commitment, round);
         self.reconstructed_blocks
             .entry(commitment)
-            .and_modify(|entry| entry.round = entry.round.max(round))
             .or_insert_with(|| ReconstructedBlock {
                 round,
                 block: Arc::clone(&block),
@@ -3145,6 +3162,135 @@ mod tests {
                     },
                     _ = context.sleep(config.link.latency * 10) => {
                         panic!("later-round reconstruction did not complete");
+                    },
+                }
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_cached_observations_refresh_reconstruction_state_round() {
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _, mut peers, _, coding_config| async move {
+                let live = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let finalized = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let live_commitment = live.commitment();
+                let finalized_commitment = finalized.commitment();
+                let leader = peers[0].public_key.clone();
+                let receivers = [3usize, 6usize];
+                let receiver_keys = [
+                    peers[receivers[0]].public_key.clone(),
+                    peers[receivers[1]].public_key.clone(),
+                ];
+                let original_round = Round::new(Epoch::zero(), View::new(1));
+
+                for &receiver_idx in &receivers {
+                    peers[receiver_idx].mailbox.discovered(
+                        live_commitment,
+                        leader.clone(),
+                        original_round,
+                    );
+                }
+
+                // Reconstruct from gossip while leaving assigned-shard verification pending.
+                for sender_idx in [1usize, 2usize, 4usize, 5usize] {
+                    let shard = live
+                        .shard(peers[sender_idx].index.get() as u16)
+                        .expect("missing gossip shard")
+                        .encode();
+                    for receiver in &receiver_keys {
+                        peers[sender_idx].sender.send(
+                            Recipients::One(receiver.clone()),
+                            shard.clone(),
+                            true,
+                        );
+                    }
+                }
+                context.sleep(config.link.latency * 4).await;
+
+                for &receiver_idx in &receivers {
+                    assert!(
+                        peers[receiver_idx]
+                            .mailbox
+                            .get(live_commitment)
+                            .await
+                            .is_some(),
+                        "block should be cached before its round is refreshed"
+                    );
+                }
+
+                let mut notarized_sub = peers[receivers[0]]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(live_commitment);
+                let mut discovered_sub = peers[receivers[1]]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(live_commitment);
+                let later_round = Round::new(Epoch::zero(), View::new(4));
+                peers[receivers[0]]
+                    .mailbox
+                    .notarized(live_commitment, later_round);
+                peers[receivers[1]].mailbox.discovered(
+                    live_commitment,
+                    leader,
+                    later_round,
+                );
+                context.sleep(Duration::from_millis(10)).await;
+
+                let prune_round = Round::new(Epoch::zero(), View::new(3));
+                for &receiver_idx in &receivers {
+                    peers[receiver_idx]
+                        .mailbox
+                        .prune(prune_round, finalized_commitment);
+                }
+                context.sleep(Duration::from_millis(10)).await;
+
+                assert!(
+                    matches!(notarized_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "cached notarization should keep reconstruction state live"
+                );
+                assert!(
+                    matches!(discovered_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "cached discovery should keep reconstruction state live"
+                );
+
+                for (&receiver_idx, receiver) in receivers.iter().zip(&receiver_keys) {
+                    let leader_shard = live
+                        .shard(peers[receiver_idx].index.get() as u16)
+                        .expect("missing leader shard");
+                    peers[0].sender.send(
+                        Recipients::One(receiver.clone()),
+                        leader_shard.encode(),
+                        true,
+                    );
+                }
+
+                select! {
+                    result = notarized_sub => {
+                        result.expect("notarized reconstruction state should accept the leader shard");
+                    },
+                    _ = context.sleep(config.link.latency * 10) => {
+                        panic!("notarized reconstruction state did not accept the leader shard");
+                    },
+                }
+                select! {
+                    result = discovered_sub => {
+                        result.expect("discovered reconstruction state should accept the leader shard");
+                    },
+                    _ = context.sleep(config.link.latency * 10) => {
+                        panic!("discovered reconstruction state did not accept the leader shard");
                     },
                 }
             },
