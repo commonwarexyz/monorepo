@@ -113,7 +113,7 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
 pub struct Actor<
     E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: Elector<S>,
+    L: Elector<S::Certificate>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
@@ -146,7 +146,7 @@ pub struct Actor<
 impl<
     E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: Elector<S>,
+    L: Elector<S::Certificate>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,

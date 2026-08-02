@@ -1205,7 +1205,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             cfg.write_buffer,
         );
         let (offsets, mut pending) = futures::try_join!(
-            fixed::Inner::<E, u64>::init_sealed(context.child("offsets"), cfg.offsets_config(), size),
+            fixed::Inner::<E, u64>::init_sealed(
+                context.child("offsets"),
+                cfg.offsets_config(),
+                size
+            ),
             partition.open_all(),
         )?;
 
@@ -1240,10 +1244,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let handle = data
             .get(last_blob)
             .expect("the last retained blob was just verified");
-        let header_len = usize::try_from(
-            (handle.size() - final_offset).min(MAX_U32_VARINT_SIZE as u64),
-        )
-        .expect("frame headers are small");
+        let header_len =
+            usize::try_from((handle.size() - final_offset).min(MAX_U32_VARINT_SIZE as u64))
+                .expect("frame headers are small");
         let exact = handle
             .read_at(final_offset, header_len)
             .await
@@ -3136,13 +3139,10 @@ mod tests {
                 ..cfg.clone()
             };
             seed_sealed(&context, &cfg_mid, "mid_writer", &items[..2]).await;
-            let reader = Journal::<_, FixedBytes<32>>::init_sealed(
-                context.child("mid_sealed"),
-                cfg_mid,
-                2,
-            )
-            .await
-            .unwrap();
+            let reader =
+                Journal::<_, FixedBytes<32>>::init_sealed(context.child("mid_sealed"), cfg_mid, 2)
+                    .await
+                    .unwrap();
             assert_eq!(reader.bounds(), 0..2);
             assert_eq!(reader.read(1).await.unwrap(), items[1]);
             drop(reader);
@@ -3236,7 +3236,10 @@ mod tests {
             )
             .await
             .unwrap();
-            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3, 4])).await.unwrap();
+            (journal, _) = journal
+                .append_many(Many::Flat(&[1, 2, 3, 4]))
+                .await
+                .unwrap();
             let (journal, cut) = journal.start_sync().await.unwrap();
             drive_pending_syncs(&pending, cut).await.unwrap();
 
@@ -3246,7 +3249,10 @@ mod tests {
             let (journal, second) = journal.start_seal().await.unwrap();
             fail_pending_syncs(&pending);
             assert!(first.await.is_err());
-            assert!(second.await.is_err(), "a staged watermark was reported durable");
+            assert!(
+                second.await.is_err(),
+                "a staged watermark was reported durable"
+            );
             drop(journal);
         });
     }

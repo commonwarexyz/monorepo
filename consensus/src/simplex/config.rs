@@ -95,7 +95,7 @@ impl<S: Scheme, D: Digest> Floor<S, D> {
 pub struct Config<S, L, B, D, A, R, F, T>
 where
     S: Scheme,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
@@ -217,7 +217,7 @@ where
 
 impl<
     S: Scheme,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,

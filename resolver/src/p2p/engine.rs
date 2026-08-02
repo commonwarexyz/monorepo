@@ -110,10 +110,26 @@ where
         context: E,
         cfg: Config<P, D, B, Key, Con, Pro>,
     ) -> (Self, Mailbox<Key, P, Con::Subscriber>) {
+        Self::new_with_preferred_peers(context, cfg, std::iter::empty())
+    }
+
+    /// Creates a new `Actor` that prefers the given peers for fresh unrestricted fetches.
+    ///
+    /// Preferred peers must still satisfy all normal eligibility checks. Preferences do not
+    /// affect targeted fetches or retries, and peers within each preference class retain the
+    /// normal performance-based ordering.
+    pub fn new_with_preferred_peers<I>(
+        context: E,
+        cfg: Config<P, D, B, Key, Con, Pro>,
+        preferred_peers: I,
+    ) -> (Self, Mailbox<Key, P, Con::Subscriber>)
+    where
+        I: IntoIterator<Item = P>,
+    {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
-        let fetcher = Fetcher::new(
+        let fetcher = Fetcher::new_with_preferred_peers(
             context.child("fetcher"),
             FetcherConfig {
                 me: cfg.me,
@@ -122,6 +138,7 @@ where
                 retry_timeout: cfg.fetch_retry_timeout,
                 priority_requests: cfg.priority_requests,
             },
+            preferred_peers,
         );
         (
             Self {
@@ -211,6 +228,7 @@ where
                 if let Some(key) = self.fetcher.pop_active() {
                     debug!(?key, "requester timeout");
                     self.metrics.fetch.inc(Status::Failure);
+                    self.metrics.fetch_timeouts.inc();
                     self.fetcher.add_retry(key);
                 }
             },
@@ -389,8 +407,11 @@ where
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
+        let Some(receiver) = producer.try_produce(key) else {
+            self.metrics.serve.inc(Status::Dropped);
+            return;
+        };
         let timer = self.metrics.serve_duration.timer(self.context.as_ref());
-        let receiver = producer.produce(key);
         self.serves.push(async move {
             let result = receiver.await;
             Serve {
@@ -465,6 +486,7 @@ where
                     }
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.fetcher.clear_targets(&key);
+                    self.fetcher.clear_missing(&key);
                 }
             }
             Outcome::Ambiguous => {
@@ -489,6 +511,7 @@ where
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.subscribers.remove(&key);
                     self.fetcher.clear_targets(&key);
+                    self.fetcher.clear_missing(&key);
                     return;
                 }
 
@@ -507,6 +530,7 @@ where
                 self.inflight.cancel(&key);
                 self.subscribers.remove(&key);
                 self.fetcher.clear_targets(&key);
+                self.fetcher.clear_missing(&key);
             }
         }
     }
@@ -521,8 +545,9 @@ where
             return;
         };
 
-        // The peer did not have the data, so we need to try again
+        // The peer could not serve the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
-        self.fetcher.add_retry(key);
+        self.metrics.fetch_error_responses.inc();
+        self.fetcher.add_missing_retry(key);
     }
 }

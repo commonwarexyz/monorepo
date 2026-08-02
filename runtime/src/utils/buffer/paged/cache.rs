@@ -1,7 +1,7 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, Checksum, get_page_from_blob};
+use super::{CHECKSUM_SIZE, Checksum, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
 use ahash::AHashMap;
 use commonware_utils::{cache::Clock, sync::RwLock};
@@ -457,11 +457,10 @@ impl CacheRef {
                 let mut owners = Vec::with_capacity(pages);
                 for (index, key) in keys.iter().copied().enumerate() {
                     let physical = physical.clone();
-                    let fetch_future = async move {
-                        physical.await.map(|pages| pages[index].clone())
-                    }
-                    .boxed()
-                    .shared();
+                    let fetch_future =
+                        async move { physical.await.map(|pages| pages[index].clone()) }
+                            .boxed()
+                            .shared();
                     let fetch = Arc::new(fetch_future.clone());
                     cache.page_fetches.insert(
                         key,
@@ -483,9 +482,7 @@ impl CacheRef {
         };
 
         if fetches.is_empty() {
-            return self
-                .read_after_page_fault(blob, blob_id, buf, offset)
-                .await;
+            return self.read_after_page_fault(blob, blob_id, buf, offset).await;
         }
 
         let logical = match try_join_all(fetches).await {

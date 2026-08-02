@@ -325,7 +325,7 @@ pub fn extract<E, S, L>(
 where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
 {
     reporters
         .iter()

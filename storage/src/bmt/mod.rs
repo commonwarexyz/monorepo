@@ -578,8 +578,8 @@ impl<D: Digest> Proof<D> {
             }
         }
         let mut sorted: Vec<(u32, D)> = Vec::with_capacity(elements.len());
-        let mut leaf_chunks = elements.chunks_exact(2);
-        for chunk in &mut leaf_chunks {
+        let (leaf_chunks, leaf_remainder) = elements.as_chunks::<2>();
+        for chunk in leaf_chunks {
             let (leaf_a, pos_a) = &chunk[0];
             let (leaf_b, pos_b) = &chunk[1];
             let (digest_a, digest_b) = H::hash_pair(
@@ -589,7 +589,7 @@ impl<D: Digest> Proof<D> {
             sorted.push((*pos_a, digest_a));
             sorted.push((*pos_b, digest_b));
         }
-        for (leaf, position) in leaf_chunks.remainder() {
+        for (leaf, position) in leaf_remainder {
             let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
             sorted.push((*position, digest));
         }
@@ -649,8 +649,8 @@ impl<D: Digest> Proof<D> {
             }
 
             // Second pass: hash independent parent digests two at a time via `hash_pair`.
-            let mut parent_chunks = parents.chunks_exact(2);
-            for chunk in &mut parent_chunks {
+            let (parent_chunks, parent_remainder) = parents.as_chunks::<2>();
+            for chunk in parent_chunks {
                 let (pos_a, left_a, right_a) = chunk[0];
                 let (pos_b, left_b, right_b) = chunk[1];
                 let (digest_a, digest_b) = H::hash_pair(
@@ -660,7 +660,7 @@ impl<D: Digest> Proof<D> {
                 next_level.push((pos_a, digest_a));
                 next_level.push((pos_b, digest_b));
             }
-            for &(pos, left, right) in parent_chunks.remainder() {
+            for &(pos, left, right) in parent_remainder {
                 next_level.push((pos, H::hash(&[left.as_ref(), right.as_ref()])));
             }
             parents.clear();

@@ -1,6 +1,6 @@
 use commonware_runtime::{
     Metrics as RuntimeMetrics,
-    telemetry::metrics::{Gauge, MetricsExt as _, histogram, status},
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _, histogram, status},
 };
 
 /// Metrics for the peer actor.
@@ -15,6 +15,10 @@ pub struct Metrics {
     pub peers_blocked: Gauge,
     /// Number of fetches by status
     pub fetch: status::Counter,
+    /// Number of outbound fetch attempts that exceeded their request deadline
+    pub fetch_timeouts: Counter,
+    /// Number of outbound fetch attempts answered with a peer error
+    pub fetch_error_responses: Counter,
     /// Number of canceled fetches by status
     pub cancel: status::Counter,
     /// Number of serves by status
@@ -37,6 +41,14 @@ impl Metrics {
         );
         let peers_blocked = context.gauge("peers_blocked", "Current number of blocked peers");
         let fetch = context.family("fetch", "Number of fetches by status");
+        let fetch_timeouts = context.counter(
+            "fetch_timeouts",
+            "Number of outbound fetch attempts that exceeded their request deadline",
+        );
+        let fetch_error_responses = context.counter(
+            "fetch_error_responses",
+            "Number of outbound fetch attempts answered with a peer error",
+        );
         let cancel = context.family("cancel", "Number of canceled fetches by status");
         let serve = context.family("serve", "Number of serves by status");
         let serve_duration_registered = context.histogram(
@@ -56,6 +68,8 @@ impl Metrics {
             serve_processing,
             peers_blocked,
             fetch,
+            fetch_timeouts,
+            fetch_error_responses,
             cancel,
             serve,
             fetch_duration: histogram::Timed::new(fetch_duration_registered),

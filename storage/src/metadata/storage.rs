@@ -104,8 +104,7 @@ impl<B: Blob> PreparedWrite<B> {
                     blob.sync().await?;
                     None
                 } else {
-                    blob.write_at(0, data.clone(), WriteOptions::SYNC)
-                        .await?;
+                    blob.write_at(0, data.clone(), WriteOptions::SYNC).await?;
                     None
                 };
                 Ok((sync, data))
@@ -173,9 +172,7 @@ struct Inner<E: Context, K: Span, V: Codec> {
 }
 
 impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
-    async fn discard(
-        blob: E::Blob,
-    ) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob, K>), Error> {
+    async fn discard(blob: E::Blob) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob, K>), Error> {
         blob.resize(0).await?;
         blob.sync().await?;
         Ok((BTreeMap::new(), Wrapper::empty(blob)))
@@ -192,26 +189,24 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
-        let (left_map, left_wrapper) =
-            Self::load(
-                &context,
-                &cfg.codec_config,
-                max_blob_size,
-                0,
-                left_blob,
-                left_len,
-            )
-            .await?;
-        let (right_map, right_wrapper) =
-            Self::load(
-                &context,
-                &cfg.codec_config,
-                max_blob_size,
-                1,
-                right_blob,
-                right_len,
-            )
-            .await?;
+        let (left_map, left_wrapper) = Self::load(
+            &context,
+            &cfg.codec_config,
+            max_blob_size,
+            0,
+            left_blob,
+            left_len,
+        )
+        .await?;
+        let (right_map, right_wrapper) = Self::load(
+            &context,
+            &cfg.codec_config,
+            max_blob_size,
+            1,
+            right_blob,
+            right_len,
+        )
+        .await?;
 
         // Choose latest blob
         let mut map = left_map;
@@ -353,7 +348,10 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                 return Self::discard(blob).await;
             }
             if encoded.remaining() == entry_bytes {
-                warn!(blob = index, "metadata entry made no decoding progress: truncating");
+                warn!(
+                    blob = index,
+                    "metadata entry made no decoding progress: truncating"
+                );
                 return Self::discard(blob).await;
             }
             lengths.insert(key.clone(), Info::new(cursor, value_bytes));
@@ -675,10 +673,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                 counter.inc();
                 Ok(())
             });
-            return Ok(self.record_pending(
-                Some(completion),
-                Some((target_cursor, mirror)),
-            ));
+            return Ok(self.record_pending(Some(completion), Some((target_cursor, mirror))));
         }
 
         let Some((target_cursor, write)) = prepared else {

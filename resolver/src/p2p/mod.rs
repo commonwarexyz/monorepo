@@ -74,6 +74,12 @@
 //! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
 //! in the latest primary set are ignored until they become primary again.
 //!
+//! [`Engine::new_with_preferred_peers`] gives fresh unrestricted fetches a preferred subset of the
+//! eligible primary peers. Preferred peers are tried first, ordered by the same performance score
+//! and deterministic peer tie-break as other peers. Preferences do not bypass targeting or any
+//! eligibility filter. After a missing response, retries shuffle peers that have not yet reported
+//! the key missing; the full eligible set becomes available again after one retry cycle.
+//!
 //! # Performance Considerations
 //!
 //! The peer supports arbitrarily many concurrent fetches, but resource usage generally
@@ -103,6 +109,14 @@ pub trait Producer: Clone + Send + 'static {
 
     /// Serve a request received from the network.
     fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes>;
+
+    /// Attempt to admit a request received from the network.
+    ///
+    /// Returning `None` leaves the request unanswered so the requester's existing timeout and
+    /// retry policy can attribute backpressure separately from an authoritative missing value.
+    fn try_produce(&mut self, key: Self::Key) -> Option<oneshot::Receiver<Bytes>> {
+        Some(self.produce(key))
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +185,20 @@ mod tests {
                     .expect("metric line must have a value")
                     .parse::<u64>()
                     .expect("status metric value must be an integer")
+            })
+            .sum()
+    }
+
+    fn metric_total(metrics: &str, name: &str) -> u64 {
+        metrics
+            .lines()
+            .filter(|line| line.split(['{', ' ']).next() == Some(name))
+            .map(|line| {
+                line.split_whitespace()
+                    .next_back()
+                    .expect("metric line must have a value")
+                    .parse::<u64>()
+                    .expect("metric value must be an integer")
             })
             .sum()
     }
@@ -281,6 +309,30 @@ mod tests {
                 let _ = sender.send(value);
             }
             receiver
+        }
+    }
+
+    #[derive(Clone)]
+    struct RejectOnceProducer {
+        attempts: Arc<Mutex<usize>>,
+        value: Bytes,
+    }
+
+    impl crate::p2p::Producer for RejectOnceProducer {
+        type Key = Key;
+
+        fn produce(&mut self, _: Self::Key) -> oneshot::Receiver<Bytes> {
+            let (sender, receiver) = oneshot::channel();
+            sender.send_lossy(self.value.clone());
+            receiver
+        }
+
+        fn try_produce(&mut self, key: Self::Key) -> Option<oneshot::Receiver<Bytes>> {
+            let mut attempts = self.attempts.lock();
+            *attempts += 1;
+            let admitted = *attempts > 1;
+            drop(attempts);
+            admitted.then(|| self.produce(key))
         }
     }
 
@@ -602,6 +654,63 @@ mod tests {
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, Bytes::from("data for key 2"));
+        });
+    }
+
+    #[test_traced]
+    fn test_producer_backpressure_is_not_reported_as_missing() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(3);
+            let value = Bytes::from("data after backpressure");
+            let producer = RejectOnceProducer {
+                attempts: Arc::new(Mutex::new(0)),
+                value: value.clone(),
+            };
+            let (requester_consumer, mut deliveries) = consumer();
+
+            let requester = schemes.remove(0);
+            let mut requester_mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(requester.public_key()),
+                requester,
+                connections.remove(0),
+                requester_consumer,
+                Producer::default(),
+            );
+            let responder = schemes.remove(0);
+            let _responder_mailbox = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(responder.public_key()),
+                responder,
+                connections.remove(0),
+                dummy_consumer(),
+                producer,
+            );
+
+            requester_mailbox.fetch(key.clone());
+            assert_eq!(deliveries.recv().await.unwrap(), (key, value));
+
+            let metrics = context.encode();
+            assert_eq!(
+                status_metric_total(&metrics, "actor_serve_total", "Dropped"),
+                1
+            );
+            assert_eq!(
+                status_metric_total(&metrics, "actor_serve_total", "Failure"),
+                0
+            );
+            assert_eq!(metric_total(&metrics, "actor_fetch_timeouts_total"), 1);
+            assert_eq!(
+                metric_total(&metrics, "actor_fetch_error_responses_total"),
+                0
+            );
         });
     }
 
@@ -2209,6 +2318,10 @@ mod tests {
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, valid_data);
+
+            let metrics = context.encode();
+            assert!(metric_total(&metrics, "actor_fetch_error_responses_total") > 0);
+            assert_eq!(metric_total(&metrics, "actor_fetch_timeouts_total"), 0);
         });
     }
 

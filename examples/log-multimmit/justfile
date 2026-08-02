@@ -1,0 +1,11 @@
+workspace_root := justfile_directory() + "/../.."
+default_deployment_dir := justfile_directory() + "/deploy"
+
+# Build the stripped deployable binary and its profiling symbols into a deployment bundle.
+build platform="linux/arm64" deployment_dir=default_deployment_dir:
+    docker buildx build \
+        --platform "{{ platform }}" \
+        --file "{{ workspace_root }}/examples/log-multimmit/assets/docker/Dockerfile" \
+        --target binary \
+        --output "type=local,dest={{ deployment_dir }}" \
+        "{{ workspace_root }}"

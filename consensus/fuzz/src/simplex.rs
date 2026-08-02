@@ -11,7 +11,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
-    certificate::{self, mocks::Fixture},
+    certificate::{self, Verifier, mocks::Fixture},
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
 };
@@ -33,7 +33,10 @@ where
     <<Self::Scheme as certificate::Verifier>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
-    type Elector: elector::Config<Self::Scheme>;
+    type Elector: elector::Config<
+            <Self::Scheme as Verifier>::PublicKey,
+            <Self::Scheme as Verifier>::Certificate,
+        >;
     fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector;
     fn fixture(
         context: &mut deterministic::Context,

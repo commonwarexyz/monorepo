@@ -138,9 +138,7 @@ mod tests {
             let checksum = Crc32::checksum(&encoded);
             encoded.extend_from_slice(&checksum.to_be_bytes());
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at(0, encoded, WriteOptions::SYNC)
-                .await
-                .unwrap();
+            blob.write_at(0, encoded, WriteOptions::SYNC).await.unwrap();
 
             let metadata = Metadata::<_, Unit, Unit>::init(
                 context.child("open"),

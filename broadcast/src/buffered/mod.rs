@@ -60,7 +60,10 @@ mod tests {
     use std::{
         collections::{BTreeMap, VecDeque},
         num::NonZeroU32,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -87,6 +90,21 @@ mod tests {
             Receiver<PublicKey>,
         ),
     >;
+
+    #[derive(Clone)]
+    struct CountingMessage {
+        value: u64,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Digestible for CountingMessage {
+        type Digest = <Sha256 as Hasher>::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Sha256::hash(&[&self.value.to_be_bytes()])
+        }
+    }
 
     async fn initialize_simulation(
         context: deterministic::Context,
@@ -223,6 +241,127 @@ mod tests {
             Message::Get { digest, responder }
                 if *digest == open_get.digest() && !responder.is_closed()
         )));
+    }
+
+    #[test]
+    fn policy_coalesces_duplicate_broadcasts_and_merges_recipients() {
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let message = Arc::new(TestMessage::shared(b"duplicate broadcast"));
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+
+        for _ in 0..1_000 {
+            <Message<PublicKey, TestMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::One(first.clone()),
+                    message: Arc::clone(&message),
+                },
+            );
+        }
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::Some(vec![second.clone()]),
+                message: Arc::clone(&message),
+            },
+        );
+
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+        assert_eq!(drained.len(), 1);
+        let Message::Broadcast { recipients, .. } = drained.pop_front().unwrap() else {
+            panic!("coalesced entry is a broadcast");
+        };
+        let Recipients::Some(recipients) = recipients else {
+            panic!("distinct recipients are merged");
+        };
+        assert_eq!(recipients, vec![first, second]);
+
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        for _ in 0..1_000 {
+            <Message<PublicKey, TestMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::All,
+                    message: Arc::clone(&message),
+                },
+            );
+        }
+        let mut count = 0;
+        overflow.drain(|message| {
+            count += usize::from(matches!(
+                message,
+                Message::Broadcast {
+                    recipients: Recipients::All,
+                    ..
+                }
+            ));
+            None
+        });
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn policy_hashes_each_distinct_overflow_broadcast_once() {
+        const MESSAGES: usize = 1_000;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut overflow = <Message<PublicKey, CountingMessage> as Policy>::Overflow::default();
+        let recipient = PrivateKey::from_seed(1).public_key();
+
+        for value in 0..MESSAGES as u64 {
+            <Message<PublicKey, CountingMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::One(recipient.clone()),
+                    message: Arc::new(CountingMessage {
+                        value,
+                        calls: Arc::clone(&calls),
+                    }),
+                },
+            );
+        }
+
+        assert_eq!(calls.load(Ordering::Relaxed), MESSAGES);
+    }
+
+    #[test]
+    fn rejected_broadcast_remains_indexed_for_coalescing() {
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let message = Arc::new(TestMessage::shared(b"rejected broadcast"));
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(first.clone()),
+                message: Arc::clone(&message),
+            },
+        );
+        overflow.drain(Some);
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(second.clone()),
+                message,
+            },
+        );
+
+        let mut drained = None;
+        overflow.drain(|message| {
+            drained = Some(message);
+            None
+        });
+        let Some(Message::Broadcast { recipients, .. }) = drained else {
+            panic!("coalesced broadcast is retained");
+        };
+        let Recipients::Some(recipients) = recipients else {
+            panic!("distinct recipients are merged");
+        };
+        assert_eq!(recipients, vec![first, second]);
     }
 
     #[test]
