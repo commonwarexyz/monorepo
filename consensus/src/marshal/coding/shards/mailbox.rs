@@ -94,7 +94,7 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to prune all caches at and below the given commitment.
+    /// A request to evict cached blocks and reconstruction state relative to a commitment.
     Prune {
         /// Inclusive prune target [`Commitment`].
         through: Commitment,
@@ -324,7 +324,10 @@ where
         receiver
     }
 
-    /// Request to prune all caches at and below the given commitment.
+    /// Evict cached blocks and reconstruction state through `through`.
+    ///
+    /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
+    /// subscriptions remain open, and later consensus notifications may recreate state.
     pub fn prune(&self, through: Commitment) {
         let _ = self.sender.enqueue(Message::Prune { through });
     }
