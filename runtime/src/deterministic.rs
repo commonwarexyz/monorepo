@@ -457,12 +457,29 @@ impl Executor {
         }
     }
 
+    /// Wake sleepers until a task is ready or no alarms remain.
+    ///
+    /// Canceling a polled sleep leaves its alarm registered until its deadline. If that alarm
+    /// wakes no task, continue to later deadlines before deciding the runtime has stalled.
+    fn wake_until_ready_or_empty(&self, mut current: SystemTime) {
+        loop {
+            current = self.skip_idle_time(current);
+            self.wake_ready_sleepers(current);
+
+            if cfg!(feature = "external")
+                || self.tasks.ready() != 0
+                || self.sleeping.lock().is_empty()
+            {
+                return;
+            }
+        }
+    }
+
     /// Ensure the runtime is making progress.
     ///
     /// When built with the `external` feature, always poll pending tasks after the passage of time.
     fn assert_liveness(&self) {
-        if cfg!(feature = "external") || self.tasks.ready() != 0 || !self.sleeping.lock().is_empty()
-        {
+        if cfg!(feature = "external") || self.tasks.ready() != 0 {
             return;
         }
 
@@ -665,12 +682,9 @@ impl Runner {
                     break output;
                 }
 
-                // Advance time (skipping ahead if no tasks are ready yet)
-                let mut current = executor.advance_time();
-                current = executor.skip_idle_time(current);
-
-                // Wake sleepers and ensure we continue to make progress
-                executor.wake_ready_sleepers(current);
+                // Advance time and wake sleepers until a task is ready or no alarms remain
+                let current = executor.advance_time();
+                executor.wake_until_ready_or_empty(current);
                 executor.assert_liveness();
 
                 // Record that we completed another iteration of the event loop.
