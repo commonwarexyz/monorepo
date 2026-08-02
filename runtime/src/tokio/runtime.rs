@@ -879,8 +879,9 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
-        tokio::telemetry,
+        AtomicBlob as _, AtomicStorage as _, BatchOperation, BatchStorage as _, Blob as _, Metrics,
+        Network, Resolver, Runner as _, Sink, Storage as _, Stream,
+        telemetry::metrics::raw::Counter, tokio::telemetry,
     };
     use bytes::Bytes;
     use std::{
@@ -956,37 +957,24 @@ mod tests {
     }
 
     #[test]
-    fn test_startup_recovers_committed_batch_before_user_code() {
+    fn test_context_removes_atomic_blob_by_handle() {
         let cfg = Config::new();
         let root = cfg.storage_directory().clone();
-        let alpha = root.join("alpha");
-        let beta = root.join("beta");
-        std::fs::create_dir_all(&alpha).unwrap();
-        std::fs::create_dir_all(&beta).unwrap();
-        let removed_blob = alpha.join(commonware_formatting::hex(b"remove"));
-        let kept_blob = alpha.join(commonware_formatting::hex(b"keep"));
-        std::fs::write(&removed_blob, b"remove").unwrap();
-        std::fs::write(&kept_blob, b"keep").unwrap();
-        std::fs::write(beta.join(commonware_formatting::hex(b"remove")), b"remove").unwrap();
+        Runner::new(cfg).start(|context| async move {
+            let (blob, _) = context.open_atomic("batch_remove", b"blob").await.unwrap();
+            blob.append(b"retained").await.unwrap();
+            context
+                .apply(vec![BatchOperation::Remove(blob.clone())])
+                .await
+                .unwrap();
 
-        let operations = crate::storage::batch::canonicalize_operations(vec![
-            crate::storage::batch::Operation::Remove(crate::RemoveTarget::Partition("beta".into())),
-            crate::storage::batch::Operation::Remove(crate::RemoveTarget::Blob {
-                partition: "alpha".into(),
-                name: b"remove".to_vec(),
-            }),
-        ])
-        .unwrap();
-        assert!(
-            crate::storage::batch::interrupt_committed_for_test(&root, &operations, 1).is_err()
-        );
-        assert!(beta.exists());
-
-        let checked_root = root.clone();
-        Runner::new(cfg).start(move |_| async move {
-            assert!(!removed_blob.exists());
-            assert!(!checked_root.join("beta").exists());
-            assert!(kept_blob.exists());
+            assert!(context.scan("batch_remove").await.unwrap().is_empty());
+            assert_eq!(
+                blob.read_at(0, 8).await.unwrap().coalesce(),
+                b"retained"
+            );
+            let (_, len) = context.open_atomic("batch_remove", b"blob").await.unwrap();
+            assert_eq!(len, 0);
         });
         let _ = std::fs::remove_dir_all(root);
     }

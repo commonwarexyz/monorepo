@@ -505,7 +505,7 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, IoBuf, RemoveTarget, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, IoBuf, Storage as _,
         storage::{
             memory::Storage as MemStorage,
             tests::{
@@ -702,39 +702,23 @@ mod tests {
     #[tokio::test]
     async fn test_faulty_storage_batch_fault_phases_are_atomic() {
         let h = Harness::new(Config::default().batch(1.0));
+        let mut targets = Vec::new();
         for partition in ["batch_a", "batch_b"] {
-            let (blob, _) = h.storage.open(partition, b"name").await.unwrap();
-            blob.write_at(0, partition.as_bytes(), WriteOptions::default())
-                .await
-                .unwrap();
+            let (blob, _) = h.storage.open_atomic(partition, b"name").await.unwrap();
+            blob.append(partition.as_bytes()).await.unwrap();
             blob.sync().await.unwrap();
+            targets.push(blob);
         }
 
-        assert!(matches!(
-            h.storage
-                .apply(vec![RemoveTarget::Partition("invalid/name".into()).into()])
-                .await,
-            Err(Error::PartitionNameInvalid(_))
-        ));
         h.storage.apply(Vec::new()).await.unwrap();
 
-        let targets = vec![
-            RemoveTarget::Blob {
-                partition: "batch_b".into(),
-                name: b"name".to_vec(),
-            },
-            RemoveTarget::Blob {
-                partition: "batch_a".into(),
-                name: b"name".to_vec(),
-            },
-            RemoveTarget::Blob {
-                partition: "batch_b".into(),
-                name: b"name".to_vec(),
-            },
-        ];
         assert!(matches!(
             h.storage
-                .apply(targets.iter().cloned().map(BatchOperation::from).collect())
+                .apply(vec![
+                    BatchOperation::Remove(targets[1].clone()),
+                    BatchOperation::Remove(targets[0].clone()),
+                    BatchOperation::Remove(targets[1].clone()),
+                ])
                 .await,
             Err(Error::Io(_))
         ));
@@ -750,7 +734,7 @@ mod tests {
         *h.config.write() = Config::default().batch_post_commit(1.0);
         assert!(matches!(
             h.storage
-                .apply(targets.into_iter().map(BatchOperation::from).collect())
+                .apply(targets.into_iter().map(BatchOperation::Remove).collect())
                 .await,
             Err(Error::Io(_))
         ));
@@ -766,10 +750,7 @@ mod tests {
         let error = h
             .storage
             .apply(vec![
-                BatchOperation::Remove(RemoveTarget::Blob {
-                    partition: "partition".into(),
-                    name: b"name".to_vec(),
-                }),
+                BatchOperation::Remove(blob.clone()),
                 BatchOperation::Rewind { blob, len: 0 },
             ])
             .await

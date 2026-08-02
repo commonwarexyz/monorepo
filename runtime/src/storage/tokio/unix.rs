@@ -12,10 +12,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{
-    sync::{Mutex, OwnedMutexGuard},
-    task,
-};
+use tokio::{sync::OwnedMutexGuard, task};
 
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
@@ -27,29 +24,33 @@ pub(super) type V2State = atomic::State;
 /// Namespace and content state needed only by V2 blobs.
 #[derive(Clone)]
 pub(super) struct V2Context {
-    state: Arc<Mutex<V2State>>,
+    state: Arc<super::super::preflush::Context>,
     namespace: Arc<super::Namespace>,
     storage_directory: PathBuf,
+    incarnation: [u8; super::super::header::Header::V2_INCARNATION_LEN],
 }
 
 impl V2Context {
     pub(super) const fn new(
-        state: Arc<Mutex<V2State>>,
+        state: Arc<super::super::preflush::Context>,
         namespace: Arc<super::Namespace>,
         storage_directory: PathBuf,
+        incarnation: [u8; super::super::header::Header::V2_INCARNATION_LEN],
     ) -> Self {
         Self {
             state,
             namespace,
             storage_directory,
+            incarnation,
         }
     }
 
     async fn lock(&self) -> OwnedMutexGuard<V2State> {
-        if let Ok(state) = self.state.clone().try_lock_owned() {
-            return state;
-        }
-        self.state.clone().lock_owned().await
+        self.state.lock().await
+    }
+
+    fn preflush(&self) -> &Arc<super::super::preflush::Preflush> {
+        self.state.preflush()
     }
 }
 
@@ -133,6 +134,15 @@ impl Blob {
 
     pub(super) const fn is_atomic(&self) -> bool {
         self.atomic.is_some()
+    }
+
+    pub(super) const fn incarnation(
+        &self,
+    ) -> [u8; super::super::header::Header::V2_INCARNATION_LEN] {
+        self.atomic
+            .as_ref()
+            .expect("atomic blobs have a persistent incarnation")
+            .incarnation
     }
 
     fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
@@ -261,6 +271,70 @@ impl Blob {
         if state.is_poisoned() {
             return Err(Self::poisoned(&self.partition, &self.name));
         }
+        if let Some(error) = self
+            .atomic
+            .as_ref()
+            .and_then(|atomic| atomic.preflush().failure())
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn drive_preflush_blocking(&self, mut driver: super::super::preflush::Driver, mut target: u64) {
+        loop {
+            let result = Self::sync_inner(&self.file, &self.partition, &self.name);
+            let Some(next) = driver.complete(target, result) else {
+                break;
+            };
+            target = next;
+        }
+    }
+
+    fn request_preflush(&self, target: u64) -> Result<(), Error> {
+        let atomic = self
+            .atomic
+            .as_ref()
+            .expect("payload preflush is only used for V2 blobs");
+        let Some(first) = atomic.preflush().request(target)? else {
+            return Ok(());
+        };
+        let driver = atomic.preflush().driver();
+        let blob = self.clone();
+        task::spawn_blocking(move || blob.drive_preflush_blocking(driver, first));
+        Ok(())
+    }
+
+    pub(super) fn ensure_preflush_blocking(&self, target: u64) -> Result<(), Error> {
+        let atomic = self
+            .atomic
+            .as_ref()
+            .expect("payload preflush is only used for V2 blobs");
+        match atomic.preflush().request(target)? {
+            Some(first) => {
+                let driver = atomic.preflush().driver();
+                self.drive_preflush_blocking(driver, first);
+            }
+            None => atomic.preflush().wait_blocking(target)?,
+        }
+        atomic.preflush().wait_blocking(target)
+    }
+
+    pub(super) fn rewind_log(&self, state: &mut V2State, len: u64) -> Result<(), Error> {
+        state.validate_rewind(len)?;
+        if len == state.logical_len() {
+            return state.rewind(len).map_err(Error::from);
+        }
+        let target = state.raw_len()?;
+        self.ensure_preflush_blocking(target)?;
+        let preflush = self
+            .atomic
+            .as_ref()
+            .expect("atomic rewinds require V2 state")
+            .preflush();
+        preflush.wait_idle_blocking()?;
+        state.rewind_preflushed(len)?;
+        preflush.reset_after_rewind(state.raw_len()?);
         Ok(())
     }
 
@@ -270,22 +344,23 @@ impl Blob {
         };
         let mut state = atomic.lock().await;
         self.ensure_healthy(&state)?;
+        state.validate_rewind(len)?;
         let truncate = len < state.logical_len() && len >= state.committed_len();
-        state.rewind(len)?;
-        if !truncate {
-            return Ok(());
-        }
-
-        let raw_len = state.raw_len()?;
-        let file = self.file.clone();
-        let partition = self.partition.clone();
-        let name = self.name.clone();
-        let generation = self.generation.clone();
+        let blob = self.clone();
         task::spawn_blocking(move || {
-            let _generation = generation;
-            let result = file
-                .set_len(raw_len)
-                .map_err(|error| Error::BlobResizeFailed(partition, hex(&name), error.into()));
+            let result = (|| {
+                blob.rewind_log(&mut state, len)?;
+                if truncate {
+                    blob.file.set_len(state.raw_len()?).map_err(|error| {
+                        Error::BlobResizeFailed(
+                            blob.partition.clone(),
+                            hex(&blob.name),
+                            error.into(),
+                        )
+                    })?;
+                }
+                Ok(())
+            })();
             if result.is_err() {
                 state.poison();
             }
@@ -299,17 +374,18 @@ impl Blob {
     }
 
     fn prepare_log_writes(
+        &self,
         state: &mut V2State,
-        file: &File,
         materialize_previous: bool,
         batch_prepared: bool,
     ) -> Result<Option<atomic::PreparedCommit>, Error> {
         if !state.is_dirty() {
             return Ok(None);
         }
+        if state.preflush_requested()? {
+            self.ensure_preflush_blocking(state.preflush_target())?;
+        }
         let materialized_previous = state.deferred_batch_root().cloned();
-        let (payload_start, payload_len) = state.pending_payload()?;
-        atomic::begin_payload_writeback(file, payload_start, payload_len)?;
         let mut prepared = state
             .prepare_commit()?
             .expect("dirty atomic state always prepares a commit");
@@ -318,43 +394,39 @@ impl Blob {
         }
         if materialize_previous && let Some(candidate) = &materialized_previous {
             let root = atomic::materialized_candidate_root(candidate)?;
-            file.write_all_at(&root, candidate.root_offset)?;
+            self.file.write_all_at(&root, candidate.root_offset)?;
         }
         if !batch_prepared {
-            file.write_all_at(&prepared.prepared_root, prepared.root_offset)?;
+            self.file
+                .write_all_at(&prepared.prepared_root, prepared.root_offset)?;
         }
         Ok(Some(prepared))
     }
 
-    fn prepare_log(
-        state: &mut V2State,
-        file: &File,
-        partition: &str,
-        name: &[u8],
-    ) -> Result<Option<atomic::PreparedCommit>, Error> {
-        let prepared = Self::prepare_log_writes(state, file, true, false)?;
-        if prepared.is_some() {
+    fn prepare_log(&self, state: &mut V2State) -> Result<Option<atomic::PreparedCommit>, Error> {
+        let prepared = self.prepare_log_writes(state, true, false)?;
+        if let Some(prepared) = &prepared {
             // A committed root is written only after every payload byte is durable.
             // Recovery can therefore accept it without rereading payload data.
-            Self::sync_inner(file, partition, name)?;
+            Self::sync_inner(&self.file, &self.partition, &self.name)?;
+            self.atomic
+                .as_ref()
+                .expect("atomic commits require V2 state")
+                .preflush()
+                .record_durable(prepared.raw_len());
         }
         Ok(prepared)
     }
 
-    fn commit_log(
-        state: &mut V2State,
-        file: &File,
-        partition: &str,
-        name: &[u8],
-    ) -> Result<(), Error> {
-        let Some(prepared) = Self::prepare_log(state, file, partition, name)? else {
+    fn commit_log(&self, state: &mut V2State) -> Result<(), Error> {
+        let Some(prepared) = self.prepare_log(state)? else {
             return Ok(());
         };
-        atomic::write_durable_at(file, prepared.root_offset, &prepared.committed_root)
+        atomic::write_durable_at(&self.file, prepared.root_offset, &prepared.committed_root)
             .map_err(Error::from)?;
         if prepared.requires_truncate() {
-            file.set_len(prepared.raw_len()).map_err(|error| {
-                Error::BlobResizeFailed(partition.to_string(), hex(name), error.into())
+            self.file.set_len(prepared.raw_len()).map_err(|error| {
+                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), error.into())
             })?;
         }
         state.finish_commit(prepared);
@@ -375,7 +447,21 @@ impl Blob {
         &self,
         state: &mut V2State,
     ) -> Result<Option<atomic::PreparedCommit>, Error> {
-        Self::prepare_log_writes(state, &self.file, false, true)
+        let prepared = self.prepare_log_writes(state, false, true)?;
+        if let Some(prepared) = &prepared {
+            let start = prepared.payload_start();
+            atomic::begin_payload_writeback(&self.file, start, prepared.raw_len() - start)?;
+        }
+        Ok(prepared)
+    }
+
+    pub(super) fn prepare_batch_delete_unflushed(
+        &self,
+        state: &V2State,
+    ) -> Result<atomic::PreparedCommit, Error> {
+        let mut prepared = state.prepare_delete()?;
+        prepared.mark_batch_prepared();
+        Ok(prepared)
     }
 
     pub(super) fn stage_batch_commit(
@@ -388,6 +474,17 @@ impl Blob {
         }
         self.file
             .write_all_at(&prepared.prepared_root, prepared.root_offset)
+            .map_err(Error::from)
+    }
+
+    /// Durably stage a deletion witness without flushing payload that the deletion discards.
+    pub(super) fn stage_batch_delete(
+        &self,
+        prepared: &mut atomic::PreparedCommit,
+        witness: &[u8],
+    ) -> Result<(), Error> {
+        prepared.attach_batch_witness(witness)?;
+        atomic::write_durable_at(&self.file, prepared.root_offset, &prepared.prepared_root)
             .map_err(Error::from)
     }
 
@@ -408,6 +505,11 @@ impl Blob {
             }
             return Ok(None);
         };
+        self.atomic
+            .as_ref()
+            .expect("atomic batch commits require V2 state")
+            .preflush()
+            .record_durable(prepared.raw_len());
         if force_truncate || prepared.requires_truncate() {
             self.truncate_batch_rewind(state)?;
         }
@@ -436,6 +538,46 @@ impl Blob {
 
     pub(super) const fn poison_batch_state(state: &mut V2State) {
         state.poison();
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_background_preflush(&self) -> Result<u64, Error> {
+        let atomic = self
+            .atomic
+            .as_ref()
+            .expect("payload preflush is only used for V2 blobs");
+        let target = {
+            let state = atomic.lock().await;
+            state.preflush_target()
+        };
+        if atomic.preflush().requested() < target {
+            return Err(Error::WriteFailed);
+        }
+        let preflush = atomic.preflush().clone();
+        task::spawn_blocking(move || preflush.wait_blocking(target))
+            .await
+            .map_err(|_| Error::Closed)??;
+        Ok(target)
+    }
+
+    #[cfg(test)]
+    pub(super) fn background_preflush_requested(&self) -> u64 {
+        self.atomic
+            .as_ref()
+            .expect("payload preflush is only used for V2 blobs")
+            .preflush()
+            .requested()
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_background_preflush_for_test(&self, target: u64) {
+        let preflush = self
+            .atomic
+            .as_ref()
+            .expect("payload preflush is only used for V2 blobs")
+            .preflush();
+        assert_eq!(preflush.request(target).unwrap(), Some(target));
+        assert_eq!(preflush.complete(target, Err(Error::WriteFailed)), None);
     }
 
     async fn lock_publication(
@@ -469,14 +611,10 @@ impl Blob {
         namespace_guard: OwnedMutexGuard<()>,
     ) -> Handle<()> {
         let (tx, rx) = oneshot::channel();
-        let file = self.file.clone();
-        let partition = self.partition.clone();
-        let name = self.name.clone();
-        let generation = self.generation.clone();
+        let blob = self.clone();
         task::spawn_blocking(move || {
-            let _generation = generation;
             let _namespace_guard = namespace_guard;
-            let result = Self::commit_log(&mut state, &file, &partition, &name);
+            let result = blob.commit_log(&mut state);
             if result.is_err() {
                 state.poison();
             }
@@ -648,9 +786,8 @@ impl crate::Blob for Blob {
             } else {
                 None
             };
-            let generation = self.generation.clone();
+            let blob = self.clone();
             return task::spawn_blocking(move || {
-                let _generation = generation;
                 let _namespace_guard = namespace_guard;
                 if offset != state.logical_len() {
                     return Err(std::io::Error::new(
@@ -672,9 +809,16 @@ impl crate::Blob for Blob {
                         &partition,
                         &name,
                     )?;
-                    state.finish_mutation(prepared.mutation);
+                    if let Some(range) = state.finish_mutation(prepared.mutation, !sync) {
+                        atomic::begin_payload_writeback(
+                            &file,
+                            range.start,
+                            range.end - range.start,
+                        )?;
+                        blob.request_preflush(range.end)?;
+                    }
                     if sync {
-                        Self::commit_log(&mut state, &file, &partition, &name)?;
+                        blob.commit_log(&mut state)?;
                     }
                     Ok(())
                 })();
@@ -776,9 +920,8 @@ impl crate::AtomicBlob for Blob {
         let partition = self.partition.clone();
         let name = self.name.clone();
         let dont_cache_supported = self.dont_cache_supported.clone();
-        let generation = self.generation.clone();
+        let blob = self.clone();
         task::spawn_blocking(move || {
-            let _generation = generation;
             let result = (|| {
                 Self::write_with_options(
                     &file,
@@ -789,7 +932,10 @@ impl crate::AtomicBlob for Blob {
                     &partition,
                     &name,
                 )?;
-                state.finish_mutation(prepared.mutation);
+                if let Some(range) = state.finish_mutation(prepared.mutation, true) {
+                    atomic::begin_payload_writeback(&file, range.start, range.end - range.start)?;
+                    blob.request_preflush(range.end)?;
+                }
                 Ok(offset)
             })();
             if result.is_err() {

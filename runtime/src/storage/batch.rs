@@ -1,10 +1,11 @@
 //! Validation and canonicalization of storage namespace operation sets.
 //!
-//! Duplicate removals are discarded, and a partition removal subsumes every blob removal in that
-//! partition. Identical publishes and rewinds are discarded. Publishing and rewinding the same
-//! blob conflict, as does any mutation covered by an exact or partition removal.
+//! Public atomic batches remove exact blob handles. The internal operation form also represents
+//! ordinary whole-partition invalidation, where a partition removal subsumes its blob removals.
+//! Identical operations are discarded, while different mutations of one blob conflict.
 //!
-//! The filesystem publication and recovery protocol is documented in the `coordinator` submodule.
+//! The participant-replicated filesystem protocol is documented in the `coordinator` submodule;
+//! despite the historical module name, it creates no coordinator file.
 
 use crate::{BatchOperation, Error, RemoveTarget};
 use std::{
@@ -44,15 +45,6 @@ impl Operation {
             Self::Remove(RemoveTarget::Blob { name, .. })
             | Self::Publish { name, .. }
             | Self::Rewind { name, .. } => Some(name),
-        }
-    }
-
-    pub(super) const fn partition_mut(&mut self) -> &mut String {
-        match self {
-            Self::Remove(RemoveTarget::Blob { partition, .. })
-            | Self::Remove(RemoveTarget::Partition(partition))
-            | Self::Publish { partition, .. }
-            | Self::Rewind { partition, .. } => partition,
         }
     }
 }
@@ -120,7 +112,7 @@ pub(crate) fn map_blobs<B, C>(
     operations
         .into_iter()
         .map(|operation| match operation {
-            BatchOperation::Remove(target) => BatchOperation::Remove(target),
+            BatchOperation::Remove(blob) => BatchOperation::Remove(map(blob)),
             BatchOperation::Publish(blob) => BatchOperation::Publish(map(blob)),
             BatchOperation::Rewind { blob, len } => BatchOperation::Rewind {
                 blob: map(blob),
@@ -138,7 +130,10 @@ pub(crate) fn canonicalize_descriptors<B>(
     let descriptors = operations
         .iter()
         .map(|operation| match operation {
-            BatchOperation::Remove(target) => Operation::Remove(target.clone()),
+            BatchOperation::Remove(blob) => {
+                let (partition, name) = location(blob);
+                Operation::Remove(RemoveTarget::Blob { partition, name })
+            }
             BatchOperation::Publish(blob) => {
                 let (partition, name) = location(blob);
                 Operation::Publish { partition, name }
@@ -374,14 +369,10 @@ mod tests {
 #[cfg(not(target_arch = "wasm32"))]
 mod coordinator;
 
-#[cfg(all(test, not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
-pub(crate) use coordinator::fail_final_control_sync_for_test;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) use coordinator::interrupt_committed_for_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use coordinator::{
-    Participant, RemovalPublication, can_supersede_embedded, materialize_embedded, preflight,
-    prepare_embedded, prepare_removal_publication, recover, recover_embedded, recover_notifying,
-    recover_removal_witnesses, resolve_operation_partitions, resolve_partition_name,
+    Participant, can_supersede_embedded, materialize_embedded, preflight, prepare_embedded,
+    recover, recover_embedded, recover_named_embedded, recover_notifying,
+    recover_partition_embedded, recover_removal_witnesses, resolve_partition_name,
     supports_speculation,
 };

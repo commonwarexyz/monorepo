@@ -78,9 +78,9 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
-    /// A namespace target to remove with [`BatchStorage::apply`].
+    /// Internal namespace target used while serializing storage invalidation.
     #[derive(Clone, Debug, Eq, PartialEq)]
-    pub enum RemoveTarget {
+    pub(crate) enum RemoveTarget {
         /// Remove one blob from a partition.
         Blob {
             /// Partition containing the blob.
@@ -95,8 +95,8 @@ stability_scope!(BETA {
     /// An operation in a durable [`BatchStorage::apply`] batch.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum BatchOperation<B> {
-        /// Remove an exact namespace entry.
-        Remove(RemoveTarget),
+        /// Delete the current atomic blob generation.
+        Remove(B),
         /// Publish pending appends to a retained atomic blob.
         Publish(B),
         /// Rewind a retained atomic blob to `len` bytes.
@@ -106,12 +106,6 @@ stability_scope!(BETA {
             /// New logical blob length in bytes, which cannot exceed its current length.
             len: u64,
         },
-    }
-
-    impl<B> From<RemoveTarget> for BatchOperation<B> {
-        fn from(target: RemoveTarget) -> Self {
-            Self::Remove(target)
-        }
     }
 
     /// Errors that can occur when interacting with the runtime.
@@ -765,21 +759,25 @@ stability_scope!(BETA {
 
     /// Opt-in interface for publishing atomic blobs and applying namespace mutations atomically.
     ///
-    /// The filesystem implementations publish write-only batches without a separate coordinator.
-    /// Each dirty participant retains the same exact group descriptor in its atomic root slot, so
-    /// opening any participant after a restart discovers and repairs the complete group before the
-    /// blob is returned. Batches containing removals retain a separate namespace coordinator
-    /// because a removed blob cannot witness its own removal. Recovery does not scan unrelated
-    /// blobs.
+    /// The filesystem implementations publish batches without a separate coordinator. Each
+    /// participant retains the same exact group descriptor in its atomic root slot, so opening any
+    /// participant after a restart discovers and repairs the complete group before the blob is
+    /// returned. A deleted participant first becomes a durable tombstone and is unlinked only
+    /// after every participant has an independently recoverable final root. Recovery does not scan
+    /// unrelated blobs.
     pub trait BatchStorage: AtomicStorage {
-        /// Start publishing atomic blobs and applying removals and rewinds as one durable batch.
+        /// Start publishing, deleting, and rewinding atomic blobs as one durable batch.
         ///
         /// A mutated handle must belong to this storage instance and still refer to the current
         /// blob at its partition and name. Missing mutation targets fail the batch. Each blob may
         /// have at most one distinct mutation: identical duplicates are permitted, while
-        /// conflicting mutations and mutations covered by a removal are rejected. Duplicate
-        /// removals and blob removals covered by a partition removal are permitted. Missing
-        /// removal targets and empty batches succeed.
+        /// conflicting mutations are rejected. Deletion requires a current atomic blob handle;
+        /// whole-partition deletion remains available through [`Storage::remove`] but is not an
+        /// atomic batch operation. Empty batches succeed.
+        ///
+        /// Deletion unlinks the name without truncating its inode. Existing handles remain
+        /// readable, including pending bytes, but can no longer authorize a batch for a same-name
+        /// replacement. As with [`Storage::remove`], mutating a deleted handle is unspecified.
         ///
         /// If this method returns `Ok`, the entire batch is durably committed and will finish
         /// applying even if the returned handle is dropped or aborted. Awaiting the handle waits
@@ -797,6 +795,9 @@ stability_scope!(BETA {
         /// transparently. An unresolved write-only batch may verify a bounded amount of newly
         /// written payload during that repair. It never scans whole blobs or historical payload.
         /// Operations on disjoint, already-open blobs may proceed concurrently.
+        /// Deletion-bearing batches instead materialize retained roots and payload-preserving
+        /// tombstones eagerly, then unlink and synchronize affected parent directories before the
+        /// returned completion handle resolves.
         ///
         /// # Filesystem Eligibility
         ///
@@ -810,7 +811,7 @@ stability_scope!(BETA {
             operations: Vec<BatchOperation<Self::AtomicBlob>>,
         ) -> impl Future<Output = Result<Handle<()>, Error>> + Send;
 
-        /// Publish atomic blobs and apply removals and rewinds as one durable batch.
+        /// Publish, delete, and rewind atomic blobs as one durable batch.
         fn apply(
             &self,
             operations: Vec<BatchOperation<Self::AtomicBlob>>,

@@ -382,7 +382,7 @@ impl Report {
             println!("file_size={file_size}");
         }
         if cfg.workload.is_multi_blob_append() {
-            let bytes_per_op = cfg.io_size() as u64 * cfg.blobs() as u64;
+            let bytes_per_op = cfg.io_size() as u64 * cfg.blobs() as u64 * cfg.appends_per_batch();
             let completion = if cfg.paired_baseline {
                 "side_specific"
             } else if cfg.workload == Workload::WriteAtomicBatchAppend {
@@ -391,8 +391,9 @@ impl Report {
                 "all_blob_syncs"
             };
             println!(
-                "blobs={} operation_unit=n_blob_durable_group bytes_per_op={} operation_latency={completion}",
+                "blobs={} appends_per_batch={} operation_unit=n_blob_durable_group bytes_per_op={} operation_latency={completion}",
                 cfg.blobs(),
+                cfg.appends_per_batch(),
                 bytes_per_op
             );
             if cfg.paired_baseline {
@@ -479,7 +480,10 @@ impl Report {
             "operations_per_worker": cfg.operations,
             "io_size": cfg.io_size(),
             "blobs": is_group.then(|| cfg.blobs()),
-            "bytes_per_op": is_group.then(|| cfg.io_size() as u64 * cfg.blobs() as u64),
+            "appends_per_batch": is_group.then(|| cfg.appends_per_batch()),
+            "bytes_per_op": is_group.then(|| {
+                cfg.io_size() as u64 * cfg.blobs() as u64 * cfg.appends_per_batch()
+            }),
             "operation_unit": is_group.then_some("n_blob_durable_group"),
             "operation_latency": is_group.then_some(if cfg.paired_baseline {
                 "side_specific"

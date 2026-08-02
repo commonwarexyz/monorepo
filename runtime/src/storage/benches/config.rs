@@ -194,6 +194,10 @@ pub struct Config {
     #[arg(long, value_parser = value_parser!(usize))]
     blobs: Option<usize>,
 
+    /// Contiguous appends to each blob before the group's durability barrier.
+    #[arg(long, value_parser = value_parser!(u64).range(1..))]
+    appends_per_batch: Option<u64>,
+
     /// Run an ordinary four-blob baseline alongside each atomic batch operation.
     #[arg(long, default_value_t = false)]
     pub paired_baseline: bool,
@@ -297,6 +301,14 @@ impl Config {
         }
     }
 
+    /// Resolved number of contiguous appends in one durable multi-blob operation.
+    pub const fn appends_per_batch(&self) -> u64 {
+        match self.appends_per_batch {
+            Some(appends) => appends,
+            None => 1,
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.inflight == 0 {
             return Err("--inflight must be greater than zero".into());
@@ -319,6 +331,9 @@ impl Config {
                     .into(),
             );
         }
+        if !self.workload.is_multi_blob_append() && self.appends_per_batch.is_some() {
+            return Err("--appends-per-batch is only valid for multi-blob append workloads".into());
+        }
         if self.blobs.is_some_and(|blobs| blobs > MAX_BLOBS) {
             return Err(format!("--blobs must not exceed {MAX_BLOBS}"));
         }
@@ -334,7 +349,10 @@ impl Config {
                 .map_err(|_| "--blobs is too large for group byte accounting")?;
             io_size
                 .checked_mul(blobs)
-                .ok_or_else(|| "--blobs * --io-size exceeds u64".to_string())?;
+                .and_then(|bytes| bytes.checked_mul(self.appends_per_batch()))
+                .ok_or_else(|| {
+                    "--blobs * --io-size * --appends-per-batch exceeds u64".to_string()
+                })?;
             if self.write_shape != WriteShape::Contiguous {
                 return Err("multi-blob append workloads require --write-shape contiguous".into());
             }
@@ -555,6 +573,37 @@ mod tests {
         assert_eq!(
             paired("write_multi_blob_append", "4"),
             Err("--paired-baseline is only valid for write_atomic_batch_append".into())
+        );
+    }
+
+    #[test]
+    fn appends_per_batch_is_scoped_to_multi_blob_workloads() {
+        let multi = Config::try_parse_from([
+            "storage_bench",
+            "--workload",
+            "write_atomic_batch_append",
+            "--appends-per-batch",
+            "16",
+            "--operations",
+            "1",
+        ])
+        .unwrap();
+        assert!(multi.validate().is_ok());
+        assert_eq!(multi.appends_per_batch(), 16);
+
+        let single = Config::try_parse_from([
+            "storage_bench",
+            "--workload",
+            "write_append",
+            "--appends-per-batch",
+            "16",
+            "--operations",
+            "1",
+        ])
+        .unwrap();
+        assert_eq!(
+            single.validate(),
+            Err("--appends-per-batch is only valid for multi-blob append workloads".into())
         );
     }
 }

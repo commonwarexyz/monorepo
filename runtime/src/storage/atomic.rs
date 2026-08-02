@@ -8,6 +8,10 @@
 //!
 //! Recovery reads two fixed, self-contained roots. An unresolved speculative batch may
 //! additionally checksum a bounded appended suffix, but never scans historical payload.
+//! Append-heavy epochs start coalesced payload durability in the background without writing a
+//! root. A completed durability operation establishes a trusted prefix; the remaining tail stays
+//! under CRC32C. Thus a crash may retain any subset of later unsynchronized writes without making
+//! a partially written epoch visible.
 //!
 //! # V2 root slots
 //!
@@ -52,12 +56,10 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Seek as _, SeekFrom, Write as _},
+    ops::Range,
     os::unix::fs::FileExt,
     path::Path,
 };
-
-#[cfg(test)]
-type DurableRecord = (u64, Vec<u8>);
 
 #[cfg(test)]
 std::thread_local! {
@@ -65,9 +67,6 @@ std::thread_local! {
         std::cell::Cell::new(None)
     };
     static TRACKED_DURABLE_WRITES: std::cell::RefCell<Option<Vec<(u64, usize)>>> = const {
-        std::cell::RefCell::new(None)
-    };
-    static TRACKED_DURABLE_RECORDS: std::cell::RefCell<Option<Vec<DurableRecord>>> = const {
         std::cell::RefCell::new(None)
     };
 }
@@ -108,7 +107,7 @@ mod tests {
             file.write_all_at(chunk, physical).unwrap();
             physical += chunk.len() as u64;
         });
-        state.finish_mutation(prepared.mutation);
+        state.finish_mutation(prepared.mutation, true);
         offset
     }
 
@@ -177,11 +176,7 @@ mod tests {
         commit(&file, &mut state);
 
         state.rewind(3).unwrap();
-        assert!(
-            state
-                .prepare_append(IoBufs::from(b"x".to_vec()))
-                .is_err()
-        );
+        assert!(state.prepare_append(IoBufs::from(b"x".to_vec())).is_err());
         commit(&file, &mut state);
         assert_eq!(file.metadata().unwrap().len(), DATA_OFFSET + 3);
         assert_eq!(append(&file, &mut state, b"XYZ"), 3);
@@ -212,7 +207,133 @@ mod tests {
     }
 
     #[test]
-    fn oversized_pending_epoch_can_be_preflushed() {
+    fn direct_recovery_is_atomic_for_arbitrary_unsynced_write_subsets() {
+        const PAYLOAD_FIRST: u8 = 1;
+        const PAYLOAD_SECOND: u8 = 2;
+        const PREPARED_ROOT: u8 = 4;
+
+        for retained in 0..=(PAYLOAD_FIRST | PAYLOAD_SECOND | PREPARED_ROOT) {
+            let (path, file) = test_file();
+            let mut state = State::empty(DATA_OFFSET);
+            append(&file, &mut state, b"old");
+            commit(&file, &mut state);
+
+            for (bit, data) in [
+                (PAYLOAD_FIRST, b"new-".as_slice()),
+                (PAYLOAD_SECOND, b"tail"),
+            ] {
+                let prepared = state
+                    .prepare_append(IoBufs::from(data.to_vec()))
+                    .unwrap()
+                    .unwrap();
+                if retained & bit != 0 {
+                    let mut physical = prepared.file_offset;
+                    prepared.data.for_each_chunk(|chunk| {
+                        file.write_all_at(chunk, physical).unwrap();
+                        physical += chunk.len() as u64;
+                    });
+                }
+                state.finish_mutation(prepared.mutation, true);
+            }
+            let prepared = state.prepare_commit().unwrap().unwrap();
+            if retained & PREPARED_ROOT != 0 {
+                file.write_all_at(&prepared.prepared_root, prepared.root_offset)
+                    .unwrap();
+            }
+            file.sync_all().unwrap();
+
+            let recovered = State::recover(&file, DATA_OFFSET).unwrap();
+            assert_eq!(read(&file, &recovered), b"old", "retained mask {retained}");
+            fs::remove_file(path).unwrap();
+        }
+
+        for committed_root_retained in [false, true] {
+            let (path, file) = test_file();
+            let mut state = State::empty(DATA_OFFSET);
+            append(&file, &mut state, b"old");
+            commit(&file, &mut state);
+            append(&file, &mut state, b"new-tail");
+            let prepared = state.prepare_commit().unwrap().unwrap();
+            file.write_all_at(&prepared.prepared_root, prepared.root_offset)
+                .unwrap();
+            file.sync_all().unwrap();
+            if committed_root_retained {
+                write_durable_at(&file, prepared.root_offset, &prepared.committed_root).unwrap();
+            }
+
+            let recovered = State::recover(&file, DATA_OFFSET).unwrap();
+            let expected: &[u8] = if committed_root_retained {
+                b"oldnew-tail"
+            } else {
+                b"old"
+            };
+            assert_eq!(read(&file, &recovered), expected);
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn direct_recovery_rejects_arbitrary_torn_publication_roots() {
+        let mut masks = (0..=ROOT_LEN)
+            .map(|prefix| (0..ROOT_LEN).map(|index| index < prefix).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for index in 0..ROOT_LEN {
+            masks.push((0..ROOT_LEN).map(|candidate| candidate == index).collect());
+            masks.push((0..ROOT_LEN).map(|candidate| candidate != index).collect());
+        }
+        masks.push((0..ROOT_LEN).map(|index| index % 2 == 0).collect());
+        masks.push((0..ROOT_LEN).map(|index| index % 3 == 1).collect());
+        masks.push(
+            (0..ROOT_LEN)
+                .map(|index| index.count_ones() % 2 == 0)
+                .collect(),
+        );
+
+        for rewind in [false, true] {
+            for (case, mask) in masks.iter().enumerate() {
+                let (path, file) = test_file();
+                let mut state = State::empty(DATA_OFFSET);
+                append(&file, &mut state, b"abcdef");
+                commit(&file, &mut state);
+
+                if rewind {
+                    state.rewind(3).unwrap();
+                } else {
+                    append(&file, &mut state, b"XYZ");
+                }
+                let prepared = state.prepare_commit().unwrap().unwrap();
+                file.write_all_at(&prepared.prepared_root, prepared.root_offset)
+                    .unwrap();
+                file.sync_all().unwrap();
+
+                let mut torn: [u8; ROOT_LEN] =
+                    prepared.prepared_root[..ROOT_LEN].try_into().unwrap();
+                for (index, from_committed) in mask.iter().copied().enumerate() {
+                    if from_committed {
+                        torn[index] = prepared.committed_root[index];
+                    }
+                }
+                file.write_all_at(&torn, prepared.root_offset).unwrap();
+                file.sync_all().unwrap();
+
+                let recovered = State::recover(&file, DATA_OFFSET).unwrap();
+                let expected: &[u8] = if torn == prepared.committed_root {
+                    if rewind { b"abc" } else { b"abcdefXYZ" }
+                } else {
+                    b"abcdef"
+                };
+                assert_eq!(
+                    read(&file, &recovered),
+                    expected,
+                    "rewind={rewind} case={case}"
+                );
+                fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_pending_epoch_requests_background_preflush() {
         let mut state = State::empty(DATA_OFFSET);
         state.logical_len = MAX_VALIDATED_PAYLOAD_LEN;
         state.payload_checksum.len = MAX_VALIDATED_PAYLOAD_LEN;
@@ -221,18 +342,64 @@ mod tests {
             .prepare_append(IoBufs::from(vec![1]))
             .unwrap()
             .unwrap();
-        state.finish_mutation(prepared.mutation);
-        let mut commit = state.prepare_commit().unwrap().unwrap();
-        assert_eq!(
-            commit.payload_checksum(),
-            PayloadChecksumEligibility::Ineligible
-        );
-        commit.mark_payload_preflushed();
+        let range = state.finish_mutation(prepared.mutation, true).unwrap();
+        let commit = state.prepare_commit().unwrap().unwrap();
         assert_eq!(
             commit.payload_checksum(),
             PayloadChecksumEligibility::Eligible(None)
         );
+        assert_eq!(range.end, commit.raw_len());
         assert_eq!(commit.payload_start(), commit.raw_len());
+    }
+
+    #[test]
+    fn background_preflush_leaves_only_a_bounded_crc_tail() {
+        let mut state = State::empty(DATA_OFFSET);
+        let prefix = state
+            .prepare_append(IoBufs::from(vec![7; BACKGROUND_PREFLUSH_INTERVAL as usize]))
+            .unwrap()
+            .unwrap();
+        let range = state.finish_mutation(prefix.mutation, true).unwrap();
+        let tail = state
+            .prepare_append(IoBufs::from(b"tail".to_vec()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.finish_mutation(tail.mutation, true), None);
+
+        let commit = state.prepare_commit().unwrap().unwrap();
+        assert_eq!(commit.payload_start(), range.end);
+        assert_eq!(
+            commit.payload_checksum(),
+            PayloadChecksumEligibility::Eligible(Some(PayloadChecksum {
+                offset: range.end,
+                len: 4,
+                checksum: checksum(&[b"tail"]),
+            }))
+        );
+    }
+
+    #[test]
+    fn immediate_sync_keeps_the_full_epoch_on_the_single_barrier_path() {
+        let mut state = State::empty(DATA_OFFSET);
+        let payload = vec![9; BACKGROUND_PREFLUSH_INTERVAL as usize];
+        let expected_checksum = checksum(&[&payload]);
+        let append = state
+            .prepare_append(IoBufs::from(payload))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.finish_mutation(append.mutation, false), None);
+        assert_eq!(state.preflush_target(), DATA_OFFSET);
+
+        let commit = state.prepare_commit().unwrap().unwrap();
+        assert_eq!(commit.payload_start(), DATA_OFFSET);
+        assert_eq!(
+            commit.payload_checksum(),
+            PayloadChecksumEligibility::Eligible(Some(PayloadChecksum {
+                offset: DATA_OFFSET,
+                len: BACKGROUND_PREFLUSH_INTERVAL,
+                checksum: expected_checksum,
+            }))
+        );
     }
 
     #[test]
@@ -242,7 +409,7 @@ mod tests {
             .prepare_append(IoBufs::from(b"new".to_vec()))
             .unwrap()
             .unwrap();
-        state.finish_mutation(append.mutation);
+        state.finish_mutation(append.mutation, true);
         let mut prepared = state.prepare_commit().unwrap().unwrap();
         prepared.mark_batch_prepared();
         let descriptor = b"group descriptor";
@@ -261,13 +428,91 @@ mod tests {
     }
 
     #[test]
+    fn deletion_tombstone_preserves_open_handle_payload() {
+        let (path, file) = test_file();
+        let mut state = State::empty(DATA_OFFSET);
+        append(&file, &mut state, b"committed");
+        commit(&file, &mut state);
+        append(&file, &mut state, b"-pending");
+
+        let mut prepared = state.prepare_delete().unwrap();
+        prepared.mark_batch_prepared();
+        prepared.attach_batch_witness(b"delete group").unwrap();
+        let candidate = prepared.candidate();
+        file.write_all_at(&prepared.prepared_root, prepared.root_offset)
+            .unwrap();
+        file.sync_all().unwrap();
+        let raw_len = file.metadata().unwrap().len();
+
+        materialize_tombstone_candidate(&file, DATA_OFFSET, &candidate).unwrap();
+        assert!(candidate_is_tombstoned(&file, &candidate).unwrap());
+        assert_eq!(file.metadata().unwrap().len(), raw_len);
+        assert_eq!(read(&file, &state), b"committed-pending");
+
+        let recovered = State::recover(&file, DATA_OFFSET).unwrap();
+        assert_eq!(read(&file, &recovered), b"committed");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn arbitrary_torn_tombstone_roots_keep_the_embedded_witness_repairable() {
+        let mut masks = (0..=ROOT_LEN)
+            .map(|prefix| (0..ROOT_LEN).map(|index| index < prefix).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        masks.push((0..ROOT_LEN).map(|index| index % 2 == 0).collect());
+        masks.push((0..ROOT_LEN).map(|index| index % 3 == 1).collect());
+        masks.push((0..ROOT_LEN).map(|index| index.count_ones() % 2 == 0).collect());
+
+        for (case, mask) in masks.into_iter().enumerate() {
+            let (path, file) = test_file();
+            let mut state = State::empty(DATA_OFFSET);
+            append(&file, &mut state, b"payload");
+            commit(&file, &mut state);
+            let mut prepared = state.prepare_delete().unwrap();
+            prepared.mark_batch_prepared();
+            let descriptor = format!("delete group {case}").into_bytes();
+            prepared.attach_batch_witness(&descriptor).unwrap();
+            let candidate = prepared.candidate();
+            file.write_all_at(&prepared.prepared_root, prepared.root_offset)
+                .unwrap();
+            file.sync_all().unwrap();
+
+            let tombstone = candidate_tombstone_root(&candidate).unwrap();
+            let mut torn = candidate.prepared_root;
+            for (index, from_tombstone) in mask.into_iter().enumerate() {
+                if from_tombstone {
+                    torn[index] = tombstone[index];
+                }
+            }
+            file.write_all_at(&torn, candidate.root_offset).unwrap();
+            file.sync_all().unwrap();
+
+            assert!(
+                candidate_has_embedded_batch_witness(&file, &candidate, &descriptor).unwrap(),
+                "case {case}"
+            );
+            assert_eq!(
+                embedded_batch_witnesses(&file, DATA_OFFSET).unwrap(),
+                vec![EmbeddedBatchWitness {
+                    root_offset: candidate.root_offset,
+                    descriptor,
+                }],
+                "case {case}"
+            );
+            materialize_tombstone_candidate(&file, DATA_OFFSET, &candidate).unwrap();
+            assert!(candidate_is_tombstoned(&file, &candidate).unwrap());
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn only_a_committed_rewind_requires_truncation_at_publication() {
         let mut state = State::empty(DATA_OFFSET);
         let append = state
             .prepare_append(IoBufs::from(b"abc".to_vec()))
             .unwrap()
             .unwrap();
-        state.finish_mutation(append.mutation);
+        state.finish_mutation(append.mutation, true);
         let prepared = state.prepare_commit().unwrap().unwrap();
         assert!(!prepared.requires_truncate());
         state.finish_commit(prepared);
@@ -275,6 +520,28 @@ mod tests {
         state.rewind(2).unwrap();
         let prepared = state.prepare_commit().unwrap().unwrap();
         assert!(prepared.requires_truncate());
+    }
+
+    #[test]
+    fn preflushed_rewind_to_committed_frontier_is_clean() {
+        let mut state = State::empty(DATA_OFFSET);
+        let committed = state
+            .prepare_append(IoBufs::from(b"base".to_vec()))
+            .unwrap()
+            .unwrap();
+        state.finish_mutation(committed.mutation, true);
+        let committed = state.prepare_commit().unwrap().unwrap();
+        state.finish_commit(committed);
+
+        let tail = state
+            .prepare_append(IoBufs::from(b"tail".to_vec()))
+            .unwrap()
+            .unwrap();
+        state.finish_mutation(tail.mutation, true);
+        state.rewind_preflushed(4).unwrap();
+
+        assert!(!state.is_dirty());
+        assert!(state.prepare_commit().unwrap().is_none());
     }
 
     #[test]
@@ -314,6 +581,7 @@ const ROOT_MAGIC: &[u8; 8] = b"CWUNOR11";
 const PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOP11";
 const BATCH_PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOB11";
 const MATERIALIZED_ROOT_MAGIC: &[u8; 8] = b"CWUNOM11";
+const TOMBSTONE_ROOT_MAGIC: &[u8; 8] = b"CWUNOT11";
 const BATCH_WITNESS_MAGIC: &[u8; 8] = b"CWUNOW11";
 const CREATION_PREFIX: &str = ".commonware-uno-create-";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_LOG_ROOT";
@@ -324,11 +592,15 @@ const ROOT_SLOT_LEN: u64 = 4096;
 const BATCH_WITNESS_HEADER_LEN: usize = 16;
 const ROOT_OFFSETS: [u64; 2] = [4096, 8192];
 pub(super) const MAX_VALIDATED_PAYLOAD_LEN: u64 = 64 * 1024 * 1024;
+pub(super) const MAX_SPECULATIVE_PARTICIPANTS: u64 = 32;
+const TARGET_PREFLUSH_PARTICIPANTS: u64 = 4;
+/// Bound the aggregate unflushed tail for the common four-participant group. Larger groups enforce
+/// their smaller per-participant budget during publication.
+pub(super) const BACKGROUND_PREFLUSH_INTERVAL: u64 =
+    MAX_VALIDATED_PAYLOAD_LEN / TARGET_PREFLUSH_PARTICIPANTS;
 const PAYLOAD_CHECKSUM_READ_LEN: usize = 64 * 1024;
 #[cfg(target_os = "linux")]
 const MIN_WRITEBACK_HINT_LEN: u64 = 64 * 1024;
-pub(super) type PendingPayload = (u64, u64);
-
 /// Checksum of one physically contiguous payload range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PayloadChecksum {
@@ -459,16 +731,6 @@ pub(super) fn track_durable_writes<T>(operation: impl FnOnce() -> T) -> (T, Vec<
     (result, writes)
 }
 
-#[cfg(test)]
-pub(super) fn track_durable_records<T>(operation: impl FnOnce() -> T) -> (T, Vec<DurableRecord>) {
-    TRACKED_DURABLE_RECORDS.with(|tracked| {
-        assert!(tracked.borrow_mut().replace(Vec::new()).is_none());
-    });
-    let result = operation();
-    let records = TRACKED_DURABLE_RECORDS.with(|tracked| tracked.borrow_mut().take().unwrap());
-    (result, records)
-}
-
 /// Start Linux writeback for the current payload while its root is built.
 #[cfg(target_os = "linux")]
 pub(super) fn begin_payload_writeback(file: &File, offset: u64, len: u64) -> io::Result<()> {
@@ -556,6 +818,17 @@ pub(crate) struct EmbeddedBatchCandidate {
     pub(crate) descriptor: Vec<u8>,
 }
 
+/// A checksummed batch descriptor found in one fixed root slot.
+///
+/// The descriptor is decoded independently from the root header. This lets group recovery repair
+/// a root whose final durable overwrite was interrupted after another participant made the group
+/// authoritative.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EmbeddedBatchWitness {
+    pub(crate) root_offset: u64,
+    pub(crate) descriptor: Vec<u8>,
+}
+
 /// Payload bounds recovered while validating a transaction candidate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CandidateMetadata {
@@ -581,7 +854,10 @@ impl PreparedCommit {
             .map(|capacity| capacity.min(u32::MAX as usize))
     }
 
-    /// Return the first physical byte in this commit's payload epoch.
+    /// Return the first payload byte recovery must validate.
+    ///
+    /// Any earlier byte in the current epoch is covered by a durability operation that completes
+    /// before this commit's root may be staged.
     pub(super) const fn payload_start(&self) -> u64 {
         self.payload_start
     }
@@ -680,7 +956,6 @@ impl PreparedCommit {
             committed_root: self.committed_root,
         }
     }
-
 }
 
 /// Mutable state for one append-only atomic blob generation.
@@ -690,6 +965,8 @@ pub(super) struct State {
     logical_len: u64,
     committed_len: u64,
     generation: u64,
+    /// Prefix that must be durable before a root may omit its bytes from payload validation.
+    preflush_target: u64,
     payload_checksum: PayloadChecksumTracker,
     deferred_batch_root: Option<Candidate>,
     dirty: bool,
@@ -703,6 +980,7 @@ impl State {
             logical_len: 0,
             committed_len: 0,
             generation: 0,
+            preflush_target: data_offset,
             payload_checksum: PayloadChecksumTracker::new(data_offset),
             deferred_batch_root: None,
             dirty: false,
@@ -804,14 +1082,14 @@ impl State {
         self.dirty
     }
 
-    pub(super) fn pending_payload(&self) -> io::Result<PendingPayload> {
-        if self.logical_len < self.committed_len {
-            let end = self.raw_len()?;
-            return Ok((end, 0));
-        }
-        let start = checked_end(self.data_offset, self.committed_len)?;
-        let len = self.logical_len - self.committed_len;
-        Ok((start, len))
+    /// Prefix that must be durable before a publication marker may omit its bytes from CRC32C.
+    pub(super) const fn preflush_target(&self) -> u64 {
+        self.preflush_target
+    }
+
+    /// Return whether an unpublished payload preflush must be drained before reusing offsets.
+    pub(super) fn preflush_requested(&self) -> io::Result<bool> {
+        Ok(self.preflush_target > checked_end(self.data_offset, self.committed_len)?)
     }
 
     /// Discard speculative checksum state after reusing an unpublished tail.
@@ -882,14 +1160,30 @@ impl State {
         }))
     }
 
-    pub(super) fn finish_mutation(&mut self, mutation: Mutation) {
+    /// Finish an append and return a newly requested background writeback range.
+    pub(super) fn finish_mutation(
+        &mut self,
+        mutation: Mutation,
+        schedule_preflush: bool,
+    ) -> Option<Range<u64>> {
         debug_assert_eq!(mutation.logical_start, self.logical_len);
-        debug_assert_eq!(
-            mutation.physical,
-            self.data_offset + mutation.logical_start
-        );
+        debug_assert_eq!(mutation.physical, self.data_offset + mutation.logical_start);
         self.logical_len = mutation.logical_end;
         self.dirty = true;
+        if !schedule_preflush {
+            return None;
+        }
+        let raw_end = self
+            .data_offset
+            .checked_add(self.logical_len)
+            .expect("prepared atomic appends have representable physical ends");
+        if raw_end - self.preflush_target < BACKGROUND_PREFLUSH_INTERVAL {
+            return None;
+        }
+        let range = self.preflush_target..raw_end;
+        self.preflush_target = range.end;
+        self.payload_checksum = PayloadChecksumTracker::new(raw_end);
+        Some(range)
     }
 
     /// Rewind to an existing logical offset.
@@ -905,26 +1199,39 @@ impl State {
         Ok(())
     }
 
-    pub(super) fn rewind(&mut self, len: u64) -> io::Result<()> {
+    fn apply_rewind(&mut self, len: u64, payload_preflushed: bool) -> io::Result<()> {
         self.validate_rewind(len)?;
         if len == self.logical_len {
             return Ok(());
         }
         self.logical_len = len;
+        let raw_end = self.raw_len()?;
         let frontier = checked_end(self.data_offset, self.committed_len)?;
-        if len < self.committed_len {
-            self.payload_checksum = PayloadChecksumTracker::new(self.raw_len()?);
-            self.dirty = true;
-        } else if len == self.committed_len {
+        if len == self.committed_len {
+            self.preflush_target = frontier;
             self.payload_checksum = PayloadChecksumTracker::new(frontier);
             self.dirty = false;
+        } else if payload_preflushed || len < self.committed_len {
+            self.preflush_target = raw_end;
+            self.payload_checksum = PayloadChecksumTracker::new(raw_end);
+            self.dirty = true;
         } else {
             // CRC32 cannot be rewound. The large-epoch preflush path will make the retained
             // unpublished prefix durable before a root can name it.
+            self.preflush_target = frontier;
             self.invalidate_payload_checksum();
             self.dirty = true;
         }
         Ok(())
+    }
+
+    pub(super) fn rewind(&mut self, len: u64) -> io::Result<()> {
+        self.apply_rewind(len, false)
+    }
+
+    /// Rewind after the backend made the complete current payload durable.
+    pub(super) fn rewind_preflushed(&mut self, len: u64) -> io::Result<()> {
+        self.apply_rewind(len, true)
     }
 
     pub(super) fn read_plan(&self, offset: u64, len: usize) -> io::Result<Vec<ReadSpan>> {
@@ -965,11 +1272,17 @@ impl State {
         let committed_root = encode_root(ROOT_MAGIC, generation, self.logical_len);
         let prepared_root = encode_root(PREPARED_ROOT_MAGIC, generation, self.logical_len).to_vec();
 
-        let payload_start = if self.logical_len < self.committed_len {
+        let committed_payload_start = if self.logical_len < self.committed_len {
             payload_end
         } else {
             checked_end(self.data_offset, self.committed_len)?
         };
+        let payload_start = committed_payload_start.max(self.preflush_target);
+        if payload_start > payload_end {
+            return Err(invalid_data(
+                "atomic preflush frontier exceeds the pending payload",
+            ));
+        }
         let payload_checksum = self.prepare_payload_checksum(payload_start, payload_end)?;
         Ok(Some(PreparedCommit {
             payload_start,
@@ -985,9 +1298,41 @@ impl State {
         }))
     }
 
+    /// Prepare a metadata-only generation that can witness this blob's deletion.
+    ///
+    /// The candidate names the last committed length rather than unpublished appends. Its durable
+    /// barrier therefore need not make discarded payload durable. The state is intentionally not
+    /// advanced: a committed batch invalidates this namespace generation instead of returning the
+    /// deleted handle to service.
+    pub(super) fn prepare_delete(&self) -> io::Result<PreparedCommit> {
+        if self.poisoned {
+            return Err(invalid_data("atomic blob generation is poisoned"));
+        }
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("atomic generation overflow"))?;
+        let payload_end = checked_end(self.data_offset, self.committed_len)?;
+        let root_offset = ROOT_OFFSETS[(generation as usize) & 1];
+        Ok(PreparedCommit {
+            payload_start: payload_end,
+            root_offset,
+            prepared_root: encode_root(PREPARED_ROOT_MAGIC, generation, self.committed_len)
+                .to_vec(),
+            committed_root: encode_root(ROOT_MAGIC, generation, self.committed_len),
+            payload_checksum: PayloadChecksumEligibility::Eligible(None),
+            commit: Commit {
+                generation,
+                append_offset: payload_end,
+                truncate: false,
+            },
+        })
+    }
+
     fn apply_commit(&mut self, prepared: PreparedCommit) {
         self.generation = prepared.commit.generation;
         self.committed_len = self.logical_len;
+        self.preflush_target = prepared.commit.append_offset;
         self.payload_checksum = PayloadChecksumTracker::new(prepared.commit.append_offset);
         self.dirty = false;
     }
@@ -1110,6 +1455,19 @@ fn candidate_materialized_root(candidate: &Candidate) -> Option<[u8; ROOT_LEN]> 
     ))
 }
 
+fn candidate_tombstone_root(candidate: &Candidate) -> Option<[u8; ROOT_LEN]> {
+    let prepared = decode_batch_prepared_root(&candidate.prepared_root)?;
+    let committed = decode_committed_root(&candidate.committed_root)?;
+    if !candidate_roots_match(candidate, prepared, committed) {
+        return None;
+    }
+    Some(encode_root(
+        TOMBSTONE_ROOT_MAGIC,
+        committed.generation,
+        committed.logical_len,
+    ))
+}
+
 /// Return the independently recoverable spelling of a valid batch candidate root.
 pub(super) fn materialized_candidate_root(candidate: &Candidate) -> io::Result<[u8; ROOT_LEN]> {
     candidate_materialized_root(candidate)
@@ -1146,6 +1504,31 @@ fn candidate_root_is_batch_transition(installed: &[u8; ROOT_LEN], candidate: &Ca
         })
 }
 
+fn candidate_root_is_delete_transition(installed: &[u8; ROOT_LEN], candidate: &Candidate) -> bool {
+    let Some(materialized) = candidate_materialized_root(candidate) else {
+        return candidate_root_is_transition(installed, candidate);
+    };
+    let Some(tombstone) = candidate_tombstone_root(candidate) else {
+        return false;
+    };
+    installed
+        .iter()
+        .zip(
+            candidate
+                .prepared_root
+                .iter()
+                .zip(&candidate.committed_root)
+                .zip(materialized)
+                .zip(tombstone),
+        )
+        .all(|(installed, (((prepared, committed), materialized), tombstone))| {
+            installed == prepared
+                || installed == committed
+                || *installed == materialized
+                || *installed == tombstone
+        })
+}
+
 fn embedded_batch_candidates_with_materialized(
     file: &File,
     data_offset: u64,
@@ -1172,11 +1555,8 @@ fn embedded_batch_candidates_with_materialized(
         let Some(root) = decode_root_fields(&encoded) else {
             continue;
         };
-        let prepared_root = encode_root(
-            BATCH_PREPARED_ROOT_MAGIC,
-            root.generation,
-            root.logical_len,
-        );
+        let prepared_root =
+            encode_root(BATCH_PREPARED_ROOT_MAGIC, root.generation, root.logical_len);
         let committed_root = encode_root(ROOT_MAGIC, root.generation, root.logical_len);
         let candidate = Candidate {
             base_generation: root.generation - 1,
@@ -1190,7 +1570,7 @@ fn embedded_batch_candidates_with_materialized(
         if encoded == materialized_root && !include_materialized {
             continue;
         }
-        if !candidate_root_is_batch_transition(&encoded, &candidate) {
+        if !candidate_root_is_delete_transition(&encoded, &candidate) {
             continue;
         }
         let Some((descriptor_offset, descriptor)) = decode_batch_witness(&slot) else {
@@ -1217,12 +1597,37 @@ fn embedded_batch_candidates_with_materialized(
     Ok(candidates)
 }
 
-/// Discover intact participant-embedded descriptors without reading payload.
-pub(crate) fn embedded_batch_candidates(
+/// Discover intact embedded descriptors even when their root header was torn during installation.
+pub(crate) fn embedded_batch_witnesses(
     file: &File,
     data_offset: u64,
-) -> io::Result<Vec<EmbeddedBatchCandidate>> {
-    embedded_batch_candidates_with_materialized(file, data_offset, false)
+) -> io::Result<Vec<EmbeddedBatchWitness>> {
+    if data_offset < ROOT_OFFSETS[1] + ROOT_SLOT_LEN {
+        return Err(invalid_input(
+            "V2 data offset does not reserve both root slots",
+        ));
+    }
+    if file.metadata()?.len() < data_offset {
+        return Ok(Vec::new());
+    }
+
+    let mut witnesses = Vec::with_capacity(ROOT_OFFSETS.len());
+    for root_offset in ROOT_OFFSETS {
+        let Some(slot) = read_root_slot(file, root_offset)? else {
+            continue;
+        };
+        let Some((descriptor_offset, descriptor)) = decode_batch_witness(&slot) else {
+            continue;
+        };
+        if descriptor_offset < ROOT_LEN {
+            continue;
+        }
+        witnesses.push(EmbeddedBatchWitness {
+            root_offset,
+            descriptor: descriptor.to_vec(),
+        });
+    }
+    Ok(witnesses)
 }
 
 /// Discover descriptors retained beside independently recoverable roots.
@@ -1296,7 +1701,7 @@ pub(crate) fn candidate_has_embedded_batch_witness(
     let installed: [u8; ROOT_LEN] = slot[..ROOT_LEN]
         .try_into()
         .expect("root slots contain a complete root header");
-    if !candidate_root_is_batch_transition(&installed, candidate) {
+    if !candidate_root_is_delete_transition(&installed, candidate) {
         return Ok(false);
     }
     Ok(decode_batch_witness(&slot)
@@ -1338,6 +1743,20 @@ pub(crate) fn candidate_is_materialized(file: &File, candidate: &Candidate) -> i
     }
 }
 
+/// Return whether a batch candidate's exact independently recoverable tombstone is installed.
+pub(crate) fn candidate_is_tombstoned(file: &File, candidate: &Candidate) -> io::Result<bool> {
+    let Some(tombstone_root) = candidate_tombstone_root(candidate) else {
+        return Ok(false);
+    };
+
+    let mut installed = [0u8; ROOT_LEN];
+    match read_exact_at(file, candidate.root_offset, &mut installed) {
+        Ok(()) => Ok(installed == tombstone_root),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Validate and durably publish a batch candidate as independently recoverable.
 pub(crate) fn materialize_candidate(
     file: &File,
@@ -1348,6 +1767,30 @@ pub(crate) fn materialize_candidate(
     let metadata = validate_candidate(file, data_offset, candidate)?;
     write_durable_at(file, candidate.root_offset, &materialized_root)?;
     file.set_len(metadata.payload_end)
+}
+
+/// Validate and durably replace a prepared candidate with a payload-preserving tombstone.
+pub(crate) fn materialize_tombstone_candidate(
+    file: &File,
+    data_offset: u64,
+    candidate: &Candidate,
+) -> io::Result<()> {
+    let tombstone_root = candidate_tombstone_root(candidate)
+        .ok_or_else(|| invalid_data("transaction candidate cannot become a tombstone"))?;
+    let committed = decode_committed_root(&candidate.committed_root)
+        .ok_or_else(|| invalid_data("transaction candidate has an invalid committed root"))?;
+    let payload_end = checked_end(data_offset, committed.logical_len)?;
+    if payload_end > file.metadata()?.len() {
+        return Err(invalid_data("transaction tombstone payload end is invalid"));
+    }
+    let mut installed = [0u8; ROOT_LEN];
+    read_exact_at(file, candidate.root_offset, &mut installed)?;
+    if !candidate_root_is_delete_transition(&installed, candidate) {
+        return Err(invalid_data(
+            "transaction candidate root is not a recoverable tombstone transition",
+        ));
+    }
+    write_durable_at(file, candidate.root_offset, &tombstone_root)
 }
 
 fn recover_root(
@@ -1370,6 +1813,7 @@ fn recover_root(
     state.logical_len = root.logical_len;
     state.committed_len = root.logical_len;
     state.generation = root.generation;
+    state.preflush_target = payload_end;
     state.payload_checksum = PayloadChecksumTracker::new(payload_end);
     Ok((state, CandidateMetadata { payload_end }))
 }
@@ -1378,8 +1822,6 @@ fn recover_root(
 pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     let tracked_write = (offset, bytes.len());
-    #[cfg(test)]
-    let tracked_record = (offset, bytes.to_vec());
 
     #[cfg(target_os = "linux")]
     {
@@ -1432,12 +1874,6 @@ pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Re
     TRACKED_DURABLE_WRITES.with(|tracked| {
         if let Some(writes) = tracked.borrow_mut().as_mut() {
             writes.push(tracked_write);
-        }
-    });
-    #[cfg(test)]
-    TRACKED_DURABLE_RECORDS.with(|tracked| {
-        if let Some(records) = tracked.borrow_mut().as_mut() {
-            records.push(tracked_record);
         }
     });
     Ok(())
@@ -1548,18 +1984,6 @@ pub(super) fn validate_payload_checksum(
         return Err(invalid_data("transaction payload checksum mismatch"));
     }
     Ok(())
-}
-
-/// Validate and durably install a transaction-bound candidate.
-#[cfg(test)]
-pub(super) fn install_candidate(
-    file: &File,
-    data_offset: u64,
-    candidate: &Candidate,
-) -> io::Result<()> {
-    let metadata = validate_candidate(file, data_offset, candidate)?;
-    write_durable_at(file, candidate.root_offset, &candidate.committed_root)?;
-    file.set_len(metadata.payload_end)
 }
 
 fn creation_path(live_path: &Path) -> io::Result<std::path::PathBuf> {

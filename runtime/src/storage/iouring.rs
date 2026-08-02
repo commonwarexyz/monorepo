@@ -31,7 +31,7 @@ use commonware_formatting::{from_hex, hex};
 use commonware_utils::{channel::oneshot, sync::Mutex as SyncMutex};
 use futures::future::join_all;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
@@ -43,6 +43,13 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+type ResolvedHeader = (
+    u64,
+    u16,
+    u64,
+    Option<[u8; Header::V2_INCARNATION_LEN]>,
+);
+
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
 fn resolve_header(
     file: &mut File,
@@ -50,12 +57,22 @@ fn resolve_header(
     versions: &RangeInclusive<u16>,
     partition: &str,
     name: &[u8],
-) -> Result<Option<(u64, u16, u64)>, Error> {
+) -> Result<Option<ResolvedHeader>, Error> {
     let mut raw = vec![0u8; Header::resolve_len(raw_len)];
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, partition, name)
+    Ok(super::header::resolve(
+        &raw, raw_len, versions, partition, name,
+    )?
+    .map(|(logical_size, blob_version, data_offset)| {
+        (
+            logical_size,
+            blob_version,
+            data_offset,
+            Header::atomic_incarnation(&raw),
+        )
+    }))
 }
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -110,17 +127,14 @@ struct Namespace {
 
 struct AtomicStateEntry {
     generation: Weak<super::generation::Token>,
-    state: Weak<Mutex<V2State>>,
+    state: Weak<super::preflush::Context>,
 }
 
 /// Mutable log/index state shared by every handle opened for one current V2 name generation.
 type V2State = super::atomic::State;
 
-async fn lock_v2(state: &Arc<Mutex<V2State>>) -> OwnedMutexGuard<V2State> {
-    if let Ok(state) = state.clone().try_lock_owned() {
-        return state;
-    }
-    state.clone().lock_owned().await
+async fn lock_v2(state: &Arc<super::preflush::Context>) -> OwnedMutexGuard<V2State> {
+    state.lock().await
 }
 
 /// Owns a V2 content lock while an admitted mutation is in flight.
@@ -137,7 +151,7 @@ struct V2WriteRequest {
     prepared: super::atomic::PreparedMutation,
     options: WriteOptions,
     cache: iouring::Cache,
-    retained: Arc<Mutex<V2State>>,
+    retained: Arc<super::preflush::Context>,
     sync: bool,
 }
 
@@ -215,7 +229,7 @@ impl Namespace {
         partition: &str,
         name: &[u8],
         generation: &Arc<super::generation::Token>,
-    ) -> Option<Arc<Mutex<V2State>>> {
+    ) -> Option<Arc<super::preflush::Context>> {
         let key = (partition.to_string(), name.to_vec());
         let mut states = self.atomic_states.lock();
         let entry = states.get(&key)?;
@@ -240,8 +254,14 @@ impl Namespace {
         name: &[u8],
         generation: &Arc<super::generation::Token>,
         state: V2State,
-    ) -> Arc<Mutex<V2State>> {
-        let state = Arc::new(Mutex::new(state));
+    ) -> Result<Arc<super::preflush::Context>, Error> {
+        let state = super::preflush::Context::new(state).map_err(|error| {
+            Error::BlobCorrupt(
+                partition.into(),
+                hex(name),
+                format!("atomic preflush initialization failed: {error}"),
+            )
+        })?;
         let mut states = self.atomic_states.lock();
         states.retain(|_, entry| entry.state.strong_count() != 0);
         states.insert(
@@ -251,7 +271,7 @@ impl Namespace {
                 state: Arc::downgrade(&state),
             },
         );
-        state
+        Ok(state)
     }
 
     fn invalidate_operations(&self, operations: &[super::batch::Operation]) {
@@ -329,10 +349,34 @@ impl Storage {
         let mut descriptors = Vec::with_capacity(operations.len());
         let mut blobs = BTreeMap::new();
         let mut mutation_handles = Vec::new();
+        let mut removals = BTreeSet::new();
         for operation in operations {
             match operation {
-                BatchOperation::Remove(target) => {
-                    descriptors.push(super::batch::Operation::Remove(target));
+                BatchOperation::Remove(blob) => {
+                    let partition = blob.partition.clone();
+                    let name = blob.name.clone();
+                    if blob.atomic.is_none() {
+                        return Err(Error::BlobOpenFailed(
+                            partition,
+                            hex(&name),
+                            IoError::new(
+                                std::io::ErrorKind::Unsupported,
+                                "batch deletion requires an atomic blob",
+                            )
+                            .into(),
+                        ));
+                    }
+                    descriptors.push(super::batch::Operation::Remove(crate::RemoveTarget::Blob {
+                        partition: partition.clone(),
+                        name: name.clone(),
+                    }));
+                    mutation_handles.push((
+                        partition.clone(),
+                        name.clone(),
+                        blob.generation.clone(),
+                    ));
+                    removals.insert((partition.clone(), name.clone()));
+                    blobs.entry((partition, name)).or_insert(blob);
                 }
                 BatchOperation::Publish(blob) => {
                     let partition = blob.partition.clone();
@@ -387,7 +431,7 @@ impl Storage {
                 }
             }
         }
-        let mut filesystem_operations = super::batch::canonicalize_operations(descriptors)?;
+        let filesystem_operations = super::batch::canonicalize_operations(descriptors)?;
         super::batch::preflight(&filesystem_operations)?;
         if filesystem_operations.is_empty() {
             let _guard = self.namespace.lock.clone().lock_owned().await;
@@ -395,16 +439,21 @@ impl Storage {
             return Ok(Handle::ready(Ok(())));
         }
 
-        let mutation_keys = filesystem_operations
-            .iter()
-            .filter_map(|operation| match operation {
-                super::batch::Operation::Publish { partition, name }
-                | super::batch::Operation::Rewind {
-                    partition, name, ..
-                } => Some((partition.clone(), name.clone())),
-                super::batch::Operation::Remove(_) => None,
-            })
-            .collect::<Vec<_>>();
+        let mutation_keys =
+            filesystem_operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    super::batch::Operation::Publish { partition, name }
+                    | super::batch::Operation::Rewind {
+                        partition, name, ..
+                    }
+                    | super::batch::Operation::Remove(crate::RemoveTarget::Blob {
+                        partition,
+                        name,
+                    }) => Some((partition.clone(), name.clone())),
+                    super::batch::Operation::Remove(crate::RemoveTarget::Partition(_)) => None,
+                })
+                .collect::<Vec<_>>();
         let mut locked = Vec::with_capacity(mutation_keys.len());
         for key in mutation_keys {
             let blob = blobs
@@ -430,24 +479,6 @@ impl Storage {
                 return Err(Error::BlobMissing(partition, hex(&name)));
             }
         }
-        let has_removals = filesystem_operations
-            .iter()
-            .any(|operation| matches!(operation, super::batch::Operation::Remove(_)));
-        // Mutation partitions come from opened blob handles and already use the stored spelling.
-        // Only externally named removal targets require filesystem-backed alias resolution.
-        let filesystem_operations = if has_removals {
-            super::batch::resolve_operation_partitions(
-                &self.storage_directory,
-                &mut filesystem_operations,
-            )?;
-            let filesystem_operations =
-                super::batch::canonicalize_operations(filesystem_operations)?;
-            super::batch::preflight(&filesystem_operations)?;
-            filesystem_operations
-        } else {
-            filesystem_operations
-        };
-
         let rewind_lengths = filesystem_operations
             .iter()
             .filter_map(|operation| match operation {
@@ -456,8 +487,9 @@ impl Storage {
                     name,
                     len,
                 } => Some(((partition.clone(), name.clone()), *len)),
-                super::batch::Operation::Publish { .. }
-                | super::batch::Operation::Remove(_) => None,
+                super::batch::Operation::Publish { .. } | super::batch::Operation::Remove(_) => {
+                    None
+                }
             })
             .collect::<BTreeMap<_, _>>();
         for (blob, state) in &locked {
@@ -494,50 +526,58 @@ impl Storage {
             } else {
                 super::atomic::MAX_VALIDATED_PAYLOAD_LEN / locked.len() as u64
             };
-            let preparations = locked.into_iter().map(|(blob, state)| {
-                let resize = rewind_lengths
-                    .get(&(blob.partition.clone(), blob.name.clone()))
-                    .copied();
-                async move {
-                    let mut operation = V2OperationGuard::new(state);
-                    if let Some(len) = resize
-                        && let Err(error) = operation.state.rewind(len)
-                    {
-                        return (blob, operation, Err(error.into()));
-                    }
-                    let mut prepared = blob
-                        .prepare_batch_commit_unflushed(&mut operation.state)
-                        .await;
-                    let preflush = prepared.as_ref().ok().and_then(Option::as_ref).is_some_and(
-                        |prepared| match prepared.payload_checksum() {
-                            super::atomic::PayloadChecksumEligibility::Eligible(Some(checksum)) => {
-                                checksum.len > payload_budget
+            let preparations =
+                locked.into_iter().map(|(blob, state)| {
+                    let removed = removals.contains(&(blob.partition.clone(), blob.name.clone()));
+                    let resize = rewind_lengths
+                        .get(&(blob.partition.clone(), blob.name.clone()))
+                        .copied();
+                    async move {
+                        let mut operation = V2OperationGuard::new(state);
+                        if let Some(len) = resize {
+                            let rewound = blob.rewind_log(&mut operation.state, len).await;
+                            if let Err(error) = rewound {
+                                return (blob, operation, Err(error), removed);
                             }
-                            super::atomic::PayloadChecksumEligibility::Eligible(None) => false,
-                            super::atomic::PayloadChecksumEligibility::Ineligible => true,
-                        },
-                    );
-                    if preflush {
-                        match blob.sync_batch_commit().await {
-                            Ok(()) => prepared
-                                .as_mut()
-                                .unwrap()
-                                .as_mut()
-                                .unwrap()
-                                .mark_payload_preflushed(),
-                            Err(error) => prepared = Err(error),
                         }
+                        let mut prepared = if removed {
+                            blob.prepare_batch_delete_unflushed(&operation.state)
+                                .map(Some)
+                        } else {
+                            blob.prepare_batch_commit_unflushed(&mut operation.state)
+                                .await
+                        };
+                        let preflush = prepared.as_ref().ok().and_then(Option::as_ref).is_some_and(
+                            |prepared| match prepared.payload_checksum() {
+                                super::atomic::PayloadChecksumEligibility::Eligible(Some(
+                                    checksum,
+                                )) => checksum.len > payload_budget,
+                                super::atomic::PayloadChecksumEligibility::Eligible(None) => false,
+                                super::atomic::PayloadChecksumEligibility::Ineligible => true,
+                            },
+                        );
+                        if preflush {
+                            let target = prepared.as_ref().unwrap().as_ref().unwrap().raw_len();
+                            match blob.ensure_preflush(target).await {
+                                Ok(()) => prepared
+                                    .as_mut()
+                                    .unwrap()
+                                    .as_mut()
+                                    .unwrap()
+                                    .mark_payload_preflushed(),
+                                Err(error) => prepared = Err(error),
+                            }
+                        }
+                        (blob, operation, prepared, removed)
                     }
-                    (blob, operation, prepared)
-                }
-            });
+                });
             let mut prepared_states = join_all(preparations).await;
 
             let preparation_error = prepared_states
                 .iter()
-                .find_map(|(_, _, result)| result.as_ref().err().cloned());
+                .find_map(|(_, _, result, _)| result.as_ref().err().cloned());
             if let Some(error) = preparation_error {
-                for (_, operation, _) in &mut prepared_states {
+                for (_, operation, _, _) in &mut prepared_states {
                     operation.poison();
                 }
                 let _ = commit_sender.send(Err(error.clone()));
@@ -547,7 +587,7 @@ impl Storage {
                 return;
             }
             let mut speculative_payload_bytes = Some(0u64);
-            for (_, _, prepared) in &prepared_states {
+            for (_, _, prepared, _) in &prepared_states {
                 let Some(prepared) = prepared.as_ref().unwrap() else {
                     continue;
                 };
@@ -564,7 +604,7 @@ impl Storage {
             }
             let participant_count = prepared_states
                 .iter()
-                .filter(|(_, _, prepared)| prepared.as_ref().unwrap().is_some())
+                .filter(|(_, _, prepared, _)| prepared.as_ref().unwrap().is_some())
                 .count();
             let verifiable = speculative_payload_bytes.is_some();
             let embedded_eligible = verifiable
@@ -577,7 +617,7 @@ impl Storage {
                 });
             let participants = prepared_states
                 .iter()
-                .filter_map(|(blob, _, prepared)| {
+                .filter_map(|(blob, _, prepared, _)| {
                     prepared.as_ref().unwrap().as_ref().map(|prepared| {
                         let payload_checksum = if verifiable {
                             let super::atomic::PayloadChecksumEligibility::Eligible(checksum) =
@@ -592,6 +632,7 @@ impl Storage {
                         super::batch::Participant {
                             partition: blob.partition.clone(),
                             name: blob.name.clone(),
+                            incarnation: blob.incarnation(),
                             candidate: prepared.candidate(),
                             payload_start: if verifiable {
                                 prepared.payload_start()
@@ -609,7 +650,7 @@ impl Storage {
                 .ok()
                 .flatten()
                 .filter(|descriptor| {
-                    prepared_states.iter().all(|(_, _, prepared)| {
+                    prepared_states.iter().all(|(_, _, prepared, _)| {
                         prepared.as_ref().unwrap().as_ref().is_none_or(|prepared| {
                             prepared.batch_witness_capacity() >= descriptor.len()
                         })
@@ -623,7 +664,7 @@ impl Storage {
                     "carried batch decision has no embedded witness",
                 )
                 .into();
-                for (_, operation, _) in &mut prepared_states {
+                for (_, operation, _, _) in &mut prepared_states {
                     operation.poison();
                 }
                 let _ = commit_sender.send(Err(error.clone()));
@@ -645,7 +686,7 @@ impl Storage {
             let transition = match transition {
                 Ok(transition) => transition,
                 Err(error) => {
-                    for (_, operation, _) in &mut prepared_states {
+                    for (_, operation, _, _) in &mut prepared_states {
                         operation.poison();
                     }
                     let _ = commit_sender.send(Err(error.clone()));
@@ -676,7 +717,7 @@ impl Storage {
                 }
                 Ok(Err(error)) => {
                     let error = Error::from(error);
-                    for (_, operation, _) in &mut prepared_states {
+                    for (_, operation, _, _) in &mut prepared_states {
                         operation.poison();
                     }
                     let _ = commit_sender.send(Err(error.clone()));
@@ -690,7 +731,7 @@ impl Storage {
                 }
                 Err(_) => {
                     let error = Error::Closed;
-                    for (_, operation, _) in &mut prepared_states {
+                    for (_, operation, _, _) in &mut prepared_states {
                         operation.poison();
                     }
                     let _ = commit_sender.send(Err(error.clone()));
@@ -701,71 +742,13 @@ impl Storage {
                 }
             }
 
-            let mut removal_publication: Option<super::batch::RemovalPublication> = None;
-            let mut eligibility_error = None;
-            if has_removals {
-                if participant_count != 0 && !verifiable {
-                    eligibility_error = Some(
-                        IoError::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "removal batch payload cannot be verified after a crash",
-                        )
-                        .into(),
-                    );
-                } else {
-                    let publication_root = root.clone();
-                    let publication_participants = participants.clone();
-                    let publication_operations = filesystem_operations.clone();
-                    let publication = tokio::task::spawn_blocking(move || {
-                        super::batch::recover_removal_witnesses(
-                            &publication_root,
-                            &publication_operations,
-                        )?;
-                        super::batch::prepare_removal_publication(
-                            &publication_root,
-                            &publication_participants,
-                            &publication_operations,
-                        )
-                    })
-                    .await;
-                    match publication {
-                        Ok(Ok(publication))
-                            if prepared_states.iter().all(|(_, _, prepared)| {
-                                prepared.as_ref().unwrap().as_ref().is_none_or(|prepared| {
-                                    prepared.batch_witness_capacity()
-                                        >= publication.descriptor().len()
-                                })
-                            }) =>
-                        {
-                            removal_publication = Some(publication);
-                        }
-                        Ok(Ok(_)) => {
-                            eligibility_error = Some(
-                                IoError::new(
-                                    std::io::ErrorKind::InvalidInput,
-                                    "removal batch descriptor exceeds a participant root slot",
-                                )
-                                .into(),
-                            );
-                        }
-                        Ok(Err(error)) => eligibility_error = Some(Error::from(error)),
-                        Err(error) if error.is_panic() => {
-                            std::panic::resume_unwind(error.into_panic());
-                        }
-                        Err(_) => eligibility_error = Some(Error::Closed),
-                    }
-                }
-            } else if participant_count != 0 && embedded_witness.is_none() {
-                eligibility_error = Some(
-                    IoError::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "write batch is not eligible for embedded crash recovery",
-                    )
-                    .into(),
-                );
-            }
-            if let Some(error) = eligibility_error {
-                for (_, operation, _) in &mut prepared_states {
+            if participant_count != 0 && embedded_witness.is_none() {
+                let error: Error = IoError::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "storage batch is not eligible for embedded crash recovery",
+                )
+                .into();
+                for (_, operation, _, _) in &mut prepared_states {
                     operation.poison();
                 }
                 let _ = commit_sender.send(Err(error.clone()));
@@ -775,48 +758,33 @@ impl Storage {
                 return;
             }
 
-            let stage_witness = embedded_witness.clone().or_else(|| {
-                removal_publication
-                    .as_ref()
-                    .map(|publication| Arc::<[u8]>::from(publication.descriptor()))
-            });
-            let removal_persist = removal_publication.map(|publication| {
-                tokio::task::spawn_blocking(move || {
-                    let result = publication.persist();
-                    (publication, result)
-                })
-            });
-
-            let stages = prepared_states
+            let stage_witness = embedded_witness.clone();
+            let participant_commits = prepared_states
                 .iter_mut()
-                .filter_map(|(blob, _, prepared)| {
+                .filter_map(|(blob, _, prepared, removed)| {
                     let prepared = prepared.as_mut().unwrap().as_mut()?;
-                    Some(blob.stage_batch_commit(prepared, stage_witness.as_deref()))
+                    Some(async {
+                        if *removed {
+                            blob.stage_batch_delete(
+                                prepared,
+                                stage_witness
+                                    .as_deref()
+                                    .expect("eligible deletions have an embedded witness"),
+                            )
+                            .await
+                        } else {
+                            blob.stage_batch_commit(prepared, stage_witness.as_deref())
+                                .await?;
+                            blob.sync_batch_commit().await
+                        }
+                    })
                 });
-            let stage_error = join_all(stages).await.into_iter().find_map(Result::err);
-            let participant_syncs = prepared_states.iter().filter_map(|(blob, _, prepared)| {
-                prepared
-                    .as_ref()
-                    .unwrap()
-                    .as_ref()
-                    .map(|_| blob.sync_batch_commit())
-            });
-            let sync_error = join_all(participant_syncs)
+            let commit_error = join_all(participant_commits)
                 .await
                 .into_iter()
                 .find_map(Result::err);
-            let (removal_publication, removal_error) = match removal_persist {
-                Some(persist) => match persist.await {
-                    Ok((publication, result)) => (Some(publication), result.err().map(Error::from)),
-                    Err(error) if error.is_panic() => {
-                        std::panic::resume_unwind(error.into_panic());
-                    }
-                    Err(_) => (None, Some(Error::Closed)),
-                },
-                None => (None, None),
-            };
-            if let Some(error) = stage_error.or(sync_error).or(removal_error) {
-                for (_, operation, _) in &mut prepared_states {
+            if let Some(error) = commit_error {
+                for (_, operation, _, _) in &mut prepared_states {
                     operation.poison();
                 }
                 let _ = commit_sender.send(Err(error.clone()));
@@ -827,7 +795,10 @@ impl Storage {
             }
 
             if let Some(witness) = embedded_witness {
-                *namespace.embedded_batch_decision.lock() = Some(witness);
+                let has_removals = filesystem_operations
+                    .iter()
+                    .any(|operation| matches!(operation, super::batch::Operation::Remove(_)));
+                *namespace.embedded_batch_decision.lock() = Some(witness.clone());
                 namespace.invalidate_operations(&filesystem_operations);
                 namespace
                     .carried_batch_decision
@@ -840,14 +811,46 @@ impl Storage {
                     }
                     Err(_) => {}
                 }
-                let mut completion = Ok(());
-                for (blob, mut operation, prepared) in prepared_states {
-                    let force_truncate = rewind_lengths
-                        .contains_key(&(blob.partition.clone(), blob.name.clone()));
+                let mut completion = if has_removals {
+                    let materialization_root = root.clone();
+                    let materialization_witness = witness.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        super::batch::materialize_embedded(
+                            &materialization_root,
+                            &materialization_witness,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            *namespace.embedded_batch_decision.lock() = None;
+                            Ok(())
+                        }
+                        Ok(Err(error)) => Err(Error::from(error)),
+                        Err(error) if error.is_panic() => {
+                            std::panic::resume_unwind(error.into_panic())
+                        }
+                        Err(_) => Err(Error::Closed),
+                    }
+                } else {
+                    Ok(())
+                };
+                for (blob, mut operation, prepared, removed) in prepared_states {
+                    if completion.is_err() {
+                        operation.poison();
+                        continue;
+                    }
+                    if removed {
+                        debug_assert!(prepared.as_ref().is_ok_and(Option::is_some));
+                        operation.finish();
+                        continue;
+                    }
+                    let force_truncate =
+                        rewind_lengths.contains_key(&(blob.partition.clone(), blob.name.clone()));
                     let result = blob.finish_batch_commit(
                         &mut operation.state,
                         prepared.unwrap(),
-                        true,
+                        !has_removals,
                         force_truncate,
                     );
                     if let Err(error) = result {
@@ -857,10 +860,13 @@ impl Storage {
                     }
                     operation.finish();
                 }
-                namespace.recovery_required.store(true, Ordering::Release);
+                namespace.recovery_required.store(
+                    completion.is_err() || !has_removals,
+                    Ordering::Release,
+                );
                 namespace
                     .carried_batch_decision
-                    .store(true, Ordering::Release);
+                    .store(completion.is_ok() && !has_removals, Ordering::Release);
                 drop(guard);
                 on_complete();
                 let _ = completion_sender.send(completion);
@@ -880,25 +886,12 @@ impl Storage {
                 Err(_) => {}
             }
 
-            let mut result = match removal_publication {
-                Some(publication) => match tokio::task::spawn_blocking(move || {
-                    publication.finish(|_| {}).map_err(Error::from)
-                })
-                .await
-                {
-                    Ok(result) => result,
-                    Err(error) if error.is_panic() => {
-                        std::panic::resume_unwind(error.into_panic());
-                    }
-                    Err(_) => Err(Error::Closed),
-                },
-                None => Ok(()),
-            };
-
+            let mut result = Ok(());
             if result.is_ok() {
-                for (blob, operation, prepared) in &mut prepared_states {
-                    let force_truncate = rewind_lengths
-                        .contains_key(&(blob.partition.clone(), blob.name.clone()));
+                for (blob, operation, prepared, removed) in &mut prepared_states {
+                    debug_assert!(!*removed);
+                    let force_truncate =
+                        rewind_lengths.contains_key(&(blob.partition.clone(), blob.name.clone()));
                     let prepared = std::mem::replace(prepared, Ok(None))
                         .expect("successful preparation retains no error");
                     let completion = blob.finish_batch_commit(
@@ -915,7 +908,7 @@ impl Storage {
                     operation.finish();
                 }
             } else {
-                for (_, operation, _) in &mut prepared_states {
+                for (_, operation, _, _) in &mut prepared_states {
                     operation.poison();
                 }
             }
@@ -958,6 +951,16 @@ impl Storage {
         super::validate_partition_name(&stored_partition)?;
         let parent = self.storage_directory.join(&stored_partition);
         let path = parent.join(hex(name));
+
+        if super::batch::recover_named_embedded(&self.storage_directory, &stored_partition, name)? {
+            self.namespace
+                .invalidate_operations(&[super::batch::Operation::Remove(
+                    crate::RemoveTarget::Blob {
+                        partition: stored_partition.clone(),
+                        name: name.to_vec(),
+                    },
+                )]);
+        }
 
         // Open existing first so stale sidecars are durably discarded before create_new makes a
         // replacement user name visible.
@@ -1004,7 +1007,7 @@ impl Storage {
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
         let existing = resolve_header(&mut file, raw_len, &versions, partition, name)?;
 
-        let (ordinary_len, blob_version, data_offset) = match existing {
+        let (ordinary_len, blob_version, data_offset, incarnation) = match existing {
             Some(resolved) => {
                 if require_atomic && resolved.2 != super::Layout::V2.data_offset() {
                     return Err(Error::BlobOpenFailed(
@@ -1046,7 +1049,12 @@ impl Storage {
                 file.sync_all().map_err(|error| {
                     Error::BlobSyncFailed(partition.into(), hex(name), error.into())
                 })?;
-                (0, blob_version, data_offset)
+                (
+                    0,
+                    blob_version,
+                    data_offset,
+                    Header::atomic_incarnation(&region),
+                )
             }
         };
 
@@ -1076,7 +1084,7 @@ impl Storage {
                         name,
                         &generation,
                         state,
-                    ))
+                    )?)
                 }
             }
         } else {
@@ -1094,18 +1102,22 @@ impl Storage {
                 generation,
                 namespace: Some(self.namespace.clone()),
                 atomic: atomic.clone(),
+                incarnation,
             },
         );
         drop(guard);
 
-        let logical_len = if let Some(state) = atomic {
-            let state = state.lock().await;
+        let logical_len = if let Some(context) = atomic {
+            let state = context.lock().await;
             if state.is_poisoned() {
                 return Err(Error::BlobCorrupt(
                     partition.into(),
                     hex(name),
                     "atomic blob generation is poisoned".into(),
                 ));
+            }
+            if let Some(error) = context.preflush().failure() {
+                return Err(error);
             }
             state.logical_len()
         } else {
@@ -1183,6 +1195,8 @@ impl crate::Storage for Storage {
         // Acquire the filesystem lock
         let _guard = self.namespace.lock.lock().await;
         self.recover_locked()?;
+
+        super::batch::recover_partition_embedded(&self.storage_directory, partition)?;
 
         let path = self.storage_directory.join(partition);
 
@@ -1267,7 +1281,9 @@ pub struct Blob {
     /// Namespace owner used to validate V2 commit publication.
     namespace: Option<Arc<Namespace>>,
     /// Log/index state shared by every open of the current V2 name generation.
-    atomic: Option<Arc<Mutex<V2State>>>,
+    atomic: Option<Arc<super::preflush::Context>>,
+    /// Persistent identity of this exact V2 creation.
+    incarnation: Option<[u8; Header::V2_INCARNATION_LEN]>,
     /// Shared page-cache policy and learned `RWF_DONTCACHE` support.
     cache: iouring::Cache,
 }
@@ -1275,7 +1291,8 @@ pub struct Blob {
 struct BlobContext {
     generation: Arc<super::generation::Token>,
     namespace: Option<Arc<Namespace>>,
-    atomic: Option<Arc<Mutex<V2State>>>,
+    atomic: Option<Arc<super::preflush::Context>>,
+    incarnation: Option<[u8; Header::V2_INCARNATION_LEN]>,
 }
 
 impl Clone for Blob {
@@ -1290,6 +1307,7 @@ impl Clone for Blob {
             data_offset: self.data_offset,
             namespace: self.namespace.clone(),
             atomic: self.atomic.clone(),
+            incarnation: self.incarnation,
             cache: self.cache.clone(),
         }
     }
@@ -1317,6 +1335,7 @@ impl Blob {
                 generation: super::generation::Token::detached(),
                 namespace: None,
                 atomic: None,
+                incarnation: None,
             },
         )
     }
@@ -1340,6 +1359,7 @@ impl Blob {
             data_offset,
             namespace: context.namespace,
             atomic: context.atomic,
+            incarnation: context.incarnation,
             cache: iouring::Cache::Disabled(Arc::new(AtomicBool::new(true))),
         }
     }
@@ -1350,6 +1370,11 @@ impl Blob {
         } else {
             iouring::Cache::Enabled
         }
+    }
+
+    const fn incarnation(&self) -> [u8; Header::V2_INCARNATION_LEN] {
+        self.incarnation
+            .expect("atomic blobs have a persistent incarnation")
     }
 
     fn atomic_layout_required(&self) -> Error {
@@ -1376,6 +1401,76 @@ impl Blob {
         if state.is_poisoned() {
             return Err(self.poisoned());
         }
+        if let Some(error) = self
+            .atomic
+            .as_ref()
+            .and_then(|atomic| atomic.preflush().failure())
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn drive_preflush(&self, mut driver: super::preflush::Driver, mut target: u64) {
+        loop {
+            let result = self
+                .io_handle
+                .sync(self.file.clone())
+                .await
+                .map_err(|error| self.map_sync_error(error));
+            let Some(next) = driver.complete(target, result) else {
+                break;
+            };
+            target = next;
+        }
+    }
+
+    fn request_preflush(&self, target: u64) -> Result<(), Error> {
+        let atomic = self
+            .atomic
+            .as_ref()
+            .expect("payload preflush is only used for V2 blobs");
+        let Some(first) = atomic.preflush().request(target)? else {
+            return Ok(());
+        };
+        let driver = atomic.preflush().driver();
+        let blob = self.clone();
+        drop(tokio::spawn(async move {
+            blob.drive_preflush(driver, first).await;
+        }));
+        Ok(())
+    }
+
+    async fn ensure_preflush(&self, target: u64) -> Result<(), Error> {
+        let atomic = self
+            .atomic
+            .as_ref()
+            .expect("payload preflush is only used for V2 blobs");
+        match atomic.preflush().request(target)? {
+            Some(first) => {
+                let driver = atomic.preflush().driver();
+                self.drive_preflush(driver, first).await;
+            }
+            None => atomic.preflush().wait(target).await?,
+        }
+        atomic.preflush().wait(target).await
+    }
+
+    async fn rewind_log(&self, state: &mut V2State, len: u64) -> Result<(), Error> {
+        state.validate_rewind(len)?;
+        if len == state.logical_len() {
+            return state.rewind(len).map_err(Error::from);
+        }
+        let target = state.raw_len()?;
+        self.ensure_preflush(target).await?;
+        let preflush = self
+            .atomic
+            .as_ref()
+            .expect("atomic rewinds require V2 state")
+            .preflush();
+        preflush.wait_idle().await?;
+        state.rewind_preflushed(len)?;
+        preflush.reset_after_rewind(state.raw_len()?);
         Ok(())
     }
 
@@ -1383,10 +1478,11 @@ impl Blob {
         let Some(atomic) = &self.atomic else {
             return Err(self.atomic_layout_required());
         };
-        let mut state = atomic.lock().await;
+        let mut state = lock_v2(atomic).await;
         self.ensure_healthy(&state)?;
+        state.validate_rewind(len)?;
         let truncate = len < state.logical_len() && len >= state.committed_len();
-        state.rewind(len)?;
+        self.rewind_log(&mut state, len).await?;
         if !truncate {
             return Ok(());
         }
@@ -1442,7 +1538,26 @@ impl Blob {
                         request.retained,
                     )
                     .await?;
-                operation.state.finish_mutation(request.prepared.mutation);
+                if let Some(range) = operation
+                    .state
+                    .finish_mutation(request.prepared.mutation, !request.sync)
+                {
+                    let file = blob.file.clone();
+                    let start = range.start;
+                    let len = range.end - range.start;
+                    match tokio::task::spawn_blocking(move || {
+                        super::atomic::begin_payload_writeback(&file, start, len)
+                    })
+                    .await
+                    {
+                        Ok(result) => result?,
+                        Err(error) if error.is_panic() => {
+                            std::panic::resume_unwind(error.into_panic())
+                        }
+                        Err(_) => return Err(Error::Closed),
+                    }
+                    blob.request_preflush(range.end)?;
+                }
                 if request.sync {
                     blob.commit_log(&mut operation.state).await?;
                 }
@@ -1463,18 +1578,10 @@ impl Blob {
         if !state.is_dirty() {
             return Ok(None);
         }
-        let materialized_previous = state.deferred_batch_root().cloned();
-        let (payload_start, payload_len) = state.pending_payload()?;
-        let file = self.file.clone();
-        let preparing = tokio::task::spawn_blocking(move || {
-            super::atomic::begin_payload_writeback(&file, payload_start, payload_len)?;
-            Ok::<_, std::io::Error>(())
-        });
-        match preparing.await {
-            Ok(result) => result?,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(_) => return Err(Error::Closed),
+        if state.preflush_requested()? {
+            self.ensure_preflush(state.preflush_target()).await?;
         }
+        let materialized_previous = state.deferred_batch_root().cloned();
         let mut prepared = state
             .prepare_commit()?
             .expect("dirty atomic state always prepares a commit");
@@ -1512,10 +1619,15 @@ impl Blob {
         state: &mut V2State,
     ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
         let prepared = self.prepare_log_writes(state, true, false).await?;
-        if prepared.is_some() {
+        if let Some(prepared) = &prepared {
             // The first barrier makes payload bytes durable. Publishing the
             // committed root with RWF_DSYNC then makes recovery metadata-only.
             self.sync_batch_commit().await?;
+            self.atomic
+                .as_ref()
+                .expect("atomic commits require V2 state")
+                .preflush()
+                .record_durable(prepared.raw_len());
         }
         Ok(prepared)
     }
@@ -1570,7 +1682,25 @@ impl Blob {
         &self,
         state: &mut V2State,
     ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
-        self.prepare_log_writes(state, false, true).await
+        let prepared = self.prepare_log_writes(state, false, true).await?;
+        if let Some(prepared) = &prepared {
+            let start = prepared.payload_start();
+            super::atomic::begin_payload_writeback(
+                &self.file,
+                start,
+                prepared.raw_len() - start,
+            )?;
+        }
+        Ok(prepared)
+    }
+
+    fn prepare_batch_delete_unflushed(
+        &self,
+        state: &V2State,
+    ) -> Result<super::atomic::PreparedCommit, Error> {
+        let mut prepared = state.prepare_delete()?;
+        prepared.mark_batch_prepared();
+        Ok(prepared)
     }
 
     async fn stage_batch_commit(
@@ -1593,6 +1723,25 @@ impl Blob {
         Ok(())
     }
 
+    /// Durably stage a deletion witness without flushing discarded payload.
+    async fn stage_batch_delete(
+        &self,
+        prepared: &mut super::atomic::PreparedCommit,
+        witness: &[u8],
+    ) -> Result<(), Error> {
+        prepared.attach_batch_witness(witness)?;
+        self.io_handle
+            .write_at(
+                self.file.clone(),
+                prepared.root_offset,
+                prepared.prepared_root.clone().into(),
+                WriteOptions::SYNC,
+                iouring::Cache::Enabled,
+            )
+            .await
+            .map_err(|error| self.map_sync_error(error))
+    }
+
     async fn sync_batch_commit(&self) -> Result<(), Error> {
         self.io_handle
             .sync(self.file.clone())
@@ -1613,6 +1762,11 @@ impl Blob {
             }
             return Ok(());
         };
+        self.atomic
+            .as_ref()
+            .expect("atomic batch commits require V2 state")
+            .preflush()
+            .record_durable(prepared.raw_len());
         if force_truncate || prepared.requires_truncate() {
             self.truncate_batch_rewind(state)?;
         }
@@ -1706,7 +1860,7 @@ impl crate::Blob for Blob {
         };
 
         if let Some(atomic) = &self.atomic {
-            let state = atomic.lock().await;
+            let state = lock_v2(atomic).await;
             self.ensure_healthy(&state)?;
             let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
             let end = offset.checked_add(len_u64).ok_or(Error::OffsetOverflow)?;
@@ -1906,10 +2060,7 @@ impl crate::Blob for Blob {
 }
 
 impl crate::AtomicBlob for Blob {
-    async fn append(
-        &self,
-        data: impl Into<IoBufs> + Send,
-    ) -> Result<u64, Error> {
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         let Some(atomic) = &self.atomic else {
             return Err(self.atomic_layout_required());
         };
@@ -1946,7 +2097,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         AtomicBlob as _, AtomicStorage as _, BatchStorage as _, Blob as _, BufferPool,
-        BufferPoolConfig, IoBuf, IoBufMut, RemoveTarget, Storage as _,
+        BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
         storage::{
             Layout,
             tests::{
@@ -2193,12 +2344,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_atomic_background_preflush_writes_payload_before_marker() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open_atomic("atomic", b"background").await.unwrap();
+        let prefix_len = super::super::atomic::BACKGROUND_PREFLUSH_INTERVAL as usize;
+        blob.append(vec![0x5a; prefix_len]).await.unwrap();
+
+        let atomic = blob.atomic.as_ref().unwrap();
+        let target = {
+            let state = lock_v2(atomic).await;
+            state.preflush_target()
+        };
+        assert!(atomic.preflush().requested() >= target);
+        atomic.preflush().wait(target).await.unwrap();
+        assert_eq!(target, Layout::V2.data_offset() + prefix_len as u64);
+
+        let path = storage_directory.join("atomic").join(hex(b"background"));
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(
+            super::super::atomic::embedded_batch_witnesses(&file, Layout::V2.data_offset())
+                .unwrap()
+                .is_empty(),
+            "background payload durability must not publish a root"
+        );
+
+        blob.append(b"tail").await.unwrap();
+        storage
+            .apply(vec![BatchOperation::Publish(blob.clone())])
+            .await
+            .unwrap();
+        drop((blob, storage));
+
+        let storage = start_test_storage(storage_directory.clone());
+        let (blob, len) = storage.open_atomic("atomic", b"background").await.unwrap();
+        assert_eq!(len, prefix_len as u64 + 4);
+        assert_eq!(
+            blob.read_at(prefix_len as u64, 4).await.unwrap().coalesce(),
+            b"tail"
+        );
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_rewind_forgets_preflush_credit_before_reusing_offsets() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage
+            .open_atomic("atomic", b"preflush-rewind")
+            .await
+            .unwrap();
+        let payload_len = super::super::atomic::BACKGROUND_PREFLUSH_INTERVAL as usize;
+        blob.append(vec![0x5a; payload_len]).await.unwrap();
+
+        let atomic = blob.atomic.as_ref().unwrap();
+        let target = {
+            let state = lock_v2(atomic).await;
+            state.preflush_target()
+        };
+        atomic.preflush().wait(target).await.unwrap();
+        blob.rewind(0).await.unwrap();
+        assert_eq!(
+            atomic.preflush().requested(),
+            Layout::V2.data_offset(),
+            "rewind must remove durability credit for the discarded physical offsets"
+        );
+
+        blob.append(vec![0xa5; payload_len]).await.unwrap();
+        let replacement_target = {
+            let state = lock_v2(atomic).await;
+            state.preflush_target()
+        };
+        assert_eq!(
+            replacement_target,
+            Layout::V2.data_offset() + payload_len as u64
+        );
+        atomic.preflush().wait(replacement_target).await.unwrap();
+        storage
+            .apply(vec![BatchOperation::Publish(blob.clone())])
+            .await
+            .unwrap();
+
+        drop((blob, storage));
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_invalid_rewind_does_not_flush_or_poison() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage
+            .open_atomic("atomic", b"invalid-rewind")
+            .await
+            .unwrap();
+        blob.append(b"base").await.unwrap();
+        blob.sync().await.unwrap();
+        blob.append(b"tail").await.unwrap();
+        let preflush = blob.atomic.as_ref().unwrap().preflush();
+        let requested = preflush.requested();
+
+        assert!(blob.rewind(9).await.is_err());
+        assert_eq!(preflush.requested(), requested);
+        assert_eq!(blob.append(b"ok").await.unwrap(), 8);
+        blob.sync().await.unwrap();
+
+        drop((blob, storage));
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_reopen_rejects_sticky_preflush_failure() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage
+            .open_atomic("atomic", b"failed-preflush")
+            .await
+            .unwrap();
+        let target = Layout::V2.data_offset() + 1;
+        let preflush = blob.atomic.as_ref().unwrap().preflush();
+        assert_eq!(preflush.request(target).unwrap(), Some(target));
+        assert_eq!(preflush.complete(target, Err(Error::WriteFailed)), None);
+
+        assert!(matches!(
+            storage.open_atomic("atomic", b"failed-preflush").await,
+            Err(Error::WriteFailed)
+        ));
+
+        drop((blob, storage));
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
     async fn test_atomic_batch_rewind_reclaims_unpublished_tail_on_completion() {
         let (storage, storage_directory) = create_test_storage();
-        let (blob, _) = storage.open_atomic("atomic", b"batch-rewind").await.unwrap();
-        let live_path = storage_directory
-            .join("atomic")
-            .join(hex(b"batch-rewind"));
+        let (blob, _) = storage
+            .open_atomic("atomic", b"batch-rewind")
+            .await
+            .unwrap();
+        let live_path = storage_directory.join("atomic").join(hex(b"batch-rewind"));
         let data_offset = Layout::V2.data_offset();
 
         blob.append(b"base").await.unwrap();
@@ -2211,10 +2491,16 @@ mod tests {
             }])
             .await
             .unwrap();
-        assert_eq!(std::fs::metadata(&live_path).unwrap().len(), data_offset + 4);
+        assert_eq!(
+            std::fs::metadata(&live_path).unwrap().len(),
+            data_offset + 4
+        );
 
         blob.append(b"abcdef").await.unwrap();
-        assert_eq!(std::fs::metadata(&live_path).unwrap().len(), data_offset + 10);
+        assert_eq!(
+            std::fs::metadata(&live_path).unwrap().len(),
+            data_offset + 10
+        );
 
         storage
             .apply(vec![BatchOperation::Rewind {
@@ -2224,7 +2510,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(blob.read_at(0, 7).await.unwrap().coalesce(), b"baseabc");
-        assert_eq!(std::fs::metadata(&live_path).unwrap().len(), data_offset + 7);
+        assert_eq!(
+            std::fs::metadata(&live_path).unwrap().len(),
+            data_offset + 7
+        );
 
         blob.append(b"XYZ").await.unwrap();
         storage
@@ -2234,7 +2523,10 @@ mod tests {
             }])
             .await
             .unwrap();
-        assert_eq!(std::fs::metadata(&live_path).unwrap().len(), data_offset + 7);
+        assert_eq!(
+            std::fs::metadata(&live_path).unwrap().len(),
+            data_offset + 7
+        );
 
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -2243,7 +2535,7 @@ mod tests {
     async fn test_dropped_atomic_operation_guard_poisons_generation() {
         let (storage, storage_directory) = create_test_storage();
         let (blob, _) = storage.open_atomic("atomic", b"canceled").await.unwrap();
-        let state = blob.atomic.as_ref().unwrap().clone().lock_owned().await;
+        let state = blob.atomic.as_ref().unwrap().lock().await;
 
         drop(V2OperationGuard::new(state));
 
@@ -2320,7 +2612,10 @@ mod tests {
     #[tokio::test]
     async fn test_committed_batch_survives_completion_drop() {
         let (storage, storage_directory) = create_test_storage();
-        let (old, _) = storage.open("batch_start", b"victim").await.unwrap();
+        let (old, _) = storage
+            .open_atomic("batch_start", b"victim")
+            .await
+            .unwrap();
         old.write_at(0, b"old", WriteOptions::SYNC).await.unwrap();
         let (resized, _) = storage
             .open_atomic("batch_resize", b"retained")
@@ -2332,10 +2627,7 @@ mod tests {
             .unwrap();
         let victim = storage_directory.join("batch_start").join(hex(b"victim"));
         let operations = vec![
-            BatchOperation::Remove(RemoveTarget::Blob {
-                partition: "batch_start".into(),
-                name: b"victim".to_vec(),
-            }),
+            BatchOperation::Remove(old.clone()),
             BatchOperation::Rewind {
                 blob: resized.clone(),
                 len: 3,

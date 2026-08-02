@@ -367,7 +367,14 @@ async fn run_write_multi_blob_append(cfg: &Config, context: &Context) -> Result<
 
     let start = Instant::now();
     let limit = run_limit(cfg, start);
-    let stats = run_multi_blob_append_loop(&blobs, limit, cfg.io_size(), payload).await?;
+    let stats = run_multi_blob_append_loop(
+        &blobs,
+        limit,
+        cfg.io_size(),
+        cfg.appends_per_batch(),
+        payload,
+    )
+    .await?;
     let hot_elapsed = start.elapsed();
     let final_file_size = stats.bytes;
 
@@ -413,6 +420,7 @@ async fn run_write_atomic_batch_append(cfg: &Config, context: &Context) -> Resul
             &atomic_blobs,
             limit,
             cfg.io_size(),
+            cfg.appends_per_batch(),
             payload,
         )
         .await?;
@@ -431,9 +439,15 @@ async fn run_write_atomic_batch_append(cfg: &Config, context: &Context) -> Resul
             final_file_size,
         )
     } else {
-        let stats =
-            run_atomic_batch_append_loop(context, &atomic_blobs, limit, cfg.io_size(), payload)
-                .await?;
+        let stats = run_atomic_batch_append_loop(
+            context,
+            &atomic_blobs,
+            limit,
+            cfg.io_size(),
+            cfg.appends_per_batch(),
+            payload,
+        )
+        .await?;
         let hot_elapsed = start.elapsed();
         let final_file_size = stats.bytes;
         Report::new(hot_elapsed, None, None, Some(vec![stats]), final_file_size)

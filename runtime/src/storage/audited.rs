@@ -262,8 +262,8 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
 mod tests {
     use crate::{
         AtomicBlob as _, AtomicStorage as _, BatchOperation, BatchStorage as _, Blob as _,
-        BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut, RemoveTarget,
-        Storage as _, WriteOptions,
+        BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut, Storage as _,
+        WriteOptions,
         deterministic::Auditor,
         storage::{
             audited::Storage as AuditedStorage,
@@ -350,6 +350,14 @@ mod tests {
             .open_atomic("publish_partition", b"name")
             .await
             .unwrap();
+        let (remove1, _) = storage1
+            .open_atomic("blob_partition", b"name")
+            .await
+            .unwrap();
+        let (remove2, _) = storage2
+            .open_atomic("blob_partition", b"name")
+            .await
+            .unwrap();
         rewind1.append(b"rewind").await.unwrap();
         rewind2.append(b"rewind").await.unwrap();
         publish1.append(b"pending").await.unwrap();
@@ -361,22 +369,8 @@ mod tests {
                     blob: rewind1.clone(),
                     len: 3,
                 },
-                RemoveTarget::Blob {
-                    partition: "blob_partition".into(),
-                    name: b"name".to_vec(),
-                }
-                .into(),
-                RemoveTarget::Blob {
-                    partition: "whole_partition".into(),
-                    name: b"subsumed".to_vec(),
-                }
-                .into(),
-                RemoveTarget::Partition("whole_partition".into()).into(),
-                RemoveTarget::Blob {
-                    partition: "blob_partition".into(),
-                    name: b"name".to_vec(),
-                }
-                .into(),
+                BatchOperation::Remove(remove1.clone()),
+                BatchOperation::Remove(remove1),
                 BatchOperation::Rewind {
                     blob: rewind1,
                     len: 3,
@@ -387,12 +381,7 @@ mod tests {
             .unwrap();
         storage2
             .apply(vec![
-                RemoveTarget::Partition("whole_partition".into()).into(),
-                RemoveTarget::Blob {
-                    partition: "blob_partition".into(),
-                    name: b"name".to_vec(),
-                }
-                .into(),
+                BatchOperation::Remove(remove2),
                 BatchOperation::Rewind {
                     blob: rewind2,
                     len: 3,

@@ -6,7 +6,7 @@ use commonware_macros::stability_scope;
 stability_scope!(BETA {
     use crate::{Buf, BufMut};
     use commonware_codec::{DecodeExt, Encode, FixedSize, Read as CodecRead, Write as CodecWrite};
-    use commonware_cryptography::Crc32;
+    use commonware_cryptography::{Crc32, Hasher as _};
     use commonware_formatting::hex;
     use std::ops::RangeInclusive;
     use tracing::warn;
@@ -162,9 +162,9 @@ stability_scope!(BETA {
         }
 
         /// Validates the header region past the prelude for this layout, which must be
-        /// fully present: a [Layout::V0] region is the prelude alone, [Layout::V1] extends
-        /// to a CRC over the prelude and immutable zero reserved padding, and [Layout::V2]
-        /// retains the same structure over a larger region.
+        /// fully present: a [Layout::V0] region is the prelude alone, [Layout::V1] adds a CRC over
+        /// the prelude and immutable zero padding, and [Layout::V2] also authenticates a persistent
+        /// creation incarnation before its zero padding and mutable root pages.
         fn validate_region(self, raw: &[u8], raw_len: u64) -> Result<(), HeaderError> {
             match self {
                 Self::V0 => Ok(()),
@@ -178,7 +178,25 @@ stability_scope!(BETA {
                     let crc = u32::from_be_bytes(
                         raw[Header::PRELUDE_SIZE..Header::PARSE_LEN].try_into().unwrap(),
                     );
-                    if Crc32::checksum(&raw[..Header::PRELUDE_SIZE]) != crc {
+                    let expected_crc = match self {
+                        Self::V1 => Crc32::checksum(&raw[..Header::PRELUDE_SIZE]),
+                        Self::V2 => {
+                            if raw.len() < Header::V2_IMMUTABLE_LEN {
+                                return Err(HeaderError::Truncated {
+                                    required_len: Header::V2_IMMUTABLE_LEN as u64,
+                                    raw_len,
+                                });
+                            }
+                            let mut checksum = Crc32::default();
+                            checksum.update(&raw[..Header::PRELUDE_SIZE]);
+                            checksum.update(
+                                &raw[Header::V2_INCARNATION_OFFSET..Header::V2_IMMUTABLE_LEN],
+                            );
+                            checksum.finalize().1.as_u32()
+                        }
+                        Self::V0 => unreachable!(),
+                    };
+                    if expected_crc != crc {
                         return Err(HeaderError::InvalidChecksum);
                     }
                     if raw_len < self.data_offset() {
@@ -192,7 +210,12 @@ stability_scope!(BETA {
                         Self::V2 => 4096,
                         Self::V0 => unreachable!(),
                     };
-                    if raw[Header::PARSE_LEN..immutable_end]
+                    let padding_start = match self {
+                        Self::V1 => Header::PARSE_LEN,
+                        Self::V2 => Header::V2_IMMUTABLE_LEN,
+                        Self::V0 => unreachable!(),
+                    };
+                    if raw[padding_start..immutable_end]
                         .iter()
                         .any(|&byte| byte != 0)
                     {
@@ -272,8 +295,9 @@ stability_scope!(BETA {
     /// | 0-3      | magic (per layout)           | runtime     | is this file one of our blobs, and which layout? |
     /// | 4-5      | runtime version (u16)        | runtime     | can this build read this container layout?       |
     /// | 6-7      | blob version (u16)           | application | can this application interpret the contents?     |
-    /// | 8-11     | CRC32 of bytes 0-7 (V1/V2)   | runtime     | is this header intact?                           |
-    /// | 12..4096 | immutable zero padding       | runtime     | is the reserved header region unchanged?         |
+    /// | 8-11     | immutable CRC32              | runtime     | is this header intact?                           |
+    /// | 12-27    | V2 incarnation (V2 only)     | runtime     | which creation of this name is this?             |
+    /// | 12/28..4096 | immutable zero padding    | runtime     | is the reserved header region unchanged?         |
     ///
     /// The magic selects the header region layout ([Layout]), and the layout fully
     /// determines the geometry: a V0 header region is the 8-byte prelude alone with data at
@@ -294,12 +318,19 @@ stability_scope!(BETA {
         /// Size of the header prelude in bytes.
         pub(crate) const PRELUDE_SIZE: usize = 8;
 
-        /// Size of the V1/V2 header extension in bytes (CRC32 over the prelude).
+        /// Size of the V1/V2 CRC32 field. V2 covers the prelude and its incarnation.
         pub(crate) const EXTENSION_SIZE: usize = 4;
 
         /// Number of leading bytes needed to identify any header: the prelude plus the V1/V2
         /// extension.
         pub(crate) const PARSE_LEN: usize = Self::PRELUDE_SIZE + Self::EXTENSION_SIZE;
+
+        /// Size of the identity that distinguishes separate V2 creations at one path.
+        pub(crate) const V2_INCARNATION_LEN: usize = 16;
+
+        const V2_INCARNATION_OFFSET: usize = Self::PARSE_LEN;
+        const V2_IMMUTABLE_LEN: usize =
+            Self::V2_INCARNATION_OFFSET + Self::V2_INCARNATION_LEN;
 
         /// Length of magic bytes.
         pub(crate) const MAGIC_LENGTH: usize = 4;
@@ -333,9 +364,22 @@ stability_scope!(BETA {
             region.extend_from_slice(&header.encode());
             match layout {
                 Layout::V0 => {}
-                Layout::V1 | Layout::V2 => {
+                Layout::V1 => {
                     let crc = Crc32::checksum(&region);
                     region.extend_from_slice(&crc.to_be_bytes());
+                    region.resize(layout.data_offset() as usize, 0);
+                }
+                Layout::V2 => {
+                    let random = ahash::RandomState::new();
+                    let mut incarnation = [0u8; Self::V2_INCARNATION_LEN];
+                    incarnation[..8].copy_from_slice(&random.hash_one(0u8).to_be_bytes());
+                    incarnation[8..].copy_from_slice(&random.hash_one(1u8).to_be_bytes());
+                    let mut checksum = Crc32::default();
+                    checksum.update(&region);
+                    checksum.update(&incarnation);
+                    let crc = checksum.finalize().1.as_u32();
+                    region.extend_from_slice(&crc.to_be_bytes());
+                    region.extend_from_slice(&incarnation);
                     region.resize(layout.data_offset() as usize, 0);
                 }
             }
@@ -363,6 +407,20 @@ stability_scope!(BETA {
             let layout = Layout::V2;
             let blob_version = *versions.end();
             (Self::encode_region(layout, blob_version), blob_version)
+        }
+
+        /// Return the persistent identity of a validated V2 immutable header page.
+        pub(crate) fn atomic_incarnation(raw: &[u8]) -> Option<[u8; Self::V2_INCARNATION_LEN]> {
+            if raw.len() < Self::V2_IMMUTABLE_LEN
+                || raw.get(..Self::MAGIC_LENGTH) != Some(Layout::V2.magic().as_slice())
+            {
+                return None;
+            }
+            Some(
+                raw[Self::V2_INCARNATION_OFFSET..Self::V2_IMMUTABLE_LEN]
+                    .try_into()
+                    .expect("V2 incarnation has a fixed length"),
+            )
         }
 
         /// Parses and validates a blob's header from its leading bytes, returning the blob's
@@ -515,6 +573,7 @@ impl arbitrary::Arbitrary<'_> for Header {
 pub(crate) mod tests {
     use super::{Header, HeaderError, Layout};
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_cryptography::Hasher as _;
 
     /// A V0 header with the given blob version, for direct field manipulation in tests.
     fn v0_header(blob_version: u16) -> Header {
@@ -581,9 +640,16 @@ pub(crate) mod tests {
         assert_eq!(&region[6..8], &7u16.to_be_bytes());
 
         let crc = u32::from_be_bytes(region[8..12].try_into().unwrap());
-        assert_eq!(crc, commonware_cryptography::Crc32::checksum(&region[..8]));
+        let mut expected = commonware_cryptography::Crc32::default();
+        expected.update(&region[..Header::PRELUDE_SIZE]);
+        expected.update(&region[Header::V2_INCARNATION_OFFSET..Header::V2_IMMUTABLE_LEN]);
+        assert_eq!(crc, expected.finalize().1.as_u32());
 
-        assert!(region[Header::PARSE_LEN..].iter().all(|&byte| byte == 0));
+        let incarnation = Header::atomic_incarnation(&region).unwrap();
+        assert_ne!(incarnation, [0; Header::V2_INCARNATION_LEN]);
+        assert!(region[Header::V2_IMMUTABLE_LEN..]
+            .iter()
+            .all(|&byte| byte == 0));
 
         let (size, parsed_blob_version, data_offset) =
             Header::parse(&region, Layout::V2.data_offset(), &(0..=7)).unwrap();
@@ -707,8 +773,19 @@ pub(crate) mod tests {
             Err(HeaderError::InvalidChecksum)
         ));
 
+        let mut bad_incarnation = v2_header_region(0);
+        bad_incarnation[Header::V2_INCARNATION_OFFSET] ^= 0x01;
+        assert!(matches!(
+            Header::parse(
+                &bad_incarnation,
+                Layout::V2.data_offset(),
+                &(0..=0)
+            ),
+            Err(HeaderError::InvalidChecksum)
+        ));
+
         let mut bad_padding = v2_header_region(0);
-        bad_padding[Header::PARSE_LEN] = 0x01;
+        bad_padding[Header::V2_IMMUTABLE_LEN] = 0x01;
         assert!(matches!(
             Header::parse(&bad_padding, Layout::V2.data_offset(), &(0..=0)),
             Err(HeaderError::InvalidPadding)
@@ -1109,7 +1186,8 @@ pub(crate) mod tests {
                 raw
             }),
             ("magic byte lost with later bytes persisted", {
-                // Not a prefix: a write cannot persist byte 5 without byte 3.
+                // Out-of-order survival is possible before sync, but the conservative legacy
+                // classifier rejects it instead of risking destructive recreation.
                 let mut raw = region.clone();
                 raw[3] = 0;
                 raw

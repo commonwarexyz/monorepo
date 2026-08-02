@@ -236,7 +236,7 @@ pub async fn run_atomic_append_loop(
     Ok(stats)
 }
 
-/// Append one contiguous payload to every ordinary blob, then make all writes durable.
+/// Append a contiguous payload stream to every ordinary blob, then make all writes durable.
 ///
 /// One reported operation covers the concurrent writes and concurrent sync completions for the
 /// entire group. No handle remains outstanding when the operation is recorded.
@@ -244,21 +244,22 @@ pub async fn run_multi_blob_append_loop(
     blobs: &[impl Blob],
     limit: RunLimit,
     io_size: usize,
+    appends_per_batch: u64,
     payload: IoBufs,
 ) -> Result<Stats> {
-    let (io_size, group_bytes) = group_dimensions(blobs.len(), io_size)?;
+    let group = AppendGroup::new(blobs.len(), io_size, appends_per_batch)?;
     let mut stats = Stats::default();
     let mut offset = 0u64;
 
     while should_continue(limit, stats.ops) {
-        let next_offset = next_append_offset(offset, io_size)?;
-        run_ordinary_append_group(blobs, offset, &payload, group_bytes, &mut stats).await?;
+        let next_offset = group.next_offset(offset)?;
+        run_ordinary_append_group(blobs, offset, group, &payload, &mut stats).await?;
         offset = next_offset;
     }
     Ok(stats)
 }
 
-/// Append one contiguous payload to every atomic blob and publish one durable batch.
+/// Append a contiguous payload stream to every atomic blob and publish one durable batch.
 ///
 /// The operation latency covers the concurrent writes through full batch-handle completion. The
 /// durable decision return and completion-handle resolution are also recorded separately.
@@ -267,9 +268,10 @@ pub async fn run_atomic_batch_append_loop<S: BatchStorage>(
     blobs: &[S::AtomicBlob],
     limit: RunLimit,
     io_size: usize,
+    appends_per_batch: u64,
     payload: IoBufs,
 ) -> Result<Stats> {
-    let (io_size, group_bytes) = group_dimensions(blobs.len(), io_size)?;
+    let group = AppendGroup::new(blobs.len(), io_size, appends_per_batch)?;
     let publications = blobs
         .iter()
         .cloned()
@@ -279,14 +281,14 @@ pub async fn run_atomic_batch_append_loop<S: BatchStorage>(
     let mut offset = 0u64;
 
     while should_continue(limit, stats.ops) {
-        let next_offset = next_append_offset(offset, io_size)?;
+        let next_offset = group.next_offset(offset)?;
         run_atomic_append_group(
             storage,
             blobs,
             &publications,
             offset,
+            group,
             &payload,
-            group_bytes,
             &mut stats,
         )
         .await?;
@@ -305,6 +307,7 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
     atomic_blobs: &[S::AtomicBlob],
     limit: RunLimit,
     io_size: usize,
+    appends_per_batch: u64,
     payload: IoBufs,
 ) -> Result<PairedAppendStats> {
     if ordinary_blobs.len() != atomic_blobs.len() {
@@ -312,8 +315,8 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
             "paired append groups must contain the same number of blobs".into(),
         ));
     }
-    let (append_size, ordinary_group_bytes) = group_dimensions(ordinary_blobs.len(), io_size)?;
-    let (_, atomic_group_bytes) = group_dimensions(atomic_blobs.len(), io_size)?;
+    let ordinary_group = AppendGroup::new(ordinary_blobs.len(), io_size, appends_per_batch)?;
+    let atomic_group = AppendGroup::new(atomic_blobs.len(), io_size, appends_per_batch)?;
     let publications = atomic_blobs
         .iter()
         .cloned()
@@ -328,13 +331,13 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
     let mut offset = 0u64;
 
     while should_continue(limit, paired.ordinary.ops) {
-        let next_offset = next_append_offset(offset, append_size)?;
+        let next_offset = ordinary_group.next_offset(offset)?;
         if paired.ordinary.ops.is_multiple_of(2) {
             paired.ordinary_elapsed += run_ordinary_append_group(
                 ordinary_blobs,
                 offset,
+                ordinary_group,
                 &payload,
-                ordinary_group_bytes,
                 &mut paired.ordinary,
             )
             .await?;
@@ -343,8 +346,8 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
                 atomic_blobs,
                 &publications,
                 offset,
+                atomic_group,
                 &payload,
-                atomic_group_bytes,
                 &mut paired.atomic,
             )
             .await?;
@@ -354,16 +357,16 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
                 atomic_blobs,
                 &publications,
                 offset,
+                atomic_group,
                 &payload,
-                atomic_group_bytes,
                 &mut paired.atomic,
             )
             .await?;
             paired.ordinary_elapsed += run_ordinary_append_group(
                 ordinary_blobs,
                 offset,
+                ordinary_group,
                 &payload,
-                ordinary_group_bytes,
                 &mut paired.ordinary,
             )
             .await?;
@@ -373,27 +376,60 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
     Ok(paired)
 }
 
-fn next_append_offset(offset: u64, io_size: u64) -> Result<u64> {
-    offset
-        .checked_add(io_size)
-        .ok_or_else(|| Error::Harness("append offset exceeds u64".into()))
+#[derive(Clone, Copy)]
+struct AppendGroup {
+    append_size: u64,
+    appends: u64,
+    bytes: u64,
+}
+
+impl AppendGroup {
+    fn new(blob_count: usize, io_size: usize, appends: u64) -> Result<Self> {
+        let (append_size, group_bytes) = group_dimensions(blob_count, io_size)?;
+        Ok(Self {
+            append_size,
+            appends,
+            bytes: operation_bytes(group_bytes, appends)?,
+        })
+    }
+
+    fn next_offset(self, offset: u64) -> Result<u64> {
+        let epoch_len = self
+            .append_size
+            .checked_mul(self.appends)
+            .ok_or_else(|| Error::Harness("append epoch exceeds u64".into()))?;
+        offset
+            .checked_add(epoch_len)
+            .ok_or_else(|| Error::Harness("append offset exceeds u64".into()))
+    }
+}
+
+fn operation_bytes(group_bytes: u64, appends_per_batch: u64) -> Result<u64> {
+    group_bytes
+        .checked_mul(appends_per_batch)
+        .ok_or_else(|| Error::Harness("group byte count exceeds u64".into()))
 }
 
 async fn run_ordinary_append_group(
     blobs: &[impl Blob],
-    offset: u64,
+    mut offset: u64,
+    group: AppendGroup,
     payload: &IoBufs,
-    group_bytes: u64,
     stats: &mut Stats,
 ) -> Result<Duration> {
     let started = Instant::now();
-    write_ordinary_blob_group(blobs, offset, payload).await?;
+    for _ in 0..group.appends {
+        write_ordinary_blob_group(blobs, offset, payload).await?;
+        offset = offset
+            .checked_add(group.append_size)
+            .ok_or_else(|| Error::Harness("append offset exceeds u64".into()))?;
+    }
 
     let sync_started = Instant::now();
     sync_blob_group(blobs).await?;
     stats.record_sync(sync_started.elapsed());
     let elapsed = started.elapsed();
-    stats.record(group_bytes, Some(elapsed));
+    stats.record(group.bytes, Some(elapsed));
     Ok(elapsed)
 }
 
@@ -401,13 +437,18 @@ async fn run_atomic_append_group<S: BatchStorage>(
     storage: &S,
     blobs: &[S::AtomicBlob],
     publications: &[BatchOperation<S::AtomicBlob>],
-    offset: u64,
+    mut offset: u64,
+    group: AppendGroup,
     payload: &IoBufs,
-    group_bytes: u64,
     stats: &mut Stats,
 ) -> Result<Duration> {
     let started = Instant::now();
-    append_atomic_blob_group(blobs, offset, payload).await?;
+    for _ in 0..group.appends {
+        append_atomic_blob_group(blobs, offset, payload).await?;
+        offset = offset
+            .checked_add(group.append_size)
+            .ok_or_else(|| Error::Harness("append offset exceeds u64".into()))?;
+    }
 
     let publication_started = Instant::now();
     let completion = storage.start_apply(publications.to_vec()).await?;
@@ -416,7 +457,7 @@ async fn run_atomic_append_group<S: BatchStorage>(
     let full_completion = publication_started.elapsed();
     stats.record_publication(decision_return, full_completion);
     let elapsed = started.elapsed();
-    stats.record(group_bytes, Some(elapsed));
+    stats.record(group.bytes, Some(elapsed));
     Ok(elapsed)
 }
 
