@@ -135,10 +135,12 @@
 //!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
 //!   entered in the current term.
 //! * Votes are tracked down to `view_retention` views below the highest finalized view: late
-//!   votes in that window are still reported (and equivocation there is still detected), even
-//!   though they are no longer verified or used for certificate construction. Votes below the
-//!   window are ignored on arrival, so downstream systems consuming per-vote activity (rewards,
-//!   slashing) never observe them.
+//!   votes in that window are still reported, even though they are no longer verified or used
+//!   for certificate construction. By default, certification releases full vote evidence, making
+//!   later conflict reporting and peer blocking best effort.
+//!   [`Config::track_historical_votes`] instead retains each recorded vote until its round
+//!   is pruned. Votes below the window are ignored on arrival, so downstream systems consuming
+//!   per-vote activity (rewards, slashing) never observe them.
 //!
 //! ## Protocol Properties
 //!
@@ -922,6 +924,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -1184,6 +1187,7 @@ mod tests {
                         PAGE_CACHE_SIZE,
                     ),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(validator_context.child("engine"), cfg);
                 let (pending, recovered, resolver) =
@@ -1300,6 +1304,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
             let (pending, recovered, resolver) = register_validator(&mut oracle, joiner).await;
@@ -1443,6 +1448,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
@@ -1604,6 +1610,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -1759,6 +1766,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
 
@@ -1934,6 +1942,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -2055,6 +2064,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
 
@@ -2191,6 +2201,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -2425,6 +2436,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -2586,6 +2598,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -2779,6 +2792,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -2896,6 +2910,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -3015,6 +3030,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -3202,6 +3218,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -3397,6 +3414,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3565,6 +3583,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
@@ -3729,6 +3748,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
@@ -3915,6 +3935,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
             engine.start(pending, recovered, resolver);
@@ -4036,6 +4057,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -4188,6 +4210,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
                     engines.push(engine.start(pending, recovered, resolver));
@@ -4281,6 +4304,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
             engine.start(pending, recovered, resolver);
@@ -4433,6 +4457,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -4578,6 +4603,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -4740,6 +4766,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -4868,6 +4895,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -4990,6 +5018,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
 
@@ -5165,6 +5194,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -5501,6 +5531,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: false,
                     };
                     let engine = Engine::new(
                         context
@@ -6572,6 +6603,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -6717,6 +6749,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
 
@@ -6818,6 +6851,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
@@ -7238,6 +7272,7 @@ mod tests {
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                             forwarding: ForwardingPolicy::Disabled,
+                            track_historical_votes: false,
                         };
                         let engine = Engine::new(context.child("engine"), cfg);
                         engine_handlers.push(engine.start(
@@ -7307,6 +7342,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
+                        track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
 

@@ -348,6 +348,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(5),
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             },
             gate,
             state_sync,
