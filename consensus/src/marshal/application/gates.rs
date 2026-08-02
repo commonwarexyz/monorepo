@@ -264,7 +264,7 @@ mod tests {
     use super::*;
     use crate::types::{Epoch, View};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
-    use commonware_runtime::{Runner, Spawner, deterministic};
+    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
     use std::future::ready;
 
     type D = Sha256Digest;
@@ -399,6 +399,26 @@ mod tests {
 
             forward(output_tx, input_rx, Some).await;
 
+            assert!(input_tx.is_closed());
+        });
+    }
+
+    #[test]
+    fn test_forward_cancels_in_flight_input_when_output_closes() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let (input_tx, input_rx) = oneshot::channel::<bool>();
+            let (output_tx, output_rx) = oneshot::channel::<bool>();
+            let (started_tx, started_rx) = oneshot::channel();
+            let forwarder = context.child("forwarder").spawn(|_| async move {
+                started_tx.send_lossy(());
+                forward(output_tx, input_rx, Some).await;
+            });
+
+            started_rx.await.expect("forwarder should start");
+            assert!(!input_tx.is_closed());
+            drop(output_rx);
+            forwarder.await.expect("forwarder should stop");
             assert!(input_tx.is_closed());
         });
     }
