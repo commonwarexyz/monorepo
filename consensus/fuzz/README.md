@@ -82,3 +82,43 @@ Reproduce a failure from a crash file:
 ```bash
 cargo fuzz run simplex_ed25519 artifacts/simplex_ed25519/<crash_file>
 ```
+
+## Multimmit Fuzzing
+
+Multimmit has five cargo-fuzz targets:
+
+- `multimmit_machine` drives the real synchronous machine with a bounded three-replica action
+  schedule. Inputs cover observation and verification ordering, malformed completions, persistence
+  acknowledgement and crash cuts, timers, application work, resolver results, aggregation,
+  signing, publication delivery, and typed-obligation discharge. The interpreter checks journal
+  replay, output safety, signature exposure, publication lifetime, resource bounds, and historical
+  convergence after every applicable action.
+- `multimmit_wire` decodes every public Multimmit plane under exact protocol bounds and requires
+  every accepted frame to re-encode canonically.
+- `multimmit_batcher` exercises the production batcher's bounded per-plane lanes and scheduling.
+- `multimmit_engine_minpk` and `multimmit_engine_minsig` share one byte-driven harness over six
+  production engines. At most sixteen actions schedule bounded reloads and simulated-network
+  outages around a committee-wide same-storage reopen. A final lossless suffix requires every
+  engine and producer chain to advance while an independent reporter oracle checks output prefixes,
+  height monotonicity, stable signing subjects, observed certificate-share quorums, and configured
+  state ceilings. Each campaign has a deterministic one-minute runtime deadline.
+
+Run a bounded local campaign from the workspace root with:
+
+```bash
+cargo fuzz run --manifest-path consensus/fuzz/Cargo.toml multimmit_machine -- -runs=10000
+cargo fuzz run --manifest-path consensus/fuzz/Cargo.toml multimmit_wire -- -runs=10000
+cargo fuzz run --manifest-path consensus/fuzz/Cargo.toml multimmit_batcher -- -runs=10000
+cargo fuzz run --manifest-path consensus/fuzz/Cargo.toml multimmit_engine_minpk -- -runs=100
+cargo fuzz run --manifest-path consensus/fuzz/Cargo.toml multimmit_engine_minsig -- -runs=100
+```
+
+`multimmit_machine` consumes eight bytes of historical schedule followed by at most forty
+four-byte actions. Longer inputs are intentionally ignored after that bound, so mutations cannot
+create an unbounded machine campaign.
+
+The production-engine targets consume the first eight bytes as their deterministic seed and at
+most sixteen subsequent action bytes. Input is truncated to that 24-byte prefix before it is copied
+or used to seed the runtime. Action bytes independently select one of six nodes and one of four
+actions, so all 24 node/action combinations are reachable. For a quick bounded local check, replace
+`-runs=100` with `-runs=1`.
