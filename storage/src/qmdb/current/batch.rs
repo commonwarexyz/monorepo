@@ -294,12 +294,9 @@ where
 /// Once a non-ancestor batch is applied, this batch and all of its descendants become invalid
 /// objects. The library does not guard against continued use after that point.
 ///
-/// Applying an invalid batch is caught by the any-layer staleness check and returns
+/// Applying an invalid batch is caught by the any-layer authenticated lineage check and returns
 /// [`Error::StaleBatch`] without mutating committed state, so `apply_batch` itself cannot corrupt
-/// the DB. The one exception is equal-size sibling branches (where both branches have the same
-/// total operation count): the staleness check is size-based and cannot distinguish them, so
-/// applying a descendant of one sibling after the other was already applied can silently corrupt
-/// snapshot/log state. Callers must not apply batches from an orphaned branch.
+/// the DB.
 ///
 /// Rules of thumb:
 /// - Drop any `Arc<MerkleizedBatch>` you no longer intend to apply.
@@ -763,7 +760,7 @@ where
     Operation<F, U>: Codec,
 {
     let batch_len = inner.journal_batch.items().len();
-    let batch_base = inner.bounds.total_size - batch_len as u64;
+    let batch_base = *inner.bounds.tip.size - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
     let overlay = build_chunk_overlay::<F, U, _, N>(
@@ -780,7 +777,7 @@ where
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
     // sees this many ops). Thread it through `graftable_chunks` derivation and root computation.
-    let overlay_ops_leaves = Location::<F>::new(inner.bounds.total_size);
+    let overlay_ops_leaves = inner.bounds.tip.size;
 
     // Distinguish three counters:
     //   - new_complete_chunks: chunks with all bits filled in the post-batch bitmap
@@ -1035,7 +1032,7 @@ where
     }
 
     /// Return the [`Bounds`] of the batch.
-    pub fn bounds(&self) -> &Bounds<F> {
+    pub fn bounds(&self) -> &Bounds<F, D> {
         self.inner.bounds()
     }
 
@@ -1048,7 +1045,7 @@ where
         // inactivity floor when pruning has not run.
         super::db::sync_boundary::<F, N>(
             *self.inner.bounds().inactivity_floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
-            self.inner.bounds().total_size,
+            *self.inner.bounds().tip.size,
         )
     }
 }
@@ -1580,7 +1577,7 @@ mod tests {
                 let mut scan = Location::new(floor);
                 while let Some(c) = next_candidate(chain, scan, tip) {
                     want.push(c);
-                    scan = Location::new(*c + 1);
+                    scan = c + 1;
                 }
                 for split in 0..=want.len() {
                     let mut got = Vec::new();
