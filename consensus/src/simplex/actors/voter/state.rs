@@ -1021,10 +1021,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // - notarized and certified
         // - finalized
         //
-        // We do not request the parent's notarization from the resolver
-        // (a nullification covering the parent satisfies its term anchor).
-        // Until it arrives via gossip or buffered votes, we cannot vote for
-        // this proposal, but we still advance on later certificates.
+        // Returning `ParentNotCertified` causes `try_verify` to request the
+        // exact parent's notarization from the proposal leader. We cannot vote
+        // until it certifies locally or a covering finalization makes it
+        // unnecessary, but we still advance on later certificates.
         self.is_certified(parent)
             .copied()
             .ok_or(ParentPayloadError::ParentNotCertified {

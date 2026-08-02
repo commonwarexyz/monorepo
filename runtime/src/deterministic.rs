@@ -461,7 +461,8 @@ impl Executor {
     ///
     /// When built with the `external` feature, always poll pending tasks after the passage of time.
     fn assert_liveness(&self) {
-        if cfg!(feature = "external") || self.tasks.ready() != 0 {
+        if cfg!(feature = "external") || self.tasks.ready() != 0 || !self.sleeping.lock().is_empty()
+        {
             return;
         }
 
@@ -1723,6 +1724,27 @@ mod tests {
                 now + Duration::new(15, 0),
             ]
         );
+    }
+
+    #[test]
+    fn test_dropped_sleeper_before_live_deadline() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (started_sender, started_receiver) = oneshot::channel();
+            let sleeper = context.child("sleeper").spawn(|context| async move {
+                let mut sleepers = FuturesUnordered::new();
+                sleepers.push(context.sleep(Duration::from_secs(1)));
+                started_sender.send(()).unwrap();
+                sleepers.next().await;
+            });
+
+            // Waiting for the signal ensures the child registered its alarm before being aborted.
+            started_receiver.await.unwrap();
+            sleeper.abort();
+
+            // The stale child alarm must not prevent a later live alarm from firing.
+            context.sleep(Duration::from_secs(2)).await;
+        });
     }
 
     #[test]

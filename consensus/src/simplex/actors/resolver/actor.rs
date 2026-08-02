@@ -241,7 +241,7 @@ impl<
         let outcome = if delivery
             .purposes
             .iter()
-            .all(|purpose| self.purpose_resolved(delivery.requested, *purpose))
+            .all(|purpose| self.purpose_satisfied(delivery.requested, *purpose))
         {
             Outcome::Complete
         } else {
@@ -263,7 +263,7 @@ impl<
             let resolved = delivery
                 .purposes
                 .iter()
-                .all(|purpose| self.purpose_resolved(delivery.requested, *purpose));
+                .all(|purpose| self.purpose_satisfied(delivery.requested, *purpose));
             if resolved {
                 delivery.response.send_lossy(Outcome::Complete);
             } else if certified == Some(delivery.certification) {
@@ -284,7 +284,7 @@ impl<
     ) -> bool {
         !self.certification_outcomes.contains_key(&certification)
             && purposes.iter().all(|purpose| {
-                self.purpose_resolved(requested, *purpose)
+                self.purpose_satisfied(requested, *purpose)
                     || match purpose {
                         Purpose::Backfill => true,
                         Purpose::Parent => requested == certification,
@@ -483,6 +483,12 @@ impl<
     /// unnecessary. Keeping this knowledge separately from resolver storage
     /// prevents an older queued request from resurrecting retired work.
     fn purpose_resolved(&self, view: View, purpose: Purpose) -> bool {
+        self.purpose_satisfied(view, purpose)
+            || matches!(purpose, Purpose::Parent) && self.certification_outcomes.contains_key(&view)
+    }
+
+    /// Returns whether local evidence satisfies a delivered subscriber.
+    fn purpose_satisfied(&self, view: View, purpose: Purpose) -> bool {
         if view <= self.last_finalized {
             return true;
         }
@@ -492,7 +498,7 @@ impl<
                 .range(view.covering_range(self.state.term_length()))
                 .next_back()
                 .is_some(),
-            Purpose::Parent => self.certification_outcomes.contains_key(&view),
+            Purpose::Parent => self.certification_outcomes.get(&view) == Some(&true),
             Purpose::Backfill => self.state.get(view).is_some(),
         }
     }
@@ -640,7 +646,7 @@ impl<
 
                 if purposes
                     .iter()
-                    .all(|purpose| self.purpose_resolved(view, *purpose))
+                    .all(|purpose| self.purpose_satisfied(view, *purpose))
                 {
                     response.send_lossy(Outcome::Complete);
                     return;
@@ -1623,6 +1629,40 @@ mod tests {
 
             actor.certified(&mut resolver, View::new(6), true);
             assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+        });
+    }
+
+    #[test_async]
+    async fn failed_parent_certification_is_ambiguous() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone());
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(6);
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view,
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(
+                        build_notarization(&schemes, &verifier, EPOCH, view),
+                    )
+                    .encode(),
+                    purposes: non_empty_vec![Purpose::Parent],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            actor.certified(&mut resolver, view, false);
+            assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous);
         });
     }
 
