@@ -251,17 +251,13 @@ pub struct VoteTracker<S: Scheme, D: Digest> {
 
 /// Outcome of recording a vote in its phase-specific lifecycle state.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) enum VoteRecord {
-    /// Newly inserted with the full vote retained.
-    NewRetained,
-    /// Newly inserted as compact signer facts.
-    NewCompacted,
-    /// A duplicate while the full vote remains available.
-    DuplicateRetained,
-    /// A duplicate consistent with the compact signer facts.
-    DuplicateCompacted,
+pub(crate) enum Outcome {
+    /// Newly recorded, with the full vote retained when `retained` is true.
+    Added { retained: bool },
+    /// Not newly recorded, with full votes still retained when `retained` is true.
+    Duplicate { retained: bool },
     /// The compact proposal relation proves a same-phase conflict.
-    ConflictingProposal,
+    Conflicting,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -301,10 +297,10 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         signer: Participant,
         seen: u8,
         proposal_relation: Option<(u8, bool)>,
-    ) -> VoteRecord {
+    ) -> Outcome {
         let index = usize::from(signer);
         if index >= participants {
-            return VoteRecord::DuplicateCompacted;
+            return Outcome::Duplicate { retained: false };
         }
 
         // Certificate-first rounds remain allocation-free until a vote arrives.
@@ -322,11 +318,11 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             *flags |= has_proposal;
         }
         if !previously_seen {
-            VoteRecord::NewCompacted
+            Outcome::Added { retained: false }
         } else if proposal_conflict {
-            VoteRecord::ConflictingProposal
+            Outcome::Conflicting
         } else {
-            VoteRecord::DuplicateCompacted
+            Outcome::Duplicate { retained: false }
         }
     }
 
@@ -341,13 +337,13 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         vote: &T,
         seen: u8,
         proposal_relation: Option<(u8, bool)>,
-    ) -> VoteRecord {
+    ) -> Outcome {
         match phase {
             Phase::Full(votes) => {
                 if votes.insert(vote.clone()) {
-                    VoteRecord::NewRetained
+                    Outcome::Added { retained: true }
                 } else {
-                    VoteRecord::DuplicateRetained
+                    Outcome::Duplicate { retained: true }
                 }
             }
             Phase::Compacted => Self::remember(
@@ -370,11 +366,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     ///
     /// `proposal` is the authoritative proposal, when known, and preserves
     /// proposal-match state when the full vote is not retained.
-    pub(crate) fn record(
-        &mut self,
-        vote: &Vote<S, D>,
-        proposal: Option<&Proposal<D>>,
-    ) -> VoteRecord {
+    pub(crate) fn record(&mut self, vote: &Vote<S, D>, proposal: Option<&Proposal<D>>) -> Outcome {
         match vote {
             Vote::Notarize(notarize) => Self::record_phase(
                 self.participants,
@@ -3844,15 +3836,15 @@ mod tests {
         tracker.release_finalizes(&proposal);
         assert!(matches!(
             tracker.record(&notarize, Some(&proposal)),
-            VoteRecord::NewCompacted
+            Outcome::Added { retained: false }
         ));
         assert!(matches!(
             tracker.record(&nullify, Some(&proposal)),
-            VoteRecord::NewCompacted
+            Outcome::Added { retained: false }
         ));
         assert!(matches!(
             tracker.record(&finalize, Some(&proposal)),
-            VoteRecord::NewCompacted
+            Outcome::Added { retained: false }
         ));
         assert!(tracker.has_notarize_for(signer, &proposal));
         assert!(tracker.saw_nullify(signer));
@@ -3862,14 +3854,14 @@ mod tests {
         assert!(!tracker.has_notarize_for(signer, &proposal));
         assert!(matches!(
             tracker.record(&notarize, Some(&proposal)),
-            VoteRecord::NewRetained
+            Outcome::Added { retained: true }
         ));
 
         tracker.clear_nullifies();
         assert!(!tracker.saw_nullify(signer));
         assert!(matches!(
             tracker.record(&nullify, Some(&proposal)),
-            VoteRecord::NewRetained
+            Outcome::Added { retained: true }
         ));
 
         tracker.clear_finalizes();
@@ -3877,7 +3869,7 @@ mod tests {
         assert_eq!(tracker.compacted.capacity(), 0);
         assert!(matches!(
             tracker.record(&finalize, Some(&proposal)),
-            VoteRecord::NewRetained
+            Outcome::Added { retained: true }
         ));
     }
 
@@ -3940,7 +3932,7 @@ mod tests {
         let mut releasing = VoteTracker::new(2, false);
         assert!(matches!(
             releasing.record(&vote, Some(&proposal)),
-            VoteRecord::NewRetained
+            Outcome::Added { retained: true }
         ));
         let Phase::Full(votes) = &releasing.notarizes else {
             panic!("notarize phase compacted before certification");
@@ -3950,7 +3942,7 @@ mod tests {
         assert!(matches!(&releasing.notarizes, Phase::Compacted));
         assert!(matches!(
             releasing.record(&vote, Some(&proposal)),
-            VoteRecord::DuplicateCompacted
+            Outcome::Duplicate { retained: false }
         ));
 
         // A certificate can arrive before any individual votes. Subsequent votes
@@ -3959,18 +3951,18 @@ mod tests {
         certificate_first.release_notarizes(&proposal);
         assert!(matches!(
             certificate_first.record(&vote, Some(&proposal)),
-            VoteRecord::NewCompacted
+            Outcome::Added { retained: false }
         ));
         assert!(matches!(&certificate_first.notarizes, Phase::Compacted));
         assert!(matches!(
             certificate_first.record(&vote, Some(&proposal)),
-            VoteRecord::DuplicateCompacted
+            Outcome::Duplicate { retained: false }
         ));
 
         let mut retaining = VoteTracker::new(2, true);
         assert!(matches!(
             retaining.record(&vote, Some(&proposal)),
-            VoteRecord::NewRetained
+            Outcome::Added { retained: true }
         ));
         let Phase::Full(votes) = &retaining.notarizes else {
             panic!("retained notarize phase compacted");

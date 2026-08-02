@@ -6,7 +6,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize, Kind,
-            NullifyFinalize, Proposal, Vote, VoteRecord, VoteTracker,
+            NullifyFinalize, Outcome, Proposal, Vote, VoteTracker,
         },
     },
     types::{Participant, Round as Rnd},
@@ -18,16 +18,6 @@ use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::Span;
-
-/// Outcome of recording a vote after preliminary conflict checks.
-enum Outcome {
-    /// The vote was newly recorded and reported.
-    Added,
-    /// The signer was already recorded with the same known vote state.
-    Duplicate,
-    /// Compact state proves the signer changed its relation to the authoritative proposal.
-    Conflicting,
-}
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -178,12 +168,10 @@ impl<
             self.set_authoritative_proposal(&finalize.proposal);
         }
 
-        let record = self.votes.record(&message, self.verifier.proposal());
-        let retained = match record {
-            VoteRecord::NewRetained => true,
-            VoteRecord::NewCompacted => false,
-            VoteRecord::DuplicateRetained => {
-                if constructed {
+        let retained = match self.votes.record(&message, self.verifier.proposal()) {
+            Outcome::Added { retained } => retained,
+            Outcome::Duplicate { retained } => {
+                if constructed && retained {
                     // Nullify is reconstructed for each retry. Notarize and finalize
                     // are one-shot local actions, so constructing either twice is a bug.
                     match &message {
@@ -192,10 +180,9 @@ impl<
                         Vote::Finalize(_) => panic!("duplicate finalize"),
                     }
                 }
-                return Outcome::Duplicate;
+                return Outcome::Duplicate { retained };
             }
-            VoteRecord::DuplicateCompacted => return Outcome::Duplicate,
-            VoteRecord::ConflictingProposal => return Outcome::Conflicting,
+            Outcome::Conflicting => return Outcome::Conflicting,
         };
 
         // A compacted phase already has its certificate. Report newly observed signer
@@ -210,7 +197,7 @@ impl<
         if let Some(message) = verifier_message {
             self.verifier.add(message, constructed);
         }
-        Outcome::Added
+        Outcome::Added { retained }
     }
 
     /// Adds a durable locally constructed vote.
@@ -275,8 +262,8 @@ impl<
                         false
                     }
                     None => match self.accept_vote(Vote::Notarize(notarize), false) {
-                        Outcome::Added => true,
-                        Outcome::Duplicate => false,
+                        Outcome::Added { .. } => true,
+                        Outcome::Duplicate { .. } => false,
                         Outcome::Conflicting => {
                             commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
                             false
@@ -310,8 +297,8 @@ impl<
                         false
                     }
                     None => match self.accept_vote(Vote::Nullify(nullify), false) {
-                        Outcome::Added => true,
-                        Outcome::Duplicate => false,
+                        Outcome::Added { .. } => true,
+                        Outcome::Duplicate { .. } => false,
                         Outcome::Conflicting => {
                             unreachable!("nullify votes do not carry proposals")
                         }
@@ -349,8 +336,8 @@ impl<
                         false
                     }
                     None => match self.accept_vote(Vote::Finalize(finalize), false) {
-                        Outcome::Added => true,
-                        Outcome::Duplicate => false,
+                        Outcome::Added { .. } => true,
+                        Outcome::Duplicate { .. } => false,
                         Outcome::Conflicting => {
                             commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
                             false
