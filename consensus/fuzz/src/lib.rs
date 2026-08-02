@@ -405,6 +405,7 @@ where
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forwarding: ForwardingPolicy::Disabled,
+        track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
     engine.start(pending, recovered, resolver);
@@ -650,6 +651,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             };
             let engine = Engine::new(primary_context.child("engine"), engine_cfg);
             engine.start(

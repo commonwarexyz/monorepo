@@ -5081,7 +5081,10 @@ where
             )
             .await
             .unwrap();
-        let blocks = ancestry.collect::<Vec<_>>().await;
+
+        // Consume the known finalized range. The stream may keep waiting for
+        // an older parent while that parent can still become available.
+        let blocks = ancestry.take(5).collect::<Vec<_>>().await;
 
         // Ensure correct delivery order: 5,4,3,2,1
         assert_eq!(blocks.len(), 5);

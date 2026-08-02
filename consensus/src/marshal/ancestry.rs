@@ -169,8 +169,8 @@ pub trait BlockProvider: Send + 'static {
     /// will be notified when the parent is available. If the parent is not finalized, it's possible
     /// that it may never become available.
     ///
-    /// Returns `None` when the subscription is canceled or the provider can no longer deliver
-    /// the parent.
+    /// Returns `None` only when the provider can no longer obtain the parent from any source.
+    /// Dropping the returned future cancels the subscription.
     ///
     /// The child block can carry variant-specific context needed to retrieve its parent.
     fn subscribe_parent(

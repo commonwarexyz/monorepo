@@ -652,7 +652,7 @@ pub(crate) mod tests {
         source
             .serve(Request::Boundary {
                 size: target.size,
-                start: Location::new(*target.size - 1),
+                start: target.size - 1,
             })
             .await
     }

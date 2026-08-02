@@ -355,7 +355,7 @@ mod tests {
         // A size outside the location domain is rejected.
         let beyond = CompactTarget::<MmrFamily, _> {
             root,
-            size: Location::new(*MmrFamily::MAX_LEAVES + 1),
+            size: MmrFamily::MAX_LEAVES + 1,
         };
         assert!(matches!(
             Target::try_from(&beyond),

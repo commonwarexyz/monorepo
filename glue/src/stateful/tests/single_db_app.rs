@@ -215,7 +215,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
         };
         Some(Proposed { block, merkleized })
     }
@@ -231,8 +231,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
         if merkleized.root() != tip.state_root
-            || non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
-                != tip.range
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.range
         {
             return None;
         }
@@ -598,6 +597,7 @@ impl EngineDefinition for SingleDbEngine {
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),
             forwarding: ForwardingPolicy::Disabled,
+            track_historical_votes: false,
         };
 
         let engine = simplex::Engine::new(context, simplex_config);

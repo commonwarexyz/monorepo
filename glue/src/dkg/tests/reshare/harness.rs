@@ -267,7 +267,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             payload,
         };
         Some(Proposed { block, merkleized })
@@ -1027,6 +1027,7 @@ impl EngineDefinition for ReshareEngine {
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(5),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 },
                 gate,
                 state_sync,

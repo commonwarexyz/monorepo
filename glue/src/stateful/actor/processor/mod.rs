@@ -1213,7 +1213,7 @@ mod tests {
                 state_root: merkleized.root(),
                 range: non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.bounds().tip.size
                 ),
             };
             Some(Proposed { block, merkleized })
@@ -1414,7 +1414,7 @@ mod tests {
                 state_root: merkleized.root(),
                 range: non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.bounds().tip.size
                 ),
             };
             let round = Round::new(Epoch::zero(), view);
@@ -1970,7 +1970,7 @@ mod tests {
                 state_root: merkleized.root(),
                 range: non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.bounds().tip.size
                 ),
             };
 

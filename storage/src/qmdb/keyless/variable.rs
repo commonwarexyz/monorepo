@@ -262,7 +262,7 @@ mod test {
                             batch_idx * 10 + j,
                         ));
                 }
-                let new_commit_loc = Location::new(*db.last_commit_loc() + 1 + 3);
+                let new_commit_loc = db.last_commit_loc() + 1 + 3;
                 let merkleized = batch.merkleize(&db, None, new_commit_loc).await;
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
             }

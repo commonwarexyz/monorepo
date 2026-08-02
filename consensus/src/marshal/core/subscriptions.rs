@@ -12,6 +12,10 @@ use tracing::{Span, info_span};
 
 /// A set of local subscribers waiting for one block.
 ///
+/// The retrieval strategy is not part of subscription ownership. Each caller
+/// remains registered until delivery, caller cancellation, or a backing-buffer
+/// closure that proves the buffer can no longer deliver.
+///
 /// Dropping the subscription aborts the backing buffer waiter, if one exists.
 struct BlockSubscription<V: Variant> {
     subscribers: Vec<Subscriber<V>>,

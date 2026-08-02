@@ -450,6 +450,7 @@ where
                         .await;
                 }
                 Err(key) => {
+                    // A closed buffer subscription marks the key as permanently unavailable.
                     match key {
                         SubscriptionKey::Digest(digest) => {
                             debug!(
@@ -903,10 +904,6 @@ where
                 }
 
                 self = self.prune_finalized_archives(height).await;
-
-                // Intentionally keep existing block subscriptions alive. Canceling
-                // waiters can have catastrophic consequences because actors do not
-                // retry subscriptions on failed channels.
             }
         }
         self
@@ -1079,12 +1076,12 @@ where
             return;
         }
 
-        // We don't have the block locally. Local-only waits reach this point
-        // without a round or height, so they only register a subscriber below.
+        // Resolver admission controls remote acquisition. Every caller remains
+        // registered for later local availability.
         //
         // Round-based fetching is for notarized proposal lookups whose height is
         // not known before the request. Height-based fetching is only for callers
-        // that already have a validated pruning height.
+        // that have a validated block height for resolver retention.
         match fallback {
             CommitmentFallback::FetchByRound { round } => {
                 // Fetch the notarized proposal for this round. The response
@@ -1092,14 +1089,10 @@ where
                 // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
-                if self
-                    .floor
+                self.floor
                     .fetch_if_permitted(resolver, Request::notarized(round))
-                    .denied()
-                {
-                    return;
-                }
-                debug!(?round, ?digest, "requested block missing");
+                    .ignore();
+                debug!(?round, ?digest, "notarized block unavailable");
             }
             CommitmentFallback::FetchByCommitment { height } => {
                 let commitment = match key {
@@ -1111,30 +1104,21 @@ where
 
                 // This path is only for accepted ancestry or finalized repair,
                 // never for a candidate block's immediate parent.
-                if self
-                    .floor
+                self.floor
                     .fetch_if_permitted(resolver, Request::certified_block(commitment, height))
-                    .denied()
-                {
-                    return;
-                }
-                debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
+                    .ignore();
+                debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
             }
             CommitmentFallback::Wait => {}
         }
 
-        let round = match fallback {
-            CommitmentFallback::FetchByRound { round } => Some(round),
-            CommitmentFallback::Wait | CommitmentFallback::FetchByCommitment { .. } => None,
-        };
-
         // Register subscriber.
         match key {
             SubscriptionKey::Digest(digest) => {
-                debug!(?round, ?digest, "registering subscriber");
+                debug!(?fallback, ?digest, "registering subscriber");
             }
             SubscriptionKey::Commitment(commitment) => {
-                debug!(?round, ?commitment, ?digest, "registering subscriber");
+                debug!(?fallback, ?commitment, ?digest, "registering subscriber");
             }
         }
         self.block_subscriptions
@@ -1361,9 +1345,9 @@ where
         // The floor is durable, so cache/finalized data below it can be pruned.
         self = self.prune_after_floor(height).await;
 
-        // Intentionally keep existing block subscriptions alive. Canceling
-        // waiters can have catastrophic consequences (nodes can get stuck in
-        // different views) as actors do not retry subscriptions on failed channels.
+        // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
+        // stops obsolete network work, but later local ingress can still satisfy these waiters,
+        // and callers do not retry a closed subscription.
         let repaired;
         (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
         if repaired {
@@ -2326,7 +2310,7 @@ where
             .processed_height
             .try_set(self.floor.processed_height().get());
 
-        // Prune any existing requests below the new floor.
+        // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
     }
 
@@ -2388,7 +2372,7 @@ where
         );
         self.cache = self.cache.prune_by_view(prune_round).await;
 
-        // Prune round-bound requests at or below the processed round.
+        // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_round_floor::<V::Commitment>(
             self.floor.processed_round(),
         ));

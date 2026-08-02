@@ -133,10 +133,7 @@ where
         return Ok(None);
     }
 
-    let inactive_peaks = F::inactive_peaks(
-        F::location_to_position(target.range.end()),
-        inactivity_floor,
-    );
+    let inactive_peaks = F::inactive_peaks(target.range.end(), inactivity_floor);
     if merkle.root(&hasher, inactive_peaks)? != target.root {
         return Ok(None);
     }

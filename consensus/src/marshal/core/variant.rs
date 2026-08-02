@@ -141,6 +141,9 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     /// If the block is already cached, the receiver may resolve immediately.
     /// Returns `None` when the buffer cannot provide availability notifications.
     ///
+    /// Keep the subscription open while the block may still arrive. Close it only when the buffer
+    /// shuts down or can no longer obtain the block from any source.
+    ///
     /// The returned receiver can be dropped to cancel the subscription.
     fn subscribe_by_digest(
         &self,
@@ -155,6 +158,9 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     ///
     /// Having the full commitment may enable additional retrieval mechanisms
     /// depending on the variant implementation.
+    ///
+    /// Keep the subscription open while the block may still arrive. Close it only when the buffer
+    /// shuts down or can no longer obtain the block from any source.
     ///
     /// The returned receiver can be dropped to cancel the subscription.
     fn subscribe_by_commitment(

@@ -278,7 +278,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
@@ -363,7 +363,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
@@ -583,7 +583,7 @@ mod tests {
                 merkleized.root(),
                 non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    mmr::Location::new(merkleized.bounds().total_size)
+                    merkleized.bounds().tip.size
                 ),
             );
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
@@ -593,10 +593,7 @@ mod tests {
 
             let wrong_start = AnySyncTarget::new(
                 merkleized.root(),
-                non_empty_range!(
-                    mmr::Location::new(0),
-                    mmr::Location::new(merkleized.bounds().total_size)
-                ),
+                non_empty_range!(mmr::Location::new(0), merkleized.bounds().tip.size),
             );
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
@@ -607,7 +604,7 @@ mod tests {
                 merkleized.root(),
                 non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    mmr::Location::new(merkleized.bounds().total_size - 1)
+                    merkleized.bounds().tip.size - 1
                 ),
             );
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(

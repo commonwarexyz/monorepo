@@ -281,6 +281,7 @@ impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
     type Subscriber = ();
+    type Outcome = bool;
 
     fn deliver(
         &mut self,
