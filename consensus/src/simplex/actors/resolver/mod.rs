@@ -29,7 +29,7 @@
 //! Background repair cannot detect a split where one participant certifies a notarization while
 //! another holds a covering nullification. Proposal verification exposes the missing ancestry and
 //! targets the first gap at the proposal's leader. Matching evidence or finalization retires that
-//! request; a certified-floor raise retires only background work.
+//! request, whereas a certified-floor raise retires only background work.
 //!
 //! The wire key remains the requested view. A cryptographically valid response that does not satisfy
 //! every attached purpose is ambiguous, so the resolver retries without faulting its peer. A valid

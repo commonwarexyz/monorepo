@@ -314,8 +314,8 @@
 //!
 //! Resolver keys identify views rather than certificate types. A valid response that does not satisfy
 //! every local purpose is retried without faulting its peer. A notarization delivery may wait up to
-//! [`Config::certification_timeout`](config::Config::certification_timeout) for local certification;
-//! expiry releases the delivery but does not resolve or cancel certification. Matching evidence or
+//! [`Config::certification_timeout`](config::Config::certification_timeout) for local certification.
+//! Expiry releases the delivery but does not resolve or cancel certification. Matching evidence or
 //! finalization retires targeted work.
 //!
 //! ## Pluggable Hashing and Cryptography
@@ -5674,7 +5674,9 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Entry-independent schedule: silent leads 10, group 11..=12, and lone 13.
+            // This schedule is independent of the entry certificate. The silent
+            // participant leads view 10, the group leads views 11..=12, and the
+            // lone participant leads view 13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);
@@ -5958,7 +5960,9 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Entry-independent schedule: silent leads 10, lone 11, and group 12..=13.
+            // This schedule is independent of the entry certificate. The silent
+            // participant leads view 10, the lone participant leads view 11, and
+            // the group leads views 12..=13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);
@@ -6247,7 +6251,9 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Entry-independent schedule: silent leads 10, group 11..=12, and lone 13.
+            // This schedule is independent of the entry certificate. The silent
+            // participant leads view 10, the group leads views 11..=12, and the
+            // lone participant leads view 13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = L::default().build(&participant_set);

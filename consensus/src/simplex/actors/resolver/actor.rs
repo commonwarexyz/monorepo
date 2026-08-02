@@ -53,9 +53,9 @@ struct PendingDelivery {
 
 /// Owns deferred deliveries and their independent certification deadlines.
 ///
-/// Timeout futures intentionally run to completion after a delivery resolves:
-/// some clocks retain registered alarms until their deadline, and removing the
-/// future would leave those alarms without a task to wake.
+/// Timeout futures intentionally run to completion after a delivery resolves
+/// because some clocks retain registered alarms until their deadline. Removing
+/// the future would leave those alarms without a task to wake.
 #[derive(Default)]
 struct PendingDeliveries {
     entries: Vec<PendingDelivery>,
