@@ -396,7 +396,7 @@ where
         self.witness.with(VerifiedWitness::target)
     }
 
-    /// The [`Commitment`] for the committed state of this database.
+    /// The [`Commitment`] for the database's current state.
     pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
         batch_chain::Commitment::new(self.last_commit_loc + 1, self.root())
     }

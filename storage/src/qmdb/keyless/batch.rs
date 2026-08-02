@@ -39,8 +39,8 @@ where
     /// Parent batch in the chain. `None` for batches created directly from the DB.
     parent: Option<MerkleizedParent<F, H, V, S>>,
 
-    /// The committed state immediately before this batch's operations (committed DB + prior
-    /// batches). This batch's i-th operation lands at location `base.size + i`.
+    /// The state immediately before this batch's operations.
+    /// This batch's i-th operation lands at location `base.size + i`.
     base: Commitment<F, H::Digest>,
 }
 

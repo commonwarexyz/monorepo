@@ -181,7 +181,7 @@ where
         self.root
     }
 
-    /// The [`Commitment`] committed by the database's current state.
+    /// The [`Commitment`] for the database's current state.
     pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
         Commitment::new(self.last_commit_loc + 1, self.root)
     }
