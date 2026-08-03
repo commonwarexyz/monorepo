@@ -364,6 +364,52 @@
   \note{The barriers are issued concurrently. If start_apply returns Ok, all required participant states are durably recoverable, even if the completion handle is dropped. Awaiting the handle waits for activation and namespace cleanup. A failed or cancelled start remains indeterminate because every barrier may in fact have reached disk.}
 \end{frame}
 
+\begin{frame}[t]{Current atomic batches are root-slot bounded}
+  \vspace{0.01cm}
+  \eyebrow{Every dirty participant: one 4 KiB root slot holds the complete decision}
+
+  \vspace{0.08cm}
+  \noindent\hfill
+    \begin{tikzpicture}[node distance=.06cm]
+      \node[oldroot,text width=1.75cm,minimum height=.72cm] (roothead) {40 B\\\scriptsize candidate root};
+      \node[box,text width=1.55cm,minimum height=.72cm,right=of roothead] (witness) {16 B\\\scriptsize witness header};
+      \node[root,text width=7.65cm,minimum height=.72cm,right=of witness] (descriptor) {$\leq$ 4,040 B exact group descriptor\\\scriptsize paths + incarnations + roots + CRC ranges + removals};
+    \end{tikzpicture}
+  \hfill\null
+
+  \vspace{0.2cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.49\textwidth}
+      \eyebrow{Hard admission limit}
+
+      \vspace{0.08cm}
+      \begin{tikzpicture}[node distance=.14cm]
+        \node[panel,text width=2.1cm,minimum height=.78cm,align=center] (configured) {\Large\bfseries 32\\\scriptsize configured dirty-participant cap};
+        \node[warn,text width=2.65cm,minimum height=.78cm,right=of configured] (encoded) {\Large\bfseries $\leq 28$\\\scriptsize fit even with zero-byte names};
+      \end{tikzpicture}
+
+      \vspace{0.08cm}
+      \scriptsize Only dirty participants count. Each costs 140 B + partition + blob name; a delete repeats its target. Real names lower 28. Oversize is rejected before roots are staged.
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \eyebrow{Soft recovery-work bound}
+
+      \vspace{0.08cm}
+      \begin{tikzpicture}
+        \node[root,text width=5.4cm,minimum height=.78cm] {\Large\bfseries 64 MiB aggregate\\\scriptsize maximum unresolved payload suffix revalidated after crash};
+      \end{tikzpicture}
+
+      \vspace{0.08cm}
+      \scriptsize Larger or non-contiguous epochs preflush before roots are staged. They are not rejected and payload is not written twice; publication may wait only for the uncovered durability frontier.
+    \end{column}
+  \end{columns}
+
+  \vfill
+  \takeaway{Descriptor bytes set the hard ceiling; 64 MiB only bounds recovery work. Contiguous uses at most 2 fixed or 4 variable participants.}
+
+  \note{The Vec-based API is not an unbounded transaction. The implementation rejects more than 32 dirty participants, but the replicated descriptor reaches the 4 KiB root-slot limit first: 28 is only the zero-name upper bound, and real partition names, blob names, and deletion records consume more space. This is checked before roots are staged. The separate 64 MiB limit is deliberately soft. It bounds bytes that restart may need to read and CRC, so large epochs establish a durable payload prefix before publishing roots instead of failing or copying payload. The contiguous design is comfortably inside the participant limit: fixed rollover publishes at most prior and current roots; variable publishes the data/offsets pair for each, at most four roots.}
+\end{frame}
+
 \begin{frame}[t]{Intentional limitation: no global sync order}
   \vspace{0.03cm}
   \begin{columns}[T,onlytextwidth]
