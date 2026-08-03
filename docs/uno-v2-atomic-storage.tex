@@ -902,4 +902,119 @@
   \note{UNO currently needs only one CRC over the not-yet-proven-durable suffix. That checksum answers whether a candidate epoch is complete after a crash; it is not a permanent record index or a promise to validate every later read. CRC32C values can be combined when lengths and order are known, so a receipt API might avoid hashing the same bytes twice. The difficult part is boundary mapping: append calls, preflush ranges, pages, and logical records do not necessarily align. A useful experiment would let contiguous provide a boundary plan and consume receipts while keeping codecs and indexes out of the blob layer.}
 \end{frame}
 
+\begin{frame}[t]{Open question: should every composite store adopt V2?}
+  \vspace{0.02cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \eyebrow{Stop at append-only primitives}
+
+      \vspace{0.06cm}
+      \begin{tikzpicture}[node distance=.24cm]
+        \node[root,text width=2.55cm,minimum height=.68cm] (contiguous) {contiguous V2\\
+          \scriptsize fixed / variable};
+        \node[root,text width=2.55cm,minimum height=.68cm,right=of contiguous] (pairs) {value + index pairs\\
+          \scriptsize naturally append-only};
+      \end{tikzpicture}
+
+      \vspace{0.08cm}
+      \scriptsize
+      \begin{itemize}\setlength\itemsep{0.02cm}
+        \item Existing stores retain Metadata and current durability ordering.
+        \item Smallest compatibility and migration surface.
+        \item Retains serialized checkpoint barriers in composite stores.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \eyebrow{Convert composite commit boundaries}
+
+      \vspace{0.06cm}
+      \begin{tikzpicture}[node distance=.18cm]
+        \node[box,text width=1.9cm,minimum height=.68cm] (ordinary) {table + Ordinal\\
+          \scriptsize ordinary writes};
+        \node[warn,text width=1.45cm,minimum height=.68cm,right=of ordinary] (fence) {durability\\fence};
+        \node[root,text width=2.25cm,minimum height=.68cm,right=of fence] (publish) {one UNO decision\\
+          \scriptsize journals + archive state};
+        \draw[flow] (ordinary) -- (fence);
+        \draw[flow] (fence) -- (publish);
+      \end{tikzpicture}
+
+      \vspace{0.08cm}
+      \scriptsize
+      \begin{itemize}\setlength\itemsep{0.02cm}
+        \item Add opt-in V2 commit boundaries to Immutable Archive and peers.
+        \item Fewer serial barriers; payload remains write-once.
+        \item Requires a new format, migration, rollover, and fault tests.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.08cm}
+  \begin{tikzpicture}
+    \node[panel,text width=13.45cm,align=center] {\small \textbf{``Convert all'' does not mean making every file atomic.}\\[-.01cm]
+      \scriptsize Random-write indexes remain ordinary materializations; V2 owns the append-only journals and the authority that makes those materializations reachable.};
+  \end{tikzpicture}
+
+  \vfill
+  \takeaway{Keep V2 targeted---or make it the standard opt-in commit boundary for composite storage?}
+
+  \note{Immutable Archive is the concrete decision behind this question. The narrow adoption converts only its append-only Freezer value and key-index journals, preserving the current journal-to-table-to-Metadata chain. A full archive V2 instead writes the ordinary Freezer table and Ordinal first, waits for their durability, and then jointly publishes the active journal roots with an archive-state authority. That removes a serial checkpoint phase without pretending random positioned writes are AtomicBlob operations. The same pattern may apply to other composite stores, but each needs a versioned format, explicit migration, bounded participant construction, and arbitrary-subset crash testing.}
+\end{frame}
+
+\begin{frame}[t]{Atomic overwrite is a different storage engine}
+  \vspace{0.01cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \eyebrow{Append-only: the fallback remains intact}
+
+      \vspace{0.08cm}
+      \begin{tikzpicture}[node distance=.18cm]
+        \node[oldroot,text width=1.45cm,minimum height=.58cm] (old) {old root\\\scriptsize length 3};
+        \node[box,text width=2.35cm,minimum height=.58cm,right=of old] (prefix) {\texttt{A \; B \; C}\\\scriptsize committed prefix};
+        \node[root,text width=1.25cm,minimum height=.58cm,right=of prefix] (tail) {\texttt{D}\\\scriptsize new tail};
+        \draw[flow] (old) -- (prefix);
+        \draw[flow] (prefix) -- (tail);
+      \end{tikzpicture}
+
+      \vspace{0.06cm}
+      \scriptsize The old root still names \texttt{A B C}; selecting it discards \texttt{D} without restoring payload.
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \eyebrow{Overwrite: the fallback loses its bytes}
+
+      \vspace{0.08cm}
+      \begin{tikzpicture}[node distance=.18cm]
+        \node[oldroot,text width=1.45cm,minimum height=.58cm] (root) {old root\\\scriptsize still selected};
+        \node[box,text width=2.3cm,minimum height=.58cm,right=of root] (before) {\texttt{A \; B \; C}\\\scriptsize before overwrite};
+        \node[bad,text width=1.4cm,minimum height=.58cm,right=of before] (after) {\texttt{A \; X \; C}\\\scriptsize after};
+        \draw[flow] (root) -- (before);
+        \draw[flow,draw=Fault] (before) -- (after);
+      \end{tikzpicture}
+
+      \vspace{0.06cm}
+      \scriptsize A CRC may reject torn \texttt{X}, but \texttt{B} is gone; the old root cannot restore it.
+    \end{column}
+  \end{columns}
+
+  \vspace{0.1cm}
+  \eyebrow{Making that overwrite rollbackable requires another mechanism}
+
+  \vspace{0.05cm}
+  \begin{tikzpicture}[node distance=.2cm]
+    \node[warn,text width=3.92cm,minimum height=.78cm,align=left] (cow) {\textbf{COW / shadow pages}\\
+      \tiny Write replacement elsewhere; publish a page map. Adds indirection and reclamation.};
+    \node[warn,text width=3.92cm,minimum height=.78cm,right=of cow,align=left] (undo) {\textbf{Undo / redo log}\\
+      \tiny Persist old bytes or replay data first. Adds payload writes and another ordering protocol.};
+    \node[warn,text width=3.92cm,minimum height=.78cm,right=of undo,align=left] (volume) {\textbf{Volume layer}\\
+      \tiny Version allocation below every store. Adds shared metadata, locking, and recovery work.};
+  \end{tikzpicture}
+
+  \vspace{0.06cm}
+  \centering\scriptsize Under the fault model, any subset of unsynced overwrite bytes may survive; rollback therefore needs retained old bytes or a separate new copy.
+
+  \vfill
+  \takeaway{CRC detects but cannot restore overwrites. Composite V2 keeps overwrite-heavy indexes ordinary behind atomic authority.}
+
+  \note{This is the important distinction behind \textit{convert all}. Converting a composite store's commit boundary does not require AtomicBlob to support arbitrary overwrite. The Freezer table and Ordinal can remain ordinary files: write their future epoch, make them durable, then publish the V2 journals and archive authority. Truly converting every physical file would require retaining overwritten bytes somewhere. Copy-on-write turns the file into a page-mapped store; undo logging writes old data again; a volume layer centralizes allocation and recovery. Each gives rollback material but reintroduces the write amplification, metadata, garbage collection, or global coordination that append-only UNO intentionally avoids.}
+\end{frame}
+
 \end{document}
