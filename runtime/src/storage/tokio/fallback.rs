@@ -180,11 +180,35 @@ impl crate::Blob for Blob {
 }
 
 impl crate::AtomicBlob for Blob {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
+    async fn set_tag(&self, _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
     async fn append(&self, _data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         Err(super::unsupported_atomic(&self.partition, &self.name))
     }
 
+    async fn append_tagged(
+        &self,
+        _data: impl Into<IoBufs> + Send,
+        _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
     async fn rewind(&self, _len: u64) -> Result<(), Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
+    async fn rewind_tagged(
+        &self,
+        _len: u64,
+        _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
         Err(super::unsupported_atomic(&self.partition, &self.name))
     }
 }

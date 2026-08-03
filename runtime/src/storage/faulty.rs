@@ -11,7 +11,7 @@ use std::{
     io::Error as IoError,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -345,7 +345,7 @@ impl<S: AtomicStorage> AtomicStorage for Storage<S> {
             .await
             .map(|(blob, len, blob_version)| {
                 (
-                    Blob::new(self.ctx.clone(), blob, partition.into(), name.to_vec(), len),
+                    Blob::new_atomic(self.ctx.clone(), blob, partition.into(), name.to_vec(), len),
                     len,
                     blob_version,
                 )
@@ -361,6 +361,14 @@ impl<S: BatchStorage> BatchStorage for Storage<S> {
         crate::storage::batch::canonicalize_descriptors(&operations, |blob| {
             (blob.partition.clone(), blob.name.clone())
         })?;
+        for operation in &operations {
+            match operation {
+                BatchOperation::Remove(blob) | BatchOperation::Publish(blob) => {
+                    blob.ensure_not_poisoned()?;
+                }
+                BatchOperation::Rewind { blob, .. } => blob.ensure_not_poisoned()?,
+            }
+        }
         if operations.is_empty() {
             return self.inner.start_apply(Vec::new()).await;
         }
@@ -400,6 +408,7 @@ pub struct Blob<B: crate::Blob> {
     name: Vec<u8>,
     /// Tracked size for partial resize support.
     size: Arc<AtomicU64>,
+    poisoned: Option<Arc<AtomicBool>>,
 }
 
 impl<B: crate::Blob> Blob<B> {
@@ -410,6 +419,30 @@ impl<B: crate::Blob> Blob<B> {
             partition,
             name,
             size: Arc::new(AtomicU64::new(size)),
+            poisoned: None,
+        }
+    }
+
+    fn new_atomic(ctx: Oracle, inner: B, partition: String, name: Vec<u8>, size: u64) -> Self {
+        let mut blob = Self::new(ctx, inner, partition, name, size);
+        blob.poisoned = Some(Arc::new(AtomicBool::new(false)));
+        blob
+    }
+
+    fn ensure_not_poisoned(&self) -> Result<(), Error> {
+        if self
+            .poisoned
+            .as_ref()
+            .is_some_and(|poisoned| poisoned.load(Ordering::Acquire))
+        {
+            return Err(IoError::other("atomic blob generation is poisoned").into());
+        }
+        Ok(())
+    }
+
+    fn poison(&self) {
+        if let Some(poisoned) = &self.poisoned {
+            poisoned.store(true, Ordering::Release);
         }
     }
 }
@@ -440,6 +473,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
         let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
         let sync = options.contains(WriteOptions::SYNC);
@@ -453,6 +487,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
                 // Partial write: write some bytes, sync, then fail
                 let bufs = bufs.coalesce().slice(..bytes as usize);
                 self.inner.write_at(offset, bufs, options).await?;
+                self.poison();
                 if !sync {
                     self.inner.sync().await?;
                 }
@@ -467,6 +502,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             self.inner
                 .write_at(offset, bufs, options.without(WriteOptions::SYNC))
                 .await?;
+            self.poison();
             self.size
                 .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
             return Err(injected_io_error().into());
@@ -479,12 +515,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
         let (should_fail, partial_rate) = self.ctx.check_resize_fault();
         if should_fail {
             let current = self.size.load(Ordering::Relaxed);
             if let Some(len) = self.ctx.try_partial(partial_rate, current, len) {
                 // Partial resize: resize to intermediate size, sync, then fail
                 self.inner.resize(len).await?;
+                self.poison();
                 self.inner.sync().await?;
                 self.size.store(len, Ordering::Relaxed);
                 return Err(injected_io_error().into());
@@ -497,6 +535,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
         if self.ctx.should_fail(Op::Sync) {
             return Err(injected_io_error().into());
         }
@@ -504,6 +543,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn start_sync(&self) -> Handle<()> {
+        if let Err(error) = self.ensure_not_poisoned() {
+            return Handle::ready(Err(error));
+        }
         if self.ctx.should_fail(Op::Sync) {
             return Handle::ready(Err(injected_io_error().into()));
         }
@@ -512,7 +554,20 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for Blob<B> {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+        self.inner.tag().await
+    }
+
+    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Write) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.set_tag(tag).await
+    }
+
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+        self.ensure_not_poisoned()?;
         if self.ctx.should_fail(Op::Write) {
             return Err(injected_io_error().into());
         }
@@ -524,11 +579,43 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         Ok(offset)
     }
 
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Write) {
+            return Err(injected_io_error().into());
+        }
+        let data = data.into();
+        let data_len = u64::try_from(data.remaining()).map_err(|_| Error::OffsetOverflow)?;
+        let offset = self.inner.append_tagged(data, tag).await?;
+        let len = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+        self.size.store(len, Ordering::Relaxed);
+        Ok(offset)
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
         if self.ctx.should_fail(Op::Resize) {
             return Err(injected_io_error().into());
         }
         self.inner.rewind(len).await?;
+        self.size.store(len, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Resize) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.rewind_tagged(len, tag).await?;
         self.size.store(len, Ordering::Relaxed);
         Ok(())
     }
@@ -586,6 +673,88 @@ mod tests {
                 storage,
                 config,
             }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PostAdmissionFault {
+        PartialWrite,
+        WriteSync,
+        PartialResize,
+    }
+
+    async fn inject_post_admission_fault<B: crate::Blob>(
+        blob: &Blob<B>,
+        config: &Arc<RwLock<Config>>,
+        fault: PostAdmissionFault,
+    ) -> Result<(), Error> {
+        *config.write() = match fault {
+            PostAdmissionFault::PartialWrite => Config::default().write(1.0).partial_write(1.0),
+            PostAdmissionFault::WriteSync => Config::default().sync(1.0),
+            PostAdmissionFault::PartialResize => Config::default().resize(1.0).partial_resize(1.0),
+        };
+        match fault {
+            PostAdmissionFault::PartialWrite => {
+                blob.write_at(8, b"mutation", WriteOptions::default()).await
+            }
+            PostAdmissionFault::WriteSync => {
+                blob.write_at(8, b"mutation", WriteOptions::SYNC).await
+            }
+            PostAdmissionFault::PartialResize => blob.resize(0).await,
+        }
+    }
+
+    fn assert_poisoned<T>(operation: &str, result: Result<T, Error>) {
+        match result {
+            Ok(_) => panic!("{operation} succeeded on a poisoned atomic handle"),
+            Err(error) => assert!(
+                error.to_string().contains("poisoned"),
+                "{operation} returned a non-poison error: {error}"
+            ),
+        }
+    }
+
+    async fn assert_atomic_mutations_rejected(
+        storage: &Storage<MemStorage>,
+        blob: Blob<<MemStorage as AtomicStorage>::AtomicBlob>,
+    ) {
+        let len = blob.size.load(Ordering::Relaxed);
+        assert_poisoned(
+            "write_at",
+            blob.write_at(len, b"x", WriteOptions::default()).await,
+        );
+        assert_poisoned("resize", blob.resize(len).await);
+        assert_poisoned("sync", blob.sync().await);
+        assert_poisoned("start_sync", blob.start_sync().await.await);
+        assert_poisoned(
+            "set_tag",
+            blob.set_tag([1; crate::ATOMIC_BLOB_TAG_LEN]).await,
+        );
+        assert_poisoned("append", blob.append(b"x").await);
+        assert_poisoned(
+            "append_tagged",
+            blob.append_tagged(b"x", [1; crate::ATOMIC_BLOB_TAG_LEN])
+                .await,
+        );
+        assert_poisoned("rewind", blob.rewind(len).await);
+        assert_poisoned(
+            "rewind_tagged",
+            blob.rewind_tagged(len, [1; crate::ATOMIC_BLOB_TAG_LEN])
+                .await,
+        );
+
+        for (operation, name) in [
+            (BatchOperation::Publish(blob.clone()), "batch publish"),
+            (
+                BatchOperation::Rewind {
+                    blob: blob.clone(),
+                    len,
+                },
+                "batch rewind",
+            ),
+            (BatchOperation::Remove(blob.clone()), "batch remove"),
+        ] {
+            assert_poisoned(name, storage.start_apply(vec![operation]).await);
         }
     }
 
@@ -919,6 +1088,64 @@ mod tests {
         blob.rewind(4).await.unwrap();
         assert_eq!(blob.size.load(Ordering::Relaxed), 4);
         assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"cont");
+    }
+
+    #[tokio::test]
+    async fn test_faulty_atomic_post_admission_failures_poison_handle() {
+        for fault in [
+            PostAdmissionFault::PartialWrite,
+            PostAdmissionFault::WriteSync,
+            PostAdmissionFault::PartialResize,
+        ] {
+            let h = Harness::new(Config::default());
+            let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
+            blob.write_at(0, b"contents", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            let peer = blob.clone();
+
+            assert!(
+                matches!(
+                    inject_post_admission_fault(&blob, &h.config, fault).await,
+                    Err(Error::Io(_))
+                ),
+                "{fault:?} did not return the injected failure"
+            );
+            *h.config.write() = Config::default();
+
+            assert_atomic_mutations_rejected(&h.storage, peer).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_faulty_ordinary_post_admission_failures_do_not_poison_handle() {
+        for fault in [
+            PostAdmissionFault::PartialWrite,
+            PostAdmissionFault::WriteSync,
+            PostAdmissionFault::PartialResize,
+        ] {
+            let h = Harness::new(Config::default());
+            let (blob, _) = h.storage.open("partition", b"name").await.unwrap();
+            blob.write_at(0, b"contents", WriteOptions::SYNC)
+                .await
+                .unwrap();
+
+            assert!(
+                matches!(
+                    inject_post_admission_fault(&blob, &h.config, fault).await,
+                    Err(Error::Io(_))
+                ),
+                "{fault:?} did not return the injected failure"
+            );
+            *h.config.write() = Config::default();
+
+            let len = blob.size.load(Ordering::Relaxed);
+            blob.write_at(len, b"x", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.resize(len + 1).await.unwrap();
+            blob.sync().await.unwrap();
+        }
     }
 
     #[tokio::test]

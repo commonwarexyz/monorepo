@@ -1328,43 +1328,94 @@ impl Storage {
                 let storage_directory = self.cfg.storage_directory.clone();
                 let err_partition = partition.to_string();
                 let err_name = hex(name);
-                let creation = tokio::task::spawn(async move {
+                let (region, blob_version) = if require_atomic {
+                    Header::create_atomic(&versions)
+                } else {
+                    Header::create(&versions)
+                };
+                let data_offset = region.len() as u64;
+                let incarnation = Header::atomic_incarnation(&region);
+
+                if require_atomic {
                     #[cfg(unix)]
                     {
                         sync_dir(&parent).await?;
                         sync_dir(&storage_directory).await?;
+                        drop(file);
+
+                        let creation_partition = stored_partition.clone();
+                        let creation_name = name.to_vec();
+                        let live_path = path.clone();
+                        let creation = tokio::task::spawn_blocking(move || {
+                            let result = super::atomic::discard(
+                                &storage_directory,
+                                &creation_partition,
+                                &creation_name,
+                            )
+                            .and_then(|()| {
+                                super::atomic::create_live(
+                                    &storage_directory,
+                                    &creation_partition,
+                                    &creation_name,
+                                    &live_path,
+                                    &region,
+                                )
+                            });
+                            (guard, result)
+                        });
+                        let (guard, result) = match creation.await {
+                            Ok(result) => result,
+                            Err(error) if error.is_panic() => {
+                                std::panic::resume_unwind(error.into_panic())
+                            }
+                            Err(_) => return Err(Error::Closed),
+                        };
+                        let mut file = fs::File::from_std(result.map_err(|error| {
+                            Error::BlobOpenFailed(err_partition, err_name, error.into())
+                        })?);
+                        file.set_max_buf_size(self.cfg.maximum_buffer_size);
+                        (file, guard, (0, blob_version, data_offset, incarnation))
                     }
                     #[cfg(not(unix))]
-                    let _ = (parent, storage_directory);
+                    unreachable!("atomic storage is rejected before opening on this platform")
+                } else {
+                    let creation = tokio::task::spawn(async move {
+                        #[cfg(unix)]
+                        {
+                            sync_dir(&parent).await?;
+                            sync_dir(&storage_directory).await?;
+                        }
+                        #[cfg(not(unix))]
+                        let _ = (parent, storage_directory);
 
-                    let (region, blob_version) = if require_atomic {
-                        Header::create_atomic(&versions)
-                    } else {
-                        Header::create(&versions)
-                    };
-                    let data_offset = region.len() as u64;
-                    let incarnation = Header::atomic_incarnation(&region);
-                    file.set_len(0).await.map_err(|error| {
-                        Error::BlobResizeFailed(
-                            err_partition.clone(),
-                            err_name.clone(),
-                            error.into(),
-                        )
-                    })?;
-                    file.rewind().await.map_err(|_| Error::WriteFailed)?;
-                    file.write_all(&region)
-                        .await
-                        .map_err(|_| Error::WriteFailed)?;
-                    file.sync_all().await.map_err(|error| {
-                        Error::BlobSyncFailed(err_partition.clone(), err_name.clone(), error.into())
-                    })?;
+                        file.set_len(0).await.map_err(|error| {
+                            Error::BlobResizeFailed(
+                                err_partition.clone(),
+                                err_name.clone(),
+                                error.into(),
+                            )
+                        })?;
+                        file.rewind().await.map_err(|_| Error::WriteFailed)?;
+                        file.write_all(&region)
+                            .await
+                            .map_err(|_| Error::WriteFailed)?;
+                        file.sync_all().await.map_err(|error| {
+                            Error::BlobSyncFailed(
+                                err_partition.clone(),
+                                err_name.clone(),
+                                error.into(),
+                            )
+                        })?;
 
-                    Ok::<_, Error>((file, guard, (0, blob_version, data_offset, incarnation)))
-                });
-                match creation.await {
-                    Ok(result) => result?,
-                    Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-                    Err(_) => return Err(Error::Closed),
+                        Ok::<_, Error>((file, guard, (0, blob_version, data_offset, incarnation)))
+                    });
+                    match creation.await {
+                        Ok(result) => result?,
+                        Err(error) if error.is_panic() => {
+                            std::panic::resume_unwind(error.into_panic())
+                        }
+                        Err(_) => return Err(Error::Closed),
+                    }
                 }
             }
         };
@@ -3306,6 +3357,61 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_atomic_torn_v1_recreation_replaces_live_inode() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_atomic_torn_{}", random_suffix()));
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 1024 * 1024),
+            test_pool(),
+        );
+        let partition = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        let mut canonical = Header::create(&(0..=u16::MAX)).0;
+        canonical.truncate(Header::PARSE_LEN - 1);
+        let cases: [(&[u8], Vec<u8>); 2] = [(b"short", b"CWI".to_vec()), (b"canonical", canonical)];
+
+        for (name, torn) in &cases {
+            let live = partition.join(hex(name));
+            std::fs::write(&live, torn).unwrap();
+            let old_live = std::fs::File::open(&live).unwrap();
+
+            let staged = partition.join(format!(".commonware-uno-create-{}", hex(name)));
+            let atomic_region = Header::create_atomic(&(0..=u16::MAX)).0;
+            std::fs::write(&staged, &atomic_region[..Header::PARSE_LEN - 1]).unwrap();
+            std::fs::File::open(&partition).unwrap().sync_all().unwrap();
+
+            let (blob, size) = storage.open_atomic("partition", name).await.unwrap();
+            assert_eq!(size, 0);
+            assert_eq!(
+                old_live.metadata().unwrap().len(),
+                torn.len() as u64,
+                "atomic recreation must not rewrite the visible torn inode"
+            );
+            assert!(!staged.exists());
+            let raw = std::fs::read(&live).unwrap();
+            assert_eq!(raw.len(), Layout::V2.data_offset() as usize);
+            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V2.magic());
+            drop(blob);
+        }
+
+        drop(storage);
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 1024 * 1024),
+            test_pool(),
+        );
+        for (name, _) in &cases {
+            storage
+                .open_atomic("partition", name)
+                .await
+                .expect("atomically recreated blob must remain reopenable");
+        }
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

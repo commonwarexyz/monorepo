@@ -1,7 +1,7 @@
 use super::{Header, Layout};
 use crate::{
-    BatchOperation, Buf, BufferPool, Handle, IoBufs, IoBufsMut, RemoveTarget, WriteOptions,
-    deterministic::AuditHasher,
+    ATOMIC_BLOB_TAG_LEN, BatchOperation, Buf, BufferPool, Handle, IoBufs, IoBufsMut,
+    RemoveTarget, WriteOptions, deterministic::AuditHasher,
 };
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
@@ -16,15 +16,19 @@ type BlobKey = (String, Vec<u8>);
 struct V2State {
     logical_len: u64,
     committed_len: u64,
+    tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    committed_tag: [u8; ATOMIC_BLOB_TAG_LEN],
     dirty: bool,
     poisoned: bool,
 }
 
 impl V2State {
-    const fn new(logical_len: u64) -> Self {
+    const fn new(logical_len: u64, tag: [u8; ATOMIC_BLOB_TAG_LEN]) -> Self {
         Self {
             logical_len,
             committed_len: logical_len,
+            tag,
+            committed_tag: tag,
             dirty: false,
             poisoned: false,
         }
@@ -44,10 +48,14 @@ struct V2Live {
 }
 
 impl V2Live {
-    fn new(content: Vec<u8>, logical_len: u64) -> Self {
+    fn new(
+        content: Vec<u8>,
+        logical_len: u64,
+        tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    ) -> Self {
         Self {
             content: Arc::new(RwLock::new(content)),
-            state: Mutex::new(V2State::new(logical_len)),
+            state: Mutex::new(V2State::new(logical_len, tag)),
         }
     }
 }
@@ -55,6 +63,7 @@ impl V2Live {
 struct V2Generation {
     generation: u64,
     live: Weak<V2Live>,
+    committed_tag: [u8; ATOMIC_BLOB_TAG_LEN],
 }
 
 fn atomic_layout_required(partition: &str, name: &[u8]) -> crate::Error {
@@ -189,13 +198,23 @@ impl Storage {
                 .get(&key)
                 .filter(|entry| entry.generation == generation)
                 .and_then(|entry| entry.live.upgrade());
+            let committed_tag = namespace
+                .v2_generations
+                .get(&key)
+                .filter(|entry| entry.generation == generation)
+                .map_or([0; ATOMIC_BLOB_TAG_LEN], |entry| entry.committed_tag);
             let live = live.unwrap_or_else(|| {
-                let live = Arc::new(V2Live::new(durable_content.clone(), logical_size));
+                let live = Arc::new(V2Live::new(
+                    durable_content.clone(),
+                    logical_size,
+                    committed_tag,
+                ));
                 namespace.v2_generations.insert(
                     key,
                     V2Generation {
                         generation,
                         live: Arc::downgrade(&live),
+                        committed_tag,
                     },
                 );
                 live
@@ -236,6 +255,7 @@ impl Storage {
 impl Storage {
     /// Compute a SHA-256 digest of all blob contents.
     pub fn audit(&self) -> [u8; 32] {
+        let namespace = self.namespace.lock();
         let partitions = self.partitions.lock();
         let mut hasher = AuditHasher::new();
         hasher.update(b"commonware-runtime-storage-audit-v1");
@@ -247,8 +267,35 @@ impl Storage {
                 hasher.update(b"blob");
                 hasher.update(blob_name);
                 hasher.update(b"content");
-                hasher.update(content);
+                let raw_len = content.len() as u64;
+                let valid_v2 = !Header::missing(raw_len)
+                    && matches!(
+                        Header::parse(
+                            &content[..Header::resolve_len(raw_len)],
+                            raw_len,
+                            &(0..=u16::MAX),
+                        ),
+                        Ok((_, _, data_offset)) if data_offset == Layout::V2.data_offset()
+                    );
+                if valid_v2 {
+                    // V2 incarnations distinguish filesystem creations but are random. Their
+                    // immutable CRC is random as a consequence, so omit both from the
+                    // deterministic audit. Invalid headers remain byte-exact.
+                    hasher.update(&content[..Header::PRELUDE_SIZE]);
+                    hasher.update(
+                        &content[Header::PARSE_LEN + Header::V2_INCARNATION_LEN..],
+                    );
+                } else {
+                    hasher.update(content);
+                }
             }
+        }
+
+        for ((partition, name), generation) in &namespace.v2_generations {
+            hasher.update(b"atomic-tag");
+            hasher.update(partition.as_bytes());
+            hasher.update(name);
+            hasher.update(generation.committed_tag);
         }
 
         hasher.finalize()
@@ -368,6 +415,15 @@ impl crate::AtomicStorage for Storage {
 
         *durable = replacement;
         namespace.remove(&key);
+        let generation = namespace.generation(&key);
+        namespace.v2_generations.insert(
+            key,
+            V2Generation {
+                generation,
+                live: Weak::new(),
+                committed_tag: [0; ATOMIC_BLOB_TAG_LEN],
+            },
+        );
         Ok(())
     }
 
@@ -528,6 +584,12 @@ impl crate::BatchStorage for Storage {
             durable.copy_from_slice(content);
             state.logical_len = logical_len;
             state.committed_len = logical_len;
+            state.committed_tag = state.tag;
+            namespace
+                .v2_generations
+                .get_mut(&(blob.partition.clone(), blob.name.clone()))
+                .expect("validated atomic blob must have a generation")
+                .committed_tag = state.tag;
             state.dirty = false;
         }
 
@@ -641,11 +703,17 @@ impl Blob {
         live: &V2Live,
         data: IoBufs,
         expected_offset: Option<u64>,
+        tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
     ) -> Result<u64, crate::Error> {
         let mut state = live.state.lock();
         state.ensure_available()?;
         let offset = state.logical_len;
         if data.is_empty() {
+            if let Some(tag) = tag {
+                state.tag = tag;
+                state.dirty = state.logical_len != state.committed_len
+                    || state.tag != state.committed_tag;
+            }
             return Ok(offset);
         }
         if expected_offset.is_some_and(|expected| expected != offset) {
@@ -678,11 +746,19 @@ impl Blob {
             return Err(error);
         }
         state.logical_len = logical_end;
-        state.dirty = true;
+        if let Some(tag) = tag {
+            state.tag = tag;
+        }
+        state.dirty = state.logical_len != state.committed_len || state.tag != state.committed_tag;
         Ok(offset)
     }
 
-    fn rewind_v2(&self, live: &V2Live, len: u64) -> Result<(), crate::Error> {
+    fn rewind_v2(
+        &self,
+        live: &V2Live,
+        len: u64,
+        tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<(), crate::Error> {
         let mut state = live.state.lock();
         state.ensure_available()?;
         let mut content = live.content.write();
@@ -694,13 +770,15 @@ impl Blob {
             )
             .into());
         }
-        if len == state.logical_len {
-            return Ok(());
+        if len != state.logical_len {
+            let required = self.physical_len(len)?;
+            content.resize(required, 0);
+            state.logical_len = len;
         }
-        let required = self.physical_len(len)?;
-        content.resize(required, 0);
-        state.logical_len = len;
-        state.dirty = len != state.committed_len;
+        if let Some(tag) = tag {
+            state.tag = tag;
+        }
+        state.dirty = len != state.committed_len || state.tag != state.committed_tag;
         Ok(())
     }
 
@@ -711,7 +789,7 @@ impl Blob {
         self.validate_v2_content(&mut state, &live_content)?;
 
         let key = (self.partition.clone(), self.name.clone());
-        let namespace = self.namespace.lock();
+        let mut namespace = self.namespace.lock();
         self.ensure_current(&namespace, &key)?;
         let mut partitions = self.partitions.lock();
         let partition = partitions
@@ -727,6 +805,12 @@ impl Blob {
             Self::reserve_v2(durable_content, live_content.len())?;
             durable_content.clone_from(&live_content);
             state.committed_len = state.logical_len;
+            state.committed_tag = state.tag;
+            namespace
+                .v2_generations
+                .get_mut(&key)
+                .expect("live atomic blob must have a generation")
+                .committed_tag = state.tag;
             state.dirty = false;
         }
         Ok(())
@@ -823,7 +907,7 @@ impl crate::Blob for Blob {
             return Ok(());
         }
         if let Some(live) = &self.v2 {
-            self.append_v2(live, bufs, Some(offset))?;
+            self.append_v2(live, bufs, Some(offset), None)?;
             return if sync { self.sync_v2(live) } else { Ok(()) };
         }
         let buf = bufs.coalesce();
@@ -848,7 +932,7 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
         if let Some(live) = &self.v2 {
-            return self.rewind_v2(live, len);
+            return self.rewind_v2(live, len, None);
         }
         let len = len
             .checked_add(self.data_offset)
@@ -869,18 +953,63 @@ impl crate::Blob for Blob {
 }
 
 impl crate::AtomicBlob for Blob {
+    async fn tag(&self) -> Result<[u8; ATOMIC_BLOB_TAG_LEN], crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        let state = live.state.lock();
+        state.ensure_available()?;
+        Ok(state.tag)
+    }
+
+    async fn set_tag(&self, tag: [u8; ATOMIC_BLOB_TAG_LEN]) -> Result<(), crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        let mut state = live.state.lock();
+        state.ensure_available()?;
+        if state.tag != tag {
+            state.tag = tag;
+            state.dirty =
+                state.logical_len != state.committed_len || state.tag != state.committed_tag;
+        }
+        Ok(())
+    }
+
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, crate::Error> {
         let Some(live) = &self.v2 else {
             return Err(atomic_layout_required(&self.partition, &self.name));
         };
-        self.append_v2(live, data.into(), None)
+        self.append_v2(live, data.into(), None, None)
+    }
+
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        self.append_v2(live, data.into(), None, Some(tag))
     }
 
     async fn rewind(&self, len: u64) -> Result<(), crate::Error> {
         let Some(live) = &self.v2 else {
             return Err(atomic_layout_required(&self.partition, &self.name));
         };
-        self.rewind_v2(live, len)
+        self.rewind_v2(live, len, None)
+    }
+
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        self.rewind_v2(live, len, Some(tag))
     }
 }
 
@@ -1482,6 +1611,37 @@ mod tests {
         blob_b.sync().await.unwrap();
 
         assert_ne!(storage_a.audit(), storage_b.audit());
+    }
+
+    #[tokio::test]
+    async fn test_atomic_audit_is_deterministic() {
+        let storages = [Storage::new(test_pool()), Storage::new(test_pool())];
+        for storage in &storages {
+            let (blob, _) = storage
+                .open_atomic("partition", b"blob")
+                .await
+                .unwrap();
+            blob.append(b"payload").await.unwrap();
+            blob.sync().await.unwrap();
+        }
+
+        assert_eq!(storages[0].audit(), storages[1].audit());
+    }
+
+    #[tokio::test]
+    async fn test_opening_migrated_atomic_blob_does_not_change_audit() {
+        let storage = Storage::new(test_pool());
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"payload", WriteOptions::default())
+            .await
+            .unwrap();
+        storage.migrate_atomic(blob).await.unwrap();
+
+        let before = storage.audit();
+        let (blob, size) = storage.open_atomic("partition", b"blob").await.unwrap();
+        assert_eq!(size, 7);
+        drop(blob);
+        assert_eq!(storage.audit(), before);
     }
 
     #[tokio::test]

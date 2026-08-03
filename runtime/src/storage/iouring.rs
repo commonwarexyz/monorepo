@@ -149,6 +149,7 @@ struct V2WriteRequest {
     cache: iouring::Cache,
     retained: Arc<super::preflush::Context>,
     sync: bool,
+    tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
 }
 
 impl V2OperationGuard {
@@ -1051,15 +1052,32 @@ impl Storage {
                     Header::create(&versions)
                 };
                 let data_offset = region.len() as u64;
-                file.set_len(0).map_err(|error| {
-                    Error::BlobResizeFailed(partition.into(), hex(name), error.into())
-                })?;
-                file.seek(SeekFrom::Start(0))
-                    .map_err(|_| Error::WriteFailed)?;
-                file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-                file.sync_all().map_err(|error| {
-                    Error::BlobSyncFailed(partition.into(), hex(name), error.into())
-                })?;
+                if require_atomic {
+                    drop(file);
+                    file = super::atomic::discard(&self.storage_directory, &stored_partition, name)
+                        .and_then(|()| {
+                            super::atomic::create_live(
+                                &self.storage_directory,
+                                &stored_partition,
+                                name,
+                                &path,
+                                &region,
+                            )
+                        })
+                        .map_err(|error| {
+                            Error::BlobOpenFailed(partition.into(), hex(name), error.into())
+                        })?;
+                } else {
+                    file.set_len(0).map_err(|error| {
+                        Error::BlobResizeFailed(partition.into(), hex(name), error.into())
+                    })?;
+                    file.seek(SeekFrom::Start(0))
+                        .map_err(|_| Error::WriteFailed)?;
+                    file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+                    file.sync_all().map_err(|error| {
+                        Error::BlobSyncFailed(partition.into(), hex(name), error.into())
+                    })?;
+                }
                 (
                     0,
                     blob_version,
@@ -1543,7 +1561,11 @@ impl Blob {
         Ok(())
     }
 
-    async fn rewind_atomic(&self, len: u64) -> Result<(), Error> {
+    async fn rewind_atomic(
+        &self,
+        len: u64,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<(), Error> {
         let Some(atomic) = &self.atomic else {
             return Err(self.atomic_layout_required());
         };
@@ -1552,19 +1574,55 @@ impl Blob {
         state.validate_rewind(len)?;
         let truncate = len < state.logical_len() && len >= state.committed_len();
         self.rewind_log(&mut state, len).await?;
-        if !truncate {
-            return Ok(());
+        if truncate {
+            let raw_len = state.raw_len()?;
+            if let Err(error) = self.file.set_len(raw_len) {
+                state.poison();
+                return Err(Error::BlobResizeFailed(
+                    self.partition.clone(),
+                    hex(&self.name),
+                    IoError::other(error).into(),
+                ));
+            }
         }
-        let raw_len = state.raw_len()?;
-        if let Err(error) = self.file.set_len(raw_len) {
-            state.poison();
-            return Err(Error::BlobResizeFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::other(error).into(),
-            ));
+        if let Some(tag) = tag {
+            state.set_tag(tag)?;
         }
         Ok(())
+    }
+
+    async fn append_atomic(
+        &self,
+        data: IoBufs,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<u64, Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(self.atomic_layout_required());
+        };
+        let mut state = lock_v2(atomic).await;
+        self.ensure_healthy(&state)?;
+        let offset = state.logical_len();
+        let Some(prepared) = state.prepare_append(data)? else {
+            if let Some(tag) = tag {
+                state.set_tag(tag)?;
+            }
+            return Ok(offset);
+        };
+        self.start_v2_write(
+            state,
+            V2WriteRequest {
+                prepared,
+                options: WriteOptions::default(),
+                cache: iouring::Cache::Enabled,
+                retained: atomic.clone(),
+                sync: false,
+                tag,
+            },
+            None,
+        )
+        .await
+        .unwrap_or(Err(Error::Closed))?;
+        Ok(offset)
     }
 
     fn map_sync_error(&self, error: Error) -> Error {
@@ -1626,6 +1684,9 @@ impl Blob {
                         Err(_) => return Err(Error::Closed),
                     }
                     blob.request_preflush(range.end)?;
+                }
+                if let Some(tag) = request.tag {
+                    operation.state.set_tag(tag)?;
                 }
                 if request.sync {
                     blob.commit_log(&mut operation.state).await?;
@@ -1717,6 +1778,110 @@ impl Blob {
             })?;
         }
         state.finish_commit(prepared);
+        Ok(())
+    }
+
+    /// Publish one blob with a participant-embedded decision and one inode barrier.
+    async fn commit_uno(&self, state: &mut V2State) -> Result<(), Error> {
+        if !state.is_dirty() {
+            return Ok(());
+        }
+        if state.preflush_requested()? {
+            self.ensure_preflush(state.preflush_target()).await?;
+        }
+
+        let previous_candidate = state.deferred_batch_root().cloned();
+        let mut prepared = state
+            .prepare_commit()?
+            .expect("dirty atomic state always prepares a commit");
+        if matches!(
+            prepared.payload_checksum(),
+            super::atomic::PayloadChecksumEligibility::Ineligible
+        ) {
+            self.sync_batch_commit().await?;
+            prepared.mark_payload_preflushed();
+        }
+        prepared.mark_batch_prepared();
+        let namespace = self
+            .namespace
+            .as_ref()
+            .expect("V2 blobs always retain their namespace");
+        let (participant, descriptor) = super::batch::prepare_single_publish(
+            &self.partition,
+            &self.name,
+            self.incarnation(),
+            &prepared,
+        )?;
+
+        let previous = namespace.embedded_batch_decision.lock().clone();
+        if let Some(previous) = &previous {
+            let supersedes =
+                super::batch::can_supersede_embedded(previous, std::slice::from_ref(&participant))?;
+            if !supersedes {
+                let root = namespace.storage_directory.clone();
+                let previous = previous.clone();
+                match tokio::task::spawn_blocking(move || {
+                    super::batch::materialize_embedded(&root, &previous)
+                })
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                    Err(_) => return Err(Error::Closed),
+                }
+                *namespace.embedded_batch_decision.lock() = None;
+                namespace
+                    .carried_batch_decision
+                    .store(false, Ordering::Release);
+            }
+        }
+        if previous.is_none()
+            && let Some(candidate) = previous_candidate
+        {
+            let root = super::atomic::materialized_candidate_root(&candidate)?;
+            self.io_handle
+                .write_at(
+                    self.file.clone(),
+                    candidate.root_offset,
+                    root.to_vec().into(),
+                    WriteOptions::default(),
+                    iouring::Cache::Enabled,
+                )
+                .await?;
+        }
+        prepared.attach_batch_witness(&descriptor)?;
+        self.io_handle
+            .write_at(
+                self.file.clone(),
+                prepared.root_offset,
+                prepared.prepared_root.clone().into(),
+                WriteOptions::default(),
+                iouring::Cache::Enabled,
+            )
+            .await?;
+        self.sync_batch_commit().await?;
+        let raw_len = prepared.raw_len();
+        let requires_truncate = prepared.requires_truncate();
+        *namespace.embedded_batch_decision.lock() = Some(Arc::<[u8]>::from(descriptor));
+        namespace.recovery_required.store(true, Ordering::Release);
+        namespace
+            .carried_batch_decision
+            .store(true, Ordering::Release);
+        if requires_truncate {
+            self.file.set_len(raw_len).map_err(|error| {
+                Error::BlobResizeFailed(
+                    self.partition.clone(),
+                    hex(&self.name),
+                    IoError::other(error).into(),
+                )
+            })?;
+        }
+        self.atomic
+            .as_ref()
+            .expect("atomic commits require V2 state")
+            .preflush()
+            .record_durable(raw_len);
+        state.finish_batch_commit(prepared);
         Ok(())
     }
 
@@ -1870,7 +2035,17 @@ impl Blob {
             .expect("V2 blobs always retain their namespace")
             .clone();
         let namespace_guard = namespace.lock.clone().lock_owned().await;
-        namespace.recover_locked()?;
+        if namespace.carried_batch_decision.load(Ordering::Acquire) {
+            if namespace.embedded_batch_decision.lock().is_none() {
+                return Err(IoError::new(
+                    std::io::ErrorKind::InvalidData,
+                    "carried batch decision has no embedded witness",
+                )
+                .into());
+            }
+        } else {
+            namespace.recover_locked()?;
+        }
         if !namespace.is_current(&self.partition, &self.name, &self.generation) {
             return Err(Error::BlobMissing(self.partition.clone(), hex(&self.name)));
         }
@@ -1887,7 +2062,7 @@ impl Blob {
         drop(tokio::spawn(async move {
             let _namespace_guard = namespace_guard;
             let mut operation = V2OperationGuard::new(state);
-            let result = blob.commit_log(&mut operation.state).await;
+            let result = blob.commit_uno(&mut operation.state).await;
             Self::complete_v2_operation(operation, result, sender);
         }));
         Handle::from_receiver(receiver)
@@ -2042,6 +2217,7 @@ impl crate::Blob for Blob {
                         cache: self.cache_for(write_options),
                         retained: atomic.clone(),
                         sync,
+                        tag: None,
                     },
                     namespace_guard,
                 )
@@ -2071,7 +2247,7 @@ impl crate::Blob for Blob {
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
         if self.atomic.is_some() {
-            return self.rewind_atomic(len).await;
+            return self.rewind_atomic(len, None).await;
         }
 
         let raw_len = len
@@ -2125,35 +2301,47 @@ impl crate::Blob for Blob {
 }
 
 impl crate::AtomicBlob for Blob {
-    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
         let Some(atomic) = &self.atomic else {
             return Err(self.atomic_layout_required());
         };
-        let data = data.into();
+        let state = lock_v2(atomic).await;
+        self.ensure_healthy(&state)?;
+        Ok(state.tag())
+    }
+
+    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(self.atomic_layout_required());
+        };
         let mut state = lock_v2(atomic).await;
         self.ensure_healthy(&state)?;
-        let offset = state.logical_len();
-        let Some(prepared) = state.prepare_append(data)? else {
-            return Ok(offset);
-        };
-        self.start_v2_write(
-            state,
-            V2WriteRequest {
-                prepared,
-                options: WriteOptions::default(),
-                cache: iouring::Cache::Enabled,
-                retained: atomic.clone(),
-                sync: false,
-            },
-            None,
-        )
-        .await
-        .unwrap_or(Err(Error::Closed))?;
-        Ok(offset)
+        state.set_tag(tag)?;
+        Ok(())
+    }
+
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+        self.append_atomic(data.into(), None).await
+    }
+
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        self.append_atomic(data.into(), Some(tag)).await
     }
 
     async fn rewind(&self, len: u64) -> Result<(), Error> {
-        self.rewind_atomic(len).await
+        self.rewind_atomic(len, None).await
+    }
+
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
+        self.rewind_atomic(len, Some(tag)).await
     }
 }
 
@@ -2856,6 +3044,52 @@ mod tests {
             err.to_string()
                 .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic")
         );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_torn_v1_recreation_replaces_live_inode() {
+        let (storage, storage_directory) = create_test_storage();
+        let partition = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        let mut canonical = Header::create(&(0..=u16::MAX)).0;
+        canonical.truncate(Header::PARSE_LEN - 1);
+        let cases: [(&[u8], Vec<u8>); 2] = [(b"short", b"CWI".to_vec()), (b"canonical", canonical)];
+
+        for (name, torn) in &cases {
+            let live = partition.join(hex(name));
+            std::fs::write(&live, torn).unwrap();
+            let old_live = std::fs::File::open(&live).unwrap();
+
+            let staged = partition.join(format!(".commonware-uno-create-{}", hex(name)));
+            let atomic_region = Header::create_atomic(&(0..=u16::MAX)).0;
+            std::fs::write(&staged, &atomic_region[..Header::PARSE_LEN - 1]).unwrap();
+            std::fs::File::open(&partition).unwrap().sync_all().unwrap();
+
+            let (blob, size) = storage.open_atomic("partition", name).await.unwrap();
+            assert_eq!(size, 0);
+            assert_eq!(
+                old_live.metadata().unwrap().len(),
+                torn.len() as u64,
+                "atomic recreation must not rewrite the visible torn inode"
+            );
+            assert!(!staged.exists());
+            let raw = std::fs::read(&live).unwrap();
+            assert_eq!(raw.len(), Layout::V2.data_offset() as usize);
+            assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V2.magic());
+            drop(blob);
+        }
+
+        drop(storage);
+        let storage = start_test_storage(storage_directory.clone());
+        for (name, _) in &cases {
+            storage
+                .open_atomic("partition", name)
+                .await
+                .expect("atomically recreated blob must remain reopenable");
+        }
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

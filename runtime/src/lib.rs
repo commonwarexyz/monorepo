@@ -824,11 +824,13 @@ stability_scope!(BETA {
         ///
         /// # Filesystem Eligibility
         ///
-        /// The Tokio and io_uring implementations currently limit a batch to 32 dirty mutation
-        /// participants. At most 64 MiB of newly appended payload is revalidated after a crash;
-        /// larger or non-contiguous pending epochs are made durable before their roots are staged
-        /// rather than rejected. The exact descriptor must fit in the unused portion of every
-        /// participant's 4 KiB root slot. Clean publishes do not count as participants.
+        /// The Tokio and io_uring implementations reject more than 32 dirty mutation
+        /// participants, but descriptor space is currently tighter: even empty names fit at most
+        /// 28 participants, and real names or removals lower that bound. At most 64 MiB of newly
+        /// appended payload is revalidated after a crash; larger or non-contiguous pending epochs
+        /// are made durable before their roots are staged rather than rejected. The exact
+        /// descriptor must fit in the unused portion of every participant's 4 KiB root slot.
+        /// Clean publishes do not count as participants.
         fn start_apply(
             &self,
             operations: Vec<BatchOperation<Self::AtomicBlob>>,
@@ -967,6 +969,11 @@ stability_scope!(BETA {
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 
+    /// Number of application-owned bytes carried by an atomic blob root.
+    ///
+    /// The tag is published atomically with the blob's logical length.
+    pub const ATOMIC_BLOB_TAG_LEN: usize = 12;
+
     /// Opt-in interface for atomic, immediately visible journal mutations.
     ///
     /// On an atomic blob, [`Blob::write_at`] accepts only the current logical tail and
@@ -974,6 +981,26 @@ stability_scope!(BETA {
     /// below the last synchronized length fences appends until a successful [`Blob::sync`] or
     /// completed [`Blob::start_sync`] publishes the rewind.
     pub trait AtomicBlob: Blob {
+        /// Return the application-owned tag in the blob's current root.
+        ///
+        /// A newly created blob starts with an all-zero tag. Changes made through
+        /// [`AtomicBlob::set_tag`] are immediately visible through this handle and become durable
+        /// with the same [`Blob::sync`], [`Blob::start_sync`], or batch publication as the blob's
+        /// pending append or rewind.
+        fn tag(
+            &self,
+        ) -> impl Future<Output = Result<[u8; ATOMIC_BLOB_TAG_LEN], Error>> + Send;
+
+        /// Stage an application-owned tag to publish with this blob's logical length.
+        ///
+        /// Setting the current tag is a no-op. The tag is covered by the atomic root checksum and
+        /// participates in batch recovery, so it must contain only state whose meaning is local to
+        /// this blob or to the exact batch that publishes it.
+        fn set_tag(
+            &self,
+            tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
         /// Append `data` and return its starting logical offset.
         ///
         /// The bytes become immediately visible but require a subsequent successful sync to become
@@ -984,12 +1011,32 @@ stability_scope!(BETA {
             data: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<u64, Error>> + Send;
 
+        /// Append `data` and stage `tag` as one in-memory mutation.
+        ///
+        /// A concurrent sync observes either both changes or neither change. The bytes and tag
+        /// still require a subsequent successful sync to become durable.
+        fn append_tagged(
+            &self,
+            data: impl Into<IoBufs> + Send,
+            tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        ) -> impl Future<Output = Result<u64, Error>> + Send;
+
         /// Rewind the blob to `len`, which must not exceed its current logical length.
         ///
         /// Rewinding only unpublished appends permits immediate reuse of their physical tail.
         /// Rewinding committed bytes becomes durable at the next sync and fences appends until that
         /// sync completes successfully.
         fn rewind(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Rewind to `len` and stage `tag` as one in-memory mutation.
+        ///
+        /// A concurrent sync observes either both changes or neither change. The rewind and tag
+        /// still require a subsequent successful sync to become durable.
+        fn rewind_tagged(
+            &self,
+            len: u64,
+            tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

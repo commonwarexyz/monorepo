@@ -23,6 +23,7 @@ mod durability;
 pub mod fixed;
 mod metrics;
 pub mod variable;
+commonware_macros::stability_mod!(ALPHA, pub mod v2);
 
 #[cfg(test)]
 mod tests;

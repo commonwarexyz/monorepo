@@ -246,6 +246,23 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for Blob<B> {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+        self.auditor.event(b"tag", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
+        self.inner.tag().await
+    }
+
+    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        self.auditor.event(b"set_tag", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(tag);
+        });
+        self.inner.set_tag(tag).await
+    }
+
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         let data = data.into();
         self.auditor.event(b"append", |hasher| {
@@ -256,6 +273,21 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         self.inner.append(data).await
     }
 
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        let data = data.into();
+        self.auditor.event(b"append_tagged", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update_bufs(&data);
+            hasher.update(tag);
+        });
+        self.inner.append_tagged(data, tag).await
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.auditor.event(b"rewind", |hasher| {
             hasher.update(self.partition.as_bytes());
@@ -263,6 +295,20 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
             hasher.update(len.to_be_bytes());
         });
         self.inner.rewind(len).await
+    }
+
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
+        self.auditor.event(b"rewind_tagged", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(len.to_be_bytes());
+            hasher.update(tag);
+        });
+        self.inner.rewind_tagged(len, tag).await
     }
 }
 
@@ -647,12 +693,38 @@ mod tests {
     }
 
     impl crate::AtomicBlob for RecordingBlob {
+        async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+            Ok([0; crate::ATOMIC_BLOB_TAG_LEN])
+        }
+
+        async fn set_tag(&self, _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+            Ok(())
+        }
+
         async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
             self.appends.lock().push(data.into().chunk_count());
             Ok(7)
         }
 
+        async fn append_tagged(
+            &self,
+            data: impl Into<IoBufs> + Send,
+            _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+        ) -> Result<u64, Error> {
+            self.appends.lock().push(data.into().chunk_count());
+            Ok(7)
+        }
+
         async fn rewind(&self, len: u64) -> Result<(), Error> {
+            self.rewinds.lock().push(len);
+            Ok(())
+        }
+
+        async fn rewind_tagged(
+            &self,
+            len: u64,
+            _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+        ) -> Result<(), Error> {
             self.rewinds.lock().push(len);
             Ok(())
         }

@@ -66,11 +66,12 @@
 //! is decoded independently from that header, allowing another final participant to repair a torn
 //! peer. Unlinks begin only after every final-root durability operation returns.
 //!
-//! Recovery is limited to 32 dirty participants and at most 64 MiB of payload revalidation across
-//! a group. Larger or non-contiguous pending append epochs are preflushed before roots are staged.
-//! The complete descriptor must fit beside the root in each 4 KiB slot. CRC32C detects accidental
-//! local-disk crash corruption probabilistically; it does not authenticate storage against an actor
-//! that can also rewrite checksums.
+//! The configured recovery cap is 32 dirty participants, but the root slot is tighter: the current
+//! encoding fits at most 28 even with empty names, and real names or removals lower that bound. At
+//! most 64 MiB of payload is revalidated across a group. Larger or non-contiguous pending append
+//! epochs are preflushed before roots are staged. CRC32C detects accidental local-disk crash
+//! corruption probabilistically; it does not authenticate storage against an actor that can also
+//! rewrite checksums.
 
 use super::{Operation, is_canonical_operations};
 use crate::{RemoveTarget, storage::atomic};
@@ -933,6 +934,36 @@ pub(crate) fn prepare_embedded(
     encode_descriptor(participants, operations)
 }
 
+/// Encode the self-contained decision used by the one-participant publication fast path.
+pub(in crate::storage) fn prepare_single_publish(
+    partition: &str,
+    name: &[u8],
+    incarnation: [u8; super::super::header::Header::V2_INCARNATION_LEN],
+    prepared: &atomic::PreparedCommit,
+) -> io::Result<(Participant, Vec<u8>)> {
+    let atomic::PayloadChecksumEligibility::Eligible(payload_checksum) =
+        prepared.payload_checksum()
+    else {
+        return Err(invalid_input(
+            "single-participant publication payload is not recoverable",
+        ));
+    };
+    let participant = Participant {
+        partition: partition.to_string(),
+        name: name.to_vec(),
+        incarnation,
+        candidate: prepared.candidate(),
+        payload_start: prepared.payload_start(),
+        payload_checksum,
+    };
+    let operations = [Operation::Publish {
+        partition: participant.partition.clone(),
+        name: participant.name.clone(),
+    }];
+    let descriptor = prepare_embedded(std::slice::from_ref(&participant), &operations)?;
+    Ok((participant, descriptor))
+}
+
 /// Return whether a new exact group can replace the preceding embedded decision in two slots.
 pub(crate) fn can_supersede_embedded(
     encoded: &[u8],
@@ -1471,7 +1502,19 @@ mod tests {
             prepared.push(commit);
         }
 
-        let descriptor = prepare_embedded(&participants, &operations).unwrap();
+        let descriptor = if participants.len() == 1 && matches!(roles[0], Role::Retain(_)) {
+            let (participant, descriptor) = prepare_single_publish(
+                PARTITION,
+                &blobs[0].name,
+                blobs[0].incarnation,
+                &prepared[0],
+            )
+            .unwrap();
+            assert_eq!(participant, participants[0]);
+            descriptor
+        } else {
+            prepare_embedded(&participants, &operations).unwrap()
+        };
         for commit in &mut prepared {
             commit.attach_batch_witness(&descriptor).unwrap();
         }
@@ -1675,6 +1718,39 @@ mod tests {
 
         assert_eq!(blobs[0].recovered_payload(), old);
         assert_eq!(blobs[1].recovered_payload(), b"b-old");
+    }
+
+    #[test]
+    fn single_publish_rejects_arbitrary_payload_write_subsets() {
+        let root = TestRoot::new("single-payload-subsets");
+        let old = b"old";
+        let appended = [1, 2, 4, 8, 16, 32, 64, 128];
+        let mut blobs = vec![TestBlob::create(root.path(), b"a", 9, old)];
+        let group = stage_group(&mut blobs, &[Role::Retain(appended.to_vec())]);
+        group.write_all(&blobs);
+
+        let append_offset = data_offset() + old.len() as u64;
+        for mask in 0u16..(1 << appended.len()) - 1 {
+            let survived = appended
+                .iter()
+                .enumerate()
+                .map(
+                    |(index, byte)| {
+                        if mask & (1 << index) == 0 { 0 } else { *byte }
+                    },
+                )
+                .collect::<Vec<_>>();
+            blobs[0]
+                .file
+                .write_all_at(&survived, append_offset)
+                .unwrap();
+            assert!(
+                !recover_from(root.path(), &blobs[0]),
+                "payload survival mask {mask:08b}"
+            );
+        }
+
+        assert_eq!(blobs[0].recovered_payload(), old);
     }
 
     #[test]

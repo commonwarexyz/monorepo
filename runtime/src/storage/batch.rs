@@ -376,3 +376,6 @@ pub(crate) use coordinator::{
     recover_partition_embedded, recover_removal_witnesses, resolve_partition_name,
     supports_speculation,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(in crate::storage) use coordinator::prepare_single_publish;

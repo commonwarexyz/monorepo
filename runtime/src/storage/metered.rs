@@ -294,6 +294,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for Blob<B> {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+        self.inner.tag().await
+    }
+
+    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        self.inner.set_tag(tag).await
+    }
+
     #[tracing::instrument(
         name = "runtime.storage.blob.append",
         level = "info",
@@ -310,6 +318,25 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
     }
 
     #[tracing::instrument(
+        name = "runtime.storage.blob.append_tagged",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, bytes = Empty)
+    )]
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        let data = data.into();
+        let data_len = data.remaining();
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(data_len as u64);
+        Span::current().record("bytes", data_len as u64);
+        self.inner.append_tagged(data, tag).await
+    }
+
+    #[tracing::instrument(
         name = "runtime.storage.blob.rewind",
         level = "info",
         skip_all,
@@ -318,6 +345,21 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.metrics.storage_resizes.inc();
         self.inner.rewind(len).await
+    }
+
+    #[tracing::instrument(
+        name = "runtime.storage.blob.rewind_tagged",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, len = len)
+    )]
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
+        self.metrics.storage_resizes.inc();
+        self.inner.rewind_tagged(len, tag).await
     }
 }
 

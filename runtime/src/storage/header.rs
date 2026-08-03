@@ -410,6 +410,7 @@ stability_scope!(BETA {
         }
 
         /// Return the persistent identity of a validated V2 immutable header page.
+        #[cfg(any(unix, test))]
         pub(crate) fn atomic_incarnation(raw: &[u8]) -> Option<[u8; Self::V2_INCARNATION_LEN]> {
             if raw.len() < Self::V2_IMMUTABLE_LEN
                 || raw.get(..Self::MAGIC_LENGTH) != Some(Layout::V2.magic().as_slice())

@@ -54,6 +54,33 @@ impl V2Context {
     }
 }
 
+/// Owns V2 state while a detached publication worker can no longer report panics to its caller.
+struct V2PublicationGuard {
+    state: OwnedMutexGuard<V2State>,
+    completed: bool,
+}
+
+impl V2PublicationGuard {
+    const fn new(state: OwnedMutexGuard<V2State>) -> Self {
+        Self {
+            state,
+            completed: false,
+        }
+    }
+
+    fn finish(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for V2PublicationGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.state.poison();
+        }
+    }
+}
+
 /// Page-cache policy for one write request.
 enum Cache {
     /// Use the operating system's normal page-cache behavior.
@@ -346,7 +373,11 @@ impl Blob {
         Ok(())
     }
 
-    async fn rewind_atomic(&self, len: u64) -> Result<(), Error> {
+    async fn rewind_atomic(
+        &self,
+        len: u64,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<(), Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
         };
@@ -367,6 +398,9 @@ impl Blob {
                         )
                     })?;
                 }
+                if let Some(tag) = tag {
+                    state.set_tag(tag)?;
+                }
                 Ok(())
             })();
             if result.is_err() {
@@ -379,6 +413,57 @@ impl Blob {
             let error: std::io::Error = error.into();
             Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), error.into())
         })?
+    }
+
+    async fn append_atomic(
+        &self,
+        data: IoBufs,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<u64, Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(Self::atomic_layout_required(&self.partition, &self.name));
+        };
+        let mut state = atomic.lock().await;
+        self.ensure_healthy(&state)?;
+        let offset = state.logical_len();
+        let Some(prepared) = state.prepare_append(data)? else {
+            if let Some(tag) = tag {
+                state.set_tag(tag)?;
+            }
+            return Ok(offset);
+        };
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let dont_cache_supported = self.dont_cache_supported.clone();
+        let blob = self.clone();
+        task::spawn_blocking(move || {
+            let result = (|| {
+                Self::write_with_options(
+                    &file,
+                    prepared.file_offset,
+                    prepared.data,
+                    WriteOptions::default(),
+                    dont_cache_supported,
+                    &partition,
+                    &name,
+                )?;
+                if let Some(range) = state.finish_mutation(prepared.mutation, true) {
+                    atomic::begin_payload_writeback(&file, range.start, range.end - range.start)?;
+                    blob.request_preflush(range.end)?;
+                }
+                if let Some(tag) = tag {
+                    state.set_tag(tag)?;
+                }
+                Ok(offset)
+            })();
+            if result.is_err() {
+                state.poison();
+            }
+            result
+        })
+        .await
+        .unwrap_or(Err(Error::WriteFailed))
     }
 
     fn prepare_log_writes(
@@ -438,6 +523,89 @@ impl Blob {
             })?;
         }
         state.finish_commit(prepared);
+        Ok(())
+    }
+
+    /// Publish one blob with the same recoverable prepared-root decision used by a batch.
+    ///
+    /// The payload, root, and embedded self-descriptor share one inode barrier. If that barrier is
+    /// interrupted, recovery validates the bounded payload suffix before accepting the root.
+    fn commit_uno(&self, state: &mut V2State) -> Result<(), Error> {
+        if !state.is_dirty() {
+            return Ok(());
+        }
+        if state.preflush_requested()? {
+            self.ensure_preflush_blocking(state.preflush_target())?;
+        }
+
+        let previous_candidate = state.deferred_batch_root().cloned();
+        let mut prepared = state
+            .prepare_commit()?
+            .expect("dirty atomic state always prepares a commit");
+        if matches!(
+            prepared.payload_checksum(),
+            atomic::PayloadChecksumEligibility::Ineligible
+        ) {
+            Self::sync_inner(&self.file, &self.partition, &self.name)?;
+            prepared.mark_payload_preflushed();
+        }
+        prepared.mark_batch_prepared();
+        let atomic = self
+            .atomic
+            .as_ref()
+            .expect("atomic commits require V2 state");
+        let (participant, descriptor) = super::super::batch::prepare_single_publish(
+            &self.partition,
+            &self.name,
+            atomic.incarnation,
+            &prepared,
+        )?;
+
+        let previous = atomic.namespace.embedded_batch_decision();
+        if let Some(previous) = &previous {
+            let supersedes = super::super::batch::can_supersede_embedded(
+                previous,
+                std::slice::from_ref(&participant),
+            )?;
+            if !supersedes {
+                super::super::batch::materialize_embedded(&atomic.storage_directory, previous)?;
+                atomic.namespace.set_embedded_batch_decision(None);
+                atomic
+                    .namespace
+                    .carried_batch_decision
+                    .store(false, Ordering::Release);
+            }
+        }
+        if previous.is_none()
+            && let Some(candidate) = previous_candidate
+        {
+            let root = atomic::materialized_candidate_root(&candidate)?;
+            self.file.write_all_at(&root, candidate.root_offset)?;
+        }
+        prepared.attach_batch_witness(&descriptor)?;
+        self.file
+            .write_all_at(&prepared.prepared_root, prepared.root_offset)?;
+        Self::sync_inner(&self.file, &self.partition, &self.name)?;
+        let raw_len = prepared.raw_len();
+        let requires_truncate = prepared.requires_truncate();
+        atomic
+            .namespace
+            .set_embedded_batch_decision(Some(Arc::<[u8]>::from(descriptor)));
+        atomic
+            .namespace
+            .recovery_required
+            .store(true, Ordering::Release);
+        atomic
+            .namespace
+            .carried_batch_decision
+            .store(true, Ordering::Release);
+        if requires_truncate {
+            self.file.set_len(raw_len).map_err(|error| {
+                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), error.into())
+            })?;
+        }
+        atomic.preflush().record_durable(raw_len);
+        state.finish_batch_commit(prepared);
         Ok(())
     }
 
@@ -594,12 +762,27 @@ impl Blob {
         let state = atomic.lock().await;
         self.ensure_healthy(&state)?;
         let namespace_guard = atomic.namespace.lock.clone().lock_owned().await;
-        let namespace_guard = super::recover_namespace(
-            atomic.namespace.clone(),
-            atomic.storage_directory.clone(),
-            namespace_guard,
-        )
-        .await?;
+        let namespace_guard = if atomic
+            .namespace
+            .carried_batch_decision
+            .load(Ordering::Acquire)
+        {
+            if atomic.namespace.embedded_batch_decision().is_none() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "carried batch decision has no embedded witness",
+                )
+                .into());
+            }
+            namespace_guard
+        } else {
+            super::recover_namespace(
+                atomic.namespace.clone(),
+                atomic.storage_directory.clone(),
+                namespace_guard,
+            )
+            .await?
+        };
         if !atomic
             .namespace
             .is_current(&self.partition, &self.name, &self.generation)
@@ -611,16 +794,17 @@ impl Blob {
 
     fn start_atomic_sync_locked(
         &self,
-        mut state: OwnedMutexGuard<V2State>,
+        state: OwnedMutexGuard<V2State>,
         namespace_guard: OwnedMutexGuard<()>,
     ) -> Handle<()> {
         let (tx, rx) = oneshot::channel();
         let blob = self.clone();
         task::spawn_blocking(move || {
             let _namespace_guard = namespace_guard;
-            let result = blob.commit_log(&mut state);
-            if result.is_err() {
-                state.poison();
+            let mut operation = V2PublicationGuard::new(state);
+            let result = blob.commit_uno(&mut operation.state);
+            if result.is_ok() {
+                operation.finish();
             }
             let _ = tx.send(result);
         });
@@ -855,7 +1039,7 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         if self.atomic.is_some() {
-            return self.rewind_atomic(len).await;
+            return self.rewind_atomic(len, None).await;
         }
         let file = self.file.clone();
         let len = len
@@ -909,50 +1093,47 @@ impl crate::Blob for Blob {
 }
 
 impl crate::AtomicBlob for Blob {
-    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
         };
-        let data = data.into();
+        let state = atomic.lock().await;
+        self.ensure_healthy(&state)?;
+        Ok(state.tag())
+    }
+
+    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(Self::atomic_layout_required(&self.partition, &self.name));
+        };
         let mut state = atomic.lock().await;
         self.ensure_healthy(&state)?;
-        let offset = state.logical_len();
-        let Some(prepared) = state.prepare_append(data)? else {
-            return Ok(offset);
-        };
-        let file = self.file.clone();
-        let partition = self.partition.clone();
-        let name = self.name.clone();
-        let dont_cache_supported = self.dont_cache_supported.clone();
-        let blob = self.clone();
-        task::spawn_blocking(move || {
-            let result = (|| {
-                Self::write_with_options(
-                    &file,
-                    prepared.file_offset,
-                    prepared.data,
-                    WriteOptions::default(),
-                    dont_cache_supported,
-                    &partition,
-                    &name,
-                )?;
-                if let Some(range) = state.finish_mutation(prepared.mutation, true) {
-                    atomic::begin_payload_writeback(&file, range.start, range.end - range.start)?;
-                    blob.request_preflush(range.end)?;
-                }
-                Ok(offset)
-            })();
-            if result.is_err() {
-                state.poison();
-            }
-            result
-        })
-        .await
-        .unwrap_or(Err(Error::WriteFailed))
+        state.set_tag(tag)?;
+        Ok(())
+    }
+
+    async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
+        self.append_atomic(data.into(), None).await
+    }
+
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        self.append_atomic(data.into(), Some(tag)).await
     }
 
     async fn rewind(&self, len: u64) -> Result<(), Error> {
-        self.rewind_atomic(len).await
+        self.rewind_atomic(len, None).await
+    }
+
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
+        self.rewind_atomic(len, Some(tag)).await
     }
 }
 

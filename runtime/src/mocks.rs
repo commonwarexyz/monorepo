@@ -696,12 +696,36 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for DelayedSyncBlob<B> {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+        self.inner.tag().await
+    }
+
+    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        self.inner.set_tag(tag).await
+    }
+
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         self.inner.append(data).await
     }
 
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        self.inner.append_tagged(data, tag).await
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.inner.rewind(len).await
+    }
+
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
+        self.inner.rewind_tagged(len, tag).await
     }
 }
 
@@ -1034,6 +1058,17 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for WriteFaultBlob<B> {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+        self.inner.tag().await
+    }
+
+    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.set_tag(tag).await?;
+        self.faults.note();
+        Ok(())
+    }
+
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         self.faults.check()?;
         let offset = self.inner.append(data).await?;
@@ -1041,8 +1076,27 @@ impl<B: AtomicBlob> AtomicBlob for WriteFaultBlob<B> {
         Ok(offset)
     }
 
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        self.faults.check()?;
+        let offset = self.inner.append_tagged(data, tag).await?;
+        self.faults.note();
+        Ok(offset)
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.inner.rewind(len).await
+    }
+
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
+        self.inner.rewind_tagged(len, tag).await
     }
 }
 
@@ -1174,12 +1228,36 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 }
 
 impl<B: AtomicBlob> AtomicBlob for SyncFaultBlob<B> {
+    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+        self.inner.tag().await
+    }
+
+    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+        self.inner.set_tag(tag).await
+    }
+
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         self.inner.append(data).await
     }
 
+    async fn append_tagged(
+        &self,
+        data: impl Into<IoBufs> + Send,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<u64, Error> {
+        self.inner.append_tagged(data, tag).await
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.inner.rewind(len).await
+    }
+
+    async fn rewind_tagged(
+        &self,
+        len: u64,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<(), Error> {
+        self.inner.rewind_tagged(len, tag).await
     }
 }
 

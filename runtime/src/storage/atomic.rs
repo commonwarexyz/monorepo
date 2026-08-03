@@ -31,9 +31,11 @@
 //! +----------------------+
 //! ```
 //!
-//! An ordinary root slot contains a self-contained 40-byte root header. A batch-prepared slot also
-//! stores a 16-byte witness header and the exact group descriptor immediately after the root. The
-//! witness header contains magic, descriptor length, and a domain-separated CRC32C.
+//! An ordinary root slot contains a self-contained 40-byte root header: its spelling, generation,
+//! logical length, 12 application-owned tag bytes, and a CRC32C over all preceding fields. A
+//! batch-prepared slot also stores a 16-byte witness header and the exact group descriptor
+//! immediately after the root. The witness header contains magic, descriptor length, and a
+//! domain-separated CRC32C.
 //!
 //! ```text
 //! +-------------+---------------+------------+-----------------------------+
@@ -48,7 +50,7 @@
 //! recovery protocol and its crash outcomes are documented in `storage::batch::coordinator`.
 
 use crate::{
-    IoBufs,
+    ATOMIC_BLOB_TAG_LEN, IoBufs,
     storage::{Header, Layout},
 };
 use commonware_cryptography::{Crc32, Hasher as _};
@@ -171,6 +173,20 @@ mod tests {
     }
 
     #[test]
+    fn rewind_to_committed_length_still_publishes_a_pending_tag() {
+        let (path, file) = test_file();
+        let mut state = State::empty(DATA_OFFSET);
+        append(&file, &mut state, b"base");
+        commit(&file, &mut state);
+
+        state.set_tag([0xA5; ATOMIC_BLOB_TAG_LEN]).unwrap();
+        append(&file, &mut state, b"pending");
+        assert!(state.participates_after_rewind(4).unwrap());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn unpublished_rewind_reuses_the_physical_tail() {
         let (path, file) = test_file();
         let mut state = State::empty(DATA_OFFSET);
@@ -236,8 +252,10 @@ mod tests {
         for retained in 0..=(PAYLOAD_FIRST | PAYLOAD_SECOND | PREPARED_ROOT) {
             let (path, file) = test_file();
             let mut state = State::empty(DATA_OFFSET);
+            state.set_tag([0x11; ATOMIC_BLOB_TAG_LEN]).unwrap();
             append(&file, &mut state, b"old");
             commit(&file, &mut state);
+            state.set_tag([0x22; ATOMIC_BLOB_TAG_LEN]).unwrap();
 
             for (bit, data) in [
                 (PAYLOAD_FIRST, b"new-".as_slice()),
@@ -265,14 +283,17 @@ mod tests {
 
             let recovered = State::recover(&file, DATA_OFFSET).unwrap();
             assert_eq!(read(&file, &recovered), b"old", "retained mask {retained}");
+            assert_eq!(recovered.tag(), [0x11; ATOMIC_BLOB_TAG_LEN]);
             fs::remove_file(path).unwrap();
         }
 
         for committed_root_retained in [false, true] {
             let (path, file) = test_file();
             let mut state = State::empty(DATA_OFFSET);
+            state.set_tag([0x11; ATOMIC_BLOB_TAG_LEN]).unwrap();
             append(&file, &mut state, b"old");
             commit(&file, &mut state);
+            state.set_tag([0x22; ATOMIC_BLOB_TAG_LEN]).unwrap();
             append(&file, &mut state, b"new-tail");
             let prepared = state.prepare_commit().unwrap().unwrap();
             file.write_all_at(&prepared.prepared_root, prepared.root_offset)
@@ -289,6 +310,14 @@ mod tests {
                 b"old"
             };
             assert_eq!(read(&file, &recovered), expected);
+            assert_eq!(
+                recovered.tag(),
+                if committed_root_retained {
+                    [0x22; ATOMIC_BLOB_TAG_LEN]
+                } else {
+                    [0x11; ATOMIC_BLOB_TAG_LEN]
+                }
+            );
             fs::remove_file(path).unwrap();
         }
     }
@@ -318,8 +347,10 @@ mod tests {
             for (case, mask) in masks.iter().enumerate() {
                 let (path, file) = test_file();
                 let mut state = State::empty(DATA_OFFSET);
+                state.set_tag([0x11; ATOMIC_BLOB_TAG_LEN]).unwrap();
                 append(&file, &mut state, b"abcdef");
                 commit(&file, &mut state);
+                state.set_tag([0x22; ATOMIC_BLOB_TAG_LEN]).unwrap();
 
                 if rewind {
                     state.rewind(3).unwrap();
@@ -350,6 +381,15 @@ mod tests {
                 assert_eq!(
                     read(&file, &recovered),
                     expected,
+                    "rewind={rewind} case={case}"
+                );
+                assert_eq!(
+                    recovered.tag(),
+                    if torn == prepared.committed_root {
+                        [0x22; ATOMIC_BLOB_TAG_LEN]
+                    } else {
+                        [0x11; ATOMIC_BLOB_TAG_LEN]
+                    },
                     "rewind={rewind} case={case}"
                 );
                 fs::remove_file(path).unwrap();
@@ -736,7 +776,12 @@ mod tests {
             if retained & ROOT != 0 {
                 stage
                     .write_all_at(
-                        &encode_root(ROOT_MAGIC, 1, PAYLOAD.len() as u64),
+                        &encode_root(
+                            ROOT_MAGIC,
+                            1,
+                            PAYLOAD.len() as u64,
+                            [0; ATOMIC_BLOB_TAG_LEN],
+                        ),
                         ROOT_OFFSETS[1],
                     )
                     .unwrap();
@@ -1165,6 +1210,8 @@ pub(super) struct State {
     logical_len: u64,
     committed_len: u64,
     generation: u64,
+    tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    committed_tag: [u8; ATOMIC_BLOB_TAG_LEN],
     /// Prefix that must be durable before a root may omit its bytes from payload validation.
     preflush_target: u64,
     payload_checksum: PayloadChecksumTracker,
@@ -1180,6 +1227,8 @@ impl State {
             logical_len: 0,
             committed_len: 0,
             generation: 0,
+            tag: [0; ATOMIC_BLOB_TAG_LEN],
+            committed_tag: [0; ATOMIC_BLOB_TAG_LEN],
             preflush_target: data_offset,
             payload_checksum: PayloadChecksumTracker::new(data_offset),
             deferred_batch_root: None,
@@ -1270,6 +1319,22 @@ impl State {
         self.committed_len
     }
 
+    pub(super) const fn tag(&self) -> [u8; ATOMIC_BLOB_TAG_LEN] {
+        self.tag
+    }
+
+    pub(super) fn set_tag(&mut self, tag: [u8; ATOMIC_BLOB_TAG_LEN]) -> io::Result<()> {
+        if self.poisoned {
+            return Err(invalid_data("atomic blob generation is poisoned"));
+        }
+        if self.tag == tag {
+            return Ok(());
+        }
+        self.tag = tag;
+        self.dirty = self.logical_len != self.committed_len || self.tag != self.committed_tag;
+        Ok(())
+    }
+
     pub(super) const fn deferred_batch_root(&self) -> Option<&Candidate> {
         self.deferred_batch_root.as_ref()
     }
@@ -1288,7 +1353,7 @@ impl State {
         if len == self.logical_len {
             return Ok(self.dirty);
         }
-        Ok(len != self.committed_len)
+        Ok(len != self.committed_len || self.tag != self.committed_tag)
     }
 
     /// Return whether batch preparation can finish without waiting for payload durability.
@@ -1447,7 +1512,7 @@ impl State {
         if len == self.committed_len {
             self.preflush_target = frontier;
             self.payload_checksum = PayloadChecksumTracker::new(frontier);
-            self.dirty = false;
+            self.dirty = self.tag != self.committed_tag;
         } else if payload_preflushed || len < self.committed_len {
             self.preflush_target = raw_end;
             self.payload_checksum = PayloadChecksumTracker::new(raw_end);
@@ -1506,8 +1571,9 @@ impl State {
             .ok_or_else(|| invalid_data("atomic generation overflow"))?;
         let payload_end = self.raw_len()?;
         let root_offset = ROOT_OFFSETS[(generation as usize) & 1];
-        let committed_root = encode_root(ROOT_MAGIC, generation, self.logical_len);
-        let prepared_root = encode_root(PREPARED_ROOT_MAGIC, generation, self.logical_len).to_vec();
+        let committed_root = encode_root(ROOT_MAGIC, generation, self.logical_len, self.tag);
+        let prepared_root =
+            encode_root(PREPARED_ROOT_MAGIC, generation, self.logical_len, self.tag).to_vec();
 
         let committed_payload_start = if self.logical_len < self.committed_len {
             payload_end
@@ -1554,9 +1620,19 @@ impl State {
         Ok(PreparedCommit {
             payload_start: payload_end,
             root_offset,
-            prepared_root: encode_root(PREPARED_ROOT_MAGIC, generation, self.committed_len)
-                .to_vec(),
-            committed_root: encode_root(ROOT_MAGIC, generation, self.committed_len),
+            prepared_root: encode_root(
+                PREPARED_ROOT_MAGIC,
+                generation,
+                self.committed_len,
+                self.committed_tag,
+            )
+            .to_vec(),
+            committed_root: encode_root(
+                ROOT_MAGIC,
+                generation,
+                self.committed_len,
+                self.committed_tag,
+            ),
             payload_checksum: PayloadChecksumEligibility::Eligible(None),
             commit: Commit {
                 generation,
@@ -1569,6 +1645,7 @@ impl State {
     fn apply_commit(&mut self, prepared: PreparedCommit) {
         self.generation = prepared.commit.generation;
         self.committed_len = self.logical_len;
+        self.committed_tag = self.tag;
         self.preflush_target = prepared.commit.append_offset;
         self.payload_checksum = PayloadChecksumTracker::new(prepared.commit.append_offset);
         self.dirty = false;
@@ -1587,11 +1664,17 @@ impl State {
     }
 }
 
-fn encode_root(magic: &[u8; 8], generation: u64, logical_len: u64) -> [u8; ROOT_LEN] {
+fn encode_root(
+    magic: &[u8; 8],
+    generation: u64,
+    logical_len: u64,
+    tag: [u8; ATOMIC_BLOB_TAG_LEN],
+) -> [u8; ROOT_LEN] {
     let mut root = [0u8; ROOT_LEN];
     root[..8].copy_from_slice(magic);
     root[8..16].copy_from_slice(&generation.to_be_bytes());
     root[16..24].copy_from_slice(&logical_len.to_be_bytes());
+    root[24..36].copy_from_slice(&tag);
     let root_checksum = checksum(&[ROOT_DOMAIN, &root[..ROOT_BODY_LEN]]);
     root[36..40].copy_from_slice(&root_checksum.to_be_bytes());
     root
@@ -1601,6 +1684,7 @@ fn encode_root(magic: &[u8; 8], generation: u64, logical_len: u64) -> [u8; ROOT_
 struct Root {
     generation: u64,
     logical_len: u64,
+    tag: [u8; ATOMIC_BLOB_TAG_LEN],
 }
 
 fn decode_root_with_magic(encoded: &[u8; ROOT_LEN], magic: &[u8; 8]) -> Option<Root> {
@@ -1617,9 +1701,11 @@ fn decode_root_with_magic(encoded: &[u8; ROOT_LEN], magic: &[u8; 8]) -> Option<R
 fn decode_root_fields(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
     let generation = u64::from_be_bytes(encoded[8..16].try_into().unwrap());
     let logical_len = u64::from_be_bytes(encoded[16..24].try_into().unwrap());
-    (generation != 0 && encoded[24..36].iter().all(|byte| *byte == 0)).then_some(Root {
+    let tag = encoded[24..36].try_into().unwrap();
+    (generation != 0).then_some(Root {
         generation,
         logical_len,
+        tag,
     })
 }
 
@@ -1676,6 +1762,7 @@ fn candidate_roots_match(candidate: &Candidate, prepared: Root, committed: Root)
     candidate.base_generation.checked_add(1) == Some(committed.generation)
         && committed.generation == prepared.generation
         && committed.logical_len == prepared.logical_len
+        && committed.tag == prepared.tag
         && ROOT_OFFSETS[(committed.generation as usize) & 1] == candidate.root_offset
 }
 
@@ -1689,6 +1776,7 @@ fn candidate_materialized_root(candidate: &Candidate) -> Option<[u8; ROOT_LEN]> 
         MATERIALIZED_ROOT_MAGIC,
         committed.generation,
         committed.logical_len,
+        committed.tag,
     ))
 }
 
@@ -1702,6 +1790,7 @@ fn candidate_tombstone_root(candidate: &Candidate) -> Option<[u8; ROOT_LEN]> {
         TOMBSTONE_ROOT_MAGIC,
         committed.generation,
         committed.logical_len,
+        committed.tag,
     ))
 }
 
@@ -1794,9 +1883,18 @@ fn embedded_batch_candidates_with_materialized(
         let Some(root) = decode_root_fields(&encoded) else {
             continue;
         };
-        let prepared_root =
-            encode_root(BATCH_PREPARED_ROOT_MAGIC, root.generation, root.logical_len);
-        let committed_root = encode_root(ROOT_MAGIC, root.generation, root.logical_len);
+        let prepared_root = encode_root(
+            BATCH_PREPARED_ROOT_MAGIC,
+            root.generation,
+            root.logical_len,
+            root.tag,
+        );
+        let committed_root = encode_root(
+            ROOT_MAGIC,
+            root.generation,
+            root.logical_len,
+            root.tag,
+        );
         let candidate = Candidate {
             base_generation: root.generation - 1,
             root_offset,
@@ -2053,6 +2151,8 @@ fn recover_root(
     state.logical_len = root.logical_len;
     state.committed_len = root.logical_len;
     state.generation = root.generation;
+    state.tag = root.tag;
+    state.committed_tag = root.tag;
     state.preflush_target = payload_end;
     state.payload_checksum = PayloadChecksumTracker::new(payload_end);
     Ok((state, CandidateMetadata { payload_end }))
@@ -2141,6 +2241,7 @@ fn validate_candidate_transition(
             .ok_or_else(|| invalid_data("transaction candidate generation overflow"))?
         || committed.generation != prepared.generation
         || committed.logical_len != prepared.logical_len
+        || committed.tag != prepared.tag
         || ROOT_OFFSETS[(committed.generation as usize) & 1] != candidate.root_offset
     {
         return Err(invalid_data("transaction candidate roots do not match"));
@@ -2351,7 +2452,12 @@ pub(super) fn migrate_live(
         .create_new(true)
         .open(&creation_path)?;
     let mut region = Header::create_atomic(&(blob_version..=blob_version)).0;
-    let initial_root = encode_root(ROOT_MAGIC, 1, logical_len);
+    let initial_root = encode_root(
+        ROOT_MAGIC,
+        1,
+        logical_len,
+        [0; ATOMIC_BLOB_TAG_LEN],
+    );
     let root_offset = ROOT_OFFSETS[1] as usize;
     region[root_offset..root_offset + ROOT_LEN].copy_from_slice(&initial_root);
     replacement.write_all(&region)?;

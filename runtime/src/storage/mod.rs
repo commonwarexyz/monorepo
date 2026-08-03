@@ -88,8 +88,8 @@ stability_scope!(BETA {
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::{
-        AtomicBlob, AtomicStorage, BatchOperation, BatchStorage, Blob, Buf, IoBuf, IoBufMut,
-        IoBufs, IoBufsMut, Storage, WriteOptions,
+        ATOMIC_BLOB_TAG_LEN, AtomicBlob, AtomicStorage, BatchOperation, BatchStorage, Blob, Buf,
+        IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage, WriteOptions,
     };
     use futures::FutureExt;
 
@@ -143,9 +143,11 @@ pub(crate) mod tests {
         test_apply_batch_deduplication(&storage).await;
         test_apply_batch_mixed_success(&storage).await;
         test_apply_batch_publishes_two_pending_blobs(&storage).await;
+        test_apply_batch_publishes_tags(&storage).await;
         test_apply_batch_does_not_charge_clean_publishes_to_witness(&storage).await;
         test_apply_batch_carries_consecutive_publications(&storage).await;
         test_apply_batch_carries_disjoint_publications(&storage).await;
+        test_direct_sync_transitions_to_and_from_a_group(&storage).await;
         test_apply_batch_rejects_non_atomic_handle(&storage).await;
         test_apply_batch_validates_atomically(&storage).await;
         test_apply_batch_validates_all_rewinds_before_mutating(&storage).await;
@@ -162,6 +164,7 @@ pub(crate) mod tests {
     {
         test_migrate_atomic_preserves_contents_and_version(&storage).await;
         test_migrate_atomic_rejects_stale_handle(&storage).await;
+        test_atomic_tag_persistence(&storage).await;
     }
 
     /// Migration replaces one exact name generation while preserving logical bytes and version.
@@ -194,6 +197,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(len, expected.len() as u64);
         assert_eq!(version, VERSION);
+        assert_eq!(atomic.tag().await.unwrap(), [0; ATOMIC_BLOB_TAG_LEN]);
         assert_eq!(
             atomic.read_at(0, expected.len()).await.unwrap().coalesce(),
             expected.as_slice()
@@ -239,6 +243,57 @@ pub(crate) mod tests {
         );
     }
 
+    /// Tags share the synchronization boundary with an atomic blob's logical length.
+    async fn test_atomic_tag_persistence<S>(storage: &S)
+    where
+        S: AtomicStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        const SYNC_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [1; ATOMIC_BLOB_TAG_LEN];
+        const START_SYNC_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [2; ATOMIC_BLOB_TAG_LEN];
+        const APPEND_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [3; ATOMIC_BLOB_TAG_LEN];
+        const REWIND_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [4; ATOMIC_BLOB_TAG_LEN];
+
+        let (blob, len) = storage.open_atomic("atomic_tags", b"blob").await.unwrap();
+        assert_eq!(len, 0);
+        assert_eq!(blob.tag().await.unwrap(), [0; ATOMIC_BLOB_TAG_LEN]);
+
+        blob.set_tag(SYNC_TAG).await.unwrap();
+        assert_eq!(blob.tag().await.unwrap(), SYNC_TAG);
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let (blob, len) = storage.open_atomic("atomic_tags", b"blob").await.unwrap();
+        assert_eq!(len, 0);
+        assert_eq!(blob.tag().await.unwrap(), SYNC_TAG);
+
+        blob.set_tag(START_SYNC_TAG).await.unwrap();
+        blob.start_sync().await.await.unwrap();
+        drop(blob);
+
+        let (blob, len) = storage.open_atomic("atomic_tags", b"blob").await.unwrap();
+        assert_eq!(len, 0);
+        assert_eq!(blob.tag().await.unwrap(), START_SYNC_TAG);
+
+        blob.append_tagged(b"abcdef", APPEND_TAG).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let (blob, len) = storage.open_atomic("atomic_tags", b"blob").await.unwrap();
+        assert_eq!(len, 6);
+        assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
+        assert_eq!(blob.tag().await.unwrap(), APPEND_TAG);
+
+        blob.rewind_tagged(3, REWIND_TAG).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let (blob, len) = storage.open_atomic("atomic_tags", b"blob").await.unwrap();
+        assert_eq!(len, 3);
+        assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"abc");
+        assert_eq!(blob.tag().await.unwrap(), REWIND_TAG);
+    }
+
     /// A removed handle cannot replace a newer same-name blob generation during migration.
     async fn test_migrate_atomic_rejects_stale_handle<S>(storage: &S)
     where
@@ -279,6 +334,12 @@ pub(crate) mod tests {
     where
         B: AtomicBlob,
     {
+        const APPEND_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [5; ATOMIC_BLOB_TAG_LEN];
+        const REWIND_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [6; ATOMIC_BLOB_TAG_LEN];
+
+        assert_eq!(blob.tag().await.unwrap(), [0; ATOMIC_BLOB_TAG_LEN]);
+        blob.set_tag(APPEND_TAG).await.unwrap();
+        assert_eq!(blob.tag().await.unwrap(), APPEND_TAG);
         assert_eq!(
             blob.append(vec![IoBuf::from(b"ab"), IoBuf::from(b"cdef")])
                 .await
@@ -294,10 +355,13 @@ pub(crate) mod tests {
         );
         assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
 
+        blob.set_tag(REWIND_TAG).await.unwrap();
+        assert_eq!(blob.tag().await.unwrap(), REWIND_TAG);
         blob.rewind(4).await.unwrap();
         assert_eq!(blob.append(b"XY").await.unwrap(), 4);
         assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdXY");
         blob.sync().await.unwrap();
+        assert_eq!(blob.tag().await.unwrap(), REWIND_TAG);
 
         blob.rewind(3).await.unwrap();
         assert!(blob.append(b"blocked").await.is_err());
@@ -665,6 +729,76 @@ pub(crate) mod tests {
         );
     }
 
+    /// A batch publishes data-bearing and metadata-only tags, which need not be unique.
+    async fn test_apply_batch_publishes_tags<S>(storage: &S)
+    where
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        const FIRST_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [7; ATOMIC_BLOB_TAG_LEN];
+        const SECOND_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [8; ATOMIC_BLOB_TAG_LEN];
+        const SHARED_TAG: [u8; ATOMIC_BLOB_TAG_LEN] = [9; ATOMIC_BLOB_TAG_LEN];
+
+        let (first, _) = storage
+            .open_atomic("batch_publish_tags", b"first")
+            .await
+            .unwrap();
+        first.append(b"payload").await.unwrap();
+        first.set_tag(FIRST_TAG).await.unwrap();
+        let (second, _) = storage
+            .open_atomic("batch_publish_tags", b"second")
+            .await
+            .unwrap();
+        second.set_tag(SECOND_TAG).await.unwrap();
+
+        storage
+            .apply(vec![
+                BatchOperation::Publish(first.clone()),
+                BatchOperation::Publish(second.clone()),
+            ])
+            .await
+            .unwrap();
+
+        drop(first);
+        drop(second);
+        let (first, first_len) = storage
+            .open_atomic("batch_publish_tags", b"first")
+            .await
+            .unwrap();
+        let (second, second_len) = storage
+            .open_atomic("batch_publish_tags", b"second")
+            .await
+            .unwrap();
+        assert_eq!(first_len, 7);
+        assert_eq!(second_len, 0);
+        assert_eq!(first.read_at(0, 7).await.unwrap().coalesce(), b"payload");
+        assert_eq!(first.tag().await.unwrap(), FIRST_TAG);
+        assert_eq!(second.tag().await.unwrap(), SECOND_TAG);
+
+        first.set_tag(SHARED_TAG).await.unwrap();
+        second.set_tag(SHARED_TAG).await.unwrap();
+        storage
+            .apply(vec![
+                BatchOperation::Publish(first.clone()),
+                BatchOperation::Publish(second.clone()),
+            ])
+            .await
+            .unwrap();
+
+        drop(first);
+        drop(second);
+        let (first, _) = storage
+            .open_atomic("batch_publish_tags", b"first")
+            .await
+            .unwrap();
+        let (second, _) = storage
+            .open_atomic("batch_publish_tags", b"second")
+            .await
+            .unwrap();
+        assert_eq!(first.tag().await.unwrap(), SHARED_TAG);
+        assert_eq!(second.tag().await.unwrap(), SHARED_TAG);
+    }
+
     /// Clean publications do not occupy the embedded descriptor carried by dirty participants.
     async fn test_apply_batch_does_not_charge_clean_publishes_to_witness<S>(storage: &S)
     where
@@ -750,6 +884,52 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(first.read_at(0, 4).await.unwrap().coalesce(), b"a1a2");
+        assert_eq!(second.read_at(0, 2).await.unwrap().coalesce(), b"b1");
+    }
+
+    /// Direct one-participant publication can replace and be replaced by a larger group.
+    async fn test_direct_sync_transitions_to_and_from_a_group<S>(storage: &S)
+    where
+        S: BatchStorage<AtomicBlob = <S as Storage>::Blob> + Send + Sync,
+        <S as Storage>::Blob: AtomicBlob + Send + Sync,
+    {
+        let (first, _) = storage
+            .open_atomic("batch_direct_transition", b"first")
+            .await
+            .unwrap();
+        let (second, _) = storage
+            .open_atomic("batch_direct_transition", b"second")
+            .await
+            .unwrap();
+
+        first.append(b"a0").await.unwrap();
+        first.sync().await.unwrap();
+
+        first.append(b"a1").await.unwrap();
+        second.append(b"b1").await.unwrap();
+        storage
+            .apply(vec![
+                BatchOperation::Publish(first.clone()),
+                BatchOperation::Publish(second.clone()),
+            ])
+            .await
+            .unwrap();
+
+        first.append(b"a2").await.unwrap();
+        first.sync().await.unwrap();
+        drop((first, second));
+
+        let (first, first_len) = storage
+            .open_atomic("batch_direct_transition", b"first")
+            .await
+            .unwrap();
+        let (second, second_len) = storage
+            .open_atomic("batch_direct_transition", b"second")
+            .await
+            .unwrap();
+        assert_eq!(first_len, 6);
+        assert_eq!(second_len, 2);
+        assert_eq!(first.read_at(0, 6).await.unwrap().coalesce(), b"a0a1a2");
         assert_eq!(second.read_at(0, 2).await.unwrap().coalesce(), b"b1");
     }
 
