@@ -32,6 +32,7 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
+pub(super) use mailbox::Verification;
 
 mod processing;
 mod syncing;
@@ -307,6 +308,7 @@ where
             provider: self.provider,
             marshal,
             processor,
+            initial_verifications: Vec::new(),
             skip_finalized_until,
         }
         .start()

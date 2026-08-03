@@ -1,7 +1,7 @@
 use crate::stateful::{
     Application, Input,
     actor::{
-        core::mailbox::Message,
+        core::mailbox::{Message, Verification},
         processor::{Applied, Processor},
     },
 };
@@ -9,7 +9,7 @@ use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Heightable,
     marshal::{
-        ancestry::BlockProvider,
+        ancestry::{BlockProvider, BoxedAncestry},
         core::{Mailbox as MarshalMailbox, Variant},
     },
     types::Height,
@@ -17,20 +17,67 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, futures::Pool};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    futures::Pool,
+};
 use futures::{
     FutureExt as _,
     future::{Either, ready},
+    poll,
 };
 use rand_core::Rng;
-use std::{collections::BTreeSet, sync::mpsc::TryRecvError};
-use tracing::{Instrument as _, debug, info_span};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::mpsc::TryRecvError,
+    task::Poll,
+};
+use tracing::{Instrument as _, Span, debug, info_span};
+
+/// Verification work retained across actor state transitions.
+pub(super) struct VerificationRequest<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    pub(super) span: Span,
+    pub(super) context: (E, A::Context),
+    pub(super) ancestry: BoxedAncestry<A::Block>,
+    pub(super) verification: Verification,
+}
 
 /// A single unit of work for the processing loop: either a mailbox message to
 /// handle or a deferred prune to run while the mailbox is idle.
-enum Step<M, P> {
+enum Step<M, P, J> {
     Message(M),
     Prune(P),
+    Verification(J),
+}
+
+enum VerificationResult<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    Finished {
+        id: u64,
+    },
+    Invalidated {
+        id: u64,
+        request: VerificationRequest<E, A>,
+    },
+}
+
+impl<E, A> VerificationResult<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    const fn id(&self) -> u64 {
+        match self {
+            Self::Finished { id } | Self::Invalidated { id, .. } => *id,
+        }
+    }
 }
 
 /// Records a tracked flush completion and returns whether it is durable.
@@ -64,6 +111,9 @@ where
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
+    /// Verify requests collected before the processor became available.
+    pub(super) initial_verifications: Vec<VerificationRequest<E, A>>,
+
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
     pub(super) skip_finalized_until: Option<Height>,
@@ -76,9 +126,21 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    A::Context: Clone,
 {
     pub async fn start(mut self) {
         let mut pending_prune = None;
+        let mut verifications = Pool::default();
+        let mut invalidations = BTreeMap::new();
+        let mut next_verification_id = 0u64;
+        for request in std::mem::take(&mut self.initial_verifications) {
+            self.schedule_verification(
+                &mut verifications,
+                &mut invalidations,
+                &mut next_verification_id,
+                request,
+            );
+        }
 
         // Deferred finalize flushes, each releasing its block's marshal
         // acknowledgement once the flush completes (see `Barrier`).
@@ -87,6 +149,15 @@ where
         select_loop! {
             self.context,
             on_start => {
+                while let Poll::Ready(result) = poll!(verifications.next_completed()) {
+                    self.handle_verification_result(
+                        &mut verifications,
+                        &mut invalidations,
+                        &mut next_verification_id,
+                        result,
+                    );
+                }
+
                 // Observe every already-completed flush (releasing its marshal
                 // acknowledgement) before taking the next unit of work, so
                 // acknowledgements keep flowing even while the mailbox is
@@ -112,6 +183,7 @@ where
                             let mailbox = &mut self.mailbox;
                             let syncs = &mut syncs;
                             let pending_syncs = &mut pending_syncs;
+                            let verifications = &mut verifications;
                             Either::Right(async move {
                                 loop {
                                     select! {
@@ -122,6 +194,9 @@ where
                                             if !complete(pending_syncs, completion) {
                                                 return None;
                                             }
+                                        },
+                                        result = verifications.next_completed() => {
+                                            break Some(Step::Verification(result));
                                         },
                                     }
                                 }
@@ -169,25 +244,34 @@ where
                     span,
                     context,
                     ancestry,
-                    response,
+                    verification,
                 }) => {
-                    let process = info_span!(parent: &span, "stateful.actor.verify");
-                    self.processor
-                        .verify(
-                            self.context.as_present(),
-                            self.marshal.clone(),
+                    self.schedule_verification(
+                        &mut verifications,
+                        &mut invalidations,
+                        &mut next_verification_id,
+                        VerificationRequest {
+                            span,
                             context,
                             ancestry,
-                            response,
-                        )
-                        .instrument(process)
-                        .await;
+                            verification,
+                        },
+                    );
                 }
                 Step::Message(Message::Finalized {
                     span,
                     block,
                     acknowledgement,
                 }) => {
+                    let retry = Self::quiesce_verifications(
+                        &mut verifications,
+                        &mut invalidations,
+                    )
+                    .await;
+                    assert!(
+                        self.processor.replays_idle(),
+                        "verification replay remained active after quiescence"
+                    );
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
@@ -236,6 +320,14 @@ where
                     }
                     .instrument(process)
                     .await;
+                    for request in retry {
+                        self.schedule_verification(
+                            &mut verifications,
+                            &mut invalidations,
+                            &mut next_verification_id,
+                            request,
+                        );
+                    }
                 }
                 Step::Message(Message::SubscribeDatabases { response }) => {
                     response.send_lossy(self.processor.databases().clone());
@@ -247,17 +339,131 @@ where
                         .first()
                         .is_some_and(|height| *height <= prune.barrier_height)
                     {
-                        let completion = syncs.next_completed().await;
-                        if !complete(&mut pending_syncs, completion) {
-                            return;
+                        select! {
+                            completion = syncs.next_completed() => {
+                                if !complete(&mut pending_syncs, completion) {
+                                    return;
+                                }
+                            },
+                            result = verifications.next_completed() => {
+                                self.handle_verification_result(
+                                    &mut verifications,
+                                    &mut invalidations,
+                                    &mut next_verification_id,
+                                    result,
+                                );
+                            },
                         }
                     }
+                    let retry = Self::quiesce_verifications(
+                        &mut verifications,
+                        &mut invalidations,
+                    )
+                    .await;
+                    assert!(
+                        self.processor.replays_idle(),
+                        "verification replay remained active after quiescence"
+                    );
                     prune
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;
+                    for request in retry {
+                        self.schedule_verification(
+                            &mut verifications,
+                            &mut invalidations,
+                            &mut next_verification_id,
+                            request,
+                        );
+                    }
+                }
+                Step::Verification(result) => {
+                    self.handle_verification_result(
+                        &mut verifications,
+                        &mut invalidations,
+                        &mut next_verification_id,
+                        result,
+                    );
                 }
             },
         }
+    }
+
+    fn schedule_verification(
+        &self,
+        verifications: &mut Pool<VerificationResult<E, A>>,
+        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+        next_id: &mut u64,
+        mut request: VerificationRequest<E, A>,
+    ) {
+        let id = *next_id;
+        *next_id = next_id
+            .checked_add(1)
+            .expect("verification request ID overflowed");
+        let (invalidate, invalidated) = oneshot::channel();
+        assert!(invalidations.insert(id, invalidate).is_none());
+
+        let process = info_span!(parent: &request.span, "stateful.actor.verify");
+        let mut verifier = self.processor.verifier();
+        let actor_context = self.context.as_present().child("verify");
+        let marshal = self.marshal.clone();
+        verifications.push(
+            async move {
+                let ancestry = request.ancestry.clone();
+                let attempt_context = (
+                    actor_context.child("application"),
+                    request.context.1.clone(),
+                );
+                let result = select! {
+                    _ = invalidated => None,
+                    result = verifier.verify(
+                        &actor_context,
+                        marshal,
+                        attempt_context,
+                        ancestry,
+                        &mut request.verification,
+                    ) => Some(result),
+                };
+                match result {
+                    Some(Some(valid)) => {
+                        request.verification.respond(valid);
+                        VerificationResult::Finished { id }
+                    }
+                    Some(None) => VerificationResult::Finished { id },
+                    None => VerificationResult::Invalidated { id, request },
+                }
+            }
+            .instrument(process),
+        );
+    }
+
+    fn handle_verification_result(
+        &self,
+        verifications: &mut Pool<VerificationResult<E, A>>,
+        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+        next_id: &mut u64,
+        result: VerificationResult<E, A>,
+    ) {
+        invalidations.remove(&result.id());
+        if let VerificationResult::Invalidated { request, .. } = result {
+            self.schedule_verification(verifications, invalidations, next_id, request);
+        }
+    }
+
+    async fn quiesce_verifications(
+        verifications: &mut Pool<VerificationResult<E, A>>,
+        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+    ) -> Vec<VerificationRequest<E, A>> {
+        invalidations.clear();
+        let mut retry = Vec::with_capacity(verifications.len());
+        while !verifications.is_empty() {
+            if let VerificationResult::Invalidated { request, .. } =
+                verifications.next_completed().await
+                && !request.verification.is_cancelled()
+            {
+                retry.push(request);
+            }
+        }
+        retry
     }
 }
 
@@ -279,7 +485,7 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 mod tests {
     use super::{Processing, skip_finalized_block};
     use crate::stateful::{
-        PruneConfig,
+        Application, Input, Proposed, PruneConfig,
         actor::{
             core::mailbox::Mailbox,
             metrics::Metrics as StatefulMetrics,
@@ -288,13 +494,23 @@ mod tests {
         db::Shared,
         tests::{
             fixtures,
-            mocks::{FlushControl, TestApp, TestBlock, TestDb, anchor},
+            mocks::{
+                FlushControl, TestApp, TestBlock, TestDatabases, TestDb, TestMerkleized,
+                TestScheme, TestUnmerkleized, anchor, test_databases,
+            },
         },
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Reporter as _, marshal::Update, simplex::mocks::scheme as scheme_mocks, types::Height,
+        Application as _, CertifiableBlock as _, Heightable as _, Reporter as _,
+        marshal::{
+            Update,
+            ancestry::{self, Ancestry},
+        },
+        simplex::mocks::scheme as scheme_mocks,
+        types::Height,
     };
+    use commonware_macros::select;
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
@@ -302,9 +518,157 @@ mod tests {
     use commonware_utils::{
         NZUsize,
         acknowledgement::{Acknowledgement as _, Exact},
+        channel::oneshot,
+        sync::Mutex,
     };
-    use futures::poll;
-    use std::{sync::Arc, time::Duration};
+    use futures::{StreamExt as _, poll};
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    struct VerifyGate {
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    }
+
+    #[derive(Clone)]
+    struct GatedApp {
+        gates: Arc<Mutex<VecDeque<VerifyGate>>>,
+    }
+
+    impl Application<deterministic::Context> for GatedApp {
+        type SigningScheme = TestScheme;
+        type Context = <TestApp as Application<deterministic::Context>>::Context;
+        type Block = TestBlock;
+        type Databases = TestDatabases;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(0, 0)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+        ) -> Option<TestMerkleized> {
+            let mut ancestry = Box::pin(ancestry);
+            let _block = ancestry.next().await?;
+            let mut gate = self
+                .gates
+                .lock()
+                .pop_front()
+                .expect("unexpected verification");
+            let _ = gate.started.send(());
+            let _ = (&mut gate.release).await;
+            Some(TestMerkleized)
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: TestUnmerkleized,
+        ) -> TestMerkleized {
+            TestMerkleized
+        }
+    }
+
+    #[derive(Clone)]
+    struct ReplayGatedApp {
+        gates: Arc<Mutex<VecDeque<VerifyGate>>>,
+        gate_height: Height,
+        apply_calls: Arc<AtomicUsize>,
+        verify_calls: Arc<AtomicUsize>,
+    }
+
+    impl Application<deterministic::Context> for ReplayGatedApp {
+        type SigningScheme = TestScheme;
+        type Context = <TestApp as Application<deterministic::Context>>::Context;
+        type Block = TestBlock;
+        type Databases = TestDatabases;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(0, 0)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+        ) -> Option<TestMerkleized> {
+            self.verify_calls.fetch_add(1, Ordering::SeqCst);
+            Some(TestMerkleized)
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _batches: TestUnmerkleized,
+        ) -> TestMerkleized {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            let gate = (block.height() == self.gate_height)
+                .then(|| self.gates.lock().pop_front())
+                .flatten();
+            if let Some(mut gate) = gate {
+                let _ = gate.started.send(());
+                let _ = (&mut gate.release).await;
+            }
+            TestMerkleized
+        }
+    }
+
+    fn verify_gate() -> (VerifyGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        (
+            VerifyGate {
+                started,
+                release: release_rx,
+            },
+            started_rx,
+            release,
+        )
+    }
 
     /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
     /// mailbox, flush controls, a guard keeping the (never-started) marshal
@@ -349,10 +713,294 @@ mod tests {
             provider: (),
             marshal: marshal.mailbox,
             processor,
+            initial_verifications: Vec::new(),
             skip_finalized_until: None,
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
         (Mailbox::new(sender), control, marshal.guards, actor)
+    }
+
+    #[test]
+    fn independent_verifications_do_not_block_each_other() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"concurrent-verify", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "concurrent-verify",
+                scheme,
+                None,
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let (first_gate, first_started, first_release) = verify_gate();
+            let (second_gate, second_started, second_release) = verify_gate();
+            let app = GatedApp {
+                gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                initial_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            let genesis = TestBlock::new(0, 0);
+            let first_block = TestBlock::child(&genesis, 1);
+            let first_genesis = genesis.clone();
+            let mut first_mailbox = mailbox.clone();
+            let first = context.child("first").spawn(move |task_context| {
+                let consensus_context = first_block.context();
+                async move {
+                    first_mailbox
+                        .verify(
+                            (task_context, consensus_context),
+                            ancestry::from_iter([Arc::new(first_block), Arc::new(first_genesis)]),
+                        )
+                        .await
+                }
+            });
+            first_started
+                .await
+                .expect("first verification should start");
+
+            let second_block = TestBlock::child(&genesis, 2);
+            let second = context.child("second").spawn(move |task_context| {
+                let consensus_context = second_block.context();
+                async move {
+                    mailbox
+                        .verify(
+                            (task_context, consensus_context),
+                            ancestry::from_iter([Arc::new(second_block), Arc::new(genesis)]),
+                        )
+                        .await
+                }
+            });
+            select! {
+                result = second_started => {
+                    result.expect("second verification should start while first remains pending");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("pending verification blocked unrelated verification");
+                },
+            }
+
+            first_release
+                .send(())
+                .expect("first verification should remain active");
+            second_release
+                .send(())
+                .expect("second verification should remain active");
+            assert!(first.await.expect("first verification failed"));
+            assert!(second.await.expect("second verification failed"));
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn finalization_quiesces_replay_and_retries_from_processed_tip() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let child = TestBlock::child(&parent, 2);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"finalize-replay", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "finalize-replay",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let (gate, apply_started, mut apply_release) = verify_gate();
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                gate_height: parent.height(),
+                apply_calls: apply_calls.clone(),
+                verify_calls: verify_calls.clone(),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                initial_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            let mut verifier = mailbox.clone();
+            let verify_parent = parent.clone();
+            let verify = context.child("verify").spawn(move |task_context| {
+                let consensus_context = child.context();
+                async move {
+                    verifier
+                        .verify(
+                            (task_context, consensus_context),
+                            ancestry::from_iter([Arc::new(child), Arc::new(verify_parent)]),
+                        )
+                        .await
+                }
+            });
+            apply_started.await.expect("replay should start");
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(parent), acknowledgement));
+            apply_release.closed().await;
+            waiter
+                .await
+                .expect("finalized parent should be acknowledged");
+            assert!(verify.await.expect("live verification should be retried"));
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+            actor.abort();
+            drop(marshal.guards);
+        });
+    }
+
+    #[test]
+    fn pruning_quiesces_replay_before_database_prune() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block1 = TestBlock::child(&genesis, 1);
+            let block2 = TestBlock::child(&block1, 2);
+            let parent = TestBlock::child(&block2, 3);
+            let child = TestBlock::child(&parent, 4);
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(&mut signing, b"prune-replay", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "prune-replay",
+                scheme,
+                &block2,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let (first_gate, first_started, mut first_release) = verify_gate();
+            let (second_gate, second_started, second_release) = verify_gate();
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                gate_height: parent.height(),
+                apply_calls: apply_calls.clone(),
+                verify_calls: verify_calls.clone(),
+            };
+            let control = FlushControl::default();
+            let databases = Shared::new("prune-replay", TestDb::gated(control.clone()));
+            let pruning = Pruning::build(
+                PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                },
+                1,
+                0,
+            );
+            let processor = Processor::new(
+                app,
+                databases,
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                Some(pruning),
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                processor,
+                initial_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
+            let consensus_context = child.context();
+            let mut verify = Box::pin(mailbox.verify(
+                (context.child("verify"), consensus_context),
+                ancestry::from_iter([Arc::new(child), Arc::new(parent)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+
+            select! {
+                result = first_started => result.expect("verification should start before pruning"),
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!(
+                        "verification did not start: flushes={} pruned={}",
+                        control.flushes.lock().len(),
+                        control.pruned.lock().len(),
+                    );
+                },
+            }
+            assert!(control.pruned.lock().is_empty());
+            let release = control.flushes.lock().remove(0);
+            release
+                .send(Ok(()))
+                .expect("target flush should be pending");
+            waiter1.await.expect("target block should be acknowledged");
+            first_release.closed().await;
+            while control.pruned.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            second_started
+                .await
+                .expect("live replay should restart after pruning");
+            second_release
+                .send(())
+                .expect("restarted replay should remain active");
+            assert!(verify.await);
+            assert_eq!(control.pruned.lock().clone(), vec![1]);
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 4);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+
+            let release = control.flushes.lock().remove(0);
+            release.send(Ok(())).expect("newer flush should be pending");
+            waiter2.await.expect("newer block should be acknowledged");
+            actor.abort();
+            marshal.abort();
+        });
     }
 
     /// Pruning waits for the flush that covers its target without waiting for newer state.

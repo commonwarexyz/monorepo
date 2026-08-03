@@ -142,6 +142,15 @@ pub struct Input<Upstream, Provider> {
 /// wrapper handles persistence: storing merkleized batches as pending tips on
 /// the block tree and applying changesets to the underlying databases on
 /// finalization.
+///
+/// Stateful may keep multiple verification requests in flight. Each request
+/// uses a distinct application clone, and proposal work may run between polls.
+/// Clone-local mutations are not propagated, so state that must survive a call
+/// must be shared by clones or stored externally.
+///
+/// Full verification requests are not coalesced because block availability may
+/// differ by round. Only lazy replay of an acquired block is shared; its digest
+/// commits the block's embedded consensus context.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -155,7 +164,7 @@ where
     /// epoch. Must be [`Epochable`] and [`Viewable`] so the wrapper can
     /// construct a [`Round`](commonware_consensus::types::Round) for
     /// pending-state pruning.
-    type Context: Epochable + Viewable + Send;
+    type Context: Clone + Epochable + Viewable + Send;
 
     /// The block type produced by the application.
     ///
@@ -249,9 +258,10 @@ where
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
     ///
-    /// This future may be cancelled by consensus if the caller drops its
-    /// response receiver. Implementations should be cancellation-safe: dropping
-    /// and retrying must not violate invariants or lose durable progress.
+    /// The newest abandoned verification may continue so its speculative state
+    /// can be reused. Later actor work may cancel it. Live attempts are also
+    /// cancelled and restarted around finalization and pruning. Implementations
+    /// must be cancellation-safe.
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -271,9 +281,13 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// This future may be cancelled if the originating propose/verify request
-    /// is dropped. Implementations should be cancellation-safe: dropping and
-    /// retrying must not violate invariants or lose durable progress.
+    /// Concurrent verification requests share recovery for the same missing
+    /// block. If the owner is cancelled, another live request retries it.
+    ///
+    /// This future may be cancelled with its originating request or before
+    /// finalization or pruning mutates the database set. Recovery for a live
+    /// request is restarted afterward, so implementations must be
+    /// cancellation-safe.
     ///
     /// # Panics
     ///

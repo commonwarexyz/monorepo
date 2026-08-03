@@ -1,7 +1,11 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::{Deferred, mailbox::Message, processing::Processing},
+        core::{
+            Deferred,
+            mailbox::Message,
+            processing::{Processing, VerificationRequest},
+        },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
@@ -10,9 +14,9 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    Block, Epochable, Heightable, Viewable,
+    Epochable, Heightable, Viewable,
     marshal::{
-        ancestry::{BlockProvider, BoxedAncestry},
+        ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
 };
@@ -23,18 +27,9 @@ use commonware_storage::Context;
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
-use tracing::{Instrument as _, Span, debug, error, info_span};
+use tracing::{Instrument as _, debug, error, info_span};
 
-/// Verify request buffered while state sync is still in progress.
-pub(super) struct HeldVerify<C, B: Block> {
-    span: Span,
-    context: C,
-    ancestry: BoxedAncestry<B>,
-    response: oneshot::Sender<bool>,
-}
-
-type HeldVerifyRequest<E, A> =
-    HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
+type HeldVerifyRequest<E, A> = VerificationRequest<E, A>;
 
 /// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
@@ -116,13 +111,14 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    A::Context: Clone,
 {
     pub async fn start(mut self) {
         select_loop! {
             self.context,
             on_start => {
                 self.held_verify_requests
-                    .retain(|request| !request.response.is_closed());
+                    .retain(|request| !request.verification.is_cancelled());
                 self.database_subscribers
                     .retain(|subscriber| !subscriber.is_closed());
             },
@@ -158,16 +154,16 @@ where
                     span,
                     context,
                     ancestry,
-                    response,
+                    verification,
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.hold_verify");
                     self.held_verify_requests
-                        .retain(|request| !request.response.is_closed());
-                    self.held_verify_requests.push(HeldVerify {
+                        .retain(|request| !request.verification.is_cancelled());
+                    self.held_verify_requests.push(VerificationRequest {
                         span,
                         context,
                         ancestry,
-                        response,
+                        verification,
                     });
                     process.in_scope(|| {
                         debug!(
@@ -383,26 +379,13 @@ where
             subscriber.send_lossy(processor.databases().clone());
         }
 
-        for request in self.held_verify_requests.drain(..) {
-            let process = info_span!(parent: &request.span, "stateful.actor.replay_verify");
-            processor
-                .verify(
-                    self.context.as_present(),
-                    self.marshal.clone(),
-                    request.context,
-                    request.ancestry,
-                    request.response,
-                )
-                .instrument(process)
-                .await;
-        }
-
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal: self.marshal,
             processor,
+            initial_verifications: self.held_verify_requests,
             skip_finalized_until: Some(completed_height),
         }
         .start()
