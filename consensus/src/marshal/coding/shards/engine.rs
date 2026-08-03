@@ -698,6 +698,15 @@ where
         leader: P,
         round: Round,
     ) {
+        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
+            warn!(%commitment, "no scheme for epoch, ignoring external proposal");
+            return;
+        };
+        let participants = scheme.participants();
+        if participants.index(&leader).is_none() {
+            warn!(?leader, %commitment, "leader update for non-participant, ignoring");
+            return;
+        }
         // A reconstructed block normally makes duplicate leader announcements
         // redundant, unless notarized recovery created leaderless state first.
         // In that case, the leader announcement must still populate the
@@ -708,15 +717,6 @@ where
                 .get(&commitment)
                 .is_none_or(|state| state.leader().is_some())
         {
-            return;
-        }
-        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
-            warn!(%commitment, "no scheme for epoch, ignoring external proposal");
-            return;
-        };
-        let participants = scheme.participants();
-        if participants.index(&leader).is_none() {
-            warn!(?leader, %commitment, "leader update for non-participant, ignoring");
             return;
         }
         if let Some(state) = self.state.get_mut(&commitment) {
@@ -1185,6 +1185,7 @@ where
 
         // Evict incomplete reconstructions by the same round rule. Later observations refresh
         // their round so a delayed application acknowledgment cannot retire a live re-proposal.
+        // Block subscriptions remain open because the block may still arrive through local ingress.
         let mut pruned_commitments = Vec::new();
         self.state.retain(|c, s| {
             let keep = s.round() > round;
@@ -1194,7 +1195,7 @@ where
             keep
         });
         for pruned in pruned_commitments {
-            self.drop_commitment_subscriptions(pruned);
+            self.assigned_shard_verified_subscriptions.remove(&pruned);
         }
     }
 }
@@ -2444,13 +2445,10 @@ mod tests {
             assert!(peer.mailbox.get(cached_old_commitment).await.is_none());
             assert!(peer.mailbox.get(cached_equal_commitment).await.is_none());
             assert!(peer.mailbox.get(cached_later_commitment).await.is_some());
-            assert!(matches!(
-                state_old_sub.try_recv(),
-                Err(TryRecvError::Closed)
-            ));
+            assert!(matches!(state_old_sub.try_recv(), Err(TryRecvError::Empty)));
             assert!(matches!(
                 state_equal_sub.try_recv(),
-                Err(TryRecvError::Closed)
+                Err(TryRecvError::Empty)
             ));
             assert!(matches!(
                 state_later_sub.try_recv(),
@@ -2806,6 +2804,48 @@ mod tests {
                 };
             },
         );
+    }
+
+    #[test_traced]
+    fn test_rejected_leader_does_not_refresh_retirement_round() {
+        let fixture = Fixture::<C>::default();
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let block = CodedBlock::<B, C, H>::new(
+                B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let commitment = block.commitment();
+            let unrelated = CodedBlock::<B, C, H>::new(
+                B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                coding_config,
+                &STRATEGY,
+            )
+            .commitment();
+            let leader = peers[0].public_key.clone();
+            let non_participant = PrivateKey::from_seed(10_000).public_key();
+            let receiver = &mut peers[2];
+
+            let mut subscription = receiver
+                .mailbox
+                .subscribe_assigned_shard_verified(commitment);
+            receiver.mailbox.discovered(
+                commitment,
+                leader,
+                Round::new(Epoch::zero(), View::new(1)),
+            );
+            receiver.mailbox.discovered(
+                commitment,
+                non_participant,
+                Round::new(Epoch::zero(), View::new(10)),
+            );
+            receiver
+                .mailbox
+                .prune(Round::new(Epoch::zero(), View::new(5)), vec![unrelated]);
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
+        });
     }
 
     #[test_traced]
@@ -3417,7 +3457,6 @@ mod tests {
                 let round_b = Round::new(Epoch::zero(), View::new(2));
 
                 peers[2].mailbox.discovered(commitment_a, leader, round_a);
-                let block_sub = peers[2].mailbox.subscribe(commitment_a);
 
                 let peer1_index = peers[1].index.get() as u16;
                 let shard_a = block_a.shard(peer1_index).expect("missing shard");
@@ -3443,18 +3482,6 @@ mod tests {
                     "local proposal should be cached before pruning"
                 );
                 peers[2].mailbox.prune(round_b, vec![commitment_b]);
-
-                select! {
-                    result = block_sub => {
-                        assert!(
-                            result.is_err(),
-                            "older block subscription should close after local-proposal prune"
-                        );
-                    },
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("older block subscription remained open after local-proposal prune");
-                    },
-                }
 
                 peers[1]
                     .sender

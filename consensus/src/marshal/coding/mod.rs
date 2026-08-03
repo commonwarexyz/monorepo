@@ -2180,6 +2180,85 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_floor_preserves_registered_commitment_subscription() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let missing_round = Round::new(Epoch::zero(), View::new(1));
+            let missing = CodingHarness::make_test_block(
+                Sha256::hash(&[b""]),
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                Height::new(1),
+                100,
+                NUM_VALIDATORS as u16,
+            );
+            let missing_commitment = missing.commitment();
+            shards.discovered(missing_commitment, participants[1].clone(), missing_round);
+
+            let subscription =
+                marshal.subscribe_by_commitment(missing_commitment, core::CommitmentFallback::Wait);
+            context.sleep(Duration::from_millis(100)).await;
+
+            let floor_round = Round::new(Epoch::zero(), View::new(2));
+            let floor = CodingHarness::make_test_block(
+                missing.digest(),
+                missing_commitment,
+                Height::new(2),
+                200,
+                NUM_VALIDATORS as u16,
+            );
+            let floor_commitment = floor.commitment();
+            shards.proposed(floor_round, floor);
+            assert!(shards.get(floor_commitment).await.is_some());
+            marshal.set_floor(CodingHarness::make_finalization(
+                Proposal {
+                    round: floor_round,
+                    parent: View::new(1),
+                    payload: floor_commitment,
+                },
+                &schemes,
+                QUORUM,
+            ));
+
+            while marshal.get_processed_height().await != Some(Height::new(2)) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            shards.proposed(Round::new(Epoch::zero(), View::new(3)), missing);
+            select! {
+                result = subscription => {
+                    let block = result.expect("floor update closed commitment subscription");
+                    assert_eq!(block.commitment(), missing_commitment);
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("commitment subscription did not resolve after local ingress");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_marshaled_rejects_unsupported_epoch() {
         #[derive(Clone)]
         struct LimitedEpocher {

@@ -337,8 +337,10 @@ where
     /// Entries last observed at or before `round` are eligible for retirement.
     /// Entries matching `commitments` are eligible regardless of observation round.
     ///
-    /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
-    /// subscriptions remain open, and later consensus notifications may recreate state.
+    /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
+    /// close only for entries named in `commitments`; other block subscriptions remain open for
+    /// local ingress. Digest subscriptions remain open, and later consensus notifications may
+    /// recreate state.
     pub fn prune(&self, round: Round, commitments: Vec<Commitment>) {
         let _ = self.sender.enqueue(Message::Prune { round, commitments });
     }
