@@ -4,6 +4,102 @@ use commonware_codec::{Codec, EncodeSize, Error, Read, ReadExt, Write, varint::U
 use commonware_cryptography::{Digest, Digestible, Hasher};
 use std::fmt::Debug;
 
+/// A mock block whose parent digest also serves as its certification context.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParentBlock<D: Digest> {
+    /// The parent block's digest.
+    pub parent: D,
+
+    /// The height of the block in the blockchain.
+    pub height: Height,
+
+    /// The timestamp of the block (in milliseconds since the Unix epoch).
+    pub timestamp: u64,
+
+    /// Pre-computed digest of the block.
+    digest: D,
+}
+
+impl<D: Digest> ParentBlock<D> {
+    pub fn new<H: Hasher<Digest = D>>(parent: D, height: Height, timestamp: u64) -> Self {
+        let digest = H::hash(&[
+            parent.as_ref(),
+            &height.get().to_be_bytes(),
+            &timestamp.to_be_bytes(),
+        ]);
+        Self {
+            parent,
+            height,
+            timestamp,
+            digest,
+        }
+    }
+}
+
+impl<D: Digest> Write for ParentBlock<D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.parent.write(writer);
+        self.height.write(writer);
+        UInt(self.timestamp).write(writer);
+        self.digest.write(writer);
+    }
+}
+
+impl<D: Digest> Read for ParentBlock<D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        let parent = D::read(reader)?;
+        let height = Height::read(reader)?;
+        let timestamp = UInt::read(reader)?.into();
+        let digest = D::read(reader)?;
+
+        Ok(Self {
+            parent,
+            height,
+            timestamp,
+            digest,
+        })
+    }
+}
+
+impl<D: Digest> EncodeSize for ParentBlock<D> {
+    fn encode_size(&self) -> usize {
+        self.parent.encode_size()
+            + self.height.encode_size()
+            + UInt(self.timestamp).encode_size()
+            + self.digest.encode_size()
+    }
+}
+
+impl<D: Digest> Digestible for ParentBlock<D> {
+    type Digest = D;
+
+    fn digest(&self) -> D {
+        self.digest
+    }
+}
+
+impl<D: Digest> crate::Heightable for ParentBlock<D> {
+    fn height(&self) -> Height {
+        self.height
+    }
+}
+
+impl<D: Digest> crate::Block for ParentBlock<D> {
+    fn parent(&self) -> Self::Digest {
+        self.parent
+    }
+}
+
+impl<D: Digest> crate::CertifiableBlock for ParentBlock<D> {
+    type Context = D;
+
+    fn context(&self) -> Self::Context {
+        self.parent
+    }
+}
+
 /// A mock block type for testing that stores consensus context.
 ///
 /// The context type `C` should be the consensus context (e.g., `simplex::types::Context`).
