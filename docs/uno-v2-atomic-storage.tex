@@ -370,7 +370,7 @@
 
   \vspace{0.08cm}
   \noindent\hfill
-    \begin{tikzpicture}[node distance=.17cm]
+    \begin{tikzpicture}[node distance=.40cm]
       \node[box,text width=2.0cm,minimum height=.72cm] (prepare) {encode frames\\\scriptsize starts $r_i$};
       \node[box,text width=1.9cm,minimum height=.72cm,right=of prepare] (data) {append data\\\scriptsize base $B$};
       \node[box,text width=1.95cm,minimum height=.72cm,right=of data] (derive) {derive index\\\scriptsize $o_i = B + r_i$};
@@ -398,7 +398,7 @@
       \eyebrow{What becomes visible}
 
       \vspace{0.08cm}
-      \begin{tikzpicture}[node distance=.07cm]
+      \begin{tikzpicture}[node distance=.36cm]
         \node[oldroot,text width=1.35cm,minimum height=.86cm] (oldpair) {old data\\+ offsets};
         \node[root,text width=2.0cm,minimum height=.86cm,right=of oldpair] (decision) {one UNO\\decision};
         \node[root,text width=1.35cm,minimum height=.86cm,right=of decision] (newpair) {new data\\+ offsets};
