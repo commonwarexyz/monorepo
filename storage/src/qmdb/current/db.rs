@@ -900,17 +900,17 @@ where
     }
 }
 
-/// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
-/// `None` if all bits fall on complete chunk boundaries.
+/// The bitmap's incomplete trailing chunk and the number of bits in it, or `None` if the bitmap
+/// is empty or its bits end exactly on a chunk boundary.
 pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
 ) -> Option<([u8; N], u64)> {
-    let (last_chunk, next_bit) = bitmap.last_chunk();
-    if next_bit == bitmap::Prunable::<N>::CHUNK_SIZE_BITS {
-        None
-    } else {
-        Some((last_chunk, next_bit))
+    let next_bit = bitmap.len() % bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+    if next_bit == 0 {
+        return None;
     }
+    let (last_chunk, _) = bitmap.last_chunk();
+    Some((last_chunk, next_bit))
 }
 
 /// Return complete and graftable chunk counts, enforcing the pending and pruning invariants.
@@ -1363,6 +1363,21 @@ mod tests {
         assert!(result.is_some());
         let (_chunk, next_bit) = result.unwrap();
         assert_eq!(next_bit, 5);
+    }
+
+    #[test]
+    fn partial_chunk_empty() {
+        // An empty bitmap has no partial chunk, and must not panic on `last_chunk`.
+        let bm = PrunableBitMap::<N>::new();
+        assert!(partial_chunk::<PrunableBitMap<N>, N>(&bm).is_none());
+    }
+
+    #[test]
+    fn partial_chunk_fully_pruned() {
+        // A fully-pruned bitmap is chunk-aligned but its backing store is empty; still no partial
+        // chunk, and must not panic on `last_chunk`.
+        let bm = PrunableBitMap::<N>::new_with_pruned_chunks(1).unwrap();
+        assert!(partial_chunk::<PrunableBitMap<N>, N>(&bm).is_none());
     }
 
     #[test]
