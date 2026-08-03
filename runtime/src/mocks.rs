@@ -583,6 +583,11 @@ impl<E: BatchStorage> BatchStorage for DelayedSyncContext<E> {
 impl<E: AtomicStorage> AtomicStorage for DelayedSyncContext<E> {
     type AtomicBlob = DelayedSyncBlob<E::AtomicBlob>;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        blob.sync().await?;
+        self.inner.migrate_atomic(blob.inner).await
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,
@@ -957,6 +962,10 @@ impl<E: BatchStorage> BatchStorage for WriteFaultContext<E> {
 impl<E: AtomicStorage> AtomicStorage for WriteFaultContext<E> {
     type AtomicBlob = WriteFaultBlob<E::AtomicBlob>;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        self.inner.migrate_atomic(blob.inner).await
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,
@@ -1088,6 +1097,11 @@ impl<E: BatchStorage> BatchStorage for SyncFaultContext<E> {
 impl<E: AtomicStorage> AtomicStorage for SyncFaultContext<E> {
     type AtomicBlob = SyncFaultBlob<E::AtomicBlob>;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        blob.sync().await?;
+        self.inner.migrate_atomic(blob.inner).await
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,
@@ -1175,6 +1189,82 @@ mod tests {
     use crate::{Clock, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
+
+    fn test_memory_storage() -> crate::storage::memory::Storage {
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        crate::storage::memory::Storage::new(pool)
+    }
+
+    #[test]
+    fn test_delayed_sync_context_gates_atomic_migration() {
+        deterministic::Runner::default().start(|context| async move {
+            let inner = test_memory_storage();
+            let (source, _) = inner.open("migrate_delayed", b"blob").await.unwrap();
+            source
+                .write_at(0, b"contents", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(source);
+
+            let pending = PendingSyncs::default();
+            let storage = DelayedSyncContext {
+                inner: inner.clone(),
+                pending: pending.clone(),
+            };
+            let (blob, _) = storage.open("migrate_delayed", b"blob").await.unwrap();
+            pending.arm();
+            let gate = next_pending_sync(&pending);
+            let migration = context.child("migration").spawn(move |_| async move {
+                storage.migrate_atomic(blob).await.unwrap();
+            });
+
+            gate.blocked
+                .await
+                .expect("migration must synchronize through the wrapper");
+            assert_eq!(pending.calls(), 1);
+            assert!(inner.open_atomic("migrate_delayed", b"blob").await.is_err());
+            gate.release
+                .send(Ok(()))
+                .expect("migration must remain blocked on the sync gate");
+            migration.await.unwrap();
+
+            let (atomic, len) = inner.open_atomic("migrate_delayed", b"blob").await.unwrap();
+            assert_eq!(len, 8);
+            assert_eq!(atomic.read_at(0, 8).await.unwrap().coalesce(), b"contents");
+        });
+    }
+
+    #[test]
+    fn test_sync_fault_context_blocks_atomic_migration() {
+        deterministic::Runner::default().start(|_| async move {
+            let inner = test_memory_storage();
+            let (source, _) = inner.open("migrate_faulty", b"blob").await.unwrap();
+            source
+                .write_at(0, b"contents", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(source);
+
+            let storage = SyncFaultContext {
+                inner: inner.clone(),
+                fail_partition: "migrate_faulty".into(),
+            };
+            let (blob, _) = storage.open("migrate_faulty", b"blob").await.unwrap();
+            assert!(matches!(
+                storage.migrate_atomic(blob).await,
+                Err(Error::Io(_))
+            ));
+
+            assert!(inner.open_atomic("migrate_faulty", b"blob").await.is_err());
+            let (ordinary, len) = inner.open("migrate_faulty", b"blob").await.unwrap();
+            assert_eq!(len, 8);
+            assert_eq!(
+                ordinary.read_at(0, 8).await.unwrap().coalesce(),
+                b"contents"
+            );
+        });
+    }
 
     #[test]
     fn test_send_recv() {

@@ -47,7 +47,10 @@
 //! recoverable spelling and leaves the descriptor witness available to repair peers. The batch
 //! recovery protocol and its crash outcomes are documented in `storage::batch::coordinator`.
 
-use crate::IoBufs;
+use crate::{
+    IoBufs,
+    storage::{Header, Layout},
+};
 use commonware_cryptography::{Crc32, Hasher as _};
 use commonware_formatting::hex;
 #[cfg(target_os = "linux")]
@@ -57,7 +60,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Seek as _, SeekFrom, Write as _},
     ops::Range,
-    os::unix::fs::FileExt,
+    os::unix::fs::{FileExt, MetadataExt as _},
     path::Path,
 };
 
@@ -605,6 +608,172 @@ mod tests {
         drop(file);
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn migration_streams_legacy_layouts_into_a_recoverable_v2_inode() {
+        const VERSION: u16 = 9;
+        let root = std::env::temp_dir().join(format!(
+            "commonware-atomic-migrate-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let parent = root.join("partition");
+        fs::create_dir_all(&parent).unwrap();
+
+        for layout in [Layout::V0, Layout::V1] {
+            for len in [0, 1, MIGRATION_COPY_LEN + 17] {
+                let name = format!("{:?}-{len}", layout).into_bytes();
+                let live = parent.join(hex(&name));
+                let payload = (0..len)
+                    .map(|index| (index.wrapping_mul(31) & 0xff) as u8)
+                    .collect::<Vec<_>>();
+                let raw = match layout {
+                    Layout::V0 => crate::storage::header::tests::v0_blob_bytes(VERSION, &payload),
+                    Layout::V1 => crate::storage::header::tests::v1_blob_bytes(VERSION, &payload),
+                    Layout::V2 => unreachable!(),
+                };
+                fs::write(&live, raw).unwrap();
+                let source = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&live)
+                    .unwrap();
+                let source_ino = source.metadata().unwrap().ino();
+
+                migrate_live(&root, "partition", &name, &source, layout.data_offset()).unwrap();
+
+                assert!(!creation_path(&live).unwrap().exists());
+                let migrated = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&live)
+                    .unwrap();
+                assert_ne!(migrated.metadata().unwrap().ino(), source_ino);
+                let raw_len = migrated.metadata().unwrap().len();
+                let mut header = vec![0; Header::resolve_len(raw_len)];
+                read_exact_at(&migrated, 0, &mut header).unwrap();
+                let (_, version, data_offset) =
+                    Header::parse(&header, raw_len, &(VERSION..=VERSION)).unwrap();
+                assert_eq!(version, VERSION);
+                assert_eq!(data_offset, Layout::V2.data_offset());
+                assert_eq!(
+                    State::recover(&migrated, data_offset)
+                        .unwrap()
+                        .logical_len(),
+                    len as u64
+                );
+
+                let mut migrated_payload = vec![0; len];
+                read_exact_at(&migrated, data_offset, &mut migrated_payload).unwrap();
+                assert_eq!(migrated_payload, payload);
+                let mut prior_payload = vec![0; len];
+                read_exact_at(&source, layout.data_offset(), &mut prior_payload).unwrap();
+                assert_eq!(prior_payload, payload);
+
+                // A retry after an ambiguous publication result must make the already-visible V2
+                // name durable without replacing its inode or scanning its payload.
+                let migrated_ino = migrated.metadata().unwrap().ino();
+                migrate_live(
+                    &root,
+                    "partition",
+                    &name,
+                    &migrated,
+                    Layout::V2.data_offset(),
+                )
+                .unwrap();
+                assert_eq!(migrated.metadata().unwrap().ino(), migrated_ino);
+            }
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_discards_every_retained_subset_of_an_abandoned_stage() {
+        const VERSION: u16 = 11;
+        const PAYLOAD: &[u8] = b"first payload chunk--second payload chunk";
+        const HEADER: u8 = 1;
+        const ROOT: u8 = 2;
+        const PAYLOAD_FIRST: u8 = 4;
+        const PAYLOAD_SECOND: u8 = 8;
+
+        let root = std::env::temp_dir().join(format!(
+            "commonware-atomic-migrate-stage-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let parent = root.join("partition");
+        fs::create_dir_all(&parent).unwrap();
+        let split = PAYLOAD.len() / 2;
+
+        for retained in 0..=(HEADER | ROOT | PAYLOAD_FIRST | PAYLOAD_SECOND) {
+            let name = format!("stage-{retained}").into_bytes();
+            let live = parent.join(hex(&name));
+            fs::write(
+                &live,
+                crate::storage::header::tests::v1_blob_bytes(VERSION, PAYLOAD),
+            )
+            .unwrap();
+            let source = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&live)
+                .unwrap();
+
+            let stage_path = creation_path(&live).unwrap();
+            let stage = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&stage_path)
+                .unwrap();
+            let region = Header::create_atomic(&(VERSION..=VERSION)).0;
+            if retained & HEADER != 0 {
+                stage
+                    .write_all_at(&region[..Layout::V1.data_offset() as usize], 0)
+                    .unwrap();
+            }
+            if retained & ROOT != 0 {
+                stage
+                    .write_all_at(
+                        &encode_root(ROOT_MAGIC, 1, PAYLOAD.len() as u64),
+                        ROOT_OFFSETS[1],
+                    )
+                    .unwrap();
+            }
+            if retained & PAYLOAD_FIRST != 0 {
+                stage
+                    .write_all_at(&PAYLOAD[..split], Layout::V2.data_offset())
+                    .unwrap();
+            }
+            if retained & PAYLOAD_SECOND != 0 {
+                stage
+                    .write_all_at(&PAYLOAD[split..], Layout::V2.data_offset() + split as u64)
+                    .unwrap();
+            }
+            drop(stage);
+
+            assert_eq!(
+                &fs::read(&live).unwrap()[..Header::MAGIC_LENGTH],
+                &Layout::V1.magic()
+            );
+            migrate_live(&root, "partition", &name, &source, Layout::V1.data_offset()).unwrap();
+            assert!(!stage_path.exists());
+
+            let migrated = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&live)
+                .unwrap();
+            let state = State::recover(&migrated, Layout::V2.data_offset()).unwrap();
+            assert_eq!(state.logical_len(), PAYLOAD.len() as u64, "mask {retained}");
+            let mut payload = vec![0; PAYLOAD.len()];
+            read_exact_at(&migrated, Layout::V2.data_offset(), &mut payload).unwrap();
+            assert_eq!(payload, PAYLOAD, "mask {retained}");
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 const ROOT_MAGIC: &[u8; 8] = b"CWUNOR11";
@@ -629,6 +798,7 @@ const TARGET_PREFLUSH_PARTICIPANTS: u64 = 4;
 pub(super) const BACKGROUND_PREFLUSH_INTERVAL: u64 =
     MAX_VALIDATED_PAYLOAD_LEN / TARGET_PREFLUSH_PARTICIPANTS;
 const PAYLOAD_CHECKSUM_READ_LEN: usize = 64 * 1024;
+const MIGRATION_COPY_LEN: usize = 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MIN_WRITEBACK_HINT_LEN: u64 = 64 * 1024;
 /// Checksum of one physically contiguous payload range.
@@ -2119,6 +2289,115 @@ pub(super) fn create_live(
     File::open(root)?.sync_all()?;
     file.seek(SeekFrom::Start(0))?;
     Ok(file)
+}
+
+/// Durably replace an opened V0/V1 live inode with an equivalent V2 inode, or finish making an
+/// already-visible V2 name durable after an ambiguous migration result.
+///
+/// The source is synchronized before it is copied. The replacement remains unreachable under a
+/// hidden creation name until its complete header, initial committed root, and payload are durable.
+/// An ordinary same-directory rename then publishes the replacement atomically. The caller must
+/// serialize namespace operations and prevent concurrent mutation through other source handles.
+pub(super) fn migrate_live(
+    root: &Path,
+    partition: &str,
+    name: &[u8],
+    source: &File,
+    expected_data_offset: u64,
+) -> Result<(), crate::Error> {
+    let encoded_name = hex(name);
+    source.sync_all().map_err(|error| {
+        crate::Error::BlobSyncFailed(partition.into(), encoded_name.clone(), error.into())
+    })?;
+
+    let source_metadata = source.metadata()?;
+    if !source_metadata.is_file() {
+        return Err(invalid_input("migration source is not a regular file").into());
+    }
+    let raw_len = source_metadata.len();
+    let mut raw = vec![0u8; Header::resolve_len(raw_len)];
+    read_exact_at(source, 0, &mut raw)?;
+    let (logical_len, blob_version, data_offset) = Header::parse(&raw, raw_len, &(0..=u16::MAX))
+        .map_err(|error| error.into_error(partition, name))?;
+    if data_offset != expected_data_offset {
+        return Err(crate::Error::BlobCorrupt(
+            partition.into(),
+            encoded_name,
+            "opened blob layout does not match its live header".into(),
+        ));
+    }
+    let live_path = root.join(partition).join(hex(name));
+    let live_metadata = fs::symlink_metadata(&live_path)?;
+    if !live_metadata.file_type().is_file()
+        || live_metadata.dev() != source_metadata.dev()
+        || live_metadata.ino() != source_metadata.ino()
+    {
+        return Err(invalid_input("migration source is no longer the live blob").into());
+    }
+    if data_offset == Layout::V2.data_offset() {
+        sync_live_directories(root, &live_path)?;
+        return Ok(());
+    }
+    Layout::V2
+        .data_offset()
+        .checked_add(logical_len)
+        .ok_or(crate::Error::OffsetOverflow)?;
+
+    discard(root, partition, name)?;
+    let creation_path = creation_path(&live_path)?;
+    let mut replacement = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&creation_path)?;
+    let mut region = Header::create_atomic(&(blob_version..=blob_version)).0;
+    let initial_root = encode_root(ROOT_MAGIC, 1, logical_len);
+    let root_offset = ROOT_OFFSETS[1] as usize;
+    region[root_offset..root_offset + ROOT_LEN].copy_from_slice(&initial_root);
+    replacement.write_all(&region)?;
+
+    let buffer_len = usize::try_from(logical_len.min(MIGRATION_COPY_LEN as u64))
+        .expect("migration chunks fit in usize");
+    let mut buffer = vec![0u8; buffer_len];
+    let mut copied = 0u64;
+    while copied < logical_len {
+        let remaining = logical_len - copied;
+        let len = usize::try_from(remaining.min(MIGRATION_COPY_LEN as u64))
+            .expect("migration chunks fit in usize");
+        read_exact_at(source, data_offset + copied, &mut buffer[..len])?;
+        replacement.write_all_at(&buffer[..len], Layout::V2.data_offset() + copied)?;
+        copied += len as u64;
+    }
+    replacement.sync_all()?;
+
+    // Detect stale handles and accidental concurrent resize before replacing the live name. The
+    // namespace lock excludes Commonware namespace operations, the caller excludes other handle
+    // mutations, and inode identity also catches an external rename.
+    let source_after = source.metadata()?;
+    let live_after = fs::symlink_metadata(&live_path)?;
+    if source_after.len() != raw_len
+        || source_after.dev() != source_metadata.dev()
+        || source_after.ino() != source_metadata.ino()
+        || !live_after.file_type().is_file()
+        || live_after.dev() != source_metadata.dev()
+        || live_after.ino() != source_metadata.ino()
+    {
+        return Err(invalid_input("migration source changed while it was copied").into());
+    }
+
+    fs::rename(&creation_path, &live_path)?;
+    sync_live_directories(root, &live_path)?;
+    Ok(())
+}
+
+/// Persist a same-directory live-name update after its target inode is durable.
+fn sync_live_directories(root: &Path, live_path: &Path) -> io::Result<()> {
+    let parent = live_path
+        .parent()
+        .ok_or_else(|| invalid_input("atomic blob has no parent directory"))?;
+    File::open(parent)?.sync_all()?;
+    File::open(root)?.sync_all()?;
+    Ok(())
 }
 
 /// Discard a V2 creation inode left before publication.

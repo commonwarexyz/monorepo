@@ -24,6 +24,8 @@ enum Op {
     Sync,
     Resize,
     Remove,
+    Migrate,
+    MigratePostCommit,
     Batch,
     BatchPostCommit,
     Scan,
@@ -64,6 +66,12 @@ pub struct Config {
     /// Failure rate for `remove` operations.
     pub remove_rate: Option<f64>,
 
+    /// Failure rate before an atomic migration starts.
+    pub migrate_rate: Option<f64>,
+
+    /// Failure rate reported after an atomic migration commits successfully.
+    pub migrate_post_commit_rate: Option<f64>,
+
     /// Pre-commit failure rate for non-empty batch operations.
     pub batch_rate: Option<f64>,
 
@@ -84,6 +92,8 @@ impl Config {
             Op::Sync => self.sync_rate,
             Op::Resize => self.resize_rate,
             Op::Remove => self.remove_rate,
+            Op::Migrate => self.migrate_rate,
+            Op::MigratePostCommit => self.migrate_post_commit_rate,
             Op::Batch => self.batch_rate,
             Op::BatchPostCommit => self.batch_post_commit_rate,
             Op::Scan => self.scan_rate,
@@ -136,6 +146,18 @@ impl Config {
     /// Set the remove failure rate.
     pub const fn remove(mut self, rate: f64) -> Self {
         self.remove_rate = Some(rate);
+        self
+    }
+
+    /// Set the pre-commit atomic migration failure rate.
+    pub const fn migrate(mut self, rate: f64) -> Self {
+        self.migrate_rate = Some(rate);
+        self
+    }
+
+    /// Set the failure rate reported after an atomic migration commits.
+    pub const fn migrate_post_commit(mut self, rate: f64) -> Self {
+        self.migrate_post_commit_rate = Some(rate);
         self
     }
 
@@ -297,6 +319,17 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
 impl<S: AtomicStorage> AtomicStorage for Storage<S> {
     type AtomicBlob = Blob<S::AtomicBlob>;
+
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        if self.ctx.should_fail(Op::Migrate) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.migrate_atomic(blob.inner).await?;
+        if self.ctx.should_fail(Op::MigratePostCommit) {
+            return Err(injected_io_error().into());
+        }
+        Ok(())
+    }
 
     async fn open_atomic_versioned(
         &self,
@@ -509,8 +542,8 @@ mod tests {
         storage::{
             memory::Storage as MemStorage,
             tests::{
-                run_atomic_blob_tests, run_batch_storage_tests, run_storage_foreign_handle_test,
-                run_storage_tests,
+                run_atomic_blob_tests, run_atomic_storage_tests, run_batch_storage_tests,
+                run_storage_foreign_handle_test, run_storage_tests,
             },
         },
         telemetry::metrics::Registry,
@@ -520,6 +553,13 @@ mod tests {
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
+    }
+
+    fn wrap(inner: MemStorage, seed: u64, config: Config) -> Storage<MemStorage> {
+        let rng = Arc::new(Mutex::new(
+            Box::new(StdRng::seed_from_u64(seed)) as BoxDynRng
+        ));
+        Storage::new(inner, rng, Arc::new(RwLock::new(config)))
     }
 
     /// Test harness with faulty storage wrapping memory storage.
@@ -536,10 +576,10 @@ mod tests {
 
         fn with_seed(seed: u64, config: Config) -> Self {
             let inner = MemStorage::new(test_pool());
+            let config = Arc::new(RwLock::new(config));
             let rng = Arc::new(Mutex::new(
                 Box::new(StdRng::seed_from_u64(seed)) as BoxDynRng
             ));
-            let config = Arc::new(RwLock::new(config));
             let storage = Storage::new(inner.clone(), rng, config.clone());
             Self {
                 inner,
@@ -554,6 +594,7 @@ mod tests {
         let h = Harness::new(Config::default());
         let tested = h.storage.clone();
         run_storage_tests(h.storage.clone()).await;
+        run_atomic_storage_tests(h.storage.clone()).await;
         run_batch_storage_tests(h.storage.clone()).await;
         let (atomic, _) = h
             .storage
@@ -740,6 +781,58 @@ mod tests {
         ));
         assert!(h.inner.scan("batch_a").await.unwrap().is_empty());
         assert!(h.inner.scan("batch_b").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_migration_fault_phases_are_recoverable() {
+        const PARTITION: &str = "migrate_faults";
+        const NAME: &[u8] = b"blob";
+        const DATA: &[u8] = b"durable contents";
+
+        let inner = MemStorage::new(test_pool());
+        let storage = wrap(inner.clone(), 1, Config::default());
+        let (blob, _) = storage.open(PARTITION, NAME).await.unwrap();
+        blob.write_at(0, DATA, WriteOptions::SYNC).await.unwrap();
+        drop(storage);
+
+        // A pre-commit failure leaves the ordinary generation in place.
+        let storage = wrap(inner.clone(), 2, Config::default().migrate(1.0));
+        let (blob, _) = storage.open(PARTITION, NAME).await.unwrap();
+        assert!(matches!(
+            storage.migrate_atomic(blob).await,
+            Err(Error::Io(_))
+        ));
+        drop(storage);
+
+        let storage = wrap(inner.clone(), 3, Config::default());
+        let (blob, len) = storage.open(PARTITION, NAME).await.unwrap();
+        assert_eq!(len, DATA.len() as u64);
+        assert_eq!(blob.read_at(0, DATA.len()).await.unwrap().coalesce(), DATA);
+        assert!(storage.open_atomic(PARTITION, NAME).await.is_err());
+        drop(storage);
+
+        // An error after commit is ambiguous to the caller, but reopening discovers V2.
+        let storage = wrap(inner.clone(), 4, Config::default().migrate_post_commit(1.0));
+        let (blob, _) = storage.open(PARTITION, NAME).await.unwrap();
+        assert!(matches!(
+            storage.migrate_atomic(blob).await,
+            Err(Error::Io(_))
+        ));
+        drop(storage);
+
+        let storage = wrap(inner, 5, Config::default());
+        let (atomic, len) = storage.open_atomic(PARTITION, NAME).await.unwrap();
+        assert_eq!(len, DATA.len() as u64);
+        assert_eq!(
+            atomic.read_at(0, DATA.len()).await.unwrap().coalesce(),
+            DATA
+        );
+
+        // Retrying after an ambiguous result is an idempotent V2 no-op.
+        let (ordinary, _) = storage.open(PARTITION, NAME).await.unwrap();
+        storage.migrate_atomic(ordinary).await.unwrap();
+        atomic.append(b"!").await.unwrap();
+        atomic.sync().await.unwrap();
     }
 
     #[tokio::test]

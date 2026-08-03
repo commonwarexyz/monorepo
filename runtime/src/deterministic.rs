@@ -1596,6 +1596,10 @@ impl crate::BatchStorage for Context {
 impl crate::AtomicStorage for Context {
     type AtomicBlob = <Storage as crate::AtomicStorage>::AtomicBlob;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        self.storage.migrate_atomic(blob).await
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,
@@ -1968,6 +1972,78 @@ mod tests {
             assert_eq!(blob_len, 0);
             let (_, partition_len) = context.open("batch_partition", b"name").await.unwrap();
             assert_eq!(partition_len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_atomic_migration_fault_phases() {
+        const PARTITION: &str = "migration_recovery";
+        const NAME: &[u8] = b"blob";
+        const VERSION: u16 = 13;
+        const DATA: &[u8] = b"durable contents";
+
+        let config = deterministic::Config::default()
+            .with_storage_fault_config(FaultConfig::default().migrate(1.0));
+        let (result, checkpoint) =
+            deterministic::Runner::new(config).start_and_recover(|context| async move {
+                let (blob, _, version) = context
+                    .open_versioned(PARTITION, NAME, VERSION..=VERSION)
+                    .await
+                    .unwrap();
+                assert_eq!(version, VERSION);
+                blob.write_at(0, DATA, WriteOptions::SYNC).await.unwrap();
+                context.migrate_atomic(blob).await
+            });
+        assert!(matches!(result, Err(Error::Io(_))));
+
+        let (_, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                let (ordinary, len, version) = context
+                    .open_versioned(PARTITION, NAME, VERSION..=VERSION)
+                    .await
+                    .unwrap();
+                assert_eq!(len, DATA.len() as u64);
+                assert_eq!(version, VERSION);
+                assert_eq!(
+                    ordinary.read_at(0, DATA.len()).await.unwrap().coalesce(),
+                    DATA
+                );
+                assert!(
+                    context
+                        .open_atomic_versioned(PARTITION, NAME, VERSION..=VERSION)
+                        .await
+                        .is_err()
+                );
+
+                *context.storage_fault_config().write() =
+                    FaultConfig::default().migrate_post_commit(1.0);
+                assert!(matches!(
+                    context.migrate_atomic(ordinary).await,
+                    Err(Error::Io(_))
+                ));
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (atomic, len, version) = context
+                .open_atomic_versioned(PARTITION, NAME, VERSION..=VERSION)
+                .await
+                .unwrap();
+            assert_eq!(len, DATA.len() as u64);
+            assert_eq!(version, VERSION);
+            assert_eq!(
+                atomic.read_at(0, DATA.len()).await.unwrap().coalesce(),
+                DATA
+            );
+
+            // Retrying the ambiguous result after restart is an idempotent V2 operation.
+            *context.storage_fault_config().write() = FaultConfig::default();
+            let (ordinary, _, _) = context
+                .open_versioned(PARTITION, NAME, VERSION..=VERSION)
+                .await
+                .unwrap();
+            context.migrate_atomic(ordinary).await.unwrap();
+            atomic.append(b"!").await.unwrap();
+            atomic.sync().await.unwrap();
         });
     }
 

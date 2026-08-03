@@ -315,6 +315,62 @@ impl crate::Storage for Storage {
 impl crate::AtomicStorage for Storage {
     type AtomicBlob = Blob;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), crate::Error> {
+        if !self.owns(&blob) {
+            return Err(crate::Error::BlobMissing(
+                blob.partition.clone(),
+                hex(&blob.name),
+            ));
+        }
+        crate::Blob::sync(&blob).await?;
+
+        let key = (blob.partition.clone(), blob.name.clone());
+        let mut namespace = self.namespace.lock();
+        blob.ensure_current(&namespace, &key)?;
+        let mut partitions = self.partitions.lock();
+        let durable = partitions
+            .get_mut(&blob.partition)
+            .and_then(|partition| partition.get_mut(&blob.name))
+            .ok_or_else(|| crate::Error::BlobMissing(blob.partition.clone(), hex(&blob.name)))?;
+        let (_, blob_version, data_offset) =
+            resolve_header(durable, &(0..=u16::MAX), &blob.partition, &blob.name)?.ok_or_else(
+                || {
+                    crate::Error::BlobCorrupt(
+                        blob.partition.clone(),
+                        hex(&blob.name),
+                        "opened blob has no durable header".into(),
+                    )
+                },
+            )?;
+        if data_offset != blob.data_offset {
+            return Err(crate::Error::BlobCorrupt(
+                blob.partition.clone(),
+                hex(&blob.name),
+                "opened blob layout does not match its durable header".into(),
+            ));
+        }
+        if data_offset == Layout::V2.data_offset() {
+            return Ok(());
+        }
+
+        let payload_offset =
+            usize::try_from(data_offset).map_err(|_| crate::Error::OffsetOverflow)?;
+        let payload = durable
+            .get(payload_offset..)
+            .ok_or(crate::Error::BlobInsufficientLength)?;
+        let (mut replacement, migrated_version) =
+            Header::create_atomic(&(blob_version..=blob_version));
+        debug_assert_eq!(migrated_version, blob_version);
+        replacement
+            .try_reserve(payload.len())
+            .map_err(|_| crate::Error::WriteFailed)?;
+        replacement.extend_from_slice(payload);
+
+        *durable = replacement;
+        namespace.remove(&key);
+        Ok(())
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,
@@ -837,8 +893,8 @@ mod tests {
         storage::{
             Layout,
             tests::{
-                run_atomic_blob_tests, run_batch_storage_tests, run_storage_foreign_handle_test,
-                run_storage_tests,
+                run_atomic_blob_tests, run_atomic_storage_tests, run_batch_storage_tests,
+                run_storage_foreign_handle_test, run_storage_tests,
             },
         },
         telemetry::metrics::Registry,
@@ -854,6 +910,7 @@ mod tests {
         let storage = Storage::new(test_pool());
         let tested = storage.clone();
         run_storage_tests(storage.clone()).await;
+        run_atomic_storage_tests(storage.clone()).await;
         run_batch_storage_tests(storage.clone()).await;
         let (atomic, _) = storage
             .open_atomic("atomic_storage", b"blob")
@@ -1334,6 +1391,33 @@ mod tests {
             assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + data.len() + 1);
             assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V0.magic());
             assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
+        }
+
+        let prior = blob.clone();
+        storage.migrate_atomic(blob).await.unwrap();
+        let (atomic, size, version) = storage
+            .open_atomic_versioned("partition", b"v0", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, 12);
+        assert_eq!(version, 0);
+        assert_eq!(
+            atomic.read_at(0, 12).await.unwrap().coalesce(),
+            b"hello world!"
+        );
+        assert_eq!(
+            prior.read_at(0, 12).await.unwrap().coalesce(),
+            b"hello world!"
+        );
+        {
+            let partitions = storage.partitions.lock();
+            let partition = partitions.get("partition").unwrap();
+            let raw_content = partition.get(&b"v0".to_vec()).unwrap();
+            assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V2.magic());
+            assert_eq!(
+                &raw_content[Layout::V2.data_offset() as usize..],
+                b"hello world!"
+            );
         }
 
         // Corrupted blob recovery (0 < raw_size < 8)

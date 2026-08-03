@@ -78,6 +78,14 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 impl<S: AtomicStorage> AtomicStorage for Storage<S> {
     type AtomicBlob = Blob<S::AtomicBlob>;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        self.auditor.event(b"migrate_atomic", |hasher| {
+            hasher.update(blob.partition.as_bytes());
+            hasher.update(&blob.name);
+        });
+        self.inner.migrate_atomic(blob.inner).await
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,
@@ -268,7 +276,10 @@ mod tests {
         storage::{
             audited::Storage as AuditedStorage,
             memory::Storage as MemStorage,
-            tests::{run_batch_storage_tests, run_storage_foreign_handle_test, run_storage_tests},
+            tests::{
+                run_atomic_storage_tests, run_batch_storage_tests, run_storage_foreign_handle_test,
+                run_storage_tests,
+            },
         },
         telemetry::metrics::Registry,
     };
@@ -287,6 +298,7 @@ mod tests {
         let storage = AuditedStorage::new(inner, auditor.clone());
         let tested = storage.clone();
         run_storage_tests(storage.clone()).await;
+        run_atomic_storage_tests(storage.clone()).await;
         run_batch_storage_tests(storage).await;
 
         let foreign =

@@ -853,6 +853,10 @@ impl crate::BatchStorage for Context {
 impl crate::AtomicStorage for Context {
     type AtomicBlob = <Storage as crate::AtomicStorage>::AtomicBlob;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        self.storage.migrate_atomic(blob).await
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,

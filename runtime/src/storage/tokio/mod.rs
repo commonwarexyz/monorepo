@@ -1636,6 +1636,70 @@ impl crate::Storage for Storage {
 impl crate::AtomicStorage for Storage {
     type AtomicBlob = Blob;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        #[cfg(not(unix))]
+        {
+            return Err(unsupported_atomic(blob.partition(), blob.name()));
+        }
+
+        #[cfg(unix)]
+        {
+            let partition = blob.partition().to_string();
+            let name = blob.name().to_vec();
+            let mut guard = self.lock_recovered().await?;
+            if !self
+                .namespace
+                .is_current(&partition, &name, blob.generation())
+            {
+                return Err(Error::BlobMissing(partition, hex(&name)));
+            }
+            let is_atomic = blob.is_atomic();
+            if is_atomic {
+                drop(guard);
+                crate::Blob::sync(&blob).await?;
+                guard = self.lock_recovered().await?;
+                if !self
+                    .namespace
+                    .is_current(&partition, &name, blob.generation())
+                {
+                    return Err(Error::BlobMissing(partition, hex(&name)));
+                }
+            }
+
+            let root = self.cfg.storage_directory.clone();
+            let source = blob.file();
+            let data_offset = blob.data_offset();
+            let namespace = self.namespace.clone();
+            let migration_partition = partition.clone();
+            let migration_name = name.clone();
+            let migration = tokio::task::spawn_blocking(move || {
+                let result = super::atomic::migrate_live(
+                    &root,
+                    &migration_partition,
+                    &migration_name,
+                    &source,
+                    data_offset,
+                );
+                if !is_atomic {
+                    namespace.invalidate_operations(&[super::batch::Operation::Remove(
+                        crate::RemoveTarget::Blob {
+                            partition: migration_partition,
+                            name: migration_name,
+                        },
+                    )]);
+                }
+                (guard, result)
+            });
+            let (guard, result) = match migration.await {
+                Ok(result) => result,
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(_) => return Err(Error::Closed),
+            };
+            drop(guard);
+            result
+        }
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,
@@ -1661,7 +1725,10 @@ impl crate::BatchStorage for Storage {
 mod tests {
     use super::{Header, *};
     #[cfg(unix)]
-    use crate::{AtomicBlob as _, AtomicStorage as _, storage::tests::run_atomic_blob_tests};
+    use crate::{
+        AtomicBlob as _, AtomicStorage as _,
+        storage::tests::{run_atomic_blob_tests, run_atomic_storage_tests},
+    };
     use crate::{
         BatchStorage as _, Blob, BufferPoolConfig, Storage as _, WriteOptions,
         storage::{
@@ -1735,6 +1802,7 @@ mod tests {
         run_batch_storage_tests(storage.clone()).await;
         #[cfg(unix)]
         {
+            run_atomic_storage_tests(storage.clone()).await;
             let (atomic, _) = storage
                 .open_atomic("atomic_storage", b"blob")
                 .await
@@ -3173,6 +3241,43 @@ mod tests {
         assert_eq!(raw_content.len(), Header::PRELUDE_SIZE + payload.len() + 1);
         assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V0.magic());
         assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
+
+        let (blob, size) = storage.open("partition", b"v0").await.unwrap();
+        assert_eq!(size, payload.len() as u64 + 1);
+        let prior = blob.clone();
+        storage.migrate_atomic(blob).await.unwrap();
+        let (atomic, size) = storage.open_atomic("partition", b"v0").await.unwrap();
+        assert_eq!(size, payload.len() as u64 + 1);
+        assert_eq!(
+            atomic.read_at(0, 12).await.unwrap().coalesce(),
+            b"hello world!"
+        );
+        assert_eq!(
+            prior.read_at(0, 12).await.unwrap().coalesce(),
+            b"hello world!"
+        );
+
+        let raw_content = std::fs::read(&file_path).unwrap();
+        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Layout::V2.magic());
+        assert_eq!(
+            &raw_content[Layout::V2.data_offset() as usize..],
+            b"hello world!"
+        );
+
+        drop((atomic, prior, storage));
+        let restarted = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
+        let (atomic, size) = restarted.open_atomic("partition", b"v0").await.unwrap();
+        assert_eq!(size, 12);
+        assert_eq!(
+            atomic.read_at(0, 12).await.unwrap().coalesce(),
+            b"hello world!"
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

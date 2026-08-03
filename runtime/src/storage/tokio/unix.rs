@@ -132,6 +132,14 @@ impl Blob {
         &self.generation
     }
 
+    pub(super) fn file(&self) -> Arc<File> {
+        self.file.clone()
+    }
+
+    pub(super) const fn data_offset(&self) -> u64 {
+        self.data_offset
+    }
+
     pub(super) const fn is_atomic(&self) -> bool {
         self.atomic.is_some()
     }

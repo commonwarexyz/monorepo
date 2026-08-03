@@ -121,6 +121,10 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 impl<S: AtomicStorage> AtomicStorage for Storage<S> {
     type AtomicBlob = Blob<S::AtomicBlob>;
 
+    async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
+        self.inner.migrate_atomic(blob.inner).await
+    }
+
     async fn open_atomic_versioned(
         &self,
         partition: &str,
@@ -325,8 +329,8 @@ mod tests {
         storage::{
             memory::Storage as MemoryStorage,
             tests::{
-                run_atomic_blob_tests, run_batch_storage_tests, run_storage_foreign_handle_test,
-                run_storage_tests,
+                run_atomic_blob_tests, run_atomic_storage_tests, run_batch_storage_tests,
+                run_storage_foreign_handle_test, run_storage_tests,
             },
         },
         telemetry::metrics::Registry,
@@ -343,6 +347,7 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
         let tested = storage.clone();
         run_storage_tests(storage.clone()).await;
+        run_atomic_storage_tests(storage.clone()).await;
         run_batch_storage_tests(storage.clone()).await;
         let (atomic, _) = storage
             .open_atomic("atomic_storage", b"blob")

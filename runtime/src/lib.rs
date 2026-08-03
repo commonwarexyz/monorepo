@@ -725,6 +725,29 @@ stability_scope!(BETA {
         /// Blob type returned by atomic opens.
         type AtomicBlob: AtomicBlob;
 
+        /// Consume an opened blob and durably replace its current name with an atomic blob.
+        ///
+        /// The blob's logical contents and application-owned blob version are preserved. Pending
+        /// writes on `blob` are synchronized before migration. If the blob already uses the atomic
+        /// layout, it is synchronized and left in place.
+        ///
+        /// The caller must ensure no other handle mutates the blob during migration. Handles that
+        /// remain open across a replacement continue to refer to the prior blob generation and may
+        /// remain readable, as described by [`Storage::remove`]. Their mutation behavior is
+        /// unspecified. After this method succeeds, reopen the name with
+        /// [`AtomicStorage::open_atomic`] or [`AtomicStorage::open_atomic_versioned`].
+        ///
+        /// An `Ok` result means the current name durably refers to the atomic layout. An error or
+        /// cancellation may leave either layout at the current name; retry by reopening the name
+        /// rather than reusing an existing handle. Filesystem implementations stream through a
+        /// replacement inode with bounded memory, but temporarily require enough free space for
+        /// another complete copy. Migrating names independently is resumable because migrating an
+        /// existing atomic blob is idempotent.
+        fn migrate_atomic(
+            &self,
+            blob: Self::Blob,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
         /// [`AtomicStorage::open_atomic_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only
         /// accepted blob version.
         fn open_atomic(

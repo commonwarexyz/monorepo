@@ -88,8 +88,8 @@ stability_scope!(BETA {
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::{
-        AtomicBlob, BatchOperation, BatchStorage, Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut,
-        Storage, WriteOptions,
+        AtomicBlob, AtomicStorage, BatchOperation, BatchStorage, Blob, Buf, IoBuf, IoBufMut,
+        IoBufs, IoBufsMut, Storage, WriteOptions,
     };
     use futures::FutureExt;
 
@@ -153,6 +153,127 @@ pub(crate) mod tests {
         test_apply_batch_rejects_stale_handle(&storage).await;
     }
 
+    /// Runs explicit ordinary-to-atomic migration semantics on an opt-in storage implementation.
+    pub(crate) async fn run_atomic_storage_tests<S>(storage: S)
+    where
+        S: AtomicStorage + Send + Sync + 'static,
+        S::Blob: Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        test_migrate_atomic_preserves_contents_and_version(&storage).await;
+        test_migrate_atomic_rejects_stale_handle(&storage).await;
+    }
+
+    /// Migration replaces one exact name generation while preserving logical bytes and version.
+    async fn test_migrate_atomic_preserves_contents_and_version<S>(storage: &S)
+    where
+        S: AtomicStorage + Send + Sync,
+        S::Blob: Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        const VERSION: u16 = 7;
+        let expected = (0..160_003u64)
+            .map(|index| (index.wrapping_mul(31) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let (blob, len, version) = storage
+            .open_versioned("migrate_atomic", b"blob", VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+        assert_eq!(version, VERSION);
+        blob.write_at(0, expected.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+        let prior = blob.clone();
+
+        storage.migrate_atomic(blob).await.unwrap();
+
+        let (atomic, len, version) = storage
+            .open_atomic_versioned("migrate_atomic", b"blob", VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(len, expected.len() as u64);
+        assert_eq!(version, VERSION);
+        assert_eq!(
+            atomic.read_at(0, expected.len()).await.unwrap().coalesce(),
+            expected.as_slice()
+        );
+        assert_eq!(
+            prior.read_at(0, expected.len()).await.unwrap().coalesce(),
+            expected.as_slice()
+        );
+
+        atomic.append(b"tail").await.unwrap();
+        atomic.sync().await.unwrap();
+        assert!(prior.read_at(expected.len() as u64, 1).await.is_err());
+        assert!(storage.migrate_atomic(prior.clone()).await.is_err());
+        drop(prior);
+
+        // Migrating an ordinary handle to an existing V2 blob neither replaces nor invalidates it.
+        let (ordinary, len, version) = storage
+            .open_versioned("migrate_atomic", b"blob", VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(len, expected.len() as u64 + 4);
+        assert_eq!(version, VERSION);
+        storage.migrate_atomic(ordinary).await.unwrap();
+        assert_eq!(
+            atomic.append(b"!").await.unwrap(),
+            expected.len() as u64 + 4
+        );
+        atomic.sync().await.unwrap();
+        drop(atomic);
+        let (atomic, len, version) = storage
+            .open_atomic_versioned("migrate_atomic", b"blob", VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(len, expected.len() as u64 + 5);
+        assert_eq!(version, VERSION);
+        assert_eq!(
+            atomic
+                .read_at(expected.len() as u64, 5)
+                .await
+                .unwrap()
+                .coalesce(),
+            b"tail!"
+        );
+    }
+
+    /// A removed handle cannot replace a newer same-name blob generation during migration.
+    async fn test_migrate_atomic_rejects_stale_handle<S>(storage: &S)
+    where
+        S: AtomicStorage + Send + Sync,
+        S::Blob: Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let (stale, _) = storage.open("migrate_atomic_stale", b"blob").await.unwrap();
+        stale
+            .write_at(0, b"stale", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        storage
+            .remove("migrate_atomic_stale", Some(b"blob"))
+            .await
+            .unwrap();
+        let (replacement, _) = storage.open("migrate_atomic_stale", b"blob").await.unwrap();
+        replacement
+            .write_at(0, b"replacement", WriteOptions::SYNC)
+            .await
+            .unwrap();
+
+        assert!(storage.migrate_atomic(stale).await.is_err());
+        assert_eq!(
+            replacement.read_at(0, 11).await.unwrap().coalesce(),
+            b"replacement"
+        );
+        assert!(
+            storage
+                .open_atomic("migrate_atomic_stale", b"blob")
+                .await
+                .is_err()
+        );
+    }
+
     /// Runs append, rewind, and synchronization-fence semantics on an atomic blob.
     pub(crate) async fn run_atomic_blob_tests<B>(blob: B)
     where
@@ -188,10 +309,11 @@ pub(crate) mod tests {
         assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"abcZ");
     }
 
-    /// Verify that an identical removal cannot hide a handle from another backend instance.
+    /// Verify that mutations cannot accept handles from another backend instance.
     pub(crate) async fn run_storage_foreign_handle_test<S>(storage: &S, foreign_storage: &S)
     where
         S: BatchStorage + Send + Sync,
+        S::Blob: Send + Sync,
         S::AtomicBlob: Send + Sync,
     {
         let (local, _) = storage
@@ -228,6 +350,51 @@ pub(crate) mod tests {
         assert_eq!(
             storage.scan("batch_foreign_handle").await.unwrap(),
             vec![b"shared_name".to_vec()]
+        );
+
+        let (foreign_v1, _) = foreign_storage
+            .open("migration_foreign_v1", b"blob")
+            .await
+            .unwrap();
+        foreign_v1
+            .write_at(0, b"foreign-v1", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        let readable_v1 = foreign_v1.clone();
+        assert!(matches!(
+            storage.migrate_atomic(foreign_v1).await,
+            Err(crate::Error::BlobMissing(..))
+        ));
+        assert_eq!(
+            readable_v1.read_at(0, 10).await.unwrap().coalesce(),
+            b"foreign-v1"
+        );
+        assert!(
+            foreign_storage
+                .open_atomic("migration_foreign_v1", b"blob")
+                .await
+                .is_err()
+        );
+
+        let (foreign_atomic, _) = foreign_storage
+            .open_atomic("migration_foreign_v2", b"blob")
+            .await
+            .unwrap();
+        foreign_atomic.append(b"foreign-v2").await.unwrap();
+        foreign_atomic.sync().await.unwrap();
+        drop(foreign_atomic);
+        let (foreign_v2, _) = foreign_storage
+            .open("migration_foreign_v2", b"blob")
+            .await
+            .unwrap();
+        let readable_v2 = foreign_v2.clone();
+        assert!(matches!(
+            storage.migrate_atomic(foreign_v2).await,
+            Err(crate::Error::BlobMissing(..))
+        ));
+        assert_eq!(
+            readable_v2.read_at(0, 10).await.unwrap().coalesce(),
+            b"foreign-v2"
         );
     }
 
