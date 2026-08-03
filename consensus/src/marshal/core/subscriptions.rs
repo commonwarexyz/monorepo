@@ -142,11 +142,12 @@ mod tests {
     use futures::FutureExt;
     use std::sync::Arc;
 
-    type TestBlock = Block<Digest, ()>;
+    type TestBlock = Block<Digest, u8>;
     type TestVariant = Standard<TestBlock>;
     type TestWaiters = AbortablePool<Result<Arc<TestBlock>, KeyFor<TestVariant>>>;
     type Subscriber = oneshot::Sender<Arc<TestBlock>>;
     type Subscribers = Arc<Mutex<Vec<Subscriber>>>;
+    const MOCK_CONTEXT: u8 = 0;
 
     #[derive(Clone, Default)]
     struct TestBuffer {
@@ -199,7 +200,12 @@ mod tests {
     }
 
     fn block(height: u64, timestamp: u64) -> TestBlock {
-        Block::new::<Sha256>((), Sha256::fill(0), Height::new(height), timestamp)
+        Block::new::<Sha256>(
+            MOCK_CONTEXT,
+            Sha256::fill(0),
+            Height::new(height),
+            timestamp,
+        )
     }
 
     fn assert_receives(receiver: oneshot::Receiver<Arc<TestBlock>>, expected: &TestBlock) {

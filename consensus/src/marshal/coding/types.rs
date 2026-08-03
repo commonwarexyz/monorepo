@@ -587,7 +587,8 @@ mod test {
     type H = Sha256;
     type RS = ReedSolomon<H>;
     type RShard = Shard<RS, H>;
-    type Block = MockBlock<<H as Hasher>::Digest, ()>;
+    type Block = MockBlock<<H as Hasher>::Digest, u8>;
+    const MOCK_CONTEXT: u8 = 0;
 
     #[test]
     fn test_shard_wrapper_codec_roundtrip() {
@@ -657,8 +658,12 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            Block::new::<Sha256>((), Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = Block::new::<Sha256>(
+            MOCK_CONTEXT,
+            Sha256::hash(&[b"parent"]),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
 
         let encoded = coded_block.encode();
@@ -685,8 +690,12 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            Block::new::<Sha256>((), Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = Block::new::<Sha256>(
+            MOCK_CONTEXT,
+            Sha256::hash(&[b"parent"]),
+            Height::new(42),
+            1_234_567,
+        );
         let expected = CodedBlock::<Block, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
             .commitment();
         let encoded = (block, EMBEDDED_CONFIG).encode();
@@ -714,8 +723,12 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            Block::new::<Sha256>((), Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = Block::new::<Sha256>(
+            MOCK_CONTEXT,
+            Sha256::hash(&[b"parent"]),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
         let cloned = coded_block.clone();
 
@@ -733,8 +746,12 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            Block::new::<Sha256>((), Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = Block::new::<Sha256>(
+            MOCK_CONTEXT,
+            Sha256::hash(&[b"parent"]),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
         let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block.clone());
 
@@ -758,8 +775,12 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            Block::new::<Sha256>((), Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = Block::new::<Sha256>(
+            MOCK_CONTEXT,
+            Sha256::hash(&[b"parent"]),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
         let original_commitment = coded_block.commitment();
         let original_digest = coded_block.digest();
@@ -780,8 +801,12 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            Block::new::<Sha256>((), Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = Block::new::<Sha256>(
+            MOCK_CONTEXT,
+            Sha256::hash(&[b"parent"]),
+            Height::new(42),
+            1_234_567,
+        );
         let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
         let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block);
 

@@ -440,10 +440,13 @@ mod test {
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::StreamExt;
 
+    type TestBlock = Block<Sha256Digest, u8>;
+    const MOCK_CONTEXT: u8 = 0;
+
     #[derive(Default, Clone)]
-    struct MockProvider(Vec<Block<Sha256Digest, ()>>);
+    struct MockProvider(Vec<TestBlock>);
     impl BlockProvider for MockProvider {
-        type Block = Block<Sha256Digest, ()>;
+        type Block = TestBlock;
 
         fn subscribe_parent(
             &self,
@@ -460,7 +463,6 @@ mod test {
         }
     }
 
-    type TestBlock = Block<Sha256Digest, ()>;
     type ParentSubscription = oneshot::Sender<Arc<TestBlock>>;
 
     #[derive(Default, Clone)]
@@ -473,7 +475,7 @@ mod test {
             self.subscriptions.lock().len()
         }
 
-        fn complete_all(&self, parent: Arc<Block<Sha256Digest, ()>>) {
+        fn complete_all(&self, parent: Arc<TestBlock>) {
             let subscriptions = std::mem::take(&mut *self.subscriptions.lock());
             for subscription in subscriptions {
                 assert!(subscription.send(parent.clone()).is_ok());
@@ -482,7 +484,7 @@ mod test {
     }
 
     impl BlockProvider for PendingProvider {
-        type Block = Block<Sha256Digest, ()>;
+        type Block = TestBlock;
 
         fn subscribe_parent(
             &self,
@@ -495,9 +497,9 @@ mod test {
     }
 
     #[derive(Clone)]
-    struct WrongParentProvider(Block<Sha256Digest, ()>);
+    struct WrongParentProvider(TestBlock);
     impl BlockProvider for WrongParentProvider {
-        type Block = Block<Sha256Digest, ()>;
+        type Block = TestBlock;
 
         fn subscribe_parent(
             &self,
@@ -541,8 +543,8 @@ mod test {
                 &context,
                 MockProvider::default(),
                 vec![
-                    Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1),
-                    Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(3), 3),
+                    Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1),
+                    Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(3), 3),
                 ],
             );
         });
@@ -556,8 +558,8 @@ mod test {
                 &context,
                 MockProvider::default(),
                 vec![
-                    Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1),
-                    Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(2), 2),
+                    Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1),
+                    Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(2), 2),
                 ],
             );
         });
@@ -567,8 +569,8 @@ mod test {
     #[should_panic = "fetched parent must be contiguous in height"]
     fn test_panics_on_non_contiguous_fetched_parent_height() {
         deterministic::Runner::default().start(|context| async move {
-            let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
-            let child = Block::new::<Sha256>((), parent.digest(), Height::new(3), 3);
+            let parent = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::zero(), 0);
+            let child = Block::new::<Sha256>(MOCK_CONTEXT, parent.digest(), Height::new(3), 3);
             let stream = stream(&context, MockProvider(vec![parent]), [child]);
             futures::pin_mut!(stream);
 
@@ -582,9 +584,12 @@ mod test {
     #[should_panic = "fetched parent must be contiguous in ancestry"]
     fn test_panics_on_non_contiguous_fetched_parent_digest() {
         deterministic::Runner::default().start(|context| async move {
-            let expected_parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
-            let fetched_parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 1);
-            let child = Block::new::<Sha256>((), expected_parent.digest(), Height::new(1), 2);
+            let expected_parent =
+                Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::zero(), 0);
+            let fetched_parent =
+                Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::zero(), 1);
+            let child =
+                Block::new::<Sha256>(MOCK_CONTEXT, expected_parent.digest(), Height::new(1), 2);
             let stream = stream(&context, WrongParentProvider(fetched_parent), [child]);
             futures::pin_mut!(stream);
 
@@ -597,11 +602,11 @@ mod test {
     #[test]
     fn test_peek_available_through_ancestry_trait() {
         deterministic::Runner::default().start(|context| async move {
-            fn peek_height(ancestry: impl Ancestry<Block<Sha256Digest, ()>>) -> Option<Height> {
+            fn peek_height(ancestry: impl Ancestry<TestBlock>) -> Option<Height> {
                 ancestry.peek().map(Heightable::height)
             }
 
-            let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let block = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1);
             let stream = stream(&context, MockProvider::default(), [block.clone()]);
             assert_eq!(peek_height(stream), Some(block.height()));
         });
@@ -609,11 +614,11 @@ mod test {
 
     #[test]
     fn test_from_iter_available_through_ancestry_trait() {
-        fn peek_height(ancestry: impl Ancestry<Block<Sha256Digest, ()>>) -> Option<Height> {
+        fn peek_height(ancestry: impl Ancestry<TestBlock>) -> Option<Height> {
             ancestry.peek().map(Heightable::height)
         }
 
-        let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+        let block = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1);
         let ancestry = from_iter([Arc::new(block.clone())]);
 
         assert_eq!(peek_height(ancestry), Some(block.height()));
@@ -622,8 +627,8 @@ mod test {
     #[test]
     fn test_from_iter_yields_blocks_in_order_and_peeks_next() {
         deterministic::Runner::default().start(|_| async move {
-            let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let child = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
+            let parent = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1);
+            let child = Block::new::<Sha256>(MOCK_CONTEXT, parent.digest(), Height::new(2), 2);
             let mut ancestry = from_iter([Arc::new(child.clone()), Arc::new(parent.clone())]);
 
             assert_eq!(ancestry.peek(), Some(&child));
@@ -638,7 +643,7 @@ mod test {
     #[test]
     fn test_with_prefix_peeks_tail_when_prefix_empty() {
         deterministic::Runner::default().start(|_| async move {
-            let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let block = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1);
             let mut ancestry = with_prefix([], from_iter([Arc::new(block.clone())]));
 
             assert_eq!(ancestry.peek(), Some(&block));
@@ -650,8 +655,8 @@ mod test {
     #[test]
     fn test_with_prefix_peeks_tail_after_prefix_consumed() {
         deterministic::Runner::default().start(|_| async move {
-            let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let child = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
+            let parent = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1);
+            let child = Block::new::<Sha256>(MOCK_CONTEXT, parent.digest(), Height::new(2), 2);
             let mut ancestry = with_prefix(
                 [Arc::new(child.clone())],
                 from_iter([Arc::new(parent.clone())]),
@@ -668,8 +673,9 @@ mod test {
     #[test]
     fn test_yields_genesis_and_stops() {
         deterministic::Runner::default().start(|context| async move {
-            let genesis = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
-            let child = Block::new::<Sha256>((), genesis.digest(), Height::new(1), 1);
+            let genesis =
+                Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::zero(), 0);
+            let child = Block::new::<Sha256>(MOCK_CONTEXT, genesis.digest(), Height::new(1), 1);
 
             let provider = MockProvider(vec![genesis.clone()]);
             let stream = stream(&context, provider, [child.clone()]);
@@ -683,12 +689,12 @@ mod test {
     fn test_clone_preserves_pending_parent_fetch() {
         deterministic::Runner::default().start(|context| async move {
             let parent = Arc::new(Block::new::<Sha256>(
-                (),
+                MOCK_CONTEXT,
                 Sha256Digest::EMPTY,
                 Height::zero(),
                 0,
             ));
-            let child = Block::new::<Sha256>((), parent.digest(), Height::new(1), 1);
+            let child = Block::new::<Sha256>(MOCK_CONTEXT, parent.digest(), Height::new(1), 1);
             let provider = PendingProvider::default();
             let mut stream = stream(&context, provider.clone(), [child.clone()]);
 
@@ -718,9 +724,9 @@ mod test {
     #[test]
     fn test_yields_ancestors() {
         deterministic::Runner::default().start(|context| async move {
-            let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
-            let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
+            let block1 = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1);
+            let block2 = Block::new::<Sha256>(MOCK_CONTEXT, block1.digest(), Height::new(2), 2);
+            let block3 = Block::new::<Sha256>(MOCK_CONTEXT, block2.digest(), Height::new(3), 3);
 
             let provider = MockProvider(vec![block1.clone(), block2.clone()]);
             let stream = stream(&context, provider, [block3.clone()]);
@@ -736,9 +742,9 @@ mod test {
     #[test]
     fn test_yields_ancestors_all_buffered() {
         deterministic::Runner::default().start(|context| async move {
-            let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
-            let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
+            let block1 = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1);
+            let block2 = Block::new::<Sha256>(MOCK_CONTEXT, block1.digest(), Height::new(2), 2);
+            let block3 = Block::new::<Sha256>(MOCK_CONTEXT, block2.digest(), Height::new(3), 3);
 
             let provider = MockProvider(vec![]);
             let stream = stream(
@@ -758,9 +764,9 @@ mod test {
     #[test]
     fn test_missing_parent_ends_stream() {
         deterministic::Runner::default().start(|context| async move {
-            let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-            let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
-            let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
+            let block1 = Block::new::<Sha256>(MOCK_CONTEXT, Sha256Digest::EMPTY, Height::new(1), 1);
+            let block2 = Block::new::<Sha256>(MOCK_CONTEXT, block1.digest(), Height::new(2), 2);
+            let block3 = Block::new::<Sha256>(MOCK_CONTEXT, block2.digest(), Height::new(3), 3);
 
             let provider = MockProvider(vec![block1]);
             let stream = stream(&context, provider, [block3.clone()]);
