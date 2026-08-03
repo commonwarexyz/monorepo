@@ -168,13 +168,10 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         commitment: V::Commitment,
     ) -> Option<oneshot::Receiver<Arc<V::Block>>>;
 
-    /// Notify the buffer that application processing has durably advanced through `commitments`.
+    /// Notify the buffer of durable application progress.
     ///
-    /// `round` is an inclusive retirement floor: the buffer may retire entries last observed in
-    /// that round or earlier. Each listed commitment may be retired exactly, even if sparse
-    /// certificates or re-proposals leave its observation above the floor.
-    ///
-    /// This allows the buffer to perform variant-specific cleanup operations.
+    /// Entries last observed at or before `round` are eligible for retirement.
+    /// Entries matching `commitments` are eligible regardless of observation round.
     fn finalized(&self, round: Round, commitments: Vec<V::Commitment>);
 
     /// Send a block to peers.

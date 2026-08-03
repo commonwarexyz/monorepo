@@ -1532,7 +1532,7 @@ mod tests {
             select! {
                 result = assigned => result.expect("assigned shard sender dropped"),
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("reproposal leader was not authorized by verification");
+                    panic!("assigned shard from reproposer was not accepted");
                 },
             }
 
@@ -1644,6 +1644,104 @@ mod tests {
             // because they require multiple validators to reconstruct blocks from shards. In a
             // single-validator test setup, block reconstruction fails due to insufficient shards.
             // These paths are tested in integration tests with multiple validators.
+        })
+    }
+
+    /// An invalid re-proposal must not open shard reconstruction for its payload.
+    ///
+    /// A re-proposal's consensus round is not bound to its payload because the context
+    /// digest check is skipped: the block carries the context of its original proposal.
+    /// The shard engine resolves the participant set from the announced round's epoch, so
+    /// announcing before the boundary check lets a leader bind a commitment to a round it
+    /// was never proposed in and misclassify shards from honest peers.
+    #[test_traced("INFO")]
+    fn test_invalid_reproposal_does_not_open_reconstruction() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+            let reproposer_control = oracle.control(participants[1].clone());
+            let (mut reproposer_sender, _reproposer_receiver) =
+                reproposer_control.register(2, TEST_QUOTA).await.unwrap();
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // Store a mid-epoch block in core marshal without opening shard reconstruction.
+            let original_round = Round::new(Epoch::new(0), View::new(5));
+            let original_context = CodingCtx {
+                round: original_round,
+                leader: participants[1].clone(),
+                parent: (View::new(4), genesis_commitment()),
+            };
+            let block = make_coding_block(
+                original_context,
+                Sha256::hash(&[b"parent"]),
+                Height::new(5),
+                500,
+            );
+            let coded_block: TestCodedBlock = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            assert!(marshal.verified(original_round, coded_block.clone()).await);
+            assert!(shards.get(commitment).await.is_none());
+
+            // Re-proposing the old block as epoch 1's genesis parent is invalid.
+            // The payload is the parent, so `verify` takes the re-proposal path.
+            let reproposal_round = Round::new(Epoch::new(1), View::new(1));
+            let reproposal_context = CodingCtx {
+                round: reproposal_round,
+                leader: participants[1].clone(),
+                parent: (View::zero(), commitment),
+            };
+            let assigned = shards.subscribe_assigned_shard_verified(commitment);
+            let verdict = marshaled.verify(reproposal_context, commitment).await.await;
+            assert!(!verdict.expect("re-proposal verdict missing"));
+
+            // The re-proposer delivers this node's assigned shard. Without reconstruction
+            // state it stays buffered, so assigned shard verification cannot complete.
+            let assigned_shard = coded_block
+                .shard(0)
+                .expect("missing assigned shard")
+                .encode();
+            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+
+            select! {
+                _ = assigned => {
+                    panic!("invalid re-proposal opened reconstruction for its payload");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            }
         })
     }
 

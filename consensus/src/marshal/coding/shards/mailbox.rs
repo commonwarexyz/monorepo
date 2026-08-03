@@ -64,9 +64,9 @@ where
     },
     /// A request to open a subscription for assigned shard verification.
     ///
-    /// For participants, this resolves once the leader-delivered shard for
-    /// the local participant index has been verified. Reconstructing the full
-    /// block from gossiped shards does not resolve this subscription: that
+    /// For participants, this resolves once the shard for the local participant
+    /// index has been verified. Reconstructing the full block from gossiped
+    /// shards does not resolve this subscription: that
     /// block may still be used for later certification, but it is not enough
     /// to claim the participant received the shard it is expected to echo.
     ///
@@ -97,9 +97,9 @@ where
     /// A request to retire cached blocks and reconstruction state after durable application
     /// progress.
     Prune {
-        /// The inclusive consensus-round retirement floor.
+        /// The inclusive observation-round retirement floor.
         round: Round,
-        /// The commitments through which application processing advanced.
+        /// Commitments to retire regardless of observation round.
         commitments: Vec<Commitment>,
     },
 }
@@ -241,6 +241,11 @@ where
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
+    ///
+    /// `round` MUST come from a trusted consensus observation, and its epoch
+    /// MUST be validated for `commitment`. The engine classifies the commitment's
+    /// shards against that epoch's participant set, so an unvalidated epoch can
+    /// misclassify shards from honest peers.
     pub fn discovered(&self, commitment: Commitment, leader: P, round: Round) {
         let _ = self.sender.enqueue(Message::Discovered {
             commitment,
@@ -282,9 +287,9 @@ where
 
     /// Subscribe to assigned shard verification for a commitment.
     ///
-    /// For participants, this resolves once the leader-delivered shard for
-    /// the local participant index has been verified. Reconstructing the full
-    /// block from gossiped shards does not resolve this subscription: that
+    /// For participants, this resolves once the shard for the local participant
+    /// index has been verified. Reconstructing the full block from gossiped
+    /// shards does not resolve this subscription: that
     /// block may still be used for later certification, but it is not enough
     /// to claim the participant received the shard it is expected to echo.
     ///
@@ -329,9 +334,8 @@ where
 
     /// Retire cached blocks and reconstruction state after durable application progress.
     ///
-    /// `commitments` are retired exactly. `round` is an inclusive retirement floor for every
-    /// other entry and is supplied separately because sparse finalization certificates and
-    /// re-proposals may associate it with a different block context.
+    /// Entries last observed at or before `round` are eligible for retirement.
+    /// Entries matching `commitments` are eligible regardless of observation round.
     ///
     /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
     /// subscriptions remain open, and later consensus notifications may recreate state.
