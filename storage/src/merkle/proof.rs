@@ -231,53 +231,20 @@ impl<F: Family, D: Digest> Proof<F, D> {
             .map(|(&pos, digest)| (pos, *digest))
             .collect();
 
-        // Verify each element by constructing its sub-proof in fold-based format
+        // Verify each element by reconstructing its sub-proof in the canonical layout (via the
+        // shared `build_proof`) and checking its root. Every required position was collected above
+        // and matched against `digests.len()`, so `node_digests` is complete and `build_proof`
+        // cannot fail here.
         for (element, loc) in elements {
             let bp = &blueprints[loc];
-
-            let suffix_count = usize::from(bp.suffix_peaks().is_some());
-            let mut digests = Vec::with_capacity(
-                if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len() + suffix_count,
-            );
-            if let Some((first_sub, rest)) = bp.fold_prefix.split_first() {
-                let first = *node_digests
-                    .get(&first_sub.pos)
-                    .expect("must exist by construction");
-                let acc = rest.iter().fold(first, |acc, sub| {
-                    let d = node_digests
-                        .get(&sub.pos)
-                        .expect("must exist by construction");
-                    hasher.fold(&acc, d)
-                });
-                digests.push(acc);
-            }
-            let sibling_start = bp.sibling_start();
-            for &pos in &bp.fetch_nodes[..sibling_start] {
-                let d = node_digests.get(&pos).expect("must exist by construction");
-                digests.push(*d);
-            }
-            if let Some(suffix_peaks) = bp.suffix_peaks() {
-                let (last_pos, rest_pos) = suffix_peaks
-                    .split_last()
-                    .expect("suffix_peaks is non-empty when returned");
-                let mut acc = *node_digests
-                    .get(last_pos)
-                    .expect("must exist by construction");
-                for pos in rest_pos.iter().rev() {
-                    let d = node_digests.get(pos).expect("must exist by construction");
-                    acc = hasher.fold(d, &acc);
-                }
-                digests.push(acc);
-            }
-            for &pos in &bp.fetch_nodes[sibling_start..] {
-                let d = node_digests.get(&pos).expect("must exist by construction");
-                digests.push(*d);
-            }
-            let proof = Self {
-                leaves: self.leaves,
-                inactive_peaks: self.inactive_peaks,
-                digests,
-            };
+            let proof = bp
+                .build_proof(
+                    hasher,
+                    self.inactive_peaks,
+                    |pos| node_digests.get(&pos).copied(),
+                    |_pos| (),
+                )
+                .expect("build_proof cannot fail: every node is present by construction");
 
             match proof.reconstruct_root_inner(hasher, &[element.as_ref()], *loc, None) {
                 Ok(reconstructed_root) if &reconstructed_root == root => {}
@@ -799,7 +766,9 @@ pub(crate) struct Blueprint<F: Family> {
     suffix_peaks: Vec<Position<F>>,
     /// The peaks that overlap the proven range.
     range_peaks: Vec<Subtree<F>>,
-    /// Node positions to include in the proof: after-peaks followed by DFS siblings.
+    /// Node positions included in the proof, in layout order: the active prefix peaks, then the
+    /// after-peaks, then the DFS path siblings. [`Self::sibling_start`] is the index at which the
+    /// siblings begin (the count of active prefix peaks plus after-peaks).
     pub(crate) fetch_nodes: Vec<Position<F>>,
 }
 
@@ -927,6 +896,9 @@ impl<F: Family> Blueprint<F> {
     }
 
     /// Return active after-peaks that are collapsed into a backward-folded suffix accumulator.
+    // Only the `std`-gated `verification` module consults this accessor; `build_proof` reads the
+    // `suffix_peaks` field directly.
+    #[cfg(feature = "std")]
     pub(crate) fn suffix_peaks(&self) -> Option<&[Position<F>]> {
         (!self.suffix_peaks.is_empty()).then_some(&self.suffix_peaks)
     }
@@ -992,7 +964,7 @@ impl<F: Family> Blueprint<F> {
     /// Returns an error via `element_pruned` if `get_node` returns `None` for any required
     /// position.
     pub(crate) fn build_proof<D, H, E>(
-        self,
+        &self,
         hasher: &H,
         inactive_peaks: usize,
         get_node: impl Fn(Position<F>) -> Option<D>,
@@ -1017,10 +989,9 @@ impl<F: Family> Blueprint<F> {
             digests.push(acc);
         }
 
-        for sub in &self.prefix_active_peaks {
-            digests.push(get_node(sub.pos).ok_or_else(|| element_pruned(sub.pos))?);
-        }
-        for &pos in &self.after_peaks {
+        // Active prefix peaks and after-peaks occupy the front of `fetch_nodes`.
+        let sibling_start = self.sibling_start();
+        for &pos in &self.fetch_nodes[..sibling_start] {
             digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
         }
         if let Some((last_pos, rest)) = self.suffix_peaks.split_last() {
@@ -1032,7 +1003,7 @@ impl<F: Family> Blueprint<F> {
             digests.push(acc);
         }
 
-        let sibling_start = self.sibling_start();
+        // DFS path siblings occupy the tail of `fetch_nodes`.
         for &pos in &self.fetch_nodes[sibling_start..] {
             digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
         }
