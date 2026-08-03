@@ -364,6 +364,59 @@
   \note{The barriers are issued concurrently. If start_apply returns Ok, all required participant states are durably recoverable, even if the completion handle is dropped. Awaiting the handle waits for activation and namespace cleanup. A failed or cancelled start remains indeterminate because every barrier may in fact have reached disk.}
 \end{frame}
 
+\begin{frame}[t]{Dependent writes can be built, then published together}
+  \vspace{0cm}
+  \eyebrow{Variable journal append: sequential staging is allowed}
+
+  \vspace{0.08cm}
+  \noindent\hfill
+    \begin{tikzpicture}[node distance=.17cm]
+      \node[box,text width=2.0cm,minimum height=.72cm] (prepare) {encode frames\\\scriptsize starts $r_i$};
+      \node[box,text width=1.9cm,minimum height=.72cm,right=of prepare] (data) {append data\\\scriptsize base $B$};
+      \node[box,text width=1.95cm,minimum height=.72cm,right=of data] (derive) {derive index\\\scriptsize $o_i = B + r_i$};
+      \node[box,text width=1.9cm,minimum height=.72cm,right=of derive] (offsets) {append $u64$ offsets\\\scriptsize $o_i$};
+      \node[root,text width=2.15cm,minimum height=.72cm,right=of offsets] (publish) {\texttt{start\_sync}\\\scriptsize publish both roots};
+      \draw[flow] (prepare) -- (data);
+      \draw[flow] (data) -- (derive);
+      \draw[flow] (derive) -- (offsets);
+      \draw[flow] (offsets) -- (publish);
+      \node[above=.10cm of $(prepare.north)!0.5!(offsets.north)$,font=\scriptsize,text=Muted] {build phase: pending writes may depend on earlier results};
+    \end{tikzpicture}
+  \hfill\null
+
+  \vspace{0.13cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.53\textwidth}
+      \eyebrow{How value $i$ is located}
+
+      \vspace{0.08cm}
+      \begin{tikzpicture}
+        \node[panel,text width=5.95cm,align=left] {\texttt{start = offsets[i]}\\\texttt{end = offsets[i + 1]}\\\texttt{decode data[start..end]}\\[-0.02cm]\scriptsize Active tail ends at committed data length;\\sealed sections store that length as a sentinel.};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \eyebrow{What becomes visible}
+
+      \vspace{0.08cm}
+      \begin{tikzpicture}[node distance=.07cm]
+        \node[oldroot,text width=1.35cm,minimum height=.86cm] (oldpair) {old data\\+ offsets};
+        \node[root,text width=2.0cm,minimum height=.86cm,right=of oldpair] (decision) {one UNO\\decision};
+        \node[root,text width=1.35cm,minimum height=.86cm,right=of decision] (newpair) {new data\\+ offsets};
+        \draw[flow] (oldpair) -- (decision);
+        \draw[flow] (decision) -- (newpair);
+      \end{tikzpicture}
+
+      \vspace{0.07cm}
+      \scriptsize Restart sees the old pair or complete new pair---never mismatched data and offsets lengths.
+    \end{column}
+  \end{columns}
+
+  \vfill
+  \takeaway{Stage dependency-aware writes first; one UNO decision publishes the finished set.}
+
+  \note{The batch operation is a publication boundary, not a simultaneous-write scheduler. prepare_append encodes all frames and records each relative start before I/O. Appending the data slice returns its stable append-only base B; the journal adds B to each relative start and appends those u64 entries to the offsets blob. Those pending writes are immediately available to the current writer but remain outside the committed roots. start_sync then creates Publish operations for both blobs in every dirty pair and starts one UNO group. If staging fails, publication never begins and the consuming MutableV2 API prevents reuse of partially mutated state. On rollover the same pattern covers the prior and current data/offsets pairs, at most four roots.}
+\end{frame}
+
 \begin{frame}[t]{Batch limits: descriptor bytes, not payload bytes}
   \vspace{0cm}
   \eyebrow{Every dirty participant: one 4 KiB root slot holds the complete decision}
