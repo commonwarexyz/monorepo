@@ -2234,6 +2234,17 @@ mod tests {
         }
     }
 
+    macro_rules! ready_finalize {
+        () => {
+            async fn finalize(
+                self,
+                _batch: Self::Merkleized,
+            ) -> Result<(Self, Handle<()>), Self::Error> {
+                Ok((self, Handle::ready(Ok(()))))
+            }
+        };
+    }
+
     #[derive(Default)]
     struct TestDb;
 
@@ -2268,12 +2279,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
@@ -2305,12 +2311,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.current_target
@@ -2344,12 +2345,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         async fn prune(self, _target: &Self::SyncTarget) -> Result<Self, Self::Error> {
             self.prune_count.fetch_add(1, Ordering::SeqCst);
@@ -2584,12 +2580,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
@@ -2627,12 +2618,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
@@ -2666,12 +2652,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
@@ -2705,12 +2686,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             0
@@ -2744,12 +2720,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
@@ -2783,12 +2754,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             0
@@ -2822,12 +2788,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
@@ -2861,12 +2822,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
@@ -2900,12 +2856,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
@@ -2943,12 +2894,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
@@ -3091,12 +3037,7 @@ mod tests {
             true
         }
 
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Handle<()>), Self::Error> {
-            Ok((self, Handle::ready(Ok(()))))
-        }
+        ready_finalize!();
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
