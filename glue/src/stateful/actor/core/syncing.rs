@@ -732,7 +732,7 @@ mod tests {
             };
             let mut harness =
                 TestHarness::new_on(context.child("harness"), delayed, anchor(7, 9)).await;
-            harness.syncing.pruning = Some(Pruning::fixed(
+            harness.syncing.pruning = Some(Pruning::build(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 0,

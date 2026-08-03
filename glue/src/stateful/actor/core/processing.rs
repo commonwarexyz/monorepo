@@ -19,11 +19,11 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{channel::fallible::OneshotExt, futures::Pool};
 use futures::{
+    FutureExt as _,
     future::{Either, ready},
-    poll,
 };
 use rand_core::Rng;
-use std::{collections::BTreeSet, sync::mpsc::TryRecvError, task::Poll};
+use std::{collections::BTreeSet, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: either a mailbox message to
@@ -91,7 +91,7 @@ where
                 // acknowledgement) before taking the next unit of work, so
                 // acknowledgements keep flowing even while the mailbox is
                 // never idle.
-                while let Poll::Ready(completion) = poll!(syncs.next_completed()) {
+                while let Some(completion) = syncs.next_completed().now_or_never() {
                     if !complete(&mut pending_syncs, completion) {
                         return;
                     }
@@ -106,8 +106,8 @@ where
                     Err(TryRecvError::Empty) => match pending_prune.take() {
                         // No message, but a prune is queued: run it.
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
-                        // No message and nothing to prune: wait on the mailbox,
-                        // driving flush completions while idle.
+                        // No message and nothing to prune: wait on the mailbox, driving flush
+                        // completions while idle.
                         None => {
                             let mailbox = &mut self.mailbox;
                             let syncs = &mut syncs;
@@ -334,7 +334,7 @@ mod tests {
         let control = FlushControl::default();
         let databases = Shared::new("test", TestDb::gated(control.clone()));
         let pruning = prune_config
-            .map(|config| Pruning::fixed(config, marshal.mailbox.max_pending_acks(), 0));
+            .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
         let processor = Processor::new(
             TestApp,
             databases,

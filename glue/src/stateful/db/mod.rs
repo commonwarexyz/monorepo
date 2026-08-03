@@ -88,7 +88,7 @@ use commonware_utils::{
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
 use futures::{
-    future::{Either, pending},
+    future::{Either, pending, try_join_all},
     join,
 };
 use std::{
@@ -237,7 +237,7 @@ pub trait Merkleized: Sized + Send + Sync {
     fn root(&self) -> Self::Digest;
 
     /// Create a child unmerkleized batch that reads through this batch's
-    /// pending changes before falling back to the committed database state.
+    /// pending changes before falling back to the applied database state.
     ///
     /// In QMDB, this maps to `merkleized_batch.new_batch()`.
     fn new_batch(&self) -> Self::Unmerkleized;
@@ -245,11 +245,11 @@ pub trait Merkleized: Sized + Send + Sync {
 
 /// One database managed by the [`Stateful`](super::Stateful) wrapper.
 ///
-/// Implementations create new batches from committed state and apply finalized
+/// Implementations create new batches from applied state and apply finalized
 /// batches back to storage, deferring each batch's flush to a returned handle.
 ///
 /// [`new_batch`](Self::new_batch) receives `Shared<Self>` so batch
-/// types can keep read-through access to committed state.
+/// types can keep read-through access to applied state.
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
 /// work across runtimes that satisfy the bounds.
@@ -293,15 +293,15 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// This must match [`sync_target`](Self::sync_target) after opening an empty partition.
     fn initial_sync_target() -> Self::SyncTarget;
 
-    /// Create a new unmerkleized batch rooted at the database's committed
+    /// Create a new unmerkleized batch rooted at the database's applied
     /// state.
     ///
     /// The `db` parameter is the [`Shared`] handle that wraps this
     /// database, allowing batch types to capture a shared reference for
-    /// read-through to committed state.
+    /// read-through to applied state.
     fn new_batch(db: &Shared<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
 
-    /// Return true if a merkleized batch matches a committed sync target.
+    /// Return true if a merkleized batch matches a sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
 
     /// Apply a merkleized batch's changeset to the underlying database and
@@ -330,10 +330,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         async { Ok(self) }
     }
 
-    /// Return the sync target for this database's current committed state.
+    /// Return the sync target for this database's current applied state.
     fn sync_target(&self) -> Self::SyncTarget;
 
-    /// Rewind committed state to `target`.
+    /// Rewind applied state to `target`.
     ///
     /// Implementations must ensure rewind effects are durable before returning
     /// the database (for example by committing after rewind).
@@ -393,21 +393,27 @@ impl Barrier {
     /// the unflushed batch. Returns `false` only when runtime shutdown aborts
     /// or closes a flush handle.
     pub async fn durable(self) -> bool {
-        let mut durable = true;
-        for (db_type, index, handle) in self.syncs {
-            match handle.await {
-                Ok(()) => {}
-                Err(RuntimeError::Closed | RuntimeError::Aborted) => {
-                    debug!(db_type, "runtime shutdown before finalize flush completed");
-                    durable = false;
+        let syncs = self
+            .syncs
+            .into_iter()
+            .map(|(db_type, index, handle)| async move {
+                match handle.await {
+                    Ok(()) => Ok(true),
+                    Err(RuntimeError::Closed | RuntimeError::Aborted) => {
+                        debug!(db_type, "runtime shutdown before finalize flush completed");
+                        Ok(false)
+                    }
+                    Err(err) => Err((db_type, index, err)),
                 }
-                Err(err) => {
-                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
-                    panic!("database finalize flush failed ({index}type {db_type}): {err}");
-                }
+            });
+
+        match try_join_all(syncs).await {
+            Ok(results) => results.into_iter().all(|durable| durable),
+            Err((db_type, index, err)) => {
+                let index = index.map_or(String::new(), |i| format!("index {i}, "));
+                panic!("database finalize flush failed ({index}type {db_type}): {err}");
             }
         }
-        durable
     }
 }
 
@@ -444,7 +450,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Return the sync targets produced by a newly initialized database set.
     fn initial_sync_targets() -> Self::SyncTargets;
 
-    /// Create unmerkleized batches from each database's committed state.
+    /// Create unmerkleized batches from each database's applied state.
     ///
     /// Acquires a read lock on each database.
     fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized> + Send;
@@ -454,7 +460,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// No lock is needed; reads come from the in-memory merkleized state.
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized;
 
-    /// Return true if merkleized batches match the committed sync targets.
+    /// Return true if merkleized batches match the sync targets.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
 
     /// Apply each merkleized batch's changeset and begin persisting it.
@@ -477,7 +483,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// databases whose mutations were in progress (see [Shared]); every later access panics.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
-    /// Return sync targets for the set's current committed state.
+    /// Return sync targets for the set's current applied state.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 
     /// Rewind the set to the provided per-database targets.
@@ -1679,8 +1685,8 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     batch: T::Merkleized,
     index: Option<usize>,
 ) -> (T, Handle<()>) {
-    // Mutable finalize failures are fatal by design because other databases in
-    // the same set may already have committed, leaving partially applied state.
+    // Mutable finalize failures are fatal by design because the batch may already have been
+    // applied to other databases in the same set, leaving partially applied state.
     match database.finalize(batch).await {
         Ok(result) => result,
         Err(err) => {

@@ -303,9 +303,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             });
         }
 
-        // Make sure the journal's oldest retained node is as expected based on the last pruning
-        // boundary stored in metadata. If they don't match, prune the journal to the appropriate
-        // location.
+        // Metadata stores the pruning boundary as a leaf index. Journal recovery compares node
+        // positions.
         let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
         let metadata_pruned_to = Location::<F>::new(metadata.get(&key).map_or(0, |bytes| {
             u64::from_be_bytes(
@@ -317,6 +316,39 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }));
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
         let journal_bounds_start = journal.bounds().start;
+
+        // Use the more restrictive (higher) pruning boundary between metadata and journal.
+        // This handles both cases: metadata ahead (crash during prune) and metadata stale.
+        //
+        // The journal boundary may not be leaf-aligned (it's blob-aligned), so round up to the
+        // position of the first leaf after the boundary.
+        let journal_boundary_pos = Position::<F>::new(journal_bounds_start);
+        let journal_boundary_floor = F::to_nearest_size(journal_boundary_pos);
+        let journal_boundary_leaf_aligned_pos = if journal_boundary_floor == journal_boundary_pos {
+            // `to_nearest_size` rounds down, so equality means the boundary is already
+            // leaf-aligned.
+            journal_boundary_floor
+        } else {
+            // If flooring backed up over the boundary, round up to the next leaf position, which
+            // is guaranteed to be above it.
+            Position::try_from(Location::try_from(journal_boundary_floor)? + 1)?
+        };
+        let effective_prune_pos =
+            std::cmp::max(metadata_prune_pos, journal_boundary_leaf_aligned_pos);
+
+        let last_valid_size = F::to_nearest_size(journal_size);
+        if effective_prune_pos > last_valid_size {
+            error!(
+                ?effective_prune_pos,
+                ?last_valid_size,
+                "pruning boundary exceeds recovered journal size"
+            );
+            return Err(Error::MissingNode(effective_prune_pos));
+        }
+
+        // Make sure the journal's oldest retained node is as expected based on the last pruning
+        // boundary stored in metadata. If they don't match, prune the journal to the appropriate
+        // location.
         if *metadata_prune_pos > journal_bounds_start {
             // Metadata is ahead of journal (crashed before completing journal prune).
             // Prune the journal to match metadata.
@@ -339,26 +371,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             );
         }
 
-        // Use the more restrictive (higher) pruning boundary between metadata and journal.
-        // This handles both cases: metadata ahead (crash during prune) and metadata stale.
-        //
-        // The journal boundary may not be leaf-aligned (it's blob-aligned), so round up to the
-        // position of the first leaf after the boundary.
-        let journal_boundary_pos = Position::<F>::new(journal_bounds_start);
-        let journal_boundary_floor = F::to_nearest_size(journal_boundary_pos);
-        let journal_boundary_leaf_aligned_pos = if journal_boundary_floor == journal_boundary_pos {
-            // `to_nearest_size` rounds down, so equality means the boundary is already
-            // leaf-aligned.
-            journal_boundary_floor
-        } else {
-            // If flooring backed up over the boundary, round up to the next leaf position, which
-            // is guaranteed to be above it.
-            Position::try_from(Location::try_from(journal_boundary_floor)? + 1)?
-        };
-        let effective_prune_pos =
-            std::cmp::max(metadata_prune_pos, journal_boundary_leaf_aligned_pos);
-
-        let last_valid_size = F::to_nearest_size(journal_size);
         let mut orphaned_leaf: Option<D> = None;
         if last_valid_size != journal_size {
             warn!(
@@ -2771,6 +2783,64 @@ mod tests {
     fn test_full_init_stale_metadata_returns_error_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_init_stale_metadata_returns_error_inner::<mmb::Family>);
+    }
+
+    async fn full_init_rejects_prune_boundary_beyond_recovered_size_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
+                .await
+                .unwrap();
+
+        let mut batch = merkle.new_batch();
+        for i in 0..12 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        let merkle = merkle.prune(Location::new(12)).await.unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        drop(merkle);
+
+        let journal_cfg = JConfig {
+            partition: cfg.journal_partition.clone(),
+            items_per_blob: cfg.items_per_blob,
+            page_cache: cfg.page_cache.clone(),
+            write_buffer: cfg.write_buffer,
+        };
+        let journal = Journal::<_, Digest>::init(context.child("interrupted_reset"), journal_cfg)
+            .await
+            .unwrap();
+        let recovered_size = Position::<F>::try_from(Location::<F>::new(8)).unwrap();
+        assert!(
+            journal.bounds().start > *recovered_size,
+            "test reset must discard a pruned prefix"
+        );
+        let journal = journal.clear_to_size(*recovered_size).await.unwrap();
+        drop(journal);
+
+        match Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg).await
+        {
+            Err(Error::MissingNode(_)) => {}
+            Ok(_) => panic!("pruning boundary beyond recovered size must fail closed"),
+            Err(err) => panic!("expected MissingNode error, got {err:?}"),
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_init_rejects_prune_boundary_beyond_recovered_size_mmr() {
+        deterministic::Runner::default()
+            .start(full_init_rejects_prune_boundary_beyond_recovered_size_inner::<mmr::Family>);
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_init_rejects_prune_boundary_beyond_recovered_size_mmb() {
+        deterministic::Runner::default()
+            .start(full_init_rejects_prune_boundary_beyond_recovered_size_inner::<mmb::Family>);
     }
 
     // Test that init() handles the case where metadata pruning boundary is ahead

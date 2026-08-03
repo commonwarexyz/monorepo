@@ -134,7 +134,11 @@ impl<T: Clone> Pruning<T> {
         Self::build(config, max_pending_acks, offset)
     }
 
-    fn build(config: PruneConfig, max_pending_acks: usize, maintenance_offset: u64) -> Self {
+    pub(super) fn build(
+        config: PruneConfig,
+        max_pending_acks: usize,
+        maintenance_offset: u64,
+    ) -> Self {
         config.assert_valid();
         let maintenance_interval = u64::try_from(config.maintenance_interval.get())
             .expect("prune interval should fit in u64");
@@ -158,15 +162,6 @@ impl<T: Clone> Pruning<T> {
             qmdb_retention_window,
             retained_targets: VecDeque::new(),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn fixed(
-        config: PruneConfig,
-        max_pending_acks: usize,
-        maintenance_offset: u64,
-    ) -> Self {
-        Self::build(config, max_pending_acks, maintenance_offset)
     }
 
     /// Observe a newly finalized block and decide whether pruning should run.
@@ -1602,7 +1597,7 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::fixed(config, 2, 0);
+        let mut pruning = Pruning::build(config, 2, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1624,7 +1619,7 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::fixed(config, 1, 0);
+        let mut pruning = Pruning::build(config, 1, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1653,7 +1648,7 @@ mod tests {
             retained_marshal_blocks: 3,
             retained_qmdb_blocks: 1,
         };
-        let mut pruning = Pruning::fixed(config, 1, 0);
+        let mut pruning = Pruning::build(config, 1, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None);
@@ -1677,7 +1672,7 @@ mod tests {
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 0,
         };
-        let mut pruning = Pruning::fixed(config, 1, 2);
+        let mut pruning = Pruning::build(config, 1, 2);
 
         for height in 1..=6 {
             assert_eq!(
@@ -1746,7 +1741,7 @@ mod tests {
                     digest: Block::genesis().digest(),
                 },
                 StatefulMetrics::new(harness.context_cell.as_present()),
-                Some(Pruning::fixed(
+                Some(Pruning::build(
                     PruneConfig {
                         maintenance_interval: NZUsize!(1),
                         retained_marshal_blocks: 1,
