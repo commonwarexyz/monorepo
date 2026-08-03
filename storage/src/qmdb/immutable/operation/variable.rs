@@ -1,19 +1,19 @@
 use super::{COMMIT_CONTEXT, Operation, SET_CONTEXT};
 use crate::{
-    merkle::{Family, Location},
+    merkle::Family,
     qmdb::{
         any::{VariableValue, value::VariableEncoding},
-        operation::Key,
+        operation::{Key, commit_variable_size, read_commit_variable, write_commit_variable},
     },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write, varint::UInt};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
 
 impl<F: Family, K: Key, V: VariableValue> EncodeSize for Operation<F, K, VariableEncoding<V>> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Set(k, v) => k.encode_size() + v.encode_size(),
-            Self::Commit(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
+            Self::Commit(v, floor) => commit_variable_size(v, *floor),
         }
     }
 }
@@ -28,8 +28,7 @@ impl<F: Family, K: Key, V: VariableValue> Write for Operation<F, K, VariableEnco
             }
             Self::Commit(v, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
-                v.write(buf);
-                UInt(**floor_loc).write(buf);
+                write_commit_variable(v, *floor_loc, buf);
             }
         }
     }
@@ -46,8 +45,7 @@ impl<F: Family, K: Key, V: VariableValue> Read for Operation<F, K, VariableEncod
                 Ok(Self::Set(key, value))
             }
             COMMIT_CONTEXT => {
-                let metadata = Option::<V>::read_cfg(buf, &cfg.1)?;
-                let floor_loc = Location::read(buf)?;
+                let (metadata, floor_loc) = read_commit_variable(buf, &cfg.1)?;
                 Ok(Self::Commit(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
@@ -58,8 +56,8 @@ impl<F: Family, K: Key, V: VariableValue> Read for Operation<F, K, VariableEncod
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr;
-    use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize as _};
+    use crate::merkle::{Location, mmr};
+    use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize as _, varint::UInt};
     use commonware_utils::sequence::U64;
 
     type VarOp = Operation<mmr::Family, U64, VariableEncoding<U64>>;
