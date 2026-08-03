@@ -54,6 +54,9 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
+/// `(position, digest)` pairs for a grafted tree's pinned nodes, in `Family::nodes_to_pin` order.
+type GraftedPinnedNodes<F, D> = Vec<(Position<F>, D)>;
+
 /// Metrics for the Current layer.
 pub(crate) struct Metrics<E: Context> {
     /// Pruned bitmap chunks.
@@ -496,6 +499,25 @@ where
         pair_absorption_threshold::<F, N>(self.any.bitmap.pruned_chunks() as u64)
     }
 
+    /// Read the grafted tree's pinned-node digests for pruning boundary `loc`, in
+    /// `Family::nodes_to_pin` order, as `(position, digest)` pairs.
+    ///
+    /// Errors with [`Error::DataCorrupted`] if any pinned node is absent from the grafted tree.
+    fn grafted_pinned_nodes(
+        &self,
+        loc: Location<F>,
+    ) -> Result<GraftedPinnedNodes<F, H::Digest>, Error<F>> {
+        F::nodes_to_pin(loc)
+            .map(|pos| {
+                let digest = self
+                    .grafted_tree
+                    .get_node(pos)
+                    .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
+                Ok((pos, digest))
+            })
+            .collect()
+    }
+
     /// Prune the grafted tree to match the committed bitmap's pruned chunks.
     fn prune_grafted_tree_to_bitmap(&mut self) -> Result<(), Error<F>> {
         let pruned_chunks = self.any.bitmap.pruned_chunks() as u64;
@@ -512,14 +534,7 @@ where
             .map_err(|_| Error::<F>::DataCorrupted("prune location overflow"))?;
         let size = self.grafted_tree.size();
 
-        let mut pinned = BTreeMap::new();
-        for pos in F::nodes_to_pin(prune_loc) {
-            let digest = self
-                .grafted_tree
-                .get_node(pos)
-                .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
-            pinned.insert(pos, digest);
-        }
+        let pinned: BTreeMap<_, _> = self.grafted_pinned_nodes(prune_loc)?.into_iter().collect();
 
         let mut retained = Vec::with_capacity((*size - *prune_pos) as usize);
         for p in *prune_pos..*size {
@@ -657,17 +672,12 @@ where
         }
 
         // Extract pinned nodes for the existing pruning boundary from the in-memory grafted tree.
-        let pinned_nodes = if pruned_chunks > 0 {
+        let pinned_nodes: Vec<H::Digest> = if pruned_chunks > 0 {
             let grafted_leaves = Location::<F>::new(pruned_chunks as u64);
-            let mut pinned_nodes = Vec::new();
-            for pos in F::nodes_to_pin(grafted_leaves) {
-                let digest = self
-                    .grafted_tree
-                    .get_node(pos)
-                    .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
-                pinned_nodes.push(digest);
-            }
-            pinned_nodes
+            self.grafted_pinned_nodes(grafted_leaves)?
+                .into_iter()
+                .map(|(_, digest)| digest)
+                .collect()
         } else {
             Vec::new()
         };
@@ -709,11 +719,11 @@ where
 
         // Write the pinned nodes of the grafted tree.
         let pruned_chunks = Location::<F>::new(pruned_chunks_u64);
-        for (i, grafted_pos) in F::nodes_to_pin(pruned_chunks).enumerate() {
-            let digest = self
-                .grafted_tree
-                .get_node(grafted_pos)
-                .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
+        for (i, (_, digest)) in self
+            .grafted_pinned_nodes(pruned_chunks)?
+            .into_iter()
+            .enumerate()
+        {
             let key = U64::new(NODE_PREFIX, i as u64);
             self.metadata.put(key, digest.to_vec());
         }
@@ -890,17 +900,17 @@ where
     }
 }
 
-/// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
-/// `None` if all bits fall on complete chunk boundaries.
+/// The bitmap's incomplete trailing chunk and the number of bits in it, or `None` if the bitmap
+/// is empty or its bits end exactly on a chunk boundary.
 pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
 ) -> Option<([u8; N], u64)> {
-    let (last_chunk, next_bit) = bitmap.last_chunk();
-    if next_bit == bitmap::Prunable::<N>::CHUNK_SIZE_BITS {
-        None
-    } else {
-        Some((last_chunk, next_bit))
+    let next_bit = bitmap.len() % bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+    if next_bit == 0 {
+        return None;
     }
+    let (last_chunk, _) = bitmap.last_chunk();
+    Some((last_chunk, next_bit))
 }
 
 /// Return complete and graftable chunk counts, enforcing the pending and pruning invariants.
@@ -1353,6 +1363,21 @@ mod tests {
         assert!(result.is_some());
         let (_chunk, next_bit) = result.unwrap();
         assert_eq!(next_bit, 5);
+    }
+
+    #[test]
+    fn partial_chunk_empty() {
+        // An empty bitmap has no partial chunk, and must not panic on `last_chunk`.
+        let bm = PrunableBitMap::<N>::new();
+        assert!(partial_chunk::<PrunableBitMap<N>, N>(&bm).is_none());
+    }
+
+    #[test]
+    fn partial_chunk_fully_pruned() {
+        // A fully-pruned bitmap is chunk-aligned but its backing store is empty; still no partial
+        // chunk, and must not panic on `last_chunk`.
+        let bm = PrunableBitMap::<N>::new_with_pruned_chunks(1).unwrap();
+        assert!(partial_chunk::<PrunableBitMap<N>, N>(&bm).is_none());
     }
 
     #[test]

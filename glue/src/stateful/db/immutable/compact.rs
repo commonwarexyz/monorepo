@@ -234,7 +234,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -301,7 +301,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -636,7 +636,7 @@ mod tests {
             // hangs so the test can observe the gauges while they diverge.
             let unservable_target = sync::CompactTarget {
                 root: Sha256::hash(&[&[0xFF]]),
-                size: Location::new(*target.size + 1),
+                size: target.size + 1,
             };
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
             let superseding_source = SupersedingCompactSource {

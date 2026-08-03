@@ -112,13 +112,13 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{mocks::block::Block, standard::Standard},
+        marshal::{mocks::block::EmptyBlock, standard::Standard},
         types::Height,
     };
     use commonware_cryptography::sha256::{Digest, Sha256};
     use commonware_utils::acknowledgement::Exact;
 
-    type TestBlock = Block<Digest, ()>;
+    type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
 
     fn digest(byte: u8) -> Digest {

@@ -526,7 +526,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -627,7 +627,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -806,7 +806,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -912,7 +912,7 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
@@ -1487,10 +1487,8 @@ mod tests {
             ));
 
             let mut wrong_range = valid_target.clone();
-            wrong_range.range = non_empty_range!(
-                mmr::Location::new(*valid_target.range.start()),
-                mmr::Location::new(*valid_target.range.end() + 1)
-            );
+            wrong_range.range =
+                non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
             assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_range,
@@ -1604,10 +1602,8 @@ mod tests {
             ));
 
             let mut wrong_range = valid_target.clone();
-            wrong_range.range = non_empty_range!(
-                mmr::Location::new(*valid_target.range.start()),
-                mmr::Location::new(*valid_target.range.end() + 1)
-            );
+            wrong_range.range =
+                non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_range,
