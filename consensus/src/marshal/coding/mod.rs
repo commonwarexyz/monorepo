@@ -1414,6 +1414,10 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+            let reproposer_control = oracle.control(participants[1].clone());
+            let (mut reproposer_sender, _reproposer_receiver) =
+                reproposer_control.register(2, TEST_QUOTA).await.unwrap();
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
@@ -1484,7 +1488,12 @@ mod tests {
             let coded_boundary =
                 CodedBlock::new(boundary_block.clone(), coding_config, &Sequential);
             let boundary_commitment = coded_boundary.commitment();
-            shards.proposed(boundary_round, coded_boundary);
+            shards.discovered(
+                boundary_commitment,
+                boundary_context.leader.clone(),
+                boundary_round,
+            );
+            shards.proposed(boundary_round, coded_boundary.clone());
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1498,7 +1507,7 @@ mod tests {
             let reproposal_round = Round::new(Epoch::new(0), View::new(20));
             let reproposal_context = CodingCtx {
                 round: reproposal_round,
-                leader: me.clone(),
+                leader: participants[1].clone(),
                 parent: (View::new(boundary_height.get()), boundary_commitment), // Parent IS the boundary block
             };
 
@@ -1513,6 +1522,19 @@ mod tests {
                 shard_validity.unwrap(),
                 "Re-proposal verify should return true for shard validity"
             );
+
+            let assigned = shards.subscribe_assigned_shard_verified(boundary_commitment);
+            let assigned_shard = coded_boundary
+                .shard(0)
+                .expect("missing assigned shard")
+                .encode();
+            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+            select! {
+                result = assigned => result.expect("assigned shard sender dropped"),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("reproposal leader was not authorized by verification");
+                },
+            }
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled

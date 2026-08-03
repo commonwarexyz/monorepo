@@ -957,8 +957,10 @@ where
                 .marshal
                 .subscribe_by_commitment(payload, core::CommitmentFallback::Wait);
             let marshal = self.marshal.clone();
+            let shards = self.shards.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
+            let leader = consensus_context.leader;
             let gates = self.gates.clone();
 
             // Register a certification gate task synchronously before spawning work so
@@ -1013,6 +1015,10 @@ where
                         tx.send_lossy(false);
                         return;
                     }
+
+                    // Register the re-proposal's leader only after confirming
+                    // the block belongs to this epoch boundary.
+                    shards.discovered(payload, leader, round);
 
                     // Valid re-proposal: notify the marshal and complete the
                     // certification gate task for `certify`.

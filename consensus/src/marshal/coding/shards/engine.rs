@@ -115,11 +115,10 @@
 //! The engine enforces strict validation to prevent Byzantine attacks:
 //!
 //! - All shards MUST be sent by participants in the current epoch.
-//! - If the sender is the leader: the shard index MUST match the recipient's
-//!   participant index (for participants) or the leader's index (for
-//!   non-participants).
-//! - If the sender is not the leader: the shard index MUST match the sender's
-//!   participant index (each participant can only gossip their own shard).
+//! - A discovered leader may send the recipient's assigned shard.
+//! - Any participant, including a discovered leader, may gossip its own shard.
+//! - A recipient-indexed shard from an undiscovered participant is retained in
+//!   the bounded peer buffer until consensus identifies the sender's role.
 //! - All shards MUST pass cryptographic verification against the commitment.
 //! - Each shard index may only contribute ONE shard per commitment.
 //! - Sending a second shard for the same index with different data
@@ -131,8 +130,8 @@
 //! tracked in reconstruction state. Once a block is already reconstructed and
 //! cached, additional shards for that commitment are ignored.
 //!
-//! _If the leader is not yet known, shards are buffered in fixed-size per-peer
-//! queues until consensus signals either the leader via [`Mailbox::discovered`]
+//! _If a sender's role is not yet known, shards are buffered in fixed-size per-peer
+//! queues until consensus signals a leader via [`Mailbox::discovered`]
 //! or a notarization via [`Mailbox::notarized`]. A notarization activates
 //! reconstruction interest without a leader, so only sender-indexed gossip
 //! shards can be ingested. Assigned shard verification still requires leader
@@ -174,7 +173,7 @@ use commonware_utils::{
 };
 use rand_core::Rng;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -569,20 +568,20 @@ where
                 return;
             };
 
-            // Notarized recovery can create state before leader discovery. Until
-            // the leader is known, only sender-indexed gossip shards are safe to
-            // ingest: a participant may only gossip its own shard.
-            if existing.leader().is_none()
-                && let Some(sender_index) = scheme.participants().index(&peer)
-            {
-                let expected_index: u16 = sender_index
+            // Sender-indexed gossip is immediately actionable. A recipient-indexed
+            // shard from an undiscovered reproposer remains buffered until consensus
+            // confirms the sender's role.
+            if let Some(sender_index) = scheme.participants().index(&peer) {
+                let sender_index: u16 = sender_index
                     .get()
                     .try_into()
                     .expect("participant index impossibly out of bounds");
-                if shard.index() != expected_index {
-                    // A mismatched shard is invalid for a non-leader, but it may be
-                    // the assigned shard if this peer later turns out to be the leader.
-                    // Keep it buffered until the sender's role is known.
+                let could_be_assigned = scheme
+                    .me()
+                    .is_some_and(|index| index.get() == u32::from(shard.index()));
+                if shard.index() != sender_index
+                    && (!existing.has_leader() || could_be_assigned && !existing.is_leader(&peer))
+                {
                     self.buffer_peer_shard(peer, shard);
                     return;
                 }
@@ -706,10 +705,8 @@ where
         leader: P,
         round: Round,
     ) {
-        // A reconstructed block normally makes duplicate leader announcements
-        // redundant, unless notarized recovery created leaderless state first.
-        // In that case, the leader announcement must still populate the
-        // leader-dependent path.
+        // A reconstructed block normally makes leader announcements redundant,
+        // unless its assigned shard is still pending.
         let block_cached = self.reconstructed_blocks.contains_key(&commitment);
         if block_cached {
             self.observe_existing_commitment(commitment, round);
@@ -718,7 +715,7 @@ where
             && self
                 .state
                 .get(&commitment)
-                .is_none_or(|state| state.leader().is_some())
+                .is_none_or(ReconstructionState::is_assigned_shard_verified)
         {
             return;
         }
@@ -735,20 +732,7 @@ where
             self.observe_existing_commitment(commitment, round);
         }
         if let Some(state) = self.state.get_mut(&commitment) {
-            if let Some(existing) = state.leader() {
-                if existing != &leader {
-                    warn!(
-                        existing = ?existing,
-                        ?leader,
-                        %commitment,
-                        "conflicting leader update, ignoring"
-                    );
-                }
-                return;
-            }
-            state
-                .set_leader(leader)
-                .expect("leader was checked as absent");
+            state.add_leader(leader);
         } else {
             let participants_len = u64::try_from(participants.len())
                 .expect("participant count impossibly out of bounds");
@@ -800,7 +784,7 @@ where
         }
     }
 
-    /// Buffer a shard from a peer until a leader is known.
+    /// Buffer a shard from a peer until its sender role is known.
     fn buffer_peer_shard(&mut self, peer: P, shard: Shard<C, H>) {
         if self.latest_primary_peers.position(&peer).is_none() {
             debug!(
@@ -822,22 +806,16 @@ where
         self.latest_primary_peers = peers;
     }
 
-    /// Ingest buffered pre-leader shards for a commitment into active state.
+    /// Ingest actionable buffered shards for a commitment into active state.
     ///
-    /// The buffers are per sender and may contain shards from many peers. Before
-    /// the leader is known, the only actionable shard from each sender is the
-    /// one at that sender's participant index, because that is the shard a
-    /// non-leader is allowed to gossip. This still lets a notarized commitment
-    /// reconstruct from many peer-gossiped shards. The local assigned shard is
-    /// different: it is only valid when it came from the leader, and the leader's
-    /// identity is needed before it can be accepted as assigned-shard evidence.
+    /// Sender-indexed gossip is always actionable. Recipient-indexed shards are
+    /// retained until consensus identifies their sender as a leader.
     fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
         let state = self
             .state
             .get(&commitment)
             .expect("buffered shards can only be ingested with reconstruction state");
         let round = state.round();
-        let leader_known = state.leader().is_some();
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, dropping buffered shards");
             return false;
@@ -851,19 +829,23 @@ where
                     i += 1;
                     continue;
                 }
-                if !leader_known {
-                    let Some(sender_index) = scheme.participants().index(peer) else {
-                        i += 1;
-                        continue;
-                    };
-                    let expected_index: u16 = sender_index
-                        .get()
-                        .try_into()
-                        .expect("participant index impossibly out of bounds");
-                    if queue[i].index() != expected_index {
-                        i += 1;
-                        continue;
-                    }
+                let Some(sender_index) = scheme.participants().index(peer) else {
+                    i += 1;
+                    continue;
+                };
+                let sender_index: u16 = sender_index
+                    .get()
+                    .try_into()
+                    .expect("participant index impossibly out of bounds");
+                let could_be_assigned = scheme
+                    .me()
+                    .is_some_and(|index| index.get() == u32::from(queue[i].index()));
+                let actionable = queue[i].index() == sender_index
+                    || state.is_leader(peer)
+                    || state.has_leader() && !could_be_assigned;
+                if !actionable {
+                    i += 1;
+                    continue;
                 }
                 let shard = queue.swap_remove_back(i).expect("index is valid");
                 buffered.push((peer.clone(), shard));
@@ -1256,9 +1238,8 @@ where
     C: CodingScheme,
     H: Hasher,
 {
-    /// The leader associated with this reconstruction state, if consensus has
-    /// provided it.
-    leader: Option<P>,
+    /// Leaders observed for this commitment.
+    leaders: BTreeSet<P>,
     /// Our validated shard and the action to take with it.
     pending_action: Option<AssignedShardVerifiedAction<C, H>>,
     /// Shards that have been verified and are ready to contribute to reconstruction.
@@ -1313,7 +1294,7 @@ where
     /// Create a new empty common state for the provided leader and round.
     fn new(leader: Option<P>, round: Round, participants_len: u64) -> Self {
         Self {
-            leader,
+            leaders: leader.into_iter().collect(),
             pending_action: None,
             checked_shards: Vec::new(),
             contributed: BitMap::zeroes(participants_len),
@@ -1421,10 +1402,9 @@ where
 
         // Transition to Ready.
         let round = self.common.round;
-        let leader = self.common.leader.clone();
         let common = std::mem::replace(
             &mut self.common,
-            CommonState::new(leader, round, participants_len),
+            CommonState::new(None, round, participants_len),
         );
         Some(ReadyState { common })
     }
@@ -1491,18 +1471,19 @@ where
         }
     }
 
-    /// Return the leader associated with this state.
-    const fn leader(&self) -> Option<&P> {
-        self.common().leader.as_ref()
+    /// Returns whether consensus has identified any leader for this commitment.
+    fn has_leader(&self) -> bool {
+        !self.common().leaders.is_empty()
     }
 
-    /// Set the leader for this state if it has not already been set.
-    fn set_leader(&mut self, leader: P) -> Result<(), P> {
-        if self.common().leader.is_some() {
-            return Err(leader);
-        }
-        self.common_mut().leader = Some(leader);
-        Ok(())
+    /// Returns whether consensus has identified `leader` for this commitment.
+    fn is_leader(&self, leader: &P) -> bool {
+        self.common().leaders.contains(leader)
+    }
+
+    /// Associates a consensus-observed leader with this commitment.
+    fn add_leader(&mut self, leader: P) {
+        self.common_mut().leaders.insert(leader);
     }
 
     /// Refreshes the round used to decide whether this state can be pruned.
@@ -1549,21 +1530,18 @@ where
     ///
     /// - MUST be sent by a participant in the current epoch. Non-participant
     ///   senders are blocked.
-    /// - If the sender is the leader: the shard index MUST match the
-    ///   recipient's own participant index (when the recipient is a
-    ///   participant) or the leader's participant index (when the recipient
-    ///   is a non-participant).
-    /// - If the sender is not the leader: the shard index MUST match the
-    ///   sender's participant index. Each non-leader participant may only
-    ///   gossip their own shard.
-    /// - Once the leader is known, a mismatched shard index results in
-    ///   blocking the sender.
+    /// - If the sender is a leader: the shard index MUST match either the
+    ///   recipient's participant index or the sender's participant index.
+    /// - If the sender is not a leader: the shard index MUST match the
+    ///   sender's participant index.
+    /// - Once a leader is known, any other shard index results in blocking.
     /// - Each shard index may only contribute ONE shard per commitment.
     ///   Sending a second shard for the same index with different data
     ///   (equivocation) results in blocking the sender.
-    /// - The leader's shard is verified eagerly via [`CodingScheme::check`].
-    ///   If verification fails, the leader is blocked.
-    /// - Non-leader shards are buffered in `pending_shards` and
+    /// - A leader's shard for the assigned index is verified eagerly via
+    ///   [`CodingScheme::check`].
+    ///   If verification fails, the sender is blocked.
+    /// - Own-index shards are buffered in `pending_shards` and
     ///   batch-validated when quorum is reached. Invalid shards discovered
     ///   during batch validation result in blocking their respective
     ///   senders.
@@ -1576,9 +1554,9 @@ where
     /// - Exact duplicate of a previously received shard for the same index.
     /// - The index has already been marked as contributed (via the bitmap,
     ///   e.g. after batch validation).
-    /// - Non-leader shards that arrive after the state has transitioned to
+    /// - Own-index shards that arrive after the state has transitioned to
     ///   [`ReconstructionState::Ready`] (i.e., batch validation has already
-    ///   passed). The leader's shard for our index is still accepted in
+    ///   passed). An assigned shard for our index is still accepted in
     ///   `Ready` state to ensure we verify and re-broadcast it.
     /// - Before a reconstruction state exists, shards are buffered at the
     ///   engine level in bounded per-peer queues until [`Mailbox::discovered`]
@@ -1605,23 +1583,26 @@ where
             data: shard.into_inner(),
         };
 
-        // Determine expected index based on sender role. Before the leader is
-        // known, only sender-indexed gossip shards are actionable; mismatched
-        // shards cannot be classified without the leader and do not satisfy
-        // assigned shard verification.
-        let leader = self.common().leader.as_ref();
-        let is_from_leader = leader.is_some_and(|leader| leader == &sender);
-        let expected_participant = if is_from_leader {
-            ctx.scheme.me().unwrap_or(sender_index)
-        } else {
-            sender_index
-        };
-        let expected_index: u16 = expected_participant
+        let sender_index: u16 = sender_index
             .get()
             .try_into()
             .expect("participant index impossibly out of bounds");
-        if indexed.index != expected_index {
-            if leader.is_some() {
+        let assigned_index = ctx.scheme.me().map_or(sender_index, |assigned_index| {
+            assigned_index
+                .get()
+                .try_into()
+                .expect("participant index impossibly out of bounds")
+        });
+        let is_from_leader = self.is_leader(&sender);
+        let is_assigned_shard = is_from_leader && indexed.index == assigned_index;
+        let is_gossip_shard = indexed.index == sender_index;
+        if !is_assigned_shard && !is_gossip_shard {
+            if self.has_leader() {
+                let expected_index = if is_from_leader {
+                    assigned_index
+                } else {
+                    sender_index
+                };
                 commonware_p2p::block!(
                     blocker,
                     sender,
@@ -1649,7 +1630,7 @@ where
         // Leader's shard for our index is always verified eagerly,
         // even after transitioning to Ready. This ensures we broadcast
         // our own shard to help slower peers reach quorum.
-        if is_from_leader && !self.common().assigned_shard_verified {
+        if is_assigned_shard && !self.common().assigned_shard_verified {
             let progressed = self.common_mut().verify_assigned_shard(
                 sender,
                 commitment,
@@ -1668,7 +1649,7 @@ where
             return progressed;
         }
 
-        // Non-leader shards are only accepted while awaiting quorum.
+        // Gossip shards are only accepted while awaiting quorum.
         let Self::AwaitingQuorum(state) = self else {
             return false;
         };
@@ -2644,10 +2625,10 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
-                // Get peer 2's own-index shard.
-                let peer2_index = peers[2].index.get() as u16;
-                let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                // Get a shard that belongs to neither the sender nor receiver.
+                let unrelated_index = peers[3].index.get() as u16;
+                let unrelated_shard = coded_block.shard(unrelated_index).expect("missing shard");
+                let shard_bytes = unrelated_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -2659,8 +2640,8 @@ mod tests {
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Peer 1 (not the leader) sends peer 2 a shard with peer 2's index
-                // (wrong: non-leaders must use their own index).
+                // Peer 1 (not the leader) sends peer 2 a shard for peer 3. It
+                // cannot be either sender-indexed gossip or an assigned shard.
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
@@ -2683,15 +2664,14 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
-                // Get peer 2's own-index shard.
-                let peer2_index = peers[2].index.get() as u16;
-                let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                // Get a shard that belongs to neither the sender nor receiver.
+                let unrelated_index = peers[3].index.get() as u16;
+                let unrelated_shard = coded_block.shard(unrelated_index).expect("missing shard");
+                let shard_bytes = unrelated_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Peer 1 sends a shard with peer 2's index before the leader is known (buffered).
-                // This is wrong: non-leaders must send at their own index.
+                // Peer 1 sends peer 3's shard before the leader is known.
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
@@ -2705,8 +2685,8 @@ mod tests {
                 );
 
                 // Now inform peer 2 that peer 0 is the leader.
-                // This drains the buffer: peer 1's shard has peer 2's index but
-                // peer 1 is not the leader, so expected index is peer 1's own index.
+                // This drains the impossible candidate: it belongs to neither
+                // peer 1 nor peer 2.
                 let leader = peers[0].public_key.clone();
                 peers[2].mailbox.discovered(
                     commitment,
@@ -2721,7 +2701,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_conflicting_external_proposed_ignored() {
+    fn test_later_external_proposer_accepted() {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
@@ -2729,7 +2709,7 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
-                // Get the shard the leader would send to peer 2 (at peer 2's index).
+                // Get peer 2's assigned shard.
                 let peer2_index = peers[2].index.get() as u16;
                 let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
                 let shard_bytes = peer2_shard.encode();
@@ -2739,55 +2719,41 @@ mod tests {
                 let leader_b = peers[1].public_key.clone();
 
                 // Subscribe before shards arrive so we can verify acceptance.
-                let shard_sub = peers[2]
+                let mut shard_sub = peers[2]
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment);
 
-                // First leader update should stick.
+                // The commitment is first proposed by leader A.
                 peers[2].mailbox.discovered(
                     commitment,
-                    leader_a.clone(),
+                    leader_a,
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Conflicting update should be ignored.
-                peers[2].mailbox.discovered(
-                    commitment,
-                    leader_b,
-                    Round::new(Epoch::zero(), View::new(1)),
-                );
-
-                // Original leader sends shard; this should still be accepted.
-                peers[0]
-                    .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true);
-                context.sleep(config.link.latency * 2).await;
-
-                // Subscription should resolve from accepted leader shard.
-                select! {
-                    _ = shard_sub => {},
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("subscription did not complete after shard from original leader");
-                    },
-                };
-
-                // The conflicting leader should still be treated as non-leader and blocked.
+                // The later leader's shard may arrive before its proposal.
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
+                assert!(oracle.blocked().await.unwrap().is_empty());
+                assert!(matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)));
 
-                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
-
-                // Original leader should not be blocked.
-                let blocked_peers = oracle.blocked().await.unwrap();
-                let leader_a_blocked = blocked_peers
-                    .iter()
-                    .any(|(a, b)| a == &peers[2].public_key && b == &leader_a);
-                assert!(
-                    !leader_a_blocked,
-                    "original leader should not be blocked after conflicting leader update"
+                // Discovering the later leader makes its buffered shard actionable.
+                peers[2].mailbox.discovered(
+                    commitment,
+                    leader_b,
+                    Round::new(Epoch::zero(), View::new(2)),
                 );
+
+                // Subscription should resolve from the later leader's shard.
+                select! {
+                    _ = shard_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("subscription did not complete after shard from later leader");
+                    },
+                };
+
+                assert!(oracle.blocked().await.unwrap().is_empty());
             },
         );
     }
