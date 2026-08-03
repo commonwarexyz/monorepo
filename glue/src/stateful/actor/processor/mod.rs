@@ -1,11 +1,11 @@
 //! Speculative execution engine for the [`Stateful`](super::Stateful) actor.
 //!
-//! The [`Processor`] owns the in-memory pending-tip DAG and the committed
+//! The [`Processor`] owns the in-memory pending-tip DAG and the applied
 //! database set. It is the workhorse behind the actor's `Processing` mode,
 //! handling three operations:
 //!
 //! - Propose/Verify: fork unmerkleized batches from a parent's pending
-//!   state (or from committed state), delegate to the [`Application`], and
+//!   state (or from applied state), delegate to the [`Application`], and
 //!   cache the resulting merkleized batches keyed by block digest.
 //!
 //! - Lazy recovery: when a parent's pending state is missing (e.g. after
@@ -869,7 +869,7 @@ where
     }
 }
 
-/// Returns true when `block` is already covered by committed state.
+/// Returns true when `block` is already covered by applied state.
 #[tracing::instrument(
     name = "stateful.processor.is_already_processed",
     level = "info",
