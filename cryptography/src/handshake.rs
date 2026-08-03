@@ -392,10 +392,16 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Signer, ed25519::PrivateKey, transcript::Transcript};
+    use crate::{
+        Signer,
+        ed25519::PrivateKey,
+        transcript::{Transcript, Version},
+    };
     use commonware_codec::{Codec, DecodeExt};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
+
+    const TRANSCRIPT_VERSION: Version = Version::V0;
 
     fn test_encode_roundtrip<T: Codec<Cfg = ()> + PartialEq>(value: &T) {
         assert!(value == &<T as DecodeExt<_>>::decode(value.encode()).unwrap());
@@ -410,7 +416,7 @@ mod test {
         let (d_state, msg1) = dial_start(
             &mut rng,
             Context::new(
-                &Transcript::new(b"test_namespace"),
+                &Transcript::new(b"test_namespace", TRANSCRIPT_VERSION),
                 0,
                 0..1,
                 dialer_crypto.clone(),
@@ -421,7 +427,7 @@ mod test {
         let (l_state, msg2) = listen_start(
             &mut rng,
             Context::new(
-                &Transcript::new(b"test_namespace"),
+                &Transcript::new(b"test_namespace", TRANSCRIPT_VERSION),
                 0,
                 0..1,
                 listener_crypto,
@@ -457,7 +463,7 @@ mod test {
         let (_, msg1) = dial_start(
             &mut rng,
             Context::new(
-                &Transcript::new(b"namespace_a"),
+                &Transcript::new(b"namespace_a", TRANSCRIPT_VERSION),
                 0,
                 0..1,
                 dialer_crypto.clone(),
@@ -468,7 +474,7 @@ mod test {
         let result = listen_start(
             &mut rng,
             Context::new(
-                &Transcript::new(b"namespace_b"),
+                &Transcript::new(b"namespace_b", TRANSCRIPT_VERSION),
                 0,
                 0..1,
                 listener_crypto,

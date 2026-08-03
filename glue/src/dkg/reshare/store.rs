@@ -31,7 +31,7 @@ use commonware_cryptography::{
         },
         primitives::{group, variant::Variant},
     },
-    transcript::{Summary, Transcript},
+    transcript::{Summary, Transcript, Version},
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -434,7 +434,7 @@ where
             return None;
         }
         let (mut dealer, public, private) = CryptoDealer::start::<M>(
-            Transcript::resume(rng_seed).noise(b"dealer-rng"),
+            Transcript::resume(rng_seed, Version::V1).noise(b"dealer-rng"),
             info,
             signer,
             share,
