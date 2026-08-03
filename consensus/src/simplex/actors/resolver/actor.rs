@@ -81,13 +81,6 @@ pub struct Actor<
     /// arrive, so the tombstone is kept here against the finalization boundary.
     failed_certifications: BTreeSet<View>,
 
-    /// Certificates still wanted from peers, paired with what retires each.
-    ///
-    /// This mirrors the resolver's outstanding fetches. Owning them here keeps
-    /// retirement in one place: [Self::settled] decides it from local evidence,
-    /// and [Self::sync_demands] publishes the survivors to the resolver.
-    demands: BTreeSet<(View, Demand)>,
-
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
 
@@ -117,7 +110,6 @@ impl<
                 nullification_responses: BTreeMap::new(),
                 notarization_responses: BTreeMap::new(),
                 failed_certifications: BTreeSet::new(),
-                demands: BTreeSet::new(),
 
                 mailbox_receiver: receiver,
             },
@@ -225,14 +217,20 @@ impl<
             Certificate::Notarization(notarization) => (None, None, Some(notarization.view())),
         };
 
+        let term_length = self.state.term_length();
+
         // Cache response payloads for as long as a peer can still ask for them.
         // [State] prunes at the floor, which rises sooner than finalization and
         // would hide this evidence from a peer still repairing the view.
         if let Some(nullified) = nullified
-            && nullified.term_end(self.state.term_length()) > self.last_finalized
+            && nullified.term_end(term_length) > self.last_finalized
         {
             self.nullification_responses
                 .insert(nullified, certificate.encode());
+            let covered = nullified..=nullified.term_end(term_length);
+            Self::retire(resolver, move |view, demand| {
+                demand.kind == Kind::Nullification && covered.contains(&view)
+            });
         }
         if let Some(notarized) = notarized
             && notarized > self.last_finalized
@@ -240,21 +238,23 @@ impl<
         {
             self.notarization_responses
                 .insert(notarized, certificate.encode());
+            Self::retire(resolver, move |view, demand| {
+                demand.kind == Kind::Notarization && view == notarized
+            });
         }
 
         // Finalization is the global retirement boundary: a valid proposal can no
         // longer name ancestry at or below it, so nothing here can still be asked
-        // for. Demands below it are dropped by [Self::sync_demands], which treats
-        // a finalized view as settled.
+        // for.
         if let Some(finalized) = finalized {
             self.last_finalized = self.last_finalized.max(finalized);
-            let term_length = self.state.term_length();
+            let finalized = self.last_finalized;
             self.nullification_responses
-                .retain(|view, _| view.term_end(term_length) > self.last_finalized);
+                .retain(|view, _| view.term_end(term_length) > finalized);
             self.notarization_responses
-                .retain(|view, _| *view > self.last_finalized);
-            self.failed_certifications
-                .retain(|view| *view > self.last_finalized);
+                .retain(|view, _| *view > finalized);
+            self.failed_certifications.retain(|view| *view > finalized);
+            Self::retire(resolver, move |view, _| view <= finalized);
         }
 
         // Certificate state owns floor selection and background repair.
@@ -276,6 +276,9 @@ impl<
             if view > self.last_finalized {
                 self.failed_certifications.insert(view);
             }
+            Self::retire(resolver, move |demanded, demand| {
+                demand.kind == Kind::Notarization && demanded == view
+            });
         }
 
         let effects = self.state.handle_certified(view, success);
@@ -283,10 +286,6 @@ impl<
     }
 
     /// Applies the side effects requested by [super::state::State] to the resolver.
-    ///
-    /// Call this after recording new evidence: it ends by syncing the resolver to
-    /// the surviving demands, which is what publishes both the effects below and
-    /// the evidence recorded by the caller.
     fn apply_effects<R: Resolver<Key = U64, Subscriber = Demand>>(
         &mut self,
         resolver: &mut R,
@@ -301,51 +300,53 @@ impl<
                 } => self.fetch(resolver, view, cause, reason),
                 Effect::RetainAbove(floor) => {
                     // Resolver state does not repair below its floor, so a
-                    // background demand there has nothing left to do. This is
-                    // the only retirement that depends on the floor:
-                    // [Self::settled] cannot use it, because a proposal may name
+                    // background demand there has nothing left to do. Only
+                    // background demands retire here, because a proposal may name
                     // ancestry below the floor and only finalization rules that
                     // out.
-                    self.demands
-                        .retain(|(view, demand)| demand.until != Until::Floor || *view > floor);
+                    Self::retire(resolver, move |view, demand| {
+                        demand.until == Until::Floor && view <= floor
+                    });
                 }
             }
         }
-
-        self.sync_demands(resolver);
     }
 
-    /// Drops settled demands and mirrors the survivors into the resolver.
+    /// Retires the demands that new evidence settles.
     ///
-    /// [Resolver::retain] takes a `'static` predicate and so cannot consult
-    /// [Self::settled] directly, which is why the survivors are snapshotted into
-    /// it.
-    fn sync_demands<R: Resolver<Key = U64, Subscriber = Demand>>(&mut self, resolver: &mut R) {
-        let live: BTreeSet<_> = self
-            .demands
-            .iter()
-            .copied()
-            .filter(|(view, demand)| !self.settled(*view, demand.kind))
-            .collect();
-        self.demands = live.clone();
-        let _ = resolver
-            .retain(move |key, demand| live.contains(&(View::new(u64::from(key)), *demand)));
+    /// `settled` reports whether the evidence answers a demand. [Resolver::retain]
+    /// takes an owned predicate, so it cannot call [Self::settled]. Every
+    /// retirement here names a span of views and a kind, which the caller captures
+    /// by value instead.
+    ///
+    /// Settlement is monotonic: no later evidence unsettles a demand. A retirement
+    /// therefore stays true however the resolver orders it against fetches, which
+    /// it reorders under backpressure.
+    fn retire<R: Resolver<Key = U64, Subscriber = Demand>>(
+        resolver: &mut R,
+        settled: impl Fn(View, Demand) -> bool + Send + 'static,
+    ) {
+        let _ = resolver.retain(move |key, demand| !settled(View::new(u64::from(key)), *demand));
     }
 
     /// Issues a background fetch for the nullification covering `view`.
     ///
-    /// Both [FetchReason]s want the same certificate: [State] only ever reports
+    /// Both [FetchReason]s want the same certificate: [State] only reports
     /// a view whose covering nullification is missing, whether the gap was found
     /// by scanning below the current view or opened by a failed certification.
     fn fetch<R: Resolver<Key = U64, Subscriber = Demand>>(
-        &mut self,
+        &self,
         resolver: &mut R,
         view: View,
         cause: View,
         reason: FetchReason,
     ) {
         let demand = Demand::backfill();
-        self.demands.insert((view, demand));
+
+        // Every reported gap sits above the floor, and a cached nullification
+        // covering a view above the floor is also stored in [State], so a
+        // reported gap is never settled.
+        debug_assert!(!self.settled(view, demand.kind));
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
@@ -363,7 +364,7 @@ impl<
 
     /// Fetches ancestry from the leader whose proposal requires it.
     fn resolve<R>(
-        &mut self,
+        &self,
         resolver: &mut R,
         proposal_view: View,
         view: View,
@@ -376,7 +377,6 @@ impl<
             return;
         }
         let demand = Demand::ancestry(kind);
-        self.demands.insert((view, demand));
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
@@ -399,12 +399,12 @@ impl<
     ///
     /// Settled means there is nothing left to fetch: either the evidence is in
     /// hand, or no response could ever serve the demand. This decides whether to
-    /// open a fetch, whether a delivery completed one, and which demands survive
-    /// [Self::sync_demands].
+    /// open a fetch and whether a delivery completed one. [Self::retire] carries
+    /// the same rule to the resolver, one piece of evidence at a time.
     ///
     /// A valid response does not imply this. The wire key names only a view, so a
     /// peer may answer a notarization request with a covering nullification: valid
-    /// evidence, worth recording, but not what was asked for.
+    /// evidence the actor records, but not what was asked for.
     fn settled(&self, view: View, kind: Kind) -> bool {
         // Finalization rules out any further need for the view. This is also
         // what settles a demand answered by a finalization, since recording one
@@ -415,8 +415,8 @@ impl<
         match kind {
             Kind::Nullification => self.covering_nullification(view).is_some(),
             // Holding the notarization settles this, and so does a failed
-            // verdict: certification is an application judgement on the
-            // evidence itself, so no other copy of it could pass either.
+            // verdict: certification judges the evidence itself, so no other
+            // copy of it could pass either.
             Kind::Notarization => {
                 self.notarization_responses.contains_key(&view)
                     || self.failed_certifications.contains(&view)
@@ -472,7 +472,7 @@ impl<
     /// named. Any certificate an honest peer could serve for the view is accepted,
     /// including one that answers the other kind: rejecting it would fault a peer
     /// that answered the only question the wire key asked. Whether it
-    /// settles the demand is a separate judgement (see [Self::settled]).
+    /// settles the demand is a separate check (see [Self::settled]).
     fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
@@ -579,10 +579,9 @@ impl<
                 }
 
                 // The peer answered the view it was asked about, so it is never
-                // faulted here. Whether that answer was the certificate anyone
-                // wanted is a separate question: if a demand for this view is
-                // still open, the response was valid but ambiguous, and the
-                // resolver retries without penalizing the peer.
+                // faulted here. If a demand for this view is still open, the
+                // response was valid but ambiguous, and the resolver retries
+                // without penalizing the peer.
                 let outcome = if demands.iter().all(|demand| self.settled(view, demand.kind)) {
                     Outcome::Complete
                 } else {
