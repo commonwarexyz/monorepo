@@ -63,7 +63,6 @@ use commonware_cryptography::{
         self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
         dial_start, listen_end, listen_start,
     },
-    transcript::Transcript,
 };
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -205,7 +204,7 @@ pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: 
         let (state, syn) = dial_start(
             ctx,
             Context::new(
-                &Transcript::new(&config.namespace),
+                &config.namespace,
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -271,7 +270,7 @@ pub async fn listen<
         let (state, syn_ack) = listen_start(
             ctx,
             Context::new(
-                &Transcript::new(&config.namespace),
+                &config.namespace,
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -1054,7 +1053,7 @@ mod test {
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
-                    &Transcript::new(&dialer_config.namespace),
+                    &dialer_config.namespace,
                     current_time,
                     ok_timestamps.clone(),
                     dialer_config.signing_key.clone(),
@@ -1064,7 +1063,7 @@ mod test {
             let (_, syn_ack) = listen_start(
                 context.child("listener"),
                 Context::new(
-                    &Transcript::new(&dialer_config.namespace),
+                    &dialer_config.namespace,
                     current_time,
                     ok_timestamps,
                     listener_crypto,

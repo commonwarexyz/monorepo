@@ -4,7 +4,6 @@ use crate::{
     Signer,
     ed25519::PrivateKey,
     handshake::{Context, dial_end, dial_start, listen_end, listen_start},
-    transcript::Transcript,
 };
 use commonware_codec::Encode;
 use commonware_conformance::{Conformance, conformance_tests};
@@ -27,7 +26,7 @@ impl Conformance for Handshake {
         let (dialer_state, dialer_greeting) = dial_start(
             &mut rng,
             Context::new(
-                &Transcript::new(NAMESPACE),
+                NAMESPACE,
                 0,
                 0..1,
                 dialer_key.clone(),
@@ -38,13 +37,7 @@ impl Conformance for Handshake {
 
         let (listener_state, listener_greeting_ack) = listen_start(
             &mut rng,
-            Context::new(
-                &Transcript::new(NAMESPACE),
-                0,
-                0..1,
-                listener_key,
-                dialer_key.public_key(),
-            ),
+            Context::new(NAMESPACE, 0, 0..1, listener_key, dialer_key.public_key()),
             dialer_greeting,
         )
         .unwrap();
