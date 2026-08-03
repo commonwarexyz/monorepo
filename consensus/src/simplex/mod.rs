@@ -312,8 +312,9 @@
 //! parent from the proposal's elected leader, even below the certified floor. The voter rechecks the
 //! full ancestry after each delivery and votes only once it is valid.
 //!
-//! Resolver keys identify views rather than certificate types. A valid response that does not satisfy
-//! every local purpose is retried without faulting its peer. A notarization delivery may wait up to
+//! Resolver keys name the certificate wanted, not just the view, because a notarization and a
+//! covering nullification for one view answer opposite questions. Any other certificate is invalid
+//! for the key. A notarization delivery may wait up to
 //! [`Config::certification_timeout`](config::Config::certification_timeout) for local certification.
 //! Expiry releases the delivery but does not resolve or cancel certification. Matching evidence or
 //! finalization retires targeted work.

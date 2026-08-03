@@ -4,40 +4,82 @@ pub mod batcher;
 pub mod resolver;
 pub mod voter;
 
-/// Why a certificate is being fetched.
+/// What a resolver request wants, and what retires it.
 ///
-/// This is local resolver bookkeeping and is never encoded on the wire.
+/// This is local bookkeeping and is never encoded. The wire key names only a
+/// view, so a responder cannot tell which certificate was asked for and may
+/// answer with one that does not settle the request. Keeping the demand local
+/// is what lets the requester recognize that case (see
+/// [resolver::Actor::settled]).
+///
+/// Only three of the four combinations occur: background repair always wants a
+/// nullification, while proposal ancestry wants either kind.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum Purpose {
-    /// Background repair between the local floor and current view.
-    Backfill,
-    /// A nullification covering the requested view.
-    Nullification,
-    /// A certified notarization or finalization for the named parent.
-    Parent,
+pub(crate) struct Demand {
+    /// The certificate that settles the request.
+    pub kind: Kind,
+    /// The boundary that retires the request.
+    pub until: Until,
 }
 
-impl Purpose {
-    /// Returns whether the fetch came from proposal ancestry repair.
-    pub const fn is_targeted(self) -> bool {
-        !matches!(self, Self::Backfill)
-    }
-
-    /// Returns whether matching evidence retires this purpose.
-    pub const fn is_retired_by(self, resolved: Self) -> bool {
-        matches!(
-            (self, resolved),
-            (Self::Backfill | Self::Nullification, Self::Nullification)
-                | (Self::Parent, Self::Parent)
-        )
-    }
-
-    /// Returns the stable trace field value for this purpose.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Backfill => "backfill",
-            Self::Nullification => "nullification",
-            Self::Parent => "parent",
+impl Demand {
+    /// Returns a demand for background repair of a nullification gap.
+    pub const fn backfill() -> Self {
+        Self {
+            kind: Kind::Nullification,
+            until: Until::Floor,
         }
     }
+
+    /// Returns a demand for ancestry a proposal named.
+    pub const fn ancestry(kind: Kind) -> Self {
+        Self {
+            kind,
+            until: Until::Finalization,
+        }
+    }
+}
+
+/// The certificate that settles a request.
+///
+/// A notarization and a nullification covering the same view can both exist, and
+/// neither substitutes for the other, so this cannot be inferred from the view.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum Kind {
+    /// A nullification covering the view.
+    ///
+    /// Wanted to justify a proposal that skips the view, and to fill the
+    /// nullification gaps below the current view.
+    Nullification,
+    /// A notarization for the view.
+    ///
+    /// Wanted to certify the parent a proposal names.
+    Notarization,
+}
+
+impl Kind {
+    /// Returns the stable trace field value for this kind.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Nullification => "nullification",
+            Self::Notarization => "notarization",
+        }
+    }
+}
+
+/// The boundary at which a demand retires.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum Until {
+    /// The resolver floor passes the view.
+    ///
+    /// Used for background repair of the nullification gaps below the current
+    /// view, which resolver state stops tracking once its floor is above them.
+    Floor,
+    /// The view is finalized.
+    ///
+    /// Used for ancestry a proposal named. A proposal may name ancestry below the
+    /// local floor, which is exactly the case where a peer holds a nullification
+    /// for a view this node has certified a notarization for, so only
+    /// finalization can retire it.
+    Finalization,
 }

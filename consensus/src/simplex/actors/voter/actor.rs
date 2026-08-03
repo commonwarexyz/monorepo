@@ -380,10 +380,10 @@ impl<
             Verify::Resolve {
                 proposal_view,
                 view,
-                purpose,
+                kind,
                 target,
             } => {
-                resolver.resolve(proposal_view, view, purpose, target);
+                resolver.resolve(proposal_view, view, kind, target);
                 return None;
             }
             Verify::Wait => return None,
