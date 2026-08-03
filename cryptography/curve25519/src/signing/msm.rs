@@ -1,40 +1,12 @@
-//! Multi-scalar multiplication (MSM): computing `sum(term.point * term.scalar)` for many
-//! [`Term`]s at once.
+//! Variable-time Pippenger multi-scalar multiplication for batch signature verification.
 //!
-//! Batch signature verification needs exactly one such sum, over roughly `2n` points for a batch
-//! of `n` signatures (see [`super::verify_batch`]). Computing each term independently and adding
-//! the results costs `O(n * 256)` point additions (one addition per scalar bit, per term).
-//! Pippenger's bucket method below instead processes the terms window by window: within each
-//! window it buckets every term by its digit in a single pass, then folds the buckets together,
-//! so the `256/width` windows share the cost of the additions across all `n` terms. This is
-//! variable-time, which is fine since verification only ever operates on public data.
+//! [`Term`]s arrive decompressed and recoded into signed digits. The bucket kernel processes
+//! [`LANES`] terms at once, with one private bucket stripe per SIMD lane so updates never collide.
 //!
-//! Terms arrive already decompressed and digit-recoded (see [`Term::new`]), as a short list of
-//! contiguous slices (`&[&[Term]]`: the caller's bulk decompression output plus a couple of small
-//! appendices -- see [`super::verify_batch`]), treated everywhere as one logical term sequence
-//! indexed globally across the slices in order ([`pieces`]). The bucket algorithm is transposed
-//! across [`LANES`] independent backend lanes. Each lane owns the terms whose index is congruent
-//! to it modulo `LANES` within its piece, plus a private bucket array, so no two lanes ever collide
-//! on a bucket.
-//!
-//! # Parallelization
-//!
-//! [`multiscalar_mul_terms_parallel`] decomposes the MSM by *window*, the way state-of-the-art
-//! CPU libraries (blst, gnark-crypto, arkworks, halo2curves, constantine) do, rather than by
-//! replicating bucket state per thread:
-//!
-//! 1. The bucket work is split into `(window, global term range)` tiles: each tile fills only its
-//!    own window's buckets over its own range and immediately folds them down to a single partial
-//!    point ([`transposed::window_partial`]). Distinct windows are independent by construction,
-//!    and -- because bucket-filling is linear in its terms -- two tiles of the *same* window
-//!    combine with one point addition. No bucket-array state is ever shared or merged across
-//!    threads. (An earlier design gave each thread a private copy of *every* window's buckets and
-//!    merged the copies elementwise; the merge cost `threads * windows * buckets` serial
-//!    additions, and dominated the profile past ~8 cores.) Ranges are plain cuts of the global
-//!    index space -- subslicing is free, so tile granularity is a pure tuning knob.
-//! 2. The per-window partials are combined by one short Horner ladder
-//!    ([`fold_window_partials`]): `width` doublings plus one addition per window. This is the
-//!    only sequential stage, and it is `O(windows * width)` regardless of batch size.
+//! [`multiscalar_mul`] exposes one execution shape for every [`Strategy`]: `(window, term range)`
+//! tiles. A window can be split across several point ranges when there are fewer windows than
+//! workers. Each strategy partition reuses private bucket scratch, tiles of the same window are
+//! added together, and one short Horner fold positions the window sums.
 
 use super::scalar::Scalar;
 use crate::simplified::{Backend, G, GAffine, GAffineVec, GVec, LANES};
@@ -91,6 +63,7 @@ pub(super) fn width_for(terms: usize, parallelism: usize) -> u32 {
 /// the digits (one per window). Digits are stored as `i16` (ample for any width up to 16) to
 /// keep the per-term footprint, and therefore each pass's memory traffic, small; entries above
 /// the chosen width's window count stay zero.
+#[derive(Clone, Copy)]
 pub(super) struct Term {
     point: GAffine,
     digits: [i16; MAX_WINDOWS],
@@ -158,7 +131,7 @@ mod transposed {
     /// `l mod LANES`, plus this private bucket stripe, so the wave loop below can update `LANES`
     /// buckets with one vectorized addition and no two lanes ever collide on a bucket.
     /// Heap-allocated because the width (and so the array size) is a per-batch runtime value.
-    fn identity_buckets(nb: usize) -> Vec<G> {
+    pub(super) fn identity_buckets(nb: usize) -> Vec<G> {
         vec![G::IDENTITY; LANES * nb]
     }
 
@@ -235,8 +208,7 @@ mod transposed {
         let mut sum = GVec::identity();
         let mut window_sum = GVec::identity();
         for d in (0..used).rev() {
-            let bucket_group: [G; LANES] =
-                core::array::from_fn(|lane| buckets[lane * nb + d]);
+            let bucket_group: [G; LANES] = core::array::from_fn(|lane| buckets[lane * nb + d]);
             sum = backend.g_add(sum, GVec::from_lanes(&bucket_group));
             window_sum = backend.g_add(window_sum, sum);
         }
@@ -254,14 +226,16 @@ mod transposed {
         end: usize,
         window: usize,
         width: u32,
+        buckets: &mut [G],
     ) -> G {
         let nb = super::num_buckets(width);
+        debug_assert_eq!(buckets.len(), LANES * nb);
+        buckets.fill(G::IDENTITY);
         let used = super::used_buckets(chunks, start, end, window);
-        let mut buckets = identity_buckets(nb);
         for piece in super::pieces(chunks, start, end) {
-            fill_buckets(backend, &mut buckets, nb, piece, window);
+            fill_buckets(backend, buckets, nb, piece, window);
         }
-        fold_buckets(backend, GVec::identity(), &buckets, nb, used).sum_lanes(backend)
+        fold_buckets(backend, GVec::identity(), buckets, nb, used).sum_lanes(backend)
     }
 
     /// Computes the full MSM over `chunks` via the lane-transposed Pippenger bucket method,
@@ -269,7 +243,8 @@ mod transposed {
     /// a [`GVec`] across all windows -- the inter-window doublings run `LANES` wide, and the
     /// lanes are only summed down to a single point once, at the very end. One bucket allocation
     /// is reused (re-set to the identity) across every window.
-    pub(super) fn multiscalar_mul<B: Backend>(
+    #[cfg(test)]
+    pub(super) fn multiscalar_mul_serial<B: Backend>(
         backend: B,
         chunks: &[&[Term]],
         width: u32,
@@ -295,20 +270,15 @@ mod transposed {
 }
 
 /// Computes the full MSM over `chunks` serially using the backend's transposed lanes.
-fn multiscalar_mul_terms<B: Backend>(
-    backend: B,
-    chunks: &[&[Term]],
-    width: u32,
-) -> G {
-    transposed::multiscalar_mul(backend, chunks, width)
+#[cfg(test)]
+fn multiscalar_mul_terms_serial<B: Backend>(backend: B, chunks: &[&[Term]], width: u32) -> G {
+    transposed::multiscalar_mul_serial(backend, chunks, width)
 }
 
 /// Computes `sum(points[i] * scalars[i])` serially: the reference the differential tests below
-/// compare every parallel path against (production callers all go through
-/// [`multiscalar_mul_terms_parallel`], which falls back to the same serial code for small or
-/// single-threaded inputs).
+/// compare the strategy-generic path against.
 #[cfg(test)]
-fn multiscalar_mul<B: Backend>(
+fn multiscalar_mul_points_serial<B: Backend>(
     backend: B,
     points: &[GAffine],
     scalars: &[Scalar],
@@ -320,17 +290,13 @@ fn multiscalar_mul<B: Backend>(
         .zip(scalars)
         .map(|(point, scalar)| Term::new(*point, scalar, width))
         .collect();
-    multiscalar_mul_terms(backend, &[&terms], width)
+    multiscalar_mul_terms_serial(backend, &[&terms], width)
 }
 
 /// Horner-folds per-window partial sums into the final MSM result: from the top window down,
 /// `width` doublings shift everything accumulated so far up one window, then the next window's
 /// partial joins.
-fn fold_window_partials<B: Backend>(
-    backend: B,
-    windows: &[G],
-    width: u32,
-) -> G {
+fn fold_windows<B: Backend>(backend: B, windows: &[G], width: u32) -> G {
     let mut result = GVec::identity();
     for window in windows.iter().rev() {
         for _ in 0..width {
@@ -341,77 +307,103 @@ fn fold_window_partials<B: Backend>(
     result.to_lanes()[0]
 }
 
-/// Floor on terms per parallel MSM: below this, the whole bucket phase is a few thousand point
-/// additions and tile dispatch overhead stops being amortized, so the serial path wins. Not yet
-/// tuned against real hardware.
-const MIN_PARALLEL_TERMS: usize = 64;
-
 /// Floor on terms per tile range: a shorter range's fixed per-tile cost (folding the bucket
 /// array down to a partial point) stops being amortized by its fill work.
 const MIN_RANGE_LEN: usize = 64;
 
+/// Target number of independently schedulable tiles per worker.
+const TILES_PER_WORKER: usize = 3;
+
 /// How many contiguous ranges to split `len` terms into: enough that every thread `strategy`
 /// actually has available gets a few `(window, range)` tiles to chew through (so work stealing
 /// evens out the tail), without shrinking any range below [`MIN_RANGE_LEN`].
-fn range_count(len: usize, windows: usize, strategy: &impl Strategy) -> usize {
-    let parallelism = strategy.manual().parallelism();
-    (3 * parallelism)
+fn range_count(len: usize, windows: usize, parallelism: usize) -> usize {
+    let max_ranges = (len / MIN_RANGE_LEN).max(1);
+    parallelism
+        .saturating_mul(TILES_PER_WORKER)
         .div_ceil(windows)
-        .clamp(1, len.div_ceil(MIN_RANGE_LEN))
+        .clamp(1, max_ranges)
 }
 
 /// Cuts the global term-index space `[0, total)` into up to `ranges` near-equal contiguous
 /// ranges. Ranges are pure index arithmetic -- [`pieces`] resolves them onto the underlying
 /// slices at read time -- so a cut may land anywhere, including mid-slice.
 fn partition_ranges(total: usize, ranges: usize) -> Vec<(usize, usize)> {
-    let target = total.div_ceil(ranges).max(1);
-    (0..total)
-        .step_by(target)
-        .map(|start| (start, (start + target).min(total)))
-        .collect()
+    if total == 0 {
+        return Vec::new();
+    }
+    let ranges = ranges.min(total);
+    let range_len = total / ranges;
+    let remainder = total % ranges;
+    let mut result = Vec::with_capacity(ranges);
+    let mut start = 0;
+    for range in 0..ranges {
+        let len = range_len + usize::from(range < remainder);
+        result.push((start, start + len));
+        start += len;
+    }
+    result
 }
 
 /// Computes the full MSM over `chunks` (whose terms were recoded at `width`; see [`width_for`]
 /// and [`Term::new`]) with the bucket phase spread across `strategy`'s threads as
-/// `(window, global term range)` tiles (see the module docs' "Parallelization" section): each
-/// tile fills and folds one window's buckets over one contiguous range into a single partial
-/// point, the tiles of each window are summed, and one short serial Horner ladder
-/// ([`fold_window_partials`]) positions the windows.
-pub(super) fn multiscalar_mul_terms_parallel<B: Backend>(
+/// `(window, global term range)` tiles. Each tile reduces to one point, same-window points are
+/// added, and [`fold_windows`] positions the resulting window sums.
+pub(super) fn multiscalar_mul<B: Backend>(
     backend: B,
     chunks: &[&[Term]],
     width: u32,
     strategy: &impl Strategy,
 ) -> G {
+    #[derive(Clone, Copy)]
+    struct Tile {
+        window: usize,
+        start: usize,
+        end: usize,
+    }
+
+    let strategy = strategy.manual();
     let total = total_terms(chunks);
-    if total < MIN_PARALLEL_TERMS || strategy.manual().parallelism() <= 1 {
-        return multiscalar_mul_terms(backend, chunks, width);
+    let windows = num_windows(width);
+    let ranges = partition_ranges(total, range_count(total, windows, strategy.parallelism()));
+    let mut tiles = Vec::with_capacity(windows * ranges.len());
+    for &(start, end) in &ranges {
+        for window in 0..windows {
+            tiles.push(Tile { window, start, end });
+        }
     }
-
-    let nw = num_windows(width);
-    let ranges = partition_ranges(total, range_count(total, nw, strategy));
-    let tiles = (0..nw).flat_map(|window| ranges.iter().map(move |&(a, b)| (window, a, b)));
-    let partials = strategy.map_collect_vec(tiles, |(window, a, b)| {
-        let partial = transposed::window_partial(backend, chunks, a, b, window, width);
-        (window, partial)
-    });
-
-    let mut windows = vec![GVec::identity(); nw];
+    let buckets = num_buckets(width);
+    let partials = strategy.map_init_collect_vec(
+        tiles,
+        || transposed::identity_buckets(buckets),
+        |scratch, tile| {
+            let partial = transposed::window_partial(
+                backend,
+                chunks,
+                tile.start,
+                tile.end,
+                tile.window,
+                width,
+                scratch,
+            );
+            (tile.window, partial)
+        },
+    );
+    let mut window_sums = vec![GVec::identity(); windows];
     for (window, partial) in partials {
-        windows[window] = backend.g_add(windows[window], GVec::splat(partial));
+        window_sums[window] = backend.g_add(window_sums[window], GVec::splat(partial));
     }
-    let windows: Vec<G> = windows
+    let window_sums: Vec<G> = window_sums
         .into_iter()
         .map(|window| window.to_lanes()[0])
         .collect();
-    fold_window_partials(backend, &windows, width)
+    fold_windows(backend, &window_sums, width)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplified::GBackend;
-    use crate::signing::scalar::test_support::rand_scalar;
+    use crate::{signing::scalar::test_support::rand_scalar, simplified::GBackend};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use ed25519_consensus::SigningKey;
@@ -459,10 +451,7 @@ mod tests {
 
     fn points_equal<B: Backend>(backend: B, actual: G, expected: G) -> bool {
         backend
-            .g_add(
-                GVec::splat(actual),
-                GVec::splat(expected).negate(backend),
-            )
+            .g_add(GVec::splat(actual), GVec::splat(expected).negate(backend))
             .to_lanes()[0]
             .is_identity()
     }
@@ -536,7 +525,7 @@ mod tests {
                 })
                 .to_lanes()[0];
             for width in TEST_WIDTHS {
-                let actual = multiscalar_mul(backend, &points, &scalars, width);
+                let actual = multiscalar_mul_points_serial(backend, &points, &scalars, width);
                 assert!(
                     points_equal(backend, actual, expected),
                     "n={n} width={width}"
@@ -557,23 +546,25 @@ mod tests {
             let mut chunks = split_terms(terms, &[1, 3, 7, 9, 24]);
             chunks.push(Vec::new());
 
-            let expected = multiscalar_mul_terms(backend, &refs(&single), 7);
-            let actual = multiscalar_mul_terms(backend, &refs(&chunks), 7);
+            let expected = multiscalar_mul_terms_serial(backend, &refs(&single), 7);
+            let actual = multiscalar_mul_terms_serial(backend, &refs(&chunks), 7);
             assert!(points_equal(backend, actual, expected));
         }
     }
 
     #[test]
-    fn parallel_matches_serial() {
+    fn strategy_path_matches_serial() {
         let backend = crate::simplified::test_backend();
         for n in [0, 1, 2, 5, 32, 600] {
             for width in TEST_WIDTHS {
                 let chunks = split_terms(rand_terms(backend, n, width), &[64, 64, 64, 64]);
                 let chunks = refs(&chunks);
-                let expected = multiscalar_mul_terms(backend, &chunks, width);
-                let actual =
-                    multiscalar_mul_terms_parallel(backend, &chunks, width, &Sequential);
-                assert!(points_equal(backend, actual, expected), "n={n} width={width}");
+                let expected = multiscalar_mul_terms_serial(backend, &chunks, width);
+                let actual = multiscalar_mul(backend, &chunks, width, &Sequential);
+                assert!(
+                    points_equal(backend, actual, expected),
+                    "n={n} width={width}"
+                );
             }
         }
     }
@@ -594,9 +585,12 @@ mod tests {
                     &[128, 128, 128, 128, 128, 128],
                 );
                 let chunks = refs(&chunks);
-                let expected = multiscalar_mul_terms(backend, &chunks, width);
-                let actual = multiscalar_mul_terms_parallel(backend, &chunks, width, &strategy);
-                assert!(points_equal(backend, actual, expected), "n={n} width={width}");
+                let expected = multiscalar_mul_terms_serial(backend, &chunks, width);
+                let actual = multiscalar_mul(backend, &chunks, width, &strategy);
+                assert!(
+                    points_equal(backend, actual, expected),
+                    "n={n} width={width}"
+                );
             }
         }
     }
@@ -604,7 +598,7 @@ mod tests {
     /// Splitting a window's bucket fill at an arbitrary global index (deliberately not a slice
     /// boundary) and summing the two partials must Horner-fold to the exact same point as
     /// running the whole MSM over the full range at once -- this is the
-    /// correctness argument the tile-parallel [`multiscalar_mul_terms_parallel`] relies on to
+    /// correctness argument the tile-parallel [`multiscalar_mul`] relies on to
     /// combine same-window tiles with a single addition.
     #[test]
     fn split_window_partials_match_whole_range() {
@@ -616,21 +610,38 @@ mod tests {
             let total = total_terms(&chunks);
             let mid = total / 2;
 
-            let expected = multiscalar_mul_terms(backend, &chunks, WIDTH);
+            let expected = multiscalar_mul_terms_serial(backend, &chunks, WIDTH);
 
             let nw = num_windows(WIDTH);
             let mut transposed_windows = vec![G::IDENTITY; nw];
+            let mut buckets = transposed::identity_buckets(num_buckets(WIDTH));
             for (window, partial) in transposed_windows.iter_mut().enumerate() {
                 *partial = add_points(
                     backend,
-                    transposed::window_partial(backend, &chunks, 0, mid, window, WIDTH),
-                    transposed::window_partial(backend, &chunks, mid, total, window, WIDTH),
+                    transposed::window_partial(
+                        backend,
+                        &chunks,
+                        0,
+                        mid,
+                        window,
+                        WIDTH,
+                        &mut buckets,
+                    ),
+                    transposed::window_partial(
+                        backend,
+                        &chunks,
+                        mid,
+                        total,
+                        window,
+                        WIDTH,
+                        &mut buckets,
+                    ),
                 );
             }
 
             assert!(points_equal(
                 backend,
-                fold_window_partials(backend, &transposed_windows, WIDTH),
+                fold_windows(backend, &transposed_windows, WIDTH),
                 expected,
             ));
         }

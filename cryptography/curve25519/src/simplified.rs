@@ -212,6 +212,19 @@ impl FVec {
     pub(crate) fn to_lanes(self) -> [F; LANES] {
         core::array::from_fn(|i| F(core::array::from_fn(|limb| self.limbs[limb][i])))
     }
+
+    /// Selects `other` in lanes whose corresponding mask is true.
+    fn select_lanes(self, other: Self, select_other: &[bool; LANES]) -> Self {
+        let masks = select_other.map(|select| 0u64.wrapping_sub(select as u64));
+        Self {
+            limbs: core::array::from_fn(|limb| {
+                core::array::from_fn(|lane| {
+                    (self.limbs[limb][lane] & !masks[lane])
+                        | (other.limbs[limb][lane] & masks[lane])
+                })
+            }),
+        }
+    }
 }
 
 /// Abstracts over base field operations.
@@ -543,22 +556,10 @@ impl GAffineVec {
             return packed;
         }
 
-        let x = packed.x.to_lanes();
-        let negative_x = backend.neg(packed.x).to_lanes();
-        let t2d = packed.t2d.to_lanes();
-        let negative_t2d = backend.neg(packed.t2d).to_lanes();
         Self {
-            x: FVec::from_lanes(&core::array::from_fn(|i| {
-                if negative[i] { negative_x[i] } else { x[i] }
-            })),
+            x: packed.x.select_lanes(backend.neg(packed.x), negative),
             y: packed.y,
-            t2d: FVec::from_lanes(&core::array::from_fn(|i| {
-                if negative[i] {
-                    negative_t2d[i]
-                } else {
-                    t2d[i]
-                }
-            })),
+            t2d: packed.t2d.select_lanes(backend.neg(packed.t2d), negative),
         }
     }
 

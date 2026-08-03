@@ -402,11 +402,7 @@ mod tests {
             for &digit in &digits {
                 let magnitude = Scalar::from_u128(digit.unsigned_abs() as u128);
                 let term = power.mul_mod_l(&magnitude);
-                let term = if digit < 0 {
-                    term.neg_mod_l()
-                } else {
-                    term
-                };
+                let term = if digit < 0 { term.neg_mod_l() } else { term };
                 reconstructed = reconstructed.add_mod_l(&term);
                 power = power.mul_mod_l(&base);
             }
