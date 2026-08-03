@@ -54,7 +54,7 @@ type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 type Task<P> = (Channel, P, Recipients<P>, IoBuf);
 
 /// Overhead from prepending a channel identifier to an application payload.
-const MAX_PAYLOAD_OVERHEAD: u32 = Channel::SIZE as u32;
+pub const MAX_PAYLOAD_OVERHEAD: u32 = Channel::SIZE as u32;
 
 struct RegistrationGuard {
     active: Arc<AtomicBool>,
@@ -201,7 +201,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// # Panics
     ///
-    /// Panics if [`Config::max_size`] plus framing overhead exceeds `u32::MAX`.
+    /// Panics if [`Config::max_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");

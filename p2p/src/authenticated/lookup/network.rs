@@ -7,8 +7,8 @@ use super::{
 use crate::{
     Channel,
     authenticated::{
+        MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
-        data::MAX_PAYLOAD_DATA_OVERHEAD,
         router,
     },
 };
@@ -56,11 +56,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if [`Config::max_message_size`] plus framing overhead exceeds `u32::MAX`.
+    /// Panics if [`Config::max_message_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let max_frame_size = cfg
             .max_message_size
-            .checked_add(MAX_PAYLOAD_DATA_OVERHEAD)
+            .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
         let (listener_mailbox, listener) = listener::Mailbox::new();
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(

@@ -10,6 +10,7 @@
 mod channels;
 pub use channels::backlog;
 mod data;
+pub use data::MAX_PAYLOAD_OVERHEAD;
 pub(crate) mod dialing;
 pub mod discovery;
 pub mod lookup;
