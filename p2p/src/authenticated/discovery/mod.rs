@@ -635,6 +635,21 @@ mod tests {
         });
     }
 
+    #[test]
+    #[should_panic(expected = "maximum frame size overflow")]
+    fn test_max_message_size_overflow_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                u32::MAX,
+            );
+            let _ = Network::new(context.child("network"), config);
+        });
+    }
+
     #[test_traced]
     #[should_panic(expected = "message too large")]
     fn test_message_too_large() {

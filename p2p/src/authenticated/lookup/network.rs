@@ -30,6 +30,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
+    max_frame_size: u32,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
@@ -52,7 +53,15 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`Config::max_message_size`] plus framing overhead exceeds `u32::MAX`.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
+        let max_frame_size = cfg
+            .max_message_size
+            .checked_add(MAX_PAYLOAD_DATA_OVERHEAD)
+            .expect("maximum frame size overflow");
         let (listener_mailbox, listener) = listener::Mailbox::new();
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
@@ -80,6 +89,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             Self {
                 context: ContextCell::new(context),
                 cfg,
+                max_frame_size,
 
                 channels,
                 tracker,
@@ -170,10 +180,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self
-                .cfg
-                .max_message_size
-                .saturating_add(MAX_PAYLOAD_DATA_OVERHEAD),
+            max_message_size: self.max_frame_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,
