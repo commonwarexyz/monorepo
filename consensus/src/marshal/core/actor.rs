@@ -134,6 +134,8 @@ where
     stream: Stream<E>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
+    // Commitments whose acknowledgements were superseded by a pending floor
+    superseded_ack_commitments: Vec<V::Commitment>,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
@@ -249,6 +251,7 @@ where
                 floor,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
+                superseded_ack_commitments: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 dispatch_gate: DispatchGate::default(),
@@ -1180,8 +1183,10 @@ where
         }
 
         // The pending floor owns the next application sync point. Drop any
-        // in-flight acks before they can advance the processed height past it.
-        self.pending_acks.clear();
+        // in-flight acks before they can advance the processed height past it,
+        // but retain their commitments until the anchor makes the floor active.
+        self.superseded_ack_commitments
+            .extend(self.pending_acks.clear());
 
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
@@ -1294,6 +1299,8 @@ where
             self = self
                 .update_processed_round_floor(height, finalization.round(), resolver)
                 .await;
+            let commitments = std::mem::take(&mut self.superseded_ack_commitments);
+            buffer.finalized(self.floor.processed_round(), commitments);
             let repaired;
             (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
             if repaired {
@@ -1342,7 +1349,13 @@ where
 
         // Drop all pending acknowledgement waiters so any in-flight application
         // acks for blocks below the new floor cannot rewrite the processed floor.
-        self.pending_acks.clear();
+        self.superseded_ack_commitments
+            .extend(self.pending_acks.clear());
+
+        // The active floor retires round-bound entries and every commitment whose
+        // acknowledgement it superseded.
+        let commitments = std::mem::take(&mut self.superseded_ack_commitments);
+        buffer.finalized(self.floor.processed_round(), commitments);
 
         // The floor is durable, so cache/finalized data below it can be pruned.
         self = self.prune_after_floor(height).await;

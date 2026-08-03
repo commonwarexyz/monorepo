@@ -565,6 +565,92 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_floor_retires_superseded_ack_commitments() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let mut setup = CodingHarness::setup_validator_with(
+                context.child("validator"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                Application::manual_ack(),
+            )
+            .await;
+            assert_eq!(setup.application.acknowledged().await, Height::zero());
+
+            let block_round = Round::new(Epoch::zero(), View::new(1));
+            let block = CodingHarness::make_test_block(
+                Sha256::hash(&[b""]),
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                Height::new(1),
+                100,
+                NUM_VALIDATORS as u16,
+            );
+            let commitment = block.commitment();
+
+            // The cache observation is newer than the delayed floor, so only
+            // exact-commitment retirement can remove it.
+            setup
+                .extra
+                .proposed(Round::new(Epoch::zero(), View::new(10)), block.clone());
+            assert!(setup.mailbox.verified(block_round, block.clone()).await);
+            CodingHarness::report_finalization(
+                &mut setup.mailbox,
+                CodingHarness::make_finalization(
+                    Proposal {
+                        round: block_round,
+                        parent: View::zero(),
+                        payload: commitment,
+                    },
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            while setup.application.pending_ack_heights() != vec![Height::new(1)] {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let floor_round = Round::new(Epoch::zero(), View::new(2));
+            let floor_block = CodingHarness::make_test_block(
+                block.digest(),
+                commitment,
+                Height::new(2),
+                200,
+                NUM_VALIDATORS as u16,
+            );
+            let floor_commitment = floor_block.commitment();
+            setup.extra.proposed(floor_round, floor_block);
+            setup.mailbox.set_floor(CodingHarness::make_finalization(
+                Proposal {
+                    round: floor_round,
+                    parent: View::new(1),
+                    payload: floor_commitment,
+                },
+                &schemes,
+                QUORUM,
+            ));
+
+            while setup.application.pending_ack_heights() != vec![Height::new(1), Height::new(2)] {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(setup.extra.get(commitment).await.is_none());
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_notarized_delivery_rejects_dishonest_payload_config() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
