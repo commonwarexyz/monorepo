@@ -143,14 +143,8 @@ pub struct Input<Upstream, Provider> {
 /// the block tree and applying changesets to the underlying databases on
 /// finalization.
 ///
-/// Stateful may keep multiple verification requests in flight. Each request
-/// uses a distinct application clone, and proposal work may run between polls.
-/// Clone-local mutations are not propagated, so state that must survive a call
-/// must be shared by clones or stored externally.
-///
-/// Full verification requests are not coalesced because block availability may
-/// differ by round. Only lazy replay of an acquired block is shared; its digest
-/// commits the block's embedded consensus context.
+/// Verification may overlap other verification and proposal calls.
+/// Implementations must remain correct under this interleaving.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -258,10 +252,9 @@ where
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
     ///
-    /// The newest abandoned verification may continue so its speculative state
-    /// can be reused. Later actor work may cancel it. Live attempts are also
-    /// cancelled and restarted around finalization and pruning. Implementations
-    /// must be cancellation-safe.
+    /// This future may outlive its caller. Stateful may also cancel and retry it
+    /// before finalization or pruning. Cancellation and retry must not violate
+    /// invariants or lose durable progress.
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -281,13 +274,9 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// Concurrent verification requests share recovery for the same missing
-    /// block. If the owner is cancelled, another live request retries it.
-    ///
-    /// This future may be cancelled with its originating request or before
-    /// finalization or pruning mutates the database set. Recovery for a live
-    /// request is restarted afterward, so implementations must be
-    /// cancellation-safe.
+    /// This future may be cancelled and retried before finalization or pruning.
+    /// Cancellation and retry must not violate invariants or lose durable
+    /// progress.
     ///
     /// # Panics
     ///

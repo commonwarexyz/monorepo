@@ -22,7 +22,7 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::{Span, info_span};
 
-/// Coordinates verification lifetime across all mailbox clones.
+/// Tracks the verification that can continue after caller cancellation.
 #[derive(Clone, Default)]
 struct Verifications(Arc<Mutex<Option<oneshot::Receiver<()>>>>);
 
@@ -33,7 +33,7 @@ impl Verifications {
         superseded
     }
 
-    /// Allows abandoned verification work to yield to a newer actor request.
+    /// Marks the current verification as superseded.
     fn supersede(&self) {
         self.0.lock().take();
     }

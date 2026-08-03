@@ -18,10 +18,9 @@
 //!   [`Barrier`]), then prune all pending entries at or below the
 //!   finalized round.
 //!
-//! Verification jobs are polled independently so one request waiting for
-//! ancestry or application data cannot block another. Their lazy recovery
-//! coalesces [`Application::apply`] calls by block digest. Proposal recovery
-//! remains actor-owned. An abandoned verification remains useful until newer
+//! Verification jobs are polled independently. Verification-owned lazy
+//! recovery shares [`Application::apply`] by block digest. Proposal recovery
+//! remains actor-owned. An abandoned verification remains active until newer
 //! actor work supersedes it.
 
 use crate::stateful::{
@@ -111,11 +110,9 @@ where
     }
 }
 
-/// Verification-owned replay work indexed after the block has been acquired.
+/// In-progress verification replays keyed by acquired block digest.
 ///
-/// Full verification requests remain independent because pre-acquisition
-/// availability can differ by round. Once acquired, a [`CertifiableBlock`]
-/// digest commits its embedded context, so sharing that block's replay is safe.
+/// Each key identifies a [`CertifiableBlock`] and its embedded context.
 #[derive(Clone)]
 struct ReplayFlights<D: Copy + Ord> {
     entries: Arc<Mutex<BTreeMap<D, Vec<oneshot::Sender<ReplayResult>>>>>,
@@ -141,7 +138,6 @@ enum ReplayClaim<D: Copy + Ord> {
     Wait(oneshot::Receiver<ReplayResult>),
 }
 
-/// Releases replay ownership and notifies every waiter on completion or drop.
 struct ReplayOwner<D: Copy + Ord> {
     flights: ReplayFlights<D>,
     digest: D,
@@ -338,7 +334,7 @@ where
     pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
 }
 
-/// Independently-polled verification work sharing actor-owned execution state.
+/// Executes one independently-polled verification request.
 pub(super) struct Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -378,7 +374,7 @@ where
         }
     }
 
-    /// Creates an isolated application executor sharing speculative state.
+    /// Creates a verifier for an independently-polled request.
     pub(super) fn verifier(&self) -> Verifier<E, A> {
         Verifier {
             app: self.app.clone(),
@@ -1139,7 +1135,7 @@ where
             .ok_or(PrepareBatchesError::Cancelled)?
     }
 
-    /// Rebuilds missing ancestry without holding actor state across an await.
+    /// Rebuilds missing ancestry through `target`.
     async fn rebuild_pending<P, C>(
         &self,
         app: &mut A,
