@@ -1933,7 +1933,7 @@ impl TestHarness for StandardHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox, height) = Actor::init(
+        let (actor, mailbox, floor) = Actor::init(
             context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -1946,7 +1946,7 @@ impl TestHarness for StandardHarness {
             application,
             mailbox,
             extra: buffer,
-            height,
+            height: floor.height(),
             actor_handle,
         }
     }
@@ -2728,7 +2728,7 @@ impl TestHarness for CodingHarness {
         let network = control.register(2, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
 
-        let (actor, mailbox, height) = Actor::init(
+        let (actor, mailbox, floor) = Actor::init(
             context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -2741,7 +2741,7 @@ impl TestHarness for CodingHarness {
             application,
             mailbox,
             extra: shard_mailbox,
-            height,
+            height: floor.height(),
             actor_handle,
         }
     }
