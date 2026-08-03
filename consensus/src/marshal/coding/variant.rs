@@ -155,8 +155,8 @@ where
         Some(self.subscribe(commitment))
     }
 
-    fn finalized(&self, round: Round, commitment: Commitment) {
-        self.prune(round, commitment);
+    fn finalized(&self, round: Round, commitments: Vec<Commitment>) {
+        self.prune(round, commitments);
     }
 
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {

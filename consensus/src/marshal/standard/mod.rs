@@ -3818,7 +3818,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn finalized(&self, _round: Round, _commitment: D) {}
+        fn finalized(&self, _round: Round, _commitments: Vec<D>) {}
 
         fn send(&self, round: Round, block: Arc<B>, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));

@@ -110,7 +110,7 @@ where
         self.subscribe_by_digest(commitment)
     }
 
-    fn finalized(&self, _round: Round, _commitment: B::Digest) {
+    fn finalized(&self, _round: Round, _commitments: Vec<B::Digest>) {
         // Standard's cache is already bounded and evicted per authenticated sender.
     }
 

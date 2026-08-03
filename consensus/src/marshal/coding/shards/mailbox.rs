@@ -99,8 +99,8 @@ where
     Prune {
         /// The inclusive consensus-round retirement floor.
         round: Round,
-        /// The commitment through which application processing advanced.
-        commitment: Commitment,
+        /// The commitments through which application processing advanced.
+        commitments: Vec<Commitment>,
     },
 }
 
@@ -329,13 +329,13 @@ where
 
     /// Retire cached blocks and reconstruction state after durable application progress.
     ///
-    /// `commitment` is retired exactly. `round` is an inclusive retirement floor for every other
-    /// entry and is supplied separately because sparse finalization certificates and re-proposals
-    /// may associate it with a different block context.
+    /// `commitments` are retired exactly. `round` is an inclusive retirement floor for every
+    /// other entry and is supplied separately because sparse finalization certificates and
+    /// re-proposals may associate it with a different block context.
     ///
     /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
     /// subscriptions remain open, and later consensus notifications may recreate state.
-    pub fn prune(&self, round: Round, commitment: Commitment) {
-        let _ = self.sender.enqueue(Message::Prune { round, commitment });
+    pub fn prune(&self, round: Round, commitments: Vec<Commitment>) {
+        let _ = self.sender.enqueue(Message::Prune { round, commitments });
     }
 }

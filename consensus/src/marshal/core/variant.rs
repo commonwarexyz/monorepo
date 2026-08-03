@@ -168,15 +168,14 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         commitment: V::Commitment,
     ) -> Option<oneshot::Receiver<Arc<V::Block>>>;
 
-    /// Notify the buffer that application processing has durably advanced through `commitment`.
+    /// Notify the buffer that application processing has durably advanced through `commitments`.
     ///
     /// `round` is an inclusive retirement floor: the buffer may retire entries last observed in
-    /// that round or earlier. Sparse finalization certificates mean the floor may come from an
-    /// earlier height than `commitment`. A re-proposal may also retain a commitment bound to an
-    /// earlier consensus context.
+    /// that round or earlier. Each listed commitment may be retired exactly, even if sparse
+    /// certificates or re-proposals leave its observation above the floor.
     ///
     /// This allows the buffer to perform variant-specific cleanup operations.
-    fn finalized(&self, round: Round, commitment: V::Commitment);
+    fn finalized(&self, round: Round, commitments: Vec<V::Commitment>);
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: Arc<V::Block>, recipients: Recipients<Self::PublicKey>);
@@ -232,7 +231,7 @@ where
         None
     }
 
-    fn finalized(&self, _: Round, _: V::Commitment) {}
+    fn finalized(&self, _: Round, _: Vec<V::Commitment>) {}
 
     fn send(&self, _: Round, _: Arc<V::Block>, _: Recipients<Self::PublicKey>) {}
 }

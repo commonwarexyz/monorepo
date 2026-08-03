@@ -175,7 +175,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn finalized(&self, _round: Round, _commitment: Commitment) {}
+        fn finalized(&self, _round: Round, _commitments: Vec<Commitment>) {}
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
@@ -484,6 +484,84 @@ mod tests {
         let coded_candidate: TestCodedBlock =
             CodedBlock::new(candidate, coding_config, &Sequential);
         (candidate_ctx, coded_candidate)
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_batched_acks_retire_each_exact_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let mut setup = CodingHarness::setup_validator_with(
+                context.child("validator"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(2),
+                Application::manual_ack(),
+            )
+            .await;
+            assert_eq!(setup.application.acknowledged().await, Height::zero());
+
+            let mut parent = Sha256::hash(&[b""]);
+            let mut parent_commitment =
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
+            let mut commitments = Vec::new();
+            for height in 1..=2 {
+                let round = Round::new(Epoch::zero(), View::new(height));
+                let block = CodingHarness::make_test_block(
+                    parent,
+                    parent_commitment,
+                    Height::new(height),
+                    height,
+                    NUM_VALIDATORS as u16,
+                );
+                let commitment = block.commitment();
+                parent = block.digest();
+                parent_commitment = commitment;
+                commitments.push(commitment);
+
+                setup.extra.proposed(
+                    Round::new(Epoch::zero(), View::new(height + 10)),
+                    block.clone(),
+                );
+                assert!(setup.extra.get(commitment).await.is_some());
+                assert!(setup.mailbox.verified(round, block).await);
+                CodingHarness::report_finalization(
+                    &mut setup.mailbox,
+                    CodingHarness::make_finalization(
+                        Proposal {
+                            round,
+                            parent: View::new(height - 1),
+                            payload: commitment,
+                        },
+                        &schemes,
+                        QUORUM,
+                    ),
+                )
+                .await;
+            }
+
+            while setup.application.pending_ack_heights() != vec![Height::new(1), Height::new(2)] {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(setup.application.acknowledge_next(), Some(Height::new(1)));
+            assert_eq!(setup.application.acknowledge_next(), Some(Height::new(2)));
+
+            while setup.extra.get(commitments[1]).await.is_some() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(setup.extra.get(commitments[0]).await.is_none());
+        });
     }
 
     #[test_traced("WARN")]
@@ -1800,7 +1878,7 @@ mod tests {
             // Ensure the certification gate task has registered its subscription, then
             // force cancellation by pruning the missing commitment.
             context.sleep(Duration::from_millis(100)).await;
-            shards.prune(round, missing_payload);
+            shards.prune(round, vec![missing_payload]);
 
             select! {
                 result = verify_rx => {
@@ -1877,7 +1955,7 @@ mod tests {
 
             // Prune the missing commitment in the shard engine, which should cancel
             // the underlying buffer subscription.
-            shards.prune(round, missing_commitment);
+            shards.prune(round, vec![missing_commitment]);
 
             // The core actor must surface cancellation by closing the subscription,
             // not by panicking or leaving the waiter parked indefinitely.

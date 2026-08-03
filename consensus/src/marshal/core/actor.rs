@@ -530,7 +530,8 @@ where
     {
         // Start with the ack that woke this `select_loop!` arm.
         let mut pending = Some(self.pending_acks.complete_current(result));
-        let (processed_round, last_acked_commitment) = loop {
+        let mut processed_commitments = Vec::new();
+        let processed_round = loop {
             let (height, commitment, result) = pending.take().expect("pending ack must exist");
             match result {
                 Ok(()) => {
@@ -544,12 +545,13 @@ where
                     panic!("application did not acknowledge block at height {height}: {e:?}");
                 }
             }
+            processed_commitments.push(commitment);
 
             // Opportunistically drain any additional already-ready acks so we
             // can persist one metadata sync for the whole batch below.
             match self.pending_acks.pop_ready() {
                 Some(next) => pending = Some(next),
-                None => break (self.floor.processed_round(), commitment),
+                None => break self.floor.processed_round(),
             }
         };
 
@@ -560,9 +562,9 @@ where
             .await
             .expect("failed to sync application progress");
 
-        // Anything through the last acknowledged finalization round is safe
-        // for the buffer to prune.
-        buffer.finalized(processed_round, last_acked_commitment);
+        // The round is an inclusive floor; retire every exact commitment even if sparse
+        // certificates leave it above that floor.
+        buffer.finalized(processed_round, processed_commitments);
 
         // Refill the application dispatch pipeline.
         self.try_dispatch_blocks(application).await

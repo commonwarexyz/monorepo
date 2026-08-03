@@ -534,8 +534,8 @@ where
                             response,
                         );
                     }
-                    Message::Prune { round, commitment } => {
-                        self.prune(round, commitment);
+                    Message::Prune { round, commitments } => {
+                        self.prune(round, commitments);
                     }
                 }
             },
@@ -911,9 +911,13 @@ where
         block: Arc<CodedBlock<B, C, H>>,
     ) -> Arc<CodedBlock<B, C, H>> {
         let commitment = block.commitment();
-        self.observe_existing_commitment(commitment, round);
+        let round = self.state.get_mut(&commitment).map_or(round, |state| {
+            state.observe(round);
+            state.round()
+        });
         self.reconstructed_blocks
             .entry(commitment)
+            .and_modify(|entry| entry.round = entry.round.max(round))
             .or_insert_with(|| ReconstructedBlock {
                 round,
                 block: Arc::clone(&block),
@@ -1181,21 +1185,25 @@ where
     ///
     /// Pruning waits for durable progress because a Byzantine leader may produce multiple valid
     /// commitments in one round.
-    fn prune(&mut self, round: Round, finalized: Commitment) {
+    fn prune(&mut self, round: Round, commitments: Vec<Commitment>) {
         // Durable processing makes existing exact-commitment and assigned-shard waits for these
         // states obsolete. Digest waits are not commitment-specific.
-        self.drop_commitment_subscriptions(finalized);
+        for commitment in commitments {
+            self.drop_commitment_subscriptions(commitment);
+            self.reconstructed_blocks.remove(&commitment);
+            self.state.remove(&commitment);
+        }
 
-        // Evict the processed block and blocks last observed no later than the retirement floor.
-        // Blocks observed in later rounds may still be needed for certification.
+        // Evict blocks last observed no later than the retirement floor. Blocks observed in later
+        // rounds may still be needed for certification.
         self.reconstructed_blocks
-            .retain(|commitment, entry| *commitment != finalized && entry.round > round);
+            .retain(|_, entry| entry.round > round);
 
         // Evict incomplete reconstructions by the same round rule. Later observations refresh
         // their round so a delayed application acknowledgment cannot retire a live re-proposal.
         let mut pruned_commitments = Vec::new();
         self.state.retain(|c, s| {
-            let keep = *c != finalized && s.round() > round;
+            let keep = s.round() > round;
             if !keep {
                 pruned_commitments.push(*c);
             }
@@ -2387,7 +2395,7 @@ mod tests {
             // processed commitment, even when that commitment was observed above the floor.
             peer.mailbox.prune(
                 Round::new(Epoch::zero(), View::new(3)),
-                processed_commitment,
+                vec![processed_commitment],
             );
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2451,7 +2459,7 @@ mod tests {
             let mut state_later_sub = peer.mailbox.subscribe(state_later);
             context.sleep(Duration::from_millis(10)).await;
 
-            peer.mailbox.prune(floor, unseen);
+            peer.mailbox.prune(floor, vec![unseen]);
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(peer.mailbox.get(cached_old_commitment).await.is_none());
@@ -2487,7 +2495,13 @@ mod tests {
                 &STRATEGY,
             )
             .commitment();
+            let state_first = CodedBlock::<B, C, H>::new(
+                B::new::<H>((), Sha256Digest::EMPTY, Height::new(3), 300),
+                coding_config,
+                &STRATEGY,
+            );
             let live_commitment = live.commitment();
+            let state_first_commitment = state_first.commitment();
             let leader = peers[0].public_key.clone();
             let original_round = Round::new(Epoch::zero(), View::new(1));
             let floor = Round::new(Epoch::zero(), View::new(3));
@@ -2497,6 +2511,9 @@ mod tests {
             peer.mailbox
                 .discovered(live_commitment, leader, original_round);
             peer.mailbox.proposed(reproposal_round, live);
+            peer.mailbox
+                .notarized(state_first_commitment, reproposal_round);
+            peer.mailbox.proposed(floor, state_first);
             assert!(peer.mailbox.get(live_commitment).await.is_some());
 
             let mut shard_sub = peer
@@ -2505,10 +2522,11 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
             assert!(matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)));
 
-            peer.mailbox.prune(floor, unseen);
+            peer.mailbox.prune(floor, vec![unseen]);
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(peer.mailbox.get(live_commitment).await.is_some());
+            assert!(peer.mailbox.get(state_first_commitment).await.is_some());
             assert!(matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)));
         });
     }
@@ -3236,7 +3254,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
                 peers[receiver_idx].mailbox.prune(
                     Round::new(Epoch::zero(), View::new(3)),
-                    finalized_commitment,
+                    vec![finalized_commitment],
                 );
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -3363,7 +3381,7 @@ mod tests {
                 for &receiver_idx in &receivers {
                     peers[receiver_idx]
                         .mailbox
-                        .prune(prune_round, finalized_commitment);
+                        .prune(prune_round, vec![finalized_commitment]);
                 }
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -3471,7 +3489,7 @@ mod tests {
                     peers[2].mailbox.get(commitment_b).await.is_some(),
                     "local proposal should be cached before pruning"
                 );
-                peers[2].mailbox.prune(round_b, commitment_b);
+                peers[2].mailbox.prune(round_b, vec![commitment_b]);
 
                 select! {
                     result = block_sub => {
