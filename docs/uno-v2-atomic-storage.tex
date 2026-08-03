@@ -568,6 +568,66 @@
   \note{Removing the coordinator is both the performance win and a semantic boundary. Two disjoint start_apply calls have no shared sequence number and may cross their durable frontiers in either order. That locality is what avoids a global lock and a volume-like transaction layer interposed on the filesystem. Opening one participant repairs only its exact descriptor group; recovery does not scan or order unrelated groups. If B semantically depends on A, either include both mutations in one group or do not begin B until A's durable decision is proven. start_apply returning Ok proves durability; awaiting its handle additionally waits for activation and namespace cleanup. A workload that needs one total order across arbitrary groups still needs a higher-level root WAL or coordination layer.}
 \end{frame}
 
+\begin{frame}[t]{Adoption example: not every file needs V2}
+  \vspace{0cm}
+  \eyebrow{Future Freezer / immutable Archive consumer pattern---not part of this PR}
+
+  \vspace{0.04cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \eyebrow{Keep ordinary in-place materializations}
+
+      \vspace{0.06cm}
+      \begin{tikzpicture}[node distance=.32cm]
+        \node[box,text width=2.7cm,minimum height=.64cm] (table) {Freezer table\\\scriptsize epoch slots + CRC};
+        \node[box,text width=2.7cm,minimum height=.64cm,right=of table] (ordinal) {Ordinal\\\scriptsize sparse slots + CRC};
+      \end{tikzpicture}
+
+      \vspace{0.05cm}
+      \scriptsize Old checkpoint hides epoch $E$ slots and unset bits.
+    \end{column}
+    \begin{column}{0.50\textwidth}
+      \eyebrow{Adopt V2 where the shape is append-only}
+
+      \vspace{0.06cm}
+      \begin{tikzpicture}[node distance=.46cm]
+        \node[root,text width=2.65cm,minimum height=.64cm] (values) {value journal\\\scriptsize append-only payload};
+        \node[root,text width=2.7cm,minimum height=.64cm,right=of values] (index) {key-index journal\\\scriptsize returned locations};
+        \draw[flow] (values) -- (index);
+      \end{tikzpicture}
+
+      \vspace{0.05cm}
+      \scriptsize One UNO group prevents a mismatched value/index tail.
+    \end{column}
+  \end{columns}
+
+  \vspace{0.08cm}
+  \eyebrow{Logical commit with one explicit temporal dependency}
+
+  \vspace{0.06cm}
+  \noindent\hfill
+    \begin{tikzpicture}[node distance=.52cm]
+      \node[box,text width=2.35cm,minimum height=.66cm] (stage) {1. stage\\\scriptsize pending epoch $E$};
+      \node[warn,text width=3.5cm,minimum height=.66cm,right=of stage] (materialize) {2. sync table +\\Ordinal\\\scriptsize await; old checkpoint wins};
+      \node[root,text width=4.7cm,minimum height=.66cm,right=of materialize] (publish) {3. UNO publishes journals + state $E$\\\scriptsize application authority becomes visible};
+      \draw[flow] (stage) -- (materialize);
+      \draw[flow] (materialize) -- (publish);
+    \end{tikzpicture}
+  \hfill\null
+
+  \vspace{0.1cm}
+  \noindent\hfill
+    \begin{tikzpicture}
+      \node[panel,text width=13.45cm,align=center] {\small before UNO: \textbf{old} \quad $\vert$ \quad in flight: \textbf{old or complete new} \quad $\vert$ \quad after \texttt{Ok}: \textbf{new}\\[-.01cm]\scriptsize If old wins, future materializations remain unreachable; if new wins, their durability was already proven.};
+    \end{tikzpicture}
+  \hfill\null
+
+  \vfill
+  \takeaway{Ordinary indexes first; atomic authority second.}
+
+  \note{This is an adoption pattern enabled by UNO, not a Freezer or immutable Archive change in this PR. Today Archive sync waits for Freezer and Ordinal, then publishes Metadata. A future prepared-sync API could stage V2 value and key-index roots, write the Freezer table's future epoch and Ordinal's sparse records, and await the ordinary table and Ordinal durability handles. Only then may it start the UNO group that publishes the journal roots and an application archive-state record carrying the Freezer checkpoint and ordinal bitmaps. Under an arbitrary surviving-write subset, a crash before UNO leaves the old checkpoint authoritative; complete but future-epoch table slots and uncommitted Ordinal records are ignored or cleared. During UNO, replicated recovery selects old or complete new. If new is selected, the ordinary materializations are safe because their durability barrier completed first. The archive-state record is application authority, not a global filesystem coordinator or total-order WAL.}
+\end{frame}
+
 \begin{frame}[t]{Recovery is correct for arbitrary surviving write subsets}
   \vspace{0.05cm}
   \scriptsize
