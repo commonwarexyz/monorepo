@@ -63,7 +63,6 @@ use commonware_cryptography::{
         self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
         dial_start, listen_end, listen_start,
     },
-    transcript::{Transcript, Version},
 };
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -75,10 +74,6 @@ use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
-
-// V0 is safe here because Context::new summarizes the single namespace packet before the
-// handshake commits a fixed sequence of canonical encodings at fixed positions.
-const TRANSCRIPT_VERSION: Version = Version::V0;
 
 const TAG_SIZE: u32 = {
     assert!(handshake::TAG_SIZE <= u32::MAX as usize);
@@ -209,7 +204,7 @@ pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: 
         let (state, syn) = dial_start(
             ctx,
             Context::new(
-                &Transcript::new(&config.namespace, TRANSCRIPT_VERSION),
+                &config.namespace,
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -275,7 +270,7 @@ pub async fn listen<
         let (state, syn_ack) = listen_start(
             ctx,
             Context::new(
-                &Transcript::new(&config.namespace, TRANSCRIPT_VERSION),
+                &config.namespace,
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -1058,7 +1053,7 @@ mod test {
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
-                    &Transcript::new(&dialer_config.namespace, TRANSCRIPT_VERSION),
+                    &dialer_config.namespace,
                     current_time,
                     ok_timestamps.clone(),
                     dialer_config.signing_key.clone(),
@@ -1068,7 +1063,7 @@ mod test {
             let (_, syn_ack) = listen_start(
                 context.child("listener"),
                 Context::new(
-                    &Transcript::new(&dialer_config.namespace, TRANSCRIPT_VERSION),
+                    &dialer_config.namespace,
                     current_time,
                     ok_timestamps,
                     listener_crypto,

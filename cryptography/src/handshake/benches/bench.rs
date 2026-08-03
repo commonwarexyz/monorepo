@@ -4,14 +4,11 @@ use commonware_cryptography::{
     handshake::{
         Context, Error, RecvCipher, SendCipher, dial_end, dial_start, listen_end, listen_start,
     },
-    transcript::{Transcript, Version},
 };
 use commonware_math::algebra::Random;
 use criterion::criterion_main;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha8Rng;
-
-const TRANSCRIPT_VERSION: Version = Version::V0;
 
 mod handshake;
 mod transport;
@@ -24,7 +21,7 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
     let (d_state, msg1) = dial_start(
         &mut rng,
         Context::new(
-            &Transcript::new(b"bench_namespace", TRANSCRIPT_VERSION),
+            b"bench_namespace",
             0,
             0..1,
             dialer_crypto.clone(),
@@ -34,7 +31,7 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
     let (l_state, msg2) = listen_start(
         &mut rng,
         Context::new(
-            &Transcript::new(b"bench_namespace", TRANSCRIPT_VERSION),
+            b"bench_namespace",
             0,
             0..1,
             listener_crypto,
