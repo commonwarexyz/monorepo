@@ -2,7 +2,7 @@ use crate::stateful::{
     Application, Input,
     actor::{
         core::mailbox::{Message, Verification},
-        processor::{Applied, Processor},
+        processor::{Applied, Processor, Verifier},
     },
 };
 use commonware_actor::mailbox as actor_mailbox;
@@ -130,6 +130,7 @@ where
 {
     pub async fn start(mut self) {
         let mut pending_prune = None;
+        let mut deferred_message = None;
         let mut verifications = Pool::default();
         let mut invalidations = BTreeMap::new();
         let mut next_verification_id = 0u64;
@@ -150,12 +151,7 @@ where
             self.context,
             on_start => {
                 while let Poll::Ready(result) = poll!(verifications.next_completed()) {
-                    self.handle_verification_result(
-                        &mut verifications,
-                        &mut invalidations,
-                        &mut next_verification_id,
-                        result,
-                    );
+                    Self::handle_verification_result(&mut invalidations, result);
                 }
 
                 // Observe every already-completed flush (releasing its marshal
@@ -171,42 +167,45 @@ where
                 // Pruning is non-critical work. We only run it when the mailbox is idle, and
                 // it is never raced against the mailbox due to its internal lock acquisition.
                 // If a message is ready, it is always processed immediately.
-                let next = match self.mailbox.try_recv() {
-                    // A message is ready: handle it now, regardless of any queued prune.
-                    Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
-                    Err(TryRecvError::Empty) => match pending_prune.take() {
-                        // No message, but a prune is queued: run it.
-                        Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
-                        // No message and nothing to prune: wait on the mailbox, driving flush
-                        // completions while idle.
-                        None => {
-                            let mailbox = &mut self.mailbox;
-                            let syncs = &mut syncs;
-                            let pending_syncs = &mut pending_syncs;
-                            let verifications = &mut verifications;
-                            Either::Right(async move {
-                                loop {
-                                    select! {
-                                        message = mailbox.recv() => {
-                                            break message.map(Step::Message);
-                                        },
-                                        completion = syncs.next_completed() => {
-                                            if !complete(pending_syncs, completion) {
-                                                return None;
-                                            }
-                                        },
-                                        result = verifications.next_completed() => {
-                                            break Some(Step::Verification(result));
-                                        },
+                let next = match deferred_message.take() {
+                    Some(message) => Either::Left(ready(Some(Step::Message(message)))),
+                    None => match self.mailbox.try_recv() {
+                        // A message is ready: handle it now, regardless of any queued prune.
+                        Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
+                        Err(TryRecvError::Empty) => match pending_prune.take() {
+                            // No message, but a prune is queued: run it.
+                            Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
+                            // No message and nothing to prune: wait on the mailbox, driving flush
+                            // completions while idle.
+                            None => {
+                                let mailbox = &mut self.mailbox;
+                                let syncs = &mut syncs;
+                                let pending_syncs = &mut pending_syncs;
+                                let verifications = &mut verifications;
+                                Either::Right(async move {
+                                    loop {
+                                        select! {
+                                            message = mailbox.recv() => {
+                                                break message.map(Step::Message);
+                                            },
+                                            completion = syncs.next_completed() => {
+                                                if !complete(pending_syncs, completion) {
+                                                    return None;
+                                                }
+                                            },
+                                            result = verifications.next_completed() => {
+                                                break Some(Step::Verification(result));
+                                            },
+                                        }
                                     }
-                                }
-                            })
+                                })
+                            }
+                        },
+                        Err(TryRecvError::Disconnected) => {
+                            debug!("mailbox closed, stopping processing");
+                            return;
                         }
                     },
-                    Err(TryRecvError::Disconnected) => {
-                        debug!("mailbox closed, stopping processing");
-                        return;
-                    }
                 };
             },
             on_stopped => {
@@ -228,17 +227,65 @@ where
                         upstream,
                         provider: self.provider.clone(),
                     };
-                    self.processor
+                    let verifier = self.processor.verifier();
+                    let actor_context = self.context.as_present();
+                    let marshal = self.marshal.clone();
+                    let proposal = self
+                        .processor
                         .propose(
-                            self.context.as_present(),
-                            self.marshal.clone(),
+                            actor_context,
+                            marshal.clone(),
                             context,
                             ancestry,
                             input,
                             response,
                         )
-                        .instrument(process)
-                        .await;
+                        .instrument(process);
+                    futures::pin_mut!(proposal);
+                    let mut receive_messages = true;
+                    loop {
+                        if receive_messages {
+                            select! {
+                                _ = &mut proposal => break,
+                                result = verifications.next_completed() => {
+                                    Self::handle_verification_result(&mut invalidations, result);
+                                },
+                                message = self.mailbox.recv() => match message {
+                                    Some(Message::Verify {
+                                        span,
+                                        context,
+                                        ancestry,
+                                        verification,
+                                    }) => Self::schedule_verification_with(
+                                        verifier.clone(),
+                                        actor_context.child("verify"),
+                                        marshal.clone(),
+                                        &mut verifications,
+                                        &mut invalidations,
+                                        &mut next_verification_id,
+                                        VerificationRequest {
+                                            span,
+                                            context,
+                                            ancestry,
+                                            verification,
+                                        },
+                                    ),
+                                    Some(message) => {
+                                        deferred_message = Some(message);
+                                        receive_messages = false;
+                                    }
+                                    None => receive_messages = false,
+                                },
+                            }
+                        } else {
+                            select! {
+                                _ = &mut proposal => break,
+                                result = verifications.next_completed() => {
+                                    Self::handle_verification_result(&mut invalidations, result);
+                                },
+                            }
+                        }
+                    }
                 }
                 Step::Message(Message::Verify {
                     span,
@@ -346,12 +393,7 @@ where
                                 }
                             },
                             result = verifications.next_completed() => {
-                                self.handle_verification_result(
-                                    &mut verifications,
-                                    &mut invalidations,
-                                    &mut next_verification_id,
-                                    result,
-                                );
+                                Self::handle_verification_result(&mut invalidations, result);
                             },
                         }
                     }
@@ -377,12 +419,7 @@ where
                     }
                 }
                 Step::Verification(result) => {
-                    self.handle_verification_result(
-                        &mut verifications,
-                        &mut invalidations,
-                        &mut next_verification_id,
-                        result,
-                    );
+                    Self::handle_verification_result(&mut invalidations, result);
                 }
             },
         }
@@ -390,6 +427,26 @@ where
 
     fn schedule_verification(
         &self,
+        verifications: &mut Pool<VerificationResult<E, A>>,
+        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+        next_id: &mut u64,
+        request: VerificationRequest<E, A>,
+    ) {
+        Self::schedule_verification_with(
+            self.processor.verifier(),
+            self.context.as_present().child("verify"),
+            self.marshal.clone(),
+            verifications,
+            invalidations,
+            next_id,
+            request,
+        );
+    }
+
+    fn schedule_verification_with(
+        mut verifier: Verifier<E, A>,
+        actor_context: E,
+        marshal: MarshalMailbox<S, V>,
         verifications: &mut Pool<VerificationResult<E, A>>,
         invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
         next_id: &mut u64,
@@ -403,9 +460,6 @@ where
         assert!(invalidations.insert(id, invalidate).is_none());
 
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
-        let mut verifier = self.processor.verifier();
-        let actor_context = self.context.as_present().child("verify");
-        let marshal = self.marshal.clone();
         verifications.push(
             async move {
                 let ancestry = request.ancestry.clone();
@@ -437,16 +491,17 @@ where
     }
 
     fn handle_verification_result(
-        &self,
-        verifications: &mut Pool<VerificationResult<E, A>>,
         invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
-        next_id: &mut u64,
         result: VerificationResult<E, A>,
     ) {
-        invalidations.remove(&result.id());
-        if let VerificationResult::Invalidated { request, .. } = result {
-            self.schedule_verification(verifications, invalidations, next_id, request);
-        }
+        assert!(
+            invalidations.remove(&result.id()).is_some(),
+            "completed verification must have an invalidation handle",
+        );
+        assert!(
+            matches!(result, VerificationResult::Finished { .. }),
+            "verification cannot finish through the actor loop after invalidation",
+        );
     }
 
     async fn quiesce_verifications(
@@ -531,14 +586,16 @@ mod tests {
         time::Duration,
     };
 
-    struct VerifyGate {
+    struct ApplicationGate {
         started: oneshot::Sender<()>,
         release: oneshot::Receiver<()>,
     }
 
     #[derive(Clone)]
     struct GatedApp {
-        gates: Arc<Mutex<VecDeque<VerifyGate>>>,
+        verify_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
+        proposal_gate: Arc<Mutex<Option<ApplicationGate>>>,
+        verify_valid: bool,
     }
 
     impl Application<deterministic::Context> for GatedApp {
@@ -554,7 +611,7 @@ mod tests {
         }
 
         async fn genesis(&mut self) -> Self::Block {
-            TestBlock::new(0, 0)
+            panic!("gated application genesis is not used")
         }
 
         async fn propose(
@@ -564,6 +621,11 @@ mod tests {
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
+            let gate = self.proposal_gate.lock().take();
+            if let Some(mut gate) = gate {
+                let _ = gate.started.send(());
+                let _ = (&mut gate.release).await;
+            }
             None
         }
 
@@ -576,13 +638,13 @@ mod tests {
             let mut ancestry = Box::pin(ancestry);
             let _block = ancestry.next().await?;
             let mut gate = self
-                .gates
+                .verify_gates
                 .lock()
                 .pop_front()
                 .expect("unexpected verification");
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
-            Some(TestMerkleized)
+            self.verify_valid.then_some(TestMerkleized)
         }
 
         async fn apply(
@@ -597,7 +659,7 @@ mod tests {
 
     #[derive(Clone)]
     struct ReplayGatedApp {
-        gates: Arc<Mutex<VecDeque<VerifyGate>>>,
+        gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
         gate_height: Height,
         apply_calls: Arc<AtomicUsize>,
         verify_calls: Arc<AtomicUsize>,
@@ -616,7 +678,7 @@ mod tests {
         }
 
         async fn genesis(&mut self) -> Self::Block {
-            TestBlock::new(0, 0)
+            panic!("replay-gated application genesis is not used")
         }
 
         async fn propose(
@@ -626,7 +688,7 @@ mod tests {
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
-            None
+            panic!("replay-gated application proposal is not used")
         }
 
         async fn verify(
@@ -657,17 +719,59 @@ mod tests {
         }
     }
 
-    fn verify_gate() -> (VerifyGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    fn application_gate() -> (ApplicationGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (started, started_rx) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();
         (
-            VerifyGate {
+            ApplicationGate {
                 started,
                 release: release_rx,
             },
             started_rx,
             release,
         )
+    }
+
+    async fn spawn_gated_application(
+        context: &deterministic::Context,
+        prefix: &str,
+        app: GatedApp,
+    ) -> (
+        Mailbox<deterministic::Context, GatedApp>,
+        Box<dyn std::any::Any>,
+        Handle<()>,
+    ) {
+        let mut signing = context.child("signing");
+        let scheme =
+            scheme_mocks::fixture(&mut signing, b"gated-application", 1).schemes[0].clone();
+        let marshal = fixtures::marshal_fixture(
+            context.child("marshal"),
+            prefix,
+            scheme,
+            None,
+            NZUsize!(1),
+            false,
+        )
+        .await;
+        let processor = Processor::new(
+            app,
+            test_databases(),
+            anchor(0, 0),
+            StatefulMetrics::new(context),
+            None,
+        );
+        let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let processing = Processing {
+            context: ContextCell::new(context.child("processing")),
+            mailbox: receiver,
+            provider: (),
+            marshal: marshal.mailbox,
+            processor,
+            initial_verifications: Vec::new(),
+            skip_finalized_until: None,
+        };
+        let actor = context.child("loop").spawn(move |_| processing.start());
+        (Mailbox::new(sender), marshal.guards, actor)
     }
 
     /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
@@ -678,7 +782,21 @@ mod tests {
         prefix: &str,
         prune_config: Option<PruneConfig>,
     ) -> (
-        Mailbox<deterministic::Context, TestApp>,
+        Mailbox<deterministic::Context, GatedApp>,
+        FlushControl,
+        Box<dyn std::any::Any>,
+        Handle<()>,
+    ) {
+        spawn_processing_with_gates(context, prefix, prune_config, VecDeque::new()).await
+    }
+
+    async fn spawn_processing_with_gates(
+        context: &deterministic::Context,
+        prefix: &str,
+        prune_config: Option<PruneConfig>,
+        verify_gates: VecDeque<ApplicationGate>,
+    ) -> (
+        Mailbox<deterministic::Context, GatedApp>,
         FlushControl,
         Box<dyn std::any::Any>,
         Handle<()>,
@@ -699,8 +817,13 @@ mod tests {
         let databases = Shared::new("test", TestDb::gated(control.clone()));
         let pruning = prune_config
             .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
+        let app = GatedApp {
+            verify_gates: Arc::new(Mutex::new(verify_gates)),
+            proposal_gate: Arc::new(Mutex::new(None)),
+            verify_valid: true,
+        };
         let processor = Processor::new(
-            TestApp,
+            app,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
@@ -723,42 +846,15 @@ mod tests {
     #[test]
     fn independent_verifications_do_not_block_each_other() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let mut signing = context.child("signing");
-            let scheme =
-                scheme_mocks::fixture(&mut signing, b"concurrent-verify", 1).schemes[0].clone();
-            let marshal = fixtures::marshal_fixture(
-                context.child("marshal"),
-                "concurrent-verify",
-                scheme,
-                None,
-                NZUsize!(1),
-                false,
-            )
-            .await;
-            let (first_gate, first_started, first_release) = verify_gate();
-            let (second_gate, second_started, second_release) = verify_gate();
+            let (first_gate, first_started, first_release) = application_gate();
+            let (second_gate, second_started, second_release) = application_gate();
             let app = GatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
             };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-            );
-            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
-            let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
-                mailbox: receiver,
-                provider: (),
-                marshal: marshal.mailbox,
-                processor,
-                initial_verifications: Vec::new(),
-                skip_finalized_until: None,
-            };
-            let actor = context.child("loop").spawn(move |_| processing.start());
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "concurrent-verify", app).await;
 
             let genesis = TestBlock::new(0, 0);
             let first_block = TestBlock::child(&genesis, 1);
@@ -813,6 +909,241 @@ mod tests {
     }
 
     #[test]
+    fn abandoned_incomplete_verifications_cancel_after_supersession() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (first_gate, first_started, first_release) = application_gate();
+            let (second_gate, second_started, second_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "incomplete-verify", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block1 = TestBlock::child(&genesis, 1);
+            let mut incomplete = Box::pin(mailbox.verify(
+                (context.child("empty"), block1.context()),
+                ancestry::from_iter([]),
+            ));
+            assert!(poll!(&mut incomplete).is_pending());
+            context.sleep(Duration::from_millis(10)).await;
+            drop(incomplete);
+
+            let mut first = Box::pin(mailbox.verify(
+                (context.child("first"), block1.context()),
+                ancestry::from_iter([Arc::new(block1.clone()), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut first).is_pending());
+            first_started
+                .await
+                .expect("superseding verification should start");
+            first_release
+                .send(())
+                .expect("superseding verification should remain active");
+            assert!(first.await);
+
+            let block2 = TestBlock::child(&block1, 2);
+            let mut incomplete = Box::pin(mailbox.verify(
+                (context.child("missing_parent"), block2.context()),
+                ancestry::from_iter([Arc::new(block2.clone())]),
+            ));
+            assert!(poll!(&mut incomplete).is_pending());
+            context.sleep(Duration::from_millis(10)).await;
+            drop(incomplete);
+
+            let mut second = Box::pin(mailbox.verify(
+                (context.child("second"), block2.context()),
+                ancestry::from_iter([Arc::new(block2), Arc::new(block1)]),
+            ));
+            assert!(poll!(&mut second).is_pending());
+            second_started
+                .await
+                .expect("superseding verification should start");
+            second_release
+                .send(())
+                .expect("superseding verification should remain active");
+            assert!(second.await);
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn application_rejection_returns_false() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (gate, started, release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: false,
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "rejected-verify", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let mut verify = Box::pin(mailbox.verify(
+                (context.child("verify"), block.context()),
+                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("verification should start");
+            release.send(()).expect("verification should remain active");
+            assert!(!verify.await);
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn conflicting_processed_block_is_rejected() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut mailbox, control, _marshal, actor) =
+                spawn_processing(&context, "conflicting-processed", None).await;
+            let genesis = TestBlock::new(0, 0);
+            let canonical = TestBlock::child(&genesis, 1);
+            let conflicting = TestBlock::child(&genesis, 2);
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(canonical), acknowledgement));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            control
+                .flushes
+                .lock()
+                .remove(0)
+                .send(Ok(()))
+                .expect("finalized block flush should remain pending");
+            waiter
+                .await
+                .expect("finalized block should be acknowledged");
+
+            assert!(
+                !mailbox
+                    .verify(
+                        (context.child("verify"), conflicting.context()),
+                        ancestry::from_iter([Arc::new(conflicting), Arc::new(genesis)]),
+                    )
+                    .await,
+                "conflicting block at the processed height must be rejected",
+            );
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn pending_proposal_does_not_block_active_verification() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let (proposal_gate, proposal_started, proposal_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
+                verify_valid: true,
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "propose-verify", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let mut verifier = mailbox.clone();
+            let verify_genesis = genesis.clone();
+            let consensus_context = block.context();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), consensus_context),
+                ancestry::from_iter([Arc::new(block), Arc::new(verify_genesis)]),
+            ));
+            let subscriber = mailbox.clone();
+            assert!(poll!(&mut verify).is_pending());
+            verify_started.await.expect("verification should start");
+
+            let proposal_context = TestBlock::child(&genesis, 2).context();
+            let mut proposal = Box::pin(mailbox.propose(
+                (context.child("propose"), proposal_context),
+                ancestry::from_iter([Arc::new(genesis)]),
+                (),
+            ));
+            assert!(poll!(&mut proposal).is_pending());
+            proposal_started.await.expect("proposal should start");
+            let mut databases = Box::pin(subscriber.subscribe_databases());
+            assert!(poll!(&mut databases).is_pending());
+            context.sleep(Duration::from_millis(10)).await;
+            verify_release
+                .send(())
+                .expect("verification should remain active");
+            select! {
+                result = &mut verify => {
+                    assert!(result);
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("pending proposal blocked active verification");
+                },
+            }
+            assert!(poll!(&mut databases).is_pending());
+
+            proposal_release
+                .send(())
+                .expect("proposal should remain active");
+            assert!(proposal.await.is_none());
+            drop(databases.await);
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn pending_proposal_does_not_block_new_verification() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let (proposal_gate, proposal_started, proposal_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
+                verify_valid: true,
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "propose-new-verify", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let proposal_context = TestBlock::child(&genesis, 1).context();
+            let mut proposer = mailbox.clone();
+            let mut proposal = Box::pin(proposer.propose(
+                (context.child("propose"), proposal_context),
+                ancestry::from_iter([Arc::new(genesis.clone())]),
+                (),
+            ));
+            assert!(poll!(&mut proposal).is_pending());
+            proposal_started.await.expect("proposal should start");
+
+            let block = TestBlock::child(&genesis, 2);
+            let consensus_context = block.context();
+            let mut verify = Box::pin(mailbox.verify(
+                (context.child("verify"), consensus_context),
+                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            select! {
+                result = verify_started => {
+                    result.expect("verification should start while proposal remains pending");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("pending proposal blocked new verification");
+                },
+            }
+
+            verify_release
+                .send(())
+                .expect("verification should remain active");
+            assert!(verify.await);
+            proposal_release
+                .send(())
+                .expect("proposal should remain active");
+            assert!(proposal.await.is_none());
+            actor.abort();
+        });
+    }
+
+    #[test]
     fn finalization_quiesces_replay_and_retries_from_processed_tip() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
@@ -830,7 +1161,7 @@ mod tests {
                 true,
             )
             .await;
-            let (gate, apply_started, mut apply_release) = verify_gate();
+            let (gate, apply_started, mut apply_release) = application_gate();
             let apply_calls = Arc::new(AtomicUsize::new(0));
             let verify_calls = Arc::new(AtomicUsize::new(0));
             let app = ReplayGatedApp {
@@ -907,8 +1238,8 @@ mod tests {
                 true,
             )
             .await;
-            let (first_gate, first_started, mut first_release) = verify_gate();
-            let (second_gate, second_started, second_release) = verify_gate();
+            let (first_gate, first_started, mut first_release) = application_gate();
+            let (second_gate, second_started, second_release) = application_gate();
             let apply_calls = Arc::new(AtomicUsize::new(0));
             let verify_calls = Arc::new(AtomicUsize::new(0));
             let app = ReplayGatedApp {
@@ -1008,7 +1339,8 @@ mod tests {
     fn prune_waits_only_for_target_flush() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
-            let (mut mailbox, control, _marshal, _actor) = spawn_processing(
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let (mut mailbox, control, _marshal, _actor) = spawn_processing_with_gates(
                 &context,
                 "gated-prune",
                 Some(PruneConfig {
@@ -1016,21 +1348,35 @@ mod tests {
                     retained_marshal_blocks: 0,
                     retained_qmdb_blocks: 0,
                 }),
+                VecDeque::from([verify_gate]),
             )
             .await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block1 = TestBlock::child(&genesis, 1);
+            let block2 = TestBlock::child(&block1, 2);
+            let block3 = TestBlock::child(&block2, 3);
 
             // Apply blocks 1 and 2 without releasing any flush: the loop must
             // stay live (both blocks applied) while no acknowledgement fires.
             let (acknowledgement, mut waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(1, 1)),
-                acknowledgement,
-            ));
+            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
             let (acknowledgement, mut waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
-                Arc::new(TestBlock::new(2, 2)),
-                acknowledgement,
+            let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
+
+            // Queue a verification before pruning starts, then hold it in the
+            // application until the prune is waiting on durability.
+            let consensus_context = block3.context();
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), consensus_context),
+                ancestry::from_iter([Arc::new(block3), Arc::new(block2)]),
             ));
+            assert!(poll!(&mut verify).is_pending());
+            verify_started
+                .await
+                .expect("verification should start before pruning");
+
             while control.flushes.lock().len() < 2 {
                 context.sleep(Duration::from_millis(10)).await;
             }
@@ -1047,6 +1393,16 @@ mod tests {
                 poll!(&mut waiter1).is_pending() && poll!(&mut waiter2).is_pending(),
                 "acknowledgements must keep waiting for pending flushes",
             );
+            verify_release
+                .send(())
+                .expect("verification should remain active");
+            select! {
+                result = &mut verify => assert!(result),
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("pending prune blocked active verification");
+                },
+            }
+            assert!(control.pruned.lock().is_empty());
 
             // Releasing block 1 makes the prune target durable. Block 2 remains retained in
             // marshal and must not delay pruning.
