@@ -1,4 +1,4 @@
-use super::{Config, ingress::Message};
+use super::{Config, Message};
 use crate::authenticated::{
     Mailbox,
     discovery::{
@@ -315,7 +315,7 @@ mod tests {
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
 
             assert_eq!(
-                spawner.spawn(spawner_connection, reservation),
+                spawner.spawn(peer.clone(), spawner_connection, reservation),
                 Unreliable::new(Feedback::Ok)
             );
 
@@ -358,7 +358,7 @@ mod tests {
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
 
             assert_eq!(
-                spawner.spawn(spawner_connection, reservation),
+                spawner.spawn(peer.clone(), spawner_connection, reservation),
                 Unreliable::new(Feedback::Ok)
             );
 

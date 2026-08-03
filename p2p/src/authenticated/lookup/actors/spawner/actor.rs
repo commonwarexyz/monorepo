@@ -1,4 +1,4 @@
-use super::{Config, ingress::Message};
+use super::{Config, Message};
 use crate::authenticated::{
     Mailbox,
     lookup::{

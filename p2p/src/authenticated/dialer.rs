@@ -2,16 +2,7 @@
 
 use crate::{
     Ingress,
-    authenticated::{
-        Mailbox,
-        lookup::{
-            actors::{
-                spawner,
-                tracker::{self, Metadata, Reservation},
-            },
-            metrics,
-        },
-    },
+    authenticated::{Mailbox, dialing::Tracker, metrics, spawner},
 };
 use commonware_cryptography::Signer;
 use commonware_macros::{select, select_loop};
@@ -27,8 +18,8 @@ use std::time::Duration;
 use tracing::debug;
 
 // Mailbox for the spawner actor.
-type SupervisorMailbox<E, C> =
-    Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, <C as Signer>::PublicKey>>;
+type SupervisorMailbox<E, C, R> =
+    Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, <C as Signer>::PublicKey, R>>;
 
 /// Configuration for the dialer actor.
 pub struct Config<C: Signer> {
@@ -52,7 +43,7 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- State ----------
@@ -89,17 +80,13 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
     }
 
     /// Dial a peer for which we have a reservation.
-    fn dial_peer(
+    fn dial_peer<R: Send + 'static>(
         &mut self,
-        reservation: Reservation<C::PublicKey>,
+        peer: C::PublicKey,
         ingress: Ingress,
-        supervisor: &mut SupervisorMailbox<E, C>,
+        reservation: R,
+        supervisor: &mut SupervisorMailbox<E, C, R>,
     ) {
-        // Extract metadata from the reservation
-        let Metadata::Dialer(peer) = reservation.metadata().clone() else {
-            unreachable!("unexpected reservation metadata");
-        };
-
         // Increment metrics.
         self.attempts.get_or_create_by(&peer).inc();
 
@@ -131,20 +118,20 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
                             return;
                         }
                     };
-                    debug!(?peer, ?address, "dialed peer");
+                    debug!(?peer, ?ingress, "dialed peer");
 
                     // Upgrade connection
                     let connection = match dial(context, config, peer.clone(), stream, sink).await {
-                        Ok(instance) => instance,
+                        Ok(connection) => connection,
                         Err(err) => {
                             debug!(?err, "failed to upgrade connection");
                             return;
                         }
                     };
-                    debug!(?peer, ?address, "upgraded connection");
+                    debug!(?peer, ?ingress, "upgraded connection");
 
                     // Start peer to handle messages
-                    let _ = supervisor.spawn(connection, reservation);
+                    let _ = supervisor.spawn(peer.clone(), connection, reservation);
                 };
 
                 select! {
@@ -158,18 +145,18 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
     }
 
     /// Start the dialer actor.
-    pub fn start(
+    pub fn start<T: Tracker<C::PublicKey>>(
         mut self,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        supervisor: SupervisorMailbox<E, C>,
+        tracker: T,
+        supervisor: SupervisorMailbox<E, C, T::Reservation>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
-    async fn run(
+    async fn run<T: Tracker<C::PublicKey>>(
         mut self,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        mut supervisor: SupervisorMailbox<E, C>,
+        tracker: T,
+        mut supervisor: SupervisorMailbox<E, C, T::Reservation>,
     ) {
         let mut dial_deadline = self.context.current();
         select_loop! {
@@ -199,8 +186,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
 
                 // Pop through peers until we can reserve and dial one.
                 while let Some(peer) = self.queue.pop() {
-                    if let Some((reservation, ingress)) = tracker.dial(peer).await {
-                        self.dial_peer(reservation, ingress, &mut supervisor);
+                    if let Some((reservation, ingress)) = tracker.dial(peer.clone()).await {
+                        self.dial_peer(peer, ingress, reservation, &mut supervisor);
                         break;
                     }
                 }
@@ -212,20 +199,71 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{
-        dialing::Dialable,
-        lookup::actors::tracker::{Metadata, ingress::Releaser},
-    };
-    use commonware_actor::mailbox;
+    use crate::authenticated::dialing::Dialable;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{
+        NZUsize,
+        channel::{mpsc, oneshot},
+    };
     use std::{
         net::{Ipv4Addr, SocketAddr},
         time::Duration,
     };
+
+    /// Reservation stand-in that reports its release (drop) to a channel.
+    struct TestReservation {
+        peer: PublicKey,
+        releases: mpsc::UnboundedSender<PublicKey>,
+    }
+
+    impl Drop for TestReservation {
+        fn drop(&mut self) {
+            let _ = self.releases.send(self.peer.clone());
+        }
+    }
+
+    /// Requests forwarded by [MockTracker] for the test to answer.
+    enum MockMessage {
+        Dialable {
+            responder: oneshot::Sender<Dialable<PublicKey>>,
+        },
+        Dial {
+            public_key: PublicKey,
+            responder: oneshot::Sender<Option<(TestReservation, Ingress)>>,
+        },
+    }
+
+    /// Tracker that forwards requests to the test over a channel.
+    struct MockTracker(mpsc::UnboundedSender<MockMessage>);
+
+    impl MockTracker {
+        fn new() -> (Self, mpsc::UnboundedReceiver<MockMessage>) {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            (Self(sender), receiver)
+        }
+    }
+
+    impl Tracker<PublicKey> for MockTracker {
+        type Reservation = TestReservation;
+
+        async fn dialable(&self) -> Dialable<PublicKey> {
+            let (responder, receiver) = oneshot::channel();
+            let _ = self.0.send(MockMessage::Dialable { responder });
+            receiver.await.unwrap_or_default()
+        }
+
+        async fn dial(&self, public_key: PublicKey) -> Option<(TestReservation, Ingress)> {
+            let (responder, receiver) = oneshot::channel();
+            let _ = self.0.send(MockMessage::Dial {
+                public_key,
+                responder,
+            });
+            receiver.await.ok().flatten()
+        }
+    }
 
     fn test_stream_config(signing_key: PrivateKey) -> StreamConfig<PrivateKey> {
         StreamConfig {
@@ -264,32 +302,30 @@ mod tests {
                 },
             );
 
-            let (releaser, mut releases) =
-                mailbox::new::<tracker::Message<PublicKey>>(context.child("releaser"), NZUsize!(1));
+            let (releases, mut released) = mpsc::unbounded_channel();
             let ingress = Ingress::from(address);
-            let reservation =
-                Reservation::new(Metadata::Dialer(peer.clone()), Releaser::new(releaser));
+            let reservation = TestReservation {
+                peer: peer.clone(),
+                releases,
+            };
             let (mut supervisor, _supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                Mailbox::<spawner::Message<_, _, PublicKey, TestReservation>>::new(
                     context.child("supervisor_mailbox"),
                     NZUsize!(1),
                 );
 
             let start = context.current();
-            dialer.dial_peer(reservation, ingress, &mut supervisor);
+            dialer.dial_peer(peer.clone(), ingress, reservation, &mut supervisor);
 
             // The outer dial timeout must cancel the pending handshake and drop its reservation
             // before the much longer handshake timeout can fire.
             let deadline = start + dial_timeout * 2;
-            let message = select! {
-                message = releases.recv() => message.expect("Releaser mailbox closed"),
+            let released = select! {
+                released = released.recv() => released.expect("Release channel closed"),
                 _ = context.sleep_until(deadline) => panic!("Dial reservation was not released"),
             };
-            let tracker::Message::Release { metadata } = message else {
-                panic!("Unexpected releaser message");
-            };
 
-            assert_eq!(metadata.public_key(), &peer);
+            assert_eq!(released, peer);
             assert!(
                 context.current().duration_since(start).unwrap() >= dial_timeout,
                 "Reservation released before the dial timeout"
@@ -314,17 +350,10 @@ mod tests {
 
             let dialer = Actor::new(context.child("dialer"), dialer_cfg);
 
-            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("tracker_mailbox"),
-                NZUsize!(1024),
-            );
+            let (tracker, mut tracker_rx) = MockTracker::new();
 
-            // Create a releaser for reservations
-            let (sender, _receiver) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("releaser"),
-                NZUsize!(1024),
-            );
-            let releaser = Releaser::new(sender);
+            // Create a channel for reservation releases
+            let (releases, _released) = mpsc::unbounded_channel();
 
             // Generate 10 peers
             let peers: Vec<PublicKey> = (0..10)
@@ -332,16 +361,17 @@ mod tests {
                 .collect();
 
             // Create a supervisor that just drops spawn messages
-            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
-                context.child("supervisor_mailbox"),
-                NZUsize!(100),
-            );
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey, TestReservation>>::new(
+                    context.child("supervisor_mailbox"),
+                    NZUsize!(100),
+                );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             // Start the dialer
-            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
+            let _handle = dialer.start(tracker, supervisor);
 
             // Handle messages until deadline, counting dial attempts
             let mut dial_count = 0;
@@ -349,22 +379,24 @@ mod tests {
             loop {
                 select! {
                     msg = tracker_rx.recv() => match msg {
-                        Some(tracker::Message::Dialable { responder }) => {
+                        Some(MockMessage::Dialable { responder }) => {
                             let _ = responder.send(Dialable {
                                 peers: peers.clone(),
                                 next_query_at: Some(context.current()),
                             });
                         }
-                        Some(tracker::Message::Dial {
+                        Some(MockMessage::Dial {
                             public_key,
-                            reservation,
+                            responder,
                         }) => {
                             dial_count += 1;
-                            let metadata = Metadata::Dialer(public_key);
-                            let res = tracker::Reservation::new(metadata, releaser.clone());
                             let ingress: Ingress =
                                 SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                            let _ = reservation.send(Some((res, ingress)));
+                            let reservation = TestReservation {
+                                peer: public_key,
+                                releases: releases.clone(),
+                            };
+                            let _ = responder.send(Some((reservation, ingress)));
                         }
                         _ => {}
                     },
@@ -386,7 +418,6 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
-
             let dial_frequency = Duration::from_millis(500);
 
             let dialer = Actor::new(
@@ -400,19 +431,17 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("tracker_mailbox"),
-                NZUsize!(1024),
-            );
-            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
-                context.child("supervisor_mailbox"),
-                NZUsize!(100),
-            );
+            let (tracker, mut tracker_rx) = MockTracker::new();
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey, TestReservation>>::new(
+                    context.child("supervisor_mailbox"),
+                    NZUsize!(100),
+                );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
+            let _handle = dialer.start(tracker, supervisor);
 
             // Tracker reports next_query_at=100ms, which is shorter than
             // dial_frequency=500ms. The dialer should clamp to dial_frequency,
@@ -422,7 +451,7 @@ mod tests {
             loop {
                 select! {
                     msg = tracker_rx.recv() => {
-                        if let Some(tracker::Message::Dialable { responder }) = msg {
+                        if let Some(MockMessage::Dialable { responder }) = msg {
                             refresh_count += 1;
                             let _ = responder.send(Dialable {
                                 peers: Vec::new(),
@@ -443,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dialer_keeps_dialing_queued_peers_when_next_query_deadline_is_unknown() {
+    fn test_dialer_drains_queue_at_dial_frequency() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
@@ -460,52 +489,48 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("tracker_mailbox"),
-                NZUsize!(1024),
-            );
+            let (tracker, mut tracker_rx) = MockTracker::new();
 
-            let (sender, _receiver) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("releaser"),
-                NZUsize!(1024),
-            );
-            let releaser = Releaser::new(sender);
+            let (releases, _released) = mpsc::unbounded_channel();
 
             let peers: Vec<PublicKey> = (0..3)
                 .map(|i| PrivateKey::from_seed(i).public_key())
                 .collect();
 
-            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
-                context.child("supervisor_mailbox"),
-                NZUsize!(100),
-            );
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey, TestReservation>>::new(
+                    context.child("supervisor_mailbox"),
+                    NZUsize!(100),
+                );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
+            let _handle = dialer.start(tracker, supervisor);
 
             let mut dial_count = 0;
             let deadline = context.current() + Duration::from_millis(250);
             loop {
                 select! {
                     msg = tracker_rx.recv() => match msg {
-                        Some(tracker::Message::Dialable { responder }) => {
+                        Some(MockMessage::Dialable { responder }) => {
                             let _ = responder.send(Dialable {
                                 peers: peers.clone(),
                                 next_query_at: None,
                             });
                         }
-                        Some(tracker::Message::Dial {
+                        Some(MockMessage::Dial {
                             public_key,
-                            reservation,
+                            responder,
                         }) => {
                             dial_count += 1;
-                            let metadata = Metadata::Dialer(public_key);
-                            let res = tracker::Reservation::new(metadata, releaser.clone());
                             let ingress: Ingress =
                                 SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                            let _ = reservation.send(Some((res, ingress)));
+                            let reservation = TestReservation {
+                                peer: public_key,
+                                releases: releases.clone(),
+                            };
+                            let _ = responder.send(Some((reservation, ingress)));
                         }
                         _ => {}
                     },
@@ -539,26 +564,24 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("tracker_mailbox"),
-                NZUsize!(1024),
-            );
-            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
-                context.child("supervisor_mailbox"),
-                NZUsize!(100),
-            );
+            let (tracker, mut tracker_rx) = MockTracker::new();
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey, TestReservation>>::new(
+                    context.child("supervisor_mailbox"),
+                    NZUsize!(100),
+                );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
+            let _handle = dialer.start(tracker, supervisor);
 
             let mut refresh_count = 0;
             let deadline = context.current() + Duration::from_millis(350);
             loop {
                 select! {
                     msg = tracker_rx.recv() => {
-                        if let Some(tracker::Message::Dialable { responder }) = msg {
+                        if let Some(MockMessage::Dialable { responder }) = msg {
                             refresh_count += 1;
                             let _ = responder.send(Dialable {
                                 peers: Vec::new(),

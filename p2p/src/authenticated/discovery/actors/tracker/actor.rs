@@ -314,10 +314,13 @@ mod tests {
     use super::*;
     use crate::{
         Ingress, Manager, Provider, TrackedPeers,
-        authenticated::discovery::{
-            actors::{peer, tracker},
-            config::Bootstrapper,
-            types,
+        authenticated::{
+            dialing::Tracker as _,
+            discovery::{
+                actors::{peer, tracker},
+                config::Bootstrapper,
+                types,
+            },
         },
     };
     use commonware_codec::{DecodeExt, Encode};
@@ -1263,7 +1266,8 @@ mod tests {
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
             assert!(reservation.is_some());
-            if let Some(res) = reservation {
+            if let Some((res, ingress)) = reservation {
+                assert_eq!(ingress, Ingress::Socket(boot_addr));
                 match res.metadata() {
                     crate::authenticated::discovery::actors::tracker::Metadata::Dialer(
                         pk,

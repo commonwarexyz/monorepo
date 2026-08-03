@@ -10,10 +10,13 @@
 mod channels;
 pub use channels::backlog;
 mod data;
+mod dialer;
 pub(crate) mod dialing;
 pub mod discovery;
 pub mod lookup;
 mod mailbox;
 pub use mailbox::Mailbox;
+mod metrics;
 mod relay;
 mod router;
+mod spawner;

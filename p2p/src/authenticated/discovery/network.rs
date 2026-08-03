@@ -1,7 +1,7 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
-    actors::{dialer, listener, spawner, tracker},
+    actors::{listener, spawner, tracker},
     config::Config,
 };
 use crate::{
@@ -9,6 +9,7 @@ use crate::{
     authenticated::{
         channels::{self, Channels},
         data::MAX_PAYLOAD_DATA_OVERHEAD,
+        dialer,
         discovery::types::InfoVerifier,
         router,
     },

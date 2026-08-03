@@ -1,10 +1,12 @@
 use std::num::NonZeroUsize;
 
 mod actor;
-mod ingress;
 
 pub use actor::Actor;
-pub use ingress::Message;
+
+/// Messages processed by the spawner [Actor], carrying this protocol's reservations.
+pub type Message<Si, St, P> =
+    crate::authenticated::spawner::Message<Si, St, P, super::tracker::Reservation<P>>;
 
 /// Configuration for the spawner [Actor].
 pub struct Config {

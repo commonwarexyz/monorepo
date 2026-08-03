@@ -1,13 +1,8 @@
 use crate::Channel;
+pub use crate::authenticated::metrics::Peer;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::telemetry::metrics::EncodeStruct;
 use std::fmt;
-
-/// Per-peer label.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
-pub struct Peer<P: PublicKey> {
-    pub peer: P,
-}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum MessageType {

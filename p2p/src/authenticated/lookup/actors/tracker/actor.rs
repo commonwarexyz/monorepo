@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     use crate::{
         AddressableManager, AddressableTrackedPeers, Ingress, Provider,
-        authenticated::lookup::actors::peer,
+        authenticated::{dialing::Tracker as _, lookup::actors::peer},
     };
     use commonware_cryptography::{
         Signer,
@@ -583,13 +583,7 @@ mod tests {
 
             let result = mailbox.dial(boot_pk.clone()).await;
             assert!(result.is_some());
-            if let Some((res, ingress)) = result {
-                match res.metadata() {
-                    crate::authenticated::lookup::actors::tracker::Metadata::Dialer(pk) => {
-                        assert_eq!(pk, &boot_pk);
-                    }
-                    _ => panic!("Expected Dialer metadata"),
-                }
+            if let Some((_res, ingress)) = result {
                 assert_eq!(ingress, Ingress::Socket(boot_addr));
             }
 
@@ -836,7 +830,7 @@ mod tests {
             assert!(registered_ips.contains(&addr_1.ip()));
             assert!(!registered_ips.contains(&addr_2.ip()));
 
-            let reservation = mailbox
+            let _reservation = mailbox
                 .listen(pk_1.clone(), addr_1.ip())
                 .await
                 .expect("peer should reserve");
@@ -859,7 +853,6 @@ mod tests {
                 !matches!(peer_rx.next().now_or_never(), Some(Some(peer::Message::Kill))),
                 "connected peer present in the new set should not be killed when the old set rolls off"
             );
-            assert_eq!(reservation.metadata().public_key(), &pk_1);
         });
     }
 
@@ -889,11 +882,10 @@ mod tests {
             assert!(registered_ips.contains(&addr_1.ip()));
             assert!(!registered_ips.contains(&addr_2.ip()));
 
-            let reservation = mailbox
+            let _reservation = mailbox
                 .listen(pk_1.clone(), addr_1.ip())
                 .await
                 .expect("peer should reserve");
-            assert_eq!(reservation.metadata().public_key(), &pk_1);
 
             oracle.track(
                 1,
@@ -936,9 +928,8 @@ mod tests {
             let registered_ips = listener_receiver.next().await.unwrap();
             assert!(registered_ips.contains(&addr_a.ip()));
 
-            let (reservation, ingress) =
+            let (_reservation, ingress) =
                 mailbox.dial(pk.clone()).await.expect("peer should reserve");
-            assert_eq!(reservation.metadata().public_key(), &pk);
             assert_eq!(ingress, Ingress::Socket(addr_a));
 
             oracle.track(
@@ -981,9 +972,8 @@ mod tests {
             let registered_ips = listener_receiver.next().await.unwrap();
             assert!(registered_ips.contains(&addr_a.ip()));
 
-            let (reservation, ingress) =
+            let (_reservation, ingress) =
                 mailbox.dial(pk.clone()).await.expect("peer should reserve");
-            assert_eq!(reservation.metadata().public_key(), &pk);
             assert_eq!(ingress, Ingress::Socket(addr_a));
 
             oracle.overwrite([(pk.clone(), addr_b.into())].try_into().unwrap());

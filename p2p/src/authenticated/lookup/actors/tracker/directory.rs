@@ -675,7 +675,7 @@ mod tests {
                     primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
                 )
                 .unwrap();
-            let reservation = directory
+            let _reservation = directory
                 .listen(&pk_1, addr_1.ip())
                 .expect("peer should reserve");
             directory.connect(&pk_1);
@@ -690,9 +690,8 @@ mod tests {
             assert_eq!(kill_peers, Set::try_from([pk_1.clone()]).unwrap());
             let record = directory.peers.get(&pk_1).unwrap();
             assert!(!record.deletable());
-            directory.release(reservation.metadata().clone());
+            directory.release(super::Metadata::Listener(pk_1.clone()));
             assert!(!directory.peers.contains_key(&pk_1));
-            assert_eq!(reservation.metadata().public_key(), &pk_1);
         });
     }
 
@@ -1126,7 +1125,7 @@ mod tests {
                 )
                 .unwrap();
             assert!(initial_kill.is_empty());
-            let reservation = directory
+            let _reservation = directory
                 .listen(&pk_1, old_addr.ip())
                 .expect("peer should reserve");
             directory.connect(&pk_1);
@@ -1152,7 +1151,7 @@ mod tests {
                 Some(Ingress::Socket(new_addr))
             );
             assert_eq!(directory.all().primary, [pk_1.clone()].try_into().unwrap());
-            directory.release(reservation.metadata().clone());
+            directory.release(super::Metadata::Listener(pk_1.clone()));
             assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
             assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(new_addr));
             assert!(directory.listenable().contains(&new_addr.ip()));

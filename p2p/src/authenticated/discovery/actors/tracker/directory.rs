@@ -314,10 +314,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to reserve a peer for the dialer.
     ///
-    /// Returns `Some` on success, `None` otherwise.
-    pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
+    /// Returns the reservation and the peer's ingress address on success, `None` otherwise.
+    pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C>, Ingress)> {
         let ingress = self.peers.get(peer)?.ingress()?.clone();
-        self.reserve(Metadata::Dialer(peer.clone(), ingress))
+        let reservation = self.reserve(Metadata::Dialer(peer.clone(), ingress.clone()))?;
+        Some((reservation, ingress))
     }
 
     /// Attempt to reserve a peer for the listener.

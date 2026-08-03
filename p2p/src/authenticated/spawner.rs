@@ -1,4 +1,4 @@
-use crate::authenticated::{Mailbox, discovery::actors::tracker::Reservation};
+use crate::authenticated::Mailbox;
 use commonware_actor::{Feedback, Unreliable, mailbox::UnreliablePolicy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
@@ -6,19 +6,21 @@ use commonware_stream::encrypted::{Receiver, Sender};
 use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
-pub enum Message<O: Sink, I: Stream, P: PublicKey> {
+///
+/// `R` is the tracker's dial or listen reservation, held for the lifetime of the connection.
+pub enum Message<Si: Sink, St: Stream, P: PublicKey, R> {
     /// Notify the spawner to create a new task for the given peer.
     Spawn {
         /// The peer's public key.
         peer: P,
         /// The connection to the peer.
-        connection: (Sender<O>, Receiver<I>),
+        connection: (Sender<Si>, Receiver<St>),
         /// The reservation for the peer.
-        reservation: Reservation<P>,
+        reservation: R,
     },
 }
 
-impl<P: PublicKey, O: Sink, I: Stream> UnreliablePolicy for Message<O, I, P> {
+impl<Si: Sink, St: Stream, P: PublicKey, R> UnreliablePolicy for Message<Si, St, P, R> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -29,18 +31,19 @@ impl<P: PublicKey, O: Sink, I: Stream> UnreliablePolicy for Message<O, I, P> {
     }
 }
 
-impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
+impl<Si: Sink, St: Stream, P: PublicKey, R> Mailbox<Message<Si, St, P, R>> {
     /// Send a message to the actor to spawn a new task for the given peer.
     ///
     /// This may be rejected when the spawner is backlogged, or return closed after shutdown, which
     /// is harmless since stale connections do not need to be spawned.
     pub fn spawn(
         &mut self,
-        connection: (Sender<O>, Receiver<I>),
-        reservation: Reservation<P>,
+        peer: P,
+        connection: (Sender<Si>, Receiver<St>),
+        reservation: R,
     ) -> Unreliable<Feedback> {
         self.0.enqueue(Message::Spawn {
-            peer: reservation.metadata().public_key().clone(),
+            peer,
             connection,
             reservation,
         })
@@ -50,8 +53,6 @@ impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::discovery::actors::tracker::{self, Metadata};
-    use commonware_actor::mailbox;
     use commonware_cryptography::{
         Signer as _,
         ed25519::{PrivateKey, PublicKey},
@@ -61,17 +62,29 @@ mod tests {
         Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
         listen,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, channel::mpsc};
     use futures::FutureExt as _;
     use std::time::Duration;
 
-    const STREAM_NAMESPACE: &[u8] = b"test_discovery_spawner_ingress";
+    const STREAM_NAMESPACE: &[u8] = b"test_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type Connection = (
         EncryptedSender<mocks::Sink>,
         EncryptedReceiver<mocks::Stream>,
     );
+
+    /// Reservation stand-in that reports its release (drop) to a channel.
+    struct TestReservation {
+        peer: PublicKey,
+        releases: mpsc::UnboundedSender<PublicKey>,
+    }
+
+    impl Drop for TestReservation {
+        fn drop(&mut self) {
+            let _ = self.releases.send(self.peer.clone());
+        }
+    }
 
     fn stream_config(key: PrivateKey) -> StreamConfig<PrivateKey> {
         StreamConfig {
@@ -138,39 +151,33 @@ mod tests {
             let peer_1 = PrivateKey::from_seed(1).public_key();
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
-            let (mut spawner, mut receiver) =
-                Mailbox::<Message<mocks::Sink, mocks::Stream, PublicKey>>::new(
-                    context.child("spawner_mailbox"),
-                    NZUsize!(1),
-                );
-            let (tracker_sender, mut tracker_receiver) =
-                mailbox::new::<tracker::Message<PublicKey>>(
-                    context.child("tracker_mailbox"),
-                    NZUsize!(10),
-                );
-            let releaser = tracker::ingress::Releaser::new(tracker_sender);
+            let (mut spawner, mut receiver) = Mailbox::<
+                Message<mocks::Sink, mocks::Stream, PublicKey, TestReservation>,
+            >::new(
+                context.child("spawner_mailbox"), NZUsize!(1)
+            );
+            let (releases, mut released) = mpsc::unbounded_channel();
 
-            let reservation_1 =
-                Reservation::new(Metadata::Listener(peer_1.clone()), releaser.clone());
-            let reservation_2 = Reservation::new(Metadata::Listener(peer_2.clone()), releaser);
+            let reservation_1 = TestReservation {
+                peer: peer_1.clone(),
+                releases: releases.clone(),
+            };
+            let reservation_2 = TestReservation {
+                peer: peer_2.clone(),
+                releases,
+            };
 
             assert_eq!(
-                spawner.spawn(connection_1, reservation_1),
+                spawner.spawn(peer_1.clone(), connection_1, reservation_1),
                 Unreliable::new(Feedback::Ok)
             );
             assert_eq!(
-                spawner.spawn(connection_2, reservation_2),
+                spawner.spawn(peer_2.clone(), connection_2, reservation_2),
                 Unreliable::Rejected
             );
 
-            let release = tracker_receiver
-                .recv()
-                .await
-                .expect("release should be enqueued");
-            let tracker::Message::Release { metadata } = release else {
-                panic!("unexpected tracker message");
-            };
-            assert_eq!(metadata.public_key(), &peer_2);
+            let release = released.recv().await.expect("release should be reported");
+            assert_eq!(release, peer_2);
 
             let Message::Spawn { peer, .. } = receiver
                 .recv()

@@ -2,7 +2,7 @@ use super::Reservation;
 use crate::{
     AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
     authenticated::{
-        dialing::Dialable,
+        dialing::{self, Dialable},
         lookup::actors::{peer, tracker::Metadata},
     },
     types::Address,
@@ -139,27 +139,6 @@ impl<C: PublicKey> Mailbox<C> {
         self.0.enqueue(Message::Connect { public_key, peer })
     }
 
-    /// Request dialable peers from the tracker.
-    ///
-    /// Returns an empty response if the tracker is shut down.
-    pub(crate) async fn dialable(&self) -> Dialable<C> {
-        let (responder, receiver) = oneshot::channel();
-        let _ = self.0.enqueue(Message::Dialable { responder });
-        receiver.await.unwrap_or_default()
-    }
-
-    /// Send a `Dial` message to the tracker.
-    ///
-    /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
-        let (reservation, receiver) = oneshot::channel();
-        let _ = self.0.enqueue(Message::Dial {
-            public_key,
-            reservation,
-        });
-        receiver.await.ok().flatten()
-    }
-
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
@@ -181,6 +160,27 @@ impl<C: PublicKey> Mailbox<C> {
         let _ = self.0.enqueue(Message::Listen {
             public_key,
             source_ip,
+            reservation,
+        });
+        receiver.await.ok().flatten()
+    }
+}
+
+impl<C: PublicKey> dialing::Tracker<C> for Mailbox<C> {
+    type Reservation = Reservation<C>;
+
+    /// Returns an empty response if the tracker is shut down.
+    async fn dialable(&self) -> Dialable<C> {
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Dialable { responder });
+        receiver.await.unwrap_or_default()
+    }
+
+    /// Returns `None` if the tracker is shut down.
+    async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
+        let (reservation, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Dial {
+            public_key,
             reservation,
         });
         receiver.await.ok().flatten()

@@ -25,13 +25,6 @@ impl<P: PublicKey> Reservation<P> {
     }
 }
 
-impl<P: PublicKey> Reservation<P> {
-    /// Returns the metadata associated with this reservation.
-    pub const fn metadata(&self) -> &Metadata<P> {
-        &self.metadata
-    }
-}
-
 impl<P: PublicKey> Drop for Reservation<P> {
     fn drop(&mut self) {
         let mut releaser = self
