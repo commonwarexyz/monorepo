@@ -87,6 +87,14 @@ const DESCRIPTOR_MAGIC: &[u8; 8] = b"CWUNOD12";
 const MAX_DESCRIPTOR_LEN: usize = 4096 - atomic::ROOT_LEN - 16;
 const MAX_RECORDS: usize = 1_000_000;
 const DESCRIPTOR_HEADER_LEN: usize = 20;
+const PARTICIPANT_FIXED_LEN: usize = 4
+    + 4
+    + super::super::header::Header::V2_INCARNATION_LEN
+    + 8
+    + 8
+    + atomic::ROOT_LEN * 2
+    + PAYLOAD_CHECKSUM_LEN;
+const BLOB_REMOVAL_FIXED_LEN: usize = 1 + 4 + 4;
 const TAG_PARTITION_REMOVE: u8 = 0;
 const TAG_BLOB_REMOVE: u8 = 1;
 const DECISION_SPECULATIVE: u32 = 1;
@@ -695,6 +703,7 @@ fn finish_embedded_decision(root: &Path, decision: &Decision, descriptor: &[u8])
 fn validate_speculative_participant(
     root: &Path,
     participant: &Participant,
+    removed: bool,
     embedded_descriptor: Option<&[u8]>,
 ) -> io::Result<bool> {
     let file = match open_participant(root, participant) {
@@ -715,11 +724,20 @@ fn validate_speculative_participant(
     {
         return Ok(false);
     }
-    let metadata = match atomic::validate_candidate(
-        &file,
-        super::super::Layout::V2.data_offset(),
-        &participant.candidate,
-    ) {
+    let validation = if removed {
+        atomic::validate_delete_candidate(
+            &file,
+            super::super::Layout::V2.data_offset(),
+            &participant.candidate,
+        )
+    } else {
+        atomic::validate_candidate(
+            &file,
+            super::super::Layout::V2.data_offset(),
+            &participant.candidate,
+        )
+    };
+    let metadata = match validation {
         Ok(metadata) => metadata,
         Err(error)
             if matches!(
@@ -755,7 +773,7 @@ fn path_is_missing(error: &io::Error) -> bool {
     error.kind() == ErrorKind::NotFound || error.raw_os_error() == Some(libc::ENOENT)
 }
 
-/// Validate that a canonical operation set can fit beside one bounded V2 root.
+/// Validate canonical operations and their encoded names before participant locking.
 pub(crate) fn preflight(operations: &[Operation]) -> io::Result<()> {
     let canonical = is_canonical_operations(operations)
         .map_err(|_| invalid_input("storage batch contains an invalid operation"))?;
@@ -765,28 +783,16 @@ pub(crate) fn preflight(operations: &[Operation]) -> io::Result<()> {
     if operations.len() > MAX_RECORDS {
         return Err(invalid_input("storage batch has too many operations"));
     }
-    const PARTICIPANT_FIXED_LEN: usize = 4
-        + 4
-        + super::super::header::Header::V2_INCARNATION_LEN
-        + 8
-        + 8
-        + atomic::ROOT_LEN * 2
-        + PAYLOAD_CHECKSUM_LEN;
-    const BLOB_REMOVAL_FIXED_LEN: usize = 1 + 4 + 4;
-    let mut minimum_len = DESCRIPTOR_HEADER_LEN;
     for operation in operations {
-        let (partition, name, fixed, copies) = match operation {
-            Operation::Remove(RemoveTarget::Partition(partition)) => (partition, None, 1 + 4, 1),
-            Operation::Remove(RemoveTarget::Blob { partition, name }) => (
-                partition,
-                Some(name.as_slice()),
-                PARTICIPANT_FIXED_LEN + BLOB_REMOVAL_FIXED_LEN,
-                2,
-            ),
+        let (partition, name) = match operation {
+            Operation::Remove(RemoveTarget::Partition(partition)) => (partition, None),
+            Operation::Remove(RemoveTarget::Blob { partition, name }) => {
+                (partition, Some(name.as_slice()))
+            }
             Operation::Publish { partition, name }
             | Operation::Rewind {
                 partition, name, ..
-            } => (partition, Some(name.as_slice()), PARTICIPANT_FIXED_LEN, 1),
+            } => (partition, Some(name.as_slice())),
         };
         u32::try_from(partition.len())
             .map_err(|_| invalid_input("storage batch partition name is too large"))?;
@@ -794,12 +800,45 @@ pub(crate) fn preflight(operations: &[Operation]) -> io::Result<()> {
             u32::try_from(name.len())
                 .map_err(|_| invalid_input("storage batch blob name is too large"))?;
         }
-        minimum_len = minimum_len
-            .checked_add(fixed + copies * (partition.len() + name.map_or(0, <[u8]>::len)))
+    }
+    Ok(())
+}
+
+/// Validate the exact descriptor size before mutating any participant state.
+pub(crate) fn preflight_descriptor<'a>(
+    operations: &[Operation],
+    participants: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> io::Result<()> {
+    preflight(operations)?;
+    let mut encoded_len = DESCRIPTOR_HEADER_LEN;
+    for (partition, name) in participants {
+        encoded_len = encoded_len
+            .checked_add(PARTICIPANT_FIXED_LEN)
+            .and_then(|len| len.checked_add(partition.len()))
+            .and_then(|len| len.checked_add(name.len()))
             .ok_or_else(|| invalid_input("storage batch descriptor length overflow"))?;
-        if minimum_len > MAX_DESCRIPTOR_LEN {
-            return Err(invalid_input("storage batch descriptor is too large"));
-        }
+    }
+    for operation in operations {
+        let removal_len = match operation {
+            Operation::Remove(RemoveTarget::Partition(partition)) => {
+                Some((1 + 4, partition.len(), 0))
+            }
+            Operation::Remove(RemoveTarget::Blob { partition, name }) => {
+                Some((BLOB_REMOVAL_FIXED_LEN, partition.len(), name.len()))
+            }
+            Operation::Publish { .. } | Operation::Rewind { .. } => None,
+        };
+        let Some((fixed, partition_len, name_len)) = removal_len else {
+            continue;
+        };
+        encoded_len = encoded_len
+            .checked_add(fixed)
+            .and_then(|len| len.checked_add(partition_len))
+            .and_then(|len| len.checked_add(name_len))
+            .ok_or_else(|| invalid_input("storage batch descriptor length overflow"))?;
+    }
+    if encoded_len > MAX_DESCRIPTOR_LEN {
+        return Err(invalid_input("storage batch descriptor is too large"));
     }
     Ok(())
 }
@@ -1025,7 +1064,12 @@ pub(crate) fn recover_embedded(
 
         let mut complete = true;
         for participant in &decision.participants {
-            if !validate_speculative_participant(root, participant, Some(&descriptor))? {
+            if !validate_speculative_participant(
+                root,
+                participant,
+                participant_is_removed(&decision, participant),
+                Some(&descriptor),
+            )? {
                 complete = false;
                 break;
             }
@@ -1559,11 +1603,7 @@ mod tests {
             .enumerate()
             .filter_map(|(index, byte)| (*byte != 0).then_some(index))
         {
-            masks.push(
-                (0..record.len())
-                    .map(|index| index != missing)
-                    .collect(),
-            );
+            masks.push((0..record.len()).map(|index| index != missing).collect());
         }
         masks.push((0..record.len()).map(|index| index % 2 == 0).collect());
         masks.push((0..record.len()).map(|index| index % 3 == 1).collect());
@@ -1617,9 +1657,11 @@ mod tests {
             let survived = appended
                 .iter()
                 .enumerate()
-                .map(|(index, byte)| {
-                    if mask & (1 << index) == 0 { 0 } else { *byte }
-                })
+                .map(
+                    |(index, byte)| {
+                        if mask & (1 << index) == 0 { 0 } else { *byte }
+                    },
+                )
                 .collect::<Vec<_>>();
             blobs[0]
                 .file
@@ -1683,6 +1725,100 @@ mod tests {
             assert!(!blob.path.exists());
             assert!(atomic::candidate_is_tombstoned(&blob.file, &participant.candidate).unwrap());
         }
+    }
+
+    #[test]
+    fn a_nonprefix_torn_tombstone_still_proves_a_durable_delete_decision() {
+        let root = TestRoot::new("torn-tombstone-authority");
+        let mut blobs = vec![TestBlob::create(root.path(), b"a", 6, b"a-old")];
+        let group = stage_group(&mut blobs, &[Role::Delete]);
+        group.write_all(&blobs);
+
+        let candidate = &group.participants[0].candidate;
+        atomic::materialize_tombstone_candidate(&blobs[0].file, data_offset(), candidate).unwrap();
+        let tombstone = read_candidate_root(&blobs[0], candidate);
+        group.write_all(&blobs);
+
+        let mut torn = candidate.prepared_root;
+        let changed = torn
+            .iter()
+            .zip(tombstone)
+            .position(|(prepared, tombstone)| *prepared != tombstone)
+            .unwrap();
+        torn[changed] = tombstone[changed];
+        assert_ne!(torn, candidate.prepared_root);
+        assert_ne!(torn, tombstone);
+        blobs[0]
+            .file
+            .write_all_at(&torn, candidate.root_offset)
+            .unwrap();
+        blobs[0].file.sync_all().unwrap();
+        assert!(
+            atomic::candidate_has_embedded_batch_witness(
+                &blobs[0].file,
+                candidate,
+                &group.descriptor,
+            )
+            .unwrap()
+        );
+        assert!(!atomic::candidate_is_tombstoned(&blobs[0].file, candidate).unwrap());
+
+        assert!(recover_from(root.path(), &blobs[0]));
+        assert!(!blobs[0].path.exists());
+        assert!(atomic::candidate_is_tombstoned(&blobs[0].file, candidate).unwrap());
+    }
+
+    #[test]
+    fn nonprefix_torn_final_roots_roll_forward_a_mixed_group() {
+        let root = TestRoot::new("torn-mixed-authority");
+        let mut blobs = vec![
+            TestBlob::create(root.path(), b"a", 9, b"a-old"),
+            TestBlob::create(root.path(), b"b", 29, b"b-old"),
+        ];
+        let group = stage_group(&mut blobs, &[Role::Retain(b"-new".to_vec()), Role::Delete]);
+        group.write_all(&blobs);
+
+        let retained = &group.participants[0].candidate;
+        let materialized = atomic::materialized_candidate_root(retained).unwrap();
+        let deleted = &group.participants[1].candidate;
+        atomic::materialize_tombstone_candidate(&blobs[1].file, data_offset(), deleted).unwrap();
+        let tombstone = read_candidate_root(&blobs[1], deleted);
+        group.write_all(&blobs);
+
+        for (blob, candidate, final_root) in [
+            (&blobs[0], retained, materialized),
+            (&blobs[1], deleted, tombstone),
+        ] {
+            let mut torn = candidate.prepared_root;
+            let changed = torn
+                .iter()
+                .zip(final_root)
+                .position(|(prepared, final_byte)| *prepared != final_byte)
+                .unwrap();
+            torn[changed] = final_root[changed];
+            assert_ne!(torn, candidate.prepared_root);
+            assert_ne!(torn, final_root);
+            blob.file
+                .write_all_at(&torn, candidate.root_offset)
+                .unwrap();
+            blob.file.sync_all().unwrap();
+            assert!(
+                atomic::candidate_has_embedded_batch_witness(
+                    &blob.file,
+                    candidate,
+                    &group.descriptor,
+                )
+                .unwrap()
+            );
+        }
+        assert!(!atomic::candidate_is_materialized(&blobs[0].file, retained).unwrap());
+        assert!(!atomic::candidate_is_tombstoned(&blobs[1].file, deleted).unwrap());
+
+        assert!(!recover_from(root.path(), &blobs[0]));
+        assert!(atomic::candidate_is_materialized(&blobs[0].file, retained).unwrap());
+        assert_eq!(blobs[0].recovered_payload(), b"a-old-new");
+        assert!(!blobs[1].path.exists());
+        assert!(atomic::candidate_is_tombstoned(&blobs[1].file, deleted).unwrap());
     }
 
     #[test]

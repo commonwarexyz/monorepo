@@ -150,6 +150,24 @@ mod tests {
     }
 
     #[test]
+    fn inline_batch_preparation_requires_a_complete_bounded_checksum() {
+        let (path, file) = test_file();
+        let mut state = State::empty(DATA_OFFSET);
+        assert!(state.can_prepare_batch_inline(0).unwrap());
+
+        append(&file, &mut state, b"abc");
+        assert!(state.can_prepare_batch_inline(3).unwrap());
+        assert!(!state.can_prepare_batch_inline(2).unwrap());
+
+        state.invalidate_payload_checksum();
+        assert!(!state.can_prepare_batch_inline(3).unwrap());
+        state.payload_checksum = PayloadChecksumTracker::new(DATA_OFFSET);
+        state.preflush_target = DATA_OFFSET + 1;
+        assert!(!state.can_prepare_batch_inline(3).unwrap());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn unpublished_rewind_reuses_the_physical_tail() {
         let (path, file) = test_file();
         let mut state = State::empty(DATA_OFFSET);
@@ -275,7 +293,11 @@ mod tests {
     #[test]
     fn direct_recovery_rejects_arbitrary_torn_publication_roots() {
         let mut masks = (0..=ROOT_LEN)
-            .map(|prefix| (0..ROOT_LEN).map(|index| index < prefix).collect::<Vec<_>>())
+            .map(|prefix| {
+                (0..ROOT_LEN)
+                    .map(|index| index < prefix)
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>();
         for index in 0..ROOT_LEN {
             masks.push((0..ROOT_LEN).map(|candidate| candidate == index).collect());
@@ -457,11 +479,19 @@ mod tests {
     #[test]
     fn arbitrary_torn_tombstone_roots_keep_the_embedded_witness_repairable() {
         let mut masks = (0..=ROOT_LEN)
-            .map(|prefix| (0..ROOT_LEN).map(|index| index < prefix).collect::<Vec<_>>())
+            .map(|prefix| {
+                (0..ROOT_LEN)
+                    .map(|index| index < prefix)
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>();
         masks.push((0..ROOT_LEN).map(|index| index % 2 == 0).collect());
         masks.push((0..ROOT_LEN).map(|index| index % 3 == 1).collect());
-        masks.push((0..ROOT_LEN).map(|index| index.count_ones() % 2 == 0).collect());
+        masks.push(
+            (0..ROOT_LEN)
+                .map(|index| index.count_ones() % 2 == 0)
+                .collect(),
+        );
 
         for (case, mask) in masks.into_iter().enumerate() {
             let (path, file) = test_file();
@@ -1082,6 +1112,43 @@ impl State {
         self.dirty
     }
 
+    /// Return whether applying a validated rewind would leave a root to publish.
+    pub(super) fn participates_after_rewind(&self, len: u64) -> io::Result<bool> {
+        self.validate_rewind(len)?;
+        if len == self.logical_len {
+            return Ok(self.dirty);
+        }
+        Ok(len != self.committed_len)
+    }
+
+    /// Return whether batch preparation can finish without waiting for payload durability.
+    #[cfg(any(not(feature = "iouring-storage"), test))]
+    pub(super) fn can_prepare_batch_inline(&self, payload_budget: u64) -> io::Result<bool> {
+        if self.poisoned || self.logical_len < self.committed_len || self.preflush_requested()? {
+            return Ok(false);
+        }
+        if !self.dirty {
+            return Ok(true);
+        }
+        let payload_end = self.raw_len()?;
+        let committed_payload_start = if self.logical_len < self.committed_len {
+            payload_end
+        } else {
+            checked_end(self.data_offset, self.committed_len)?
+        };
+        let payload_start = committed_payload_start.max(self.preflush_target);
+        let payload_len = payload_end
+            .checked_sub(payload_start)
+            .ok_or_else(|| invalid_data("atomic preflush frontier exceeds the pending payload"))?;
+        if payload_len == 0 {
+            return Ok(true);
+        }
+        Ok(self.payload_checksum.eligible
+            && self.payload_checksum.offset == payload_start
+            && self.payload_checksum.len == payload_len
+            && payload_len <= payload_budget)
+    }
+
     /// Prefix that must be durable before a publication marker may omit its bytes from CRC32C.
     pub(super) const fn preflush_target(&self) -> u64 {
         self.preflush_target
@@ -1521,12 +1588,14 @@ fn candidate_root_is_delete_transition(installed: &[u8; ROOT_LEN], candidate: &C
                 .zip(materialized)
                 .zip(tombstone),
         )
-        .all(|(installed, (((prepared, committed), materialized), tombstone))| {
-            installed == prepared
-                || installed == committed
-                || *installed == materialized
-                || *installed == tombstone
-        })
+        .all(
+            |(installed, (((prepared, committed), materialized), tombstone))| {
+                installed == prepared
+                    || installed == committed
+                    || *installed == materialized
+                    || *installed == tombstone
+            },
+        )
 }
 
 fn embedded_batch_candidates_with_materialized(
@@ -1764,9 +1833,10 @@ pub(crate) fn materialize_candidate(
     candidate: &Candidate,
 ) -> io::Result<()> {
     let materialized_root = materialized_candidate_root(candidate)?;
-    let metadata = validate_candidate(file, data_offset, candidate)?;
-    write_durable_at(file, candidate.root_offset, &materialized_root)?;
-    file.set_len(metadata.payload_end)
+    validate_candidate(file, data_offset, candidate)?;
+    // A live inode may already contain the next unpublished append epoch. The materialized root
+    // names the older durable length; reopening can reclaim any surplus after selecting that root.
+    write_durable_at(file, candidate.root_offset, &materialized_root)
 }
 
 /// Validate and durably replace a prepared candidate with a payload-preserving tombstone.
@@ -1884,10 +1954,11 @@ pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Re
 /// A prepared root is deliberately invisible to ordinary blob recovery. An exact durable batch
 /// descriptor supplies the prepared and committed headers, allowing validation to accept any
 /// bytewise prefix-independent transition between those headers.
-pub(super) fn validate_candidate(
+fn validate_candidate_transition(
     file: &File,
     data_offset: u64,
     candidate: &Candidate,
+    deletion: bool,
 ) -> io::Result<CandidateMetadata> {
     let committed = decode_committed_root(&candidate.committed_root)
         .ok_or_else(|| invalid_data("transaction candidate has an invalid committed root"))?;
@@ -1917,7 +1988,11 @@ pub(super) fn validate_candidate(
     // The durable batch descriptor is the authority for this exact self-contained
     // candidate. Its prior base root may already have been reused while preparing a later batch,
     // so validation must not depend on finding that base in the other root slot.
-    let torn_transition = candidate_root_is_batch_transition(&installed, candidate);
+    let torn_transition = if deletion {
+        candidate_root_is_delete_transition(&installed, candidate)
+    } else {
+        candidate_root_is_batch_transition(&installed, candidate)
+    };
     if !torn_transition {
         return Err(invalid_data(
             "transaction candidate root is not a recoverable publication transition",
@@ -1926,6 +2001,22 @@ pub(super) fn validate_candidate(
 
     let (_, metadata) = recover_root(file, data_offset, raw_len, candidate.root_offset, committed)?;
     Ok(metadata)
+}
+
+pub(super) fn validate_candidate(
+    file: &File,
+    data_offset: u64,
+    candidate: &Candidate,
+) -> io::Result<CandidateMetadata> {
+    validate_candidate_transition(file, data_offset, candidate, false)
+}
+
+pub(super) fn validate_delete_candidate(
+    file: &File,
+    data_offset: u64,
+    candidate: &Candidate,
+) -> io::Result<CandidateMetadata> {
+    validate_candidate_transition(file, data_offset, candidate, true)
 }
 
 /// Verify a bounded speculative payload suffix without publishing its candidate root.

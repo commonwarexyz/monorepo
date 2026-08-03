@@ -371,8 +371,8 @@ mod coordinator;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use coordinator::{
-    Participant, can_supersede_embedded, materialize_embedded, preflight, prepare_embedded,
-    recover, recover_embedded, recover_named_embedded, recover_notifying,
+    Participant, can_supersede_embedded, materialize_embedded, preflight, preflight_descriptor,
+    prepare_embedded, recover, recover_embedded, recover_named_embedded, recover_notifying,
     recover_partition_embedded, recover_removal_witnesses, resolve_partition_name,
     supports_speculation,
 };

@@ -12,9 +12,9 @@ use crate::Error;
 use commonware_utils::sync::Condvar;
 use commonware_utils::sync::{Mutex, MutexGuard};
 use std::sync::Arc;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 #[cfg(any(feature = "iouring-storage", test))]
 use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// Shared state and payload-preflush coordination for one current V2 generation.
 pub(super) struct Context {
@@ -69,11 +69,7 @@ pub(super) struct Driver {
 }
 
 impl Driver {
-    pub(super) fn complete(
-        &mut self,
-        target: u64,
-        result: Result<(), Error>,
-    ) -> Option<u64> {
+    pub(super) fn complete(&mut self, target: u64, result: Result<(), Error>) -> Option<u64> {
         let next = self.preflush.complete(target, result);
         if next.is_none() {
             self.armed = false;
@@ -140,11 +136,7 @@ impl Preflush {
     }
 
     /// Finish one worker pass and return the next coalesced target, if any.
-    pub(super) fn complete(
-        &self,
-        target: u64,
-        result: Result<(), Error>,
-    ) -> Option<u64> {
+    pub(super) fn complete(&self, target: u64, result: Result<(), Error>) -> Option<u64> {
         let mut inner = self.lock();
         match result {
             Ok(()) => inner.durable = inner.durable.max(target),

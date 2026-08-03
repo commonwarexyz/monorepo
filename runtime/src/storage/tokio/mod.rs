@@ -47,21 +47,12 @@ fn unsupported_atomic(partition: &str, name: &[u8]) -> Error {
 
 const MAX_BATCH_WORKERS: usize = 32;
 
-/// Run blocking batch work on a bounded number of native threads while preserving input order.
-#[cfg(test)]
-fn run_batch_workers<T, U, F>(items: Vec<T>, run: F) -> Vec<U>
-where
-    T: Send,
-    U: Send,
-    F: Fn(T) -> U + Sync,
-{
+fn split_batch_work<T>(items: Vec<T>) -> Vec<Vec<T>> {
     if items.is_empty() {
         return Vec::new();
     }
-
-    let item_count = items.len();
-    let worker_count = item_count.min(MAX_BATCH_WORKERS);
-    let chunk_len = item_count.div_ceil(worker_count);
+    let worker_count = items.len().min(MAX_BATCH_WORKERS);
+    let chunk_len = items.len().div_ceil(worker_count);
     let mut items = items.into_iter();
     let mut chunks = Vec::with_capacity(worker_count);
     loop {
@@ -71,29 +62,213 @@ where
         }
         chunks.push(chunk);
     }
+    chunks
+}
 
-    std::thread::scope(|scope| {
-        let workers = chunks
-            .into_iter()
-            .map(|chunk| {
-                let run = &run;
-                scope.spawn(move || chunk.into_iter().map(run).collect::<Vec<_>>())
+type BlockingBatchResult<T> = Result<std::thread::Result<T>, tokio::task::JoinError>;
+
+/// Run finite blocking jobs with bounded fanout while preserving chunk order.
+async fn run_blocking_batch_chunks<T, U, F>(items: Vec<T>, run: F) -> Vec<BlockingBatchResult<U>>
+where
+    T: Send + 'static,
+    U: Send + 'static,
+    F: Fn(Vec<T>) -> U + Send + Sync + 'static,
+{
+    let run = Arc::new(run);
+    let jobs = split_batch_work(items)
+        .into_iter()
+        .map(|chunk| {
+            let run = run.clone();
+            tokio::task::spawn_blocking(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(chunk)))
             })
-            .collect::<Vec<_>>();
-        let mut results = Vec::with_capacity(item_count);
-        let mut first_panic = None;
-        for worker in workers {
-            match worker.join() {
-                Ok(chunk) => results.extend(chunk),
-                Err(panic) if first_panic.is_none() => first_panic = Some(panic),
-                Err(_) => {}
+        })
+        .collect::<Vec<_>>();
+    futures::future::join_all(jobs).await
+}
+
+struct ArmedBatchState {
+    state: OwnedMutexGuard<super::atomic::State>,
+    armed: bool,
+}
+
+impl ArmedBatchState {
+    const fn new(state: OwnedMutexGuard<super::atomic::State>) -> Self {
+        Self { state, armed: true }
+    }
+
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl std::ops::Deref for ArmedBatchState {
+    type Target = super::atomic::State;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for ArmedBatchState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+impl Drop for ArmedBatchState {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.poison();
+        }
+    }
+}
+
+struct BatchParticipantState {
+    index: usize,
+    blob: Blob,
+    state: ArmedBatchState,
+    prepared: Result<Option<super::atomic::PreparedCommit>, Error>,
+    removed: bool,
+}
+
+struct ParticipantPreparation {
+    partition: String,
+    name: Vec<u8>,
+    incarnation: [u8; Header::V2_INCARNATION_LEN],
+    candidate: super::atomic::Candidate,
+    payload_start: u64,
+    payload_checksum: super::atomic::PayloadChecksumEligibility,
+    witness_capacity: usize,
+}
+
+type ParticipantSummary = (usize, Result<Option<ParticipantPreparation>, Error>);
+type BatchPreparation = (Vec<BatchParticipantState>, Vec<ParticipantSummary>);
+
+fn prepare_batch_chunk(
+    chunk: Vec<(usize, Blob, ArmedBatchState)>,
+    resize_lengths: &BTreeMap<(String, Vec<u8>), u64>,
+    removal_keys: &BTreeSet<(String, Vec<u8>)>,
+    payload_budget: u64,
+) -> BatchPreparation {
+    let mut states = Vec::with_capacity(chunk.len());
+    let mut summaries = Vec::with_capacity(chunk.len());
+    for (index, blob, state) in chunk {
+        let key = (blob.partition().to_string(), blob.name().to_vec());
+        let removed = removal_keys.contains(&key);
+        let mut participant = BatchParticipantState {
+            index,
+            blob,
+            state,
+            prepared: Ok(None),
+            removed,
+        };
+        if let Some(len) = resize_lengths.get(&key).copied()
+            && let Err(error) = participant.blob.rewind_log(&mut participant.state, len)
+        {
+            summaries.push((index, Err(error.clone())));
+            participant.prepared = Err(error);
+            states.push(participant);
+            continue;
+        }
+        participant.prepared = if removed {
+            participant
+                .blob
+                .prepare_batch_delete_unflushed(&participant.state)
+                .map(Some)
+        } else {
+            participant
+                .blob
+                .prepare_batch_commit_unflushed(&mut participant.state)
+        };
+        let preflush = participant
+            .prepared
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .is_some_and(|prepared| match prepared.payload_checksum() {
+                super::atomic::PayloadChecksumEligibility::Eligible(Some(checksum)) => {
+                    checksum.len > payload_budget
+                }
+                super::atomic::PayloadChecksumEligibility::Eligible(None) => false,
+                super::atomic::PayloadChecksumEligibility::Ineligible => true,
+            });
+        if preflush {
+            let target = participant
+                .prepared
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .raw_len();
+            match participant.blob.ensure_preflush_blocking(target) {
+                Ok(()) => participant
+                    .prepared
+                    .as_mut()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .mark_payload_preflushed(),
+                Err(error) => participant.prepared = Err(error),
             }
         }
-        if let Some(panic) = first_panic {
-            std::panic::resume_unwind(panic);
+        let summary = match &participant.prepared {
+            Ok(Some(prepared)) => Ok(Some(ParticipantPreparation {
+                partition: participant.blob.partition().to_string(),
+                name: participant.blob.name().to_vec(),
+                incarnation: participant.blob.incarnation(),
+                candidate: prepared.candidate(),
+                payload_start: prepared.payload_start(),
+                payload_checksum: prepared.payload_checksum(),
+                witness_capacity: prepared.batch_witness_capacity(),
+            })),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error.clone()),
+        };
+        summaries.push((index, summary));
+        states.push(participant);
+    }
+    (states, summaries)
+}
+
+fn stage_batch_chunk(
+    mut states: Vec<BatchParticipantState>,
+    witness: Option<Arc<[u8]>>,
+) -> (Vec<BatchParticipantState>, Vec<Error>) {
+    let mut errors = Vec::new();
+    for participant in &mut states {
+        let Ok(Some(prepared)) = &mut participant.prepared else {
+            continue;
+        };
+        let result = if participant.removed {
+            witness.as_deref().map_or_else(
+                || {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "batch deletion requires an embedded witness",
+                    )
+                    .into())
+                },
+                |witness| participant.blob.stage_batch_delete(prepared, witness),
+            )
+        } else {
+            participant
+                .blob
+                .stage_batch_commit(prepared, witness.as_deref())
+        };
+        if let Err(error) = result {
+            errors.push(error);
         }
-        results
-    })
+    }
+    for participant in &states {
+        if !participant.removed
+            && participant.prepared.as_ref().is_ok_and(Option::is_some)
+            && let Err(error) = participant.blob.sync_batch_commit()
+        {
+            errors.push(error);
+        }
+    }
+    (states, errors)
 }
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -270,17 +445,18 @@ async fn resolve_header(
     file.read_exact(&mut raw)
         .await
         .map_err(|_| Error::ReadFailed)?;
-    Ok(super::header::resolve(
-        &raw, raw_len, versions, partition, name,
-    )?
-    .map(|(logical_size, blob_version, data_offset)| {
-        (
-            logical_size,
-            blob_version,
-            data_offset,
-            Header::atomic_incarnation(&raw),
-        )
-    }))
+    Ok(
+        super::header::resolve(&raw, raw_len, versions, partition, name)?.map(
+            |(logical_size, blob_version, data_offset)| {
+                (
+                    logical_size,
+                    blob_version,
+                    data_offset,
+                    Header::atomic_incarnation(&raw),
+                )
+            },
+        ),
+    )
 }
 
 /// Complete any carried embedded or removal decision while retaining the namespace guard.
@@ -386,9 +562,9 @@ impl Storage {
     async fn start_apply_guarded<F, C, D>(
         &self,
         operations: Vec<BatchOperation<<Self as crate::AtomicStorage>::AtomicBlob>>,
-        on_worker_start: F,
-        on_commit: C,
-        on_complete: D,
+        on_worker_start: Option<F>,
+        on_commit: Option<C>,
+        on_complete: Option<D>,
     ) -> Result<Handle<()>, Error>
     where
         F: FnOnce() + Send + 'static,
@@ -531,6 +707,21 @@ impl Storage {
                 state.validate_rewind(*len)?;
             }
         }
+        let mut participants = Vec::new();
+        for (blob, state) in &locked {
+            let key = (blob.partition().to_string(), blob.name().to_vec());
+            let participates = if removals.contains(&key) {
+                true
+            } else if let Some(len) = rewind_lengths.get(&key) {
+                state.participates_after_rewind(*len)?
+            } else {
+                state.is_dirty()
+            };
+            if participates {
+                participants.push((blob.partition(), blob.name()));
+            }
+        }
+        super::batch::preflight_descriptor(&filesystem_operations, participants)?;
 
         self.namespace
             .recovery_required
@@ -539,474 +730,394 @@ impl Storage {
         let namespace = self.namespace.clone();
         let (commit_sender, commit_receiver) = oneshot::channel();
         let (completion_sender, completion_receiver) = oneshot::channel();
-        drop(tokio::task::spawn_blocking(move || {
-            on_worker_start();
-            struct ParticipantPreparation {
-                partition: String,
-                name: Vec<u8>,
-                incarnation: [u8; Header::V2_INCARNATION_LEN],
-                candidate: super::atomic::Candidate,
-                payload_start: u64,
-                payload_checksum: super::atomic::PayloadChecksumEligibility,
-                witness_capacity: usize,
-            }
-
-            enum PreparationMessage {
-                Ready(Vec<(usize, Result<Option<ParticipantPreparation>, Error>)>),
-                Panicked,
-            }
-
-            enum BatchControl {
-                Abort,
-                StageAndSync(Option<Arc<[u8]>>),
+        drop(tokio::spawn(async move {
+            let locked = locked
+                .into_iter()
+                .enumerate()
+                .map(|(index, (blob, state))| (index, blob, ArmedBatchState::new(state)))
+                .collect::<Vec<_>>();
+            if let Some(on_worker_start) = on_worker_start {
+                match tokio::task::spawn_blocking(on_worker_start).await {
+                    Ok(()) => {}
+                    Err(error) if error.is_panic() => {
+                        std::panic::resume_unwind(error.into_panic());
+                    }
+                    Err(_) => return,
+                }
             }
 
             let resize_lengths = Arc::new(rewind_lengths);
             let removal_keys = Arc::new(removals);
-
             let item_count = locked.len();
-            let worker_count = item_count.min(MAX_BATCH_WORKERS);
             let payload_budget = if item_count == 0 {
                 super::atomic::MAX_VALIDATED_PAYLOAD_LEN
             } else {
                 super::atomic::MAX_VALIDATED_PAYLOAD_LEN / item_count as u64
             };
-            let mut chunks = Vec::with_capacity(worker_count);
-            if worker_count != 0 {
-                let chunk_len = item_count.div_ceil(worker_count);
-                let mut locked = locked.into_iter().enumerate();
-                loop {
-                    let chunk = locked.by_ref().take(chunk_len).collect::<Vec<_>>();
-                    if chunk.is_empty() {
-                        break;
+            // The common append-only path only finalizes already-computed CRC state. The
+            // predicate excludes every path that can wait for payload durability; Linux's
+            // optional writeback hint starts I/O but does not wait for it.
+            let prepare_inline = removal_keys.is_empty()
+                && resize_lengths.is_empty()
+                && locked.iter().all(|(_, _, state)| {
+                    state
+                        .can_prepare_batch_inline(payload_budget)
+                        .unwrap_or(false)
+                });
+            let preparation_results = if prepare_inline {
+                vec![Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || prepare_batch_chunk(locked, &resize_lengths, &removal_keys, payload_budget),
+                )))]
+            } else {
+                let preparation_resize_lengths = resize_lengths.clone();
+                let preparation_removal_keys = removal_keys.clone();
+                run_blocking_batch_chunks(locked, move |chunk| {
+                    prepare_batch_chunk(
+                        chunk,
+                        &preparation_resize_lengths,
+                        &preparation_removal_keys,
+                        payload_budget,
+                    )
+                })
+                .await
+            };
+
+            let mut prepared_states = Vec::with_capacity(item_count);
+            let mut summaries = std::iter::repeat_with(|| None)
+                .take(item_count)
+                .collect::<Vec<_>>();
+            let mut staging_error = None;
+            let mut first_panic = None;
+            for result in preparation_results {
+                match result {
+                    Ok(Ok((states, worker_summaries))) => {
+                        for (index, summary) in worker_summaries {
+                            summaries[index] = Some(summary);
+                        }
+                        prepared_states.extend(states);
                     }
-                    chunks.push(chunk);
+                    Ok(Err(panic)) if first_panic.is_none() => first_panic = Some(panic),
+                    Ok(Err(_)) => {}
+                    Err(error) if error.is_panic() && first_panic.is_none() => {
+                        first_panic = Some(error.into_panic());
+                    }
+                    Err(_) if staging_error.is_none() => staging_error = Some(Error::Closed),
+                    Err(_) => {}
                 }
             }
-
-            // Keep each participant worker alive between candidate preparation and its durability
-            // barrier. Tokio's blocking pool retains these threads across batches while the owner
-            // constructs the shared participant-embedded witness.
-            let (mut prepared_states, embedded_witness, has_participant_mutations, staging_error) = {
-                let (summary_sender, summary_receiver) = std::sync::mpsc::channel();
-                let (result_sender, result_receiver) = std::sync::mpsc::channel();
-                let mut controls = Vec::with_capacity(chunks.len());
-                for chunk in chunks {
-                    let resize_lengths = resize_lengths.clone();
-                    let removal_keys = removal_keys.clone();
-                    let summary_sender = summary_sender.clone();
-                    let result_sender = result_sender.clone();
-                    let (control_sender, control_receiver) = std::sync::mpsc::sync_channel(1);
-                    controls.push(control_sender);
-                    drop(tokio::task::spawn_blocking(move || {
-                        let mut summary_sent = false;
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let mut states = Vec::with_capacity(chunk.len());
-                            let mut summaries = Vec::with_capacity(chunk.len());
-                            for (index, (blob, mut state)) in chunk {
-                                let removed = removal_keys.contains(&(
-                                    blob.partition().to_string(),
-                                    blob.name().to_vec(),
-                                ));
-                                let resize = resize_lengths
-                                    .get(&(blob.partition().to_string(), blob.name().to_vec()))
-                                    .copied();
-                                if let Some(len) = resize {
-                                    let rewound = blob.rewind_log(&mut state, len);
-                                    if let Err(error) = rewound {
-                                        summaries.push((index, Err(error.clone())));
-                                        states.push((index, blob, state, Err(error), removed));
-                                        continue;
-                                    }
-                                }
-                                let mut prepared = if removed {
-                                    blob.prepare_batch_delete_unflushed(&state).map(Some)
-                                } else {
-                                    blob.prepare_batch_commit_unflushed(&mut state)
-                                };
-                                let preflush = prepared
-                                    .as_ref()
-                                    .ok()
-                                    .and_then(Option::as_ref)
-                                    .is_some_and(|prepared| match prepared.payload_checksum() {
-                                        super::atomic::PayloadChecksumEligibility::Eligible(
-                                            Some(checksum),
-                                        ) => checksum.len > payload_budget,
-                                        super::atomic::PayloadChecksumEligibility::Eligible(
-                                            None,
-                                        ) => false,
-                                        super::atomic::PayloadChecksumEligibility::Ineligible => {
-                                            true
-                                        }
-                                    });
-                                if preflush {
-                                    let target =
-                                        prepared.as_ref().unwrap().as_ref().unwrap().raw_len();
-                                    match blob.ensure_preflush_blocking(target) {
-                                        Ok(()) => prepared
-                                            .as_mut()
-                                            .unwrap()
-                                            .as_mut()
-                                            .unwrap()
-                                            .mark_payload_preflushed(),
-                                        Err(error) => prepared = Err(error),
-                                    }
-                                }
-                                let summary = match &prepared {
-                                    Ok(Some(prepared)) => Ok(Some(ParticipantPreparation {
-                                        partition: blob.partition().to_string(),
-                                        name: blob.name().to_vec(),
-                                        incarnation: blob.incarnation(),
-                                        candidate: prepared.candidate(),
-                                        payload_start: prepared.payload_start(),
-                                        payload_checksum: prepared.payload_checksum(),
-                                        witness_capacity: prepared.batch_witness_capacity(),
-                                    })),
-                                    Ok(None) => Ok(None),
-                                    Err(error) => Err(error.clone()),
-                                };
-                                summaries.push((index, summary));
-                                states.push((index, blob, state, prepared, removed));
-                            }
-                            let _ = summary_sender.send(PreparationMessage::Ready(summaries));
-                            summary_sent = true;
-                            let control = control_receiver.recv().unwrap_or(BatchControl::Abort);
-                            let mut barrier_errors = Vec::new();
-                            if let BatchControl::StageAndSync(witness) = control {
-                                for (_, blob, _, prepared, removed) in &mut states {
-                                    let Ok(Some(prepared)) = prepared else {
-                                        continue;
-                                    };
-                                    let result = if *removed {
-                                        witness.as_deref().map_or_else(
-                                            || {
-                                                Err(std::io::Error::new(
-                                                    std::io::ErrorKind::InvalidInput,
-                                                    "batch deletion requires an embedded witness",
-                                                )
-                                                .into())
-                                            },
-                                            |witness| blob.stage_batch_delete(prepared, witness),
-                                        )
-                                    } else {
-                                        blob.stage_batch_commit(prepared, witness.as_deref())
-                                    };
-                                    if let Err(error) = result {
-                                        barrier_errors.push(error);
-                                    }
-                                }
-                                for (_, blob, _, prepared, removed) in &states {
-                                    if !removed
-                                        && prepared.as_ref().is_ok_and(Option::is_some)
-                                        && let Err(error) = blob.sync_batch_commit()
-                                    {
-                                        barrier_errors.push(error);
-                                    }
-                                }
-                            }
-                            (states, barrier_errors)
-                        }));
-                        if !summary_sent {
-                            let _ = summary_sender.send(PreparationMessage::Panicked);
-                        }
-                        drop(summary_sender);
-                        let _ = result_sender.send(result);
-                    }));
-                }
-                drop(summary_sender);
-                drop(result_sender);
-
-                let mut summaries = std::iter::repeat_with(|| None)
-                    .take(item_count)
-                    .collect::<Vec<_>>();
-                let mut preparation_panicked = false;
-                for _ in 0..worker_count {
-                    match summary_receiver.recv() {
-                        Ok(PreparationMessage::Ready(worker_summaries)) => {
-                            for (index, summary) in worker_summaries {
-                                summaries[index] = Some(summary);
-                            }
-                        }
-                        Ok(PreparationMessage::Panicked) => {
-                            preparation_panicked = true;
-                        }
-                        Err(_) => {
-                            preparation_panicked = true;
-                            break;
-                        }
-                    }
-                }
-
-                let mut staging_error = summaries
+            if let Some(panic) = first_panic {
+                std::panic::resume_unwind(panic);
+            }
+            if staging_error.is_none() {
+                staging_error = summaries
                     .iter()
                     .filter_map(Option::as_ref)
                     .find_map(|summary| summary.as_ref().err().cloned());
-                let mut speculative_payload_bytes = Some(0u64);
-                let mut participant_count = 0usize;
-                if staging_error.is_none() && !preparation_panicked {
-                    for summary in summaries.iter().filter_map(Option::as_ref) {
-                        let Some(prepared) = summary.as_ref().unwrap() else {
-                            continue;
-                        };
-                        participant_count += 1;
-                        match prepared.payload_checksum {
-                            super::atomic::PayloadChecksumEligibility::Eligible(checksum) => {
-                                speculative_payload_bytes =
-                                    speculative_payload_bytes.and_then(|total| {
-                                        total.checked_add(
-                                            checksum.map_or(0, |checksum| checksum.len),
-                                        )
-                                    });
-                            }
-                            super::atomic::PayloadChecksumEligibility::Ineligible => {
-                                speculative_payload_bytes = None;
-                            }
+            }
+
+            let mut speculative_payload_bytes = Some(0u64);
+            let mut participant_count = 0usize;
+            if staging_error.is_none() {
+                for summary in summaries.iter().filter_map(Option::as_ref) {
+                    let Some(prepared) = summary.as_ref().unwrap() else {
+                        continue;
+                    };
+                    participant_count += 1;
+                    match prepared.payload_checksum {
+                        super::atomic::PayloadChecksumEligibility::Eligible(checksum) => {
+                            speculative_payload_bytes =
+                                speculative_payload_bytes.and_then(|total| {
+                                    total.checked_add(checksum.map_or(0, |checksum| checksum.len))
+                                });
+                        }
+                        super::atomic::PayloadChecksumEligibility::Ineligible => {
+                            speculative_payload_bytes = None;
                         }
                     }
                 }
-                let verifiable = staging_error.is_none()
-                    && !preparation_panicked
-                    && speculative_payload_bytes.is_some();
-                let embedded_eligible = verifiable
-                    && speculative_payload_bytes.is_some_and(|verified_bytes| {
-                        super::batch::supports_speculation(
-                            &filesystem_operations,
-                            participant_count,
-                            verified_bytes,
-                        )
-                    });
-                let participants = summaries
-                    .iter()
-                    .filter_map(Option::as_ref)
-                    .filter_map(|summary| summary.as_ref().ok()?.as_ref())
-                    .map(|prepared| {
-                        let payload_checksum = if verifiable {
-                            let super::atomic::PayloadChecksumEligibility::Eligible(checksum) =
-                                prepared.payload_checksum
-                            else {
-                                unreachable!("verifiable groups contain only eligible epochs")
-                            };
-                            checksum
-                        } else {
-                            None
+            }
+            let verifiable = staging_error.is_none() && speculative_payload_bytes.is_some();
+            let embedded_eligible = verifiable
+                && speculative_payload_bytes.is_some_and(|verified_bytes| {
+                    super::batch::supports_speculation(
+                        &filesystem_operations,
+                        participant_count,
+                        verified_bytes,
+                    )
+                });
+            let participants = summaries
+                .iter()
+                .filter_map(Option::as_ref)
+                .filter_map(|summary| summary.as_ref().ok()?.as_ref())
+                .map(|prepared| {
+                    let payload_checksum = if verifiable {
+                        let super::atomic::PayloadChecksumEligibility::Eligible(checksum) =
+                            prepared.payload_checksum
+                        else {
+                            unreachable!("verifiable groups contain only eligible epochs")
                         };
-                        super::batch::Participant {
-                            partition: prepared.partition.clone(),
-                            name: prepared.name.clone(),
-                            incarnation: prepared.incarnation,
-                            candidate: prepared.candidate.clone(),
-                            payload_start: if verifiable {
-                                prepared.payload_start
-                            } else {
-                                0
-                            },
-                            payload_checksum,
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                        checksum
+                    } else {
+                        None
+                    };
+                    super::batch::Participant {
+                        partition: prepared.partition.clone(),
+                        name: prepared.name.clone(),
+                        incarnation: prepared.incarnation,
+                        candidate: prepared.candidate.clone(),
+                        payload_start: if verifiable {
+                            prepared.payload_start
+                        } else {
+                            0
+                        },
+                        payload_checksum,
+                    }
+                })
+                .collect::<Vec<_>>();
 
-                let embedded_witness = embedded_eligible
-                    .then(|| super::batch::prepare_embedded(&participants, &filesystem_operations))
-                    .transpose()
-                    .ok()
-                    .flatten()
-                    .filter(|descriptor| {
-                        summaries
+            let mut embedded_witness = None;
+            if embedded_eligible {
+                match super::batch::prepare_embedded(&participants, &filesystem_operations) {
+                    Ok(descriptor)
+                        if summaries
                             .iter()
                             .filter_map(Option::as_ref)
                             .filter_map(|summary| summary.as_ref().ok()?.as_ref())
-                            .all(|prepared| prepared.witness_capacity >= descriptor.len())
-                    })
-                    .map(Arc::<[u8]>::from);
-
-                if staging_error.is_none() && !preparation_panicked {
-                    if let Some(previous) = embedded_decision.as_deref() {
-                        let can_supersede = embedded_witness.as_deref().is_some_and(|_| {
-                            super::batch::can_supersede_embedded(previous, &participants)
-                                .unwrap_or(false)
-                        });
-                        if !can_supersede {
-                            match super::batch::materialize_embedded(&root, previous) {
-                                Ok(()) => {
-                                    namespace.set_embedded_batch_decision(None);
-                                    namespace
-                                        .carried_batch_decision
-                                        .store(false, Ordering::Release);
-                                }
-                                Err(error) => staging_error = Some(Error::from(error)),
-                            }
-                        }
-                    } else if carry_decision {
+                            .all(|prepared| prepared.witness_capacity >= descriptor.len()) =>
+                    {
+                        embedded_witness = Some(Arc::<[u8]>::from(descriptor));
+                    }
+                    Ok(_) if staging_error.is_none() => {
                         staging_error = Some(
                             std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "carried batch decision has no embedded witness",
+                                std::io::ErrorKind::InvalidInput,
+                                "storage batch descriptor exceeds a participant root slot",
                             )
                             .into(),
                         );
                     }
+                    Err(error) if staging_error.is_none() => {
+                        staging_error = Some(Error::from(error));
+                    }
+                    Ok(_) | Err(_) => {}
                 }
+            }
 
-                if staging_error.is_none()
-                    && !preparation_panicked
-                    && participant_count != 0
-                    && embedded_witness.is_none()
-                {
+            let transition = if staging_error.is_none() {
+                embedded_decision.as_deref().map_or(Ok(None), |previous| {
+                    embedded_witness
+                        .as_deref()
+                        .map_or(Ok(false), |_| {
+                            super::batch::can_supersede_embedded(previous, &participants)
+                                .map_err(Error::from)
+                        })
+                        .map(|can_supersede| (!can_supersede).then(|| previous.to_vec()))
+                })
+            } else {
+                Ok(None)
+            };
+            match transition {
+                Ok(Some(previous)) => {
+                    let transition_root = root.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        super::batch::materialize_embedded(&transition_root, &previous)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            namespace.set_embedded_batch_decision(None);
+                            namespace
+                                .carried_batch_decision
+                                .store(false, Ordering::Release);
+                        }
+                        Ok(Err(error)) if staging_error.is_none() => {
+                            staging_error = Some(Error::from(error));
+                        }
+                        Err(error) if error.is_panic() => {
+                            std::panic::resume_unwind(error.into_panic());
+                        }
+                        Err(_) if staging_error.is_none() => staging_error = Some(Error::Closed),
+                        Ok(Err(_)) | Err(_) => {}
+                    }
+                }
+                Ok(None) if carry_decision && embedded_decision.is_none() => {
                     staging_error = Some(
                         std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "storage batch is not eligible for embedded crash recovery",
+                            std::io::ErrorKind::InvalidData,
+                            "carried batch decision has no embedded witness",
                         )
                         .into(),
                     );
                 }
+                Ok(None) => {}
+                Err(error) => staging_error = Some(error),
+            }
+            if staging_error.is_none() && participant_count != 0 && embedded_witness.is_none() {
+                staging_error = Some(
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "storage batch is not eligible for embedded crash recovery",
+                    )
+                    .into(),
+                );
+            }
+
+            if staging_error.is_none() {
                 let stage_witness = embedded_witness.clone();
-                let run_barrier = staging_error.is_none() && !preparation_panicked;
-                for control in controls {
-                    let command = if run_barrier {
-                        BatchControl::StageAndSync(stage_witness.clone())
-                    } else {
-                        BatchControl::Abort
-                    };
-                    let _ = control.send(command);
-                }
-                let mut indexed_states = Vec::with_capacity(item_count);
-                let mut sync_error = None;
+                let stage_jobs = run_blocking_batch_chunks(
+                    std::mem::take(&mut prepared_states),
+                    move |states| stage_batch_chunk(states, stage_witness.clone()),
+                )
+                .await;
                 let mut first_panic = None;
-                for _ in 0..worker_count {
-                    match result_receiver.recv() {
-                        Ok(Ok((states, sync_errors))) => {
-                            indexed_states.extend(states);
-                            if sync_error.is_none() {
-                                sync_error = sync_errors.into_iter().next();
-                            }
-                        }
-                        Ok(Err(panic)) if first_panic.is_none() => {
-                            first_panic = Some(panic);
-                        }
-                        Ok(Err(_)) => {}
-                        Err(_) => {
+                for result in stage_jobs {
+                    match result {
+                        Ok(Ok((states, errors))) => {
+                            prepared_states.extend(states);
                             if staging_error.is_none() {
-                                staging_error = Some(Error::Closed);
+                                staging_error = errors.into_iter().next();
                             }
-                            break;
                         }
+                        Ok(Err(panic)) if first_panic.is_none() => first_panic = Some(panic),
+                        Ok(Err(_)) => {}
+                        Err(error) if error.is_panic() && first_panic.is_none() => {
+                            first_panic = Some(error.into_panic());
+                        }
+                        Err(_) if staging_error.is_none() => staging_error = Some(Error::Closed),
+                        Err(_) => {}
                     }
                 }
                 if let Some(panic) = first_panic {
                     std::panic::resume_unwind(panic);
                 }
-                indexed_states.sort_unstable_by_key(|(index, _, _, _, _)| *index);
-                let prepared_states = indexed_states
-                    .into_iter()
-                    .map(|(_, blob, state, prepared, removed)| (blob, state, prepared, removed))
-                    .collect::<Vec<_>>();
-                if staging_error.is_none() {
-                    staging_error = sync_error;
-                }
-                (
-                    prepared_states,
-                    embedded_witness,
-                    participant_count != 0,
-                    staging_error,
-                )
-            };
+            }
+            prepared_states.sort_unstable_by_key(|participant| participant.index);
+            let has_participant_mutations = participant_count != 0;
 
-            let invalidator = namespace.clone();
-            let committed = std::cell::Cell::new(false);
-            let commit_sender = std::cell::Cell::new(Some(commit_sender));
-            let mut on_commit = Some(on_commit);
-            let result = {
-                let mut notify_commit = |operations: &[super::batch::Operation]| {
-                    invalidator.invalidate_operations(operations);
-                    invalidator
-                        .carried_batch_decision
-                        .store(false, Ordering::Release);
-                    committed.set(true);
-                    if let Some(sender) = commit_sender.take() {
-                        let _ = sender.send(Ok(()));
-                    }
-                    on_commit
-                        .take()
-                        .expect("storage batch commits exactly once")();
-                };
-                staging_error.map_or_else(
-                    || {
-                        if let Some(witness) = embedded_witness {
-                            let has_removals = filesystem_operations
-                                .iter()
-                                .any(|operation| matches!(operation, super::batch::Operation::Remove(_)));
-                            namespace.set_embedded_batch_decision(Some(witness.clone()));
-                            notify_commit(&filesystem_operations);
-                            if has_removals {
-                                super::batch::materialize_embedded(&root, &witness)?;
-                                namespace.set_embedded_batch_decision(None);
-                            }
-                            for (blob, mut state, prepared, removed) in prepared_states.drain(..) {
-                                if removed {
-                                    debug_assert!(prepared.as_ref().is_ok_and(Option::is_some));
-                                    continue;
+            let finish_inline = staging_error.is_none()
+                && embedded_witness.is_some()
+                && on_commit.is_none()
+                && on_complete.is_none()
+                && resize_lengths.is_empty()
+                && !filesystem_operations
+                    .iter()
+                    .any(|operation| matches!(operation, super::batch::Operation::Remove(_)))
+                && prepared_states.iter().all(|participant| {
+                    participant
+                        .prepared
+                        .as_ref()
+                        .ok()
+                        .and_then(Option::as_ref)
+                        .is_none_or(|prepared| !prepared.requires_truncate())
+                });
+            let finish = move || {
+                let invalidator = namespace.clone();
+                let committed = std::cell::Cell::new(false);
+                let commit_sender = std::cell::Cell::new(Some(commit_sender));
+                let mut on_commit = on_commit;
+                let result = {
+                    let mut notify_commit = |operations: &[super::batch::Operation]| {
+                        invalidator.invalidate_operations(operations);
+                        invalidator
+                            .carried_batch_decision
+                            .store(false, Ordering::Release);
+                        committed.set(true);
+                        if let Some(sender) = commit_sender.take() {
+                            let _ = sender.send(Ok(()));
+                        }
+                        if let Some(on_commit) = on_commit.take() {
+                            on_commit();
+                        }
+                    };
+                    staging_error.map_or_else(
+                        || {
+                            if let Some(witness) = embedded_witness {
+                                let has_removals = filesystem_operations.iter().any(|operation| {
+                                    matches!(operation, super::batch::Operation::Remove(_))
+                                });
+                                namespace.set_embedded_batch_decision(Some(witness.clone()));
+                                notify_commit(&filesystem_operations);
+                                if has_removals {
+                                    super::batch::materialize_embedded(&root, &witness)?;
+                                    namespace.set_embedded_batch_decision(None);
                                 }
+                                for mut participant in prepared_states.drain(..) {
+                                    if participant.removed {
+                                        debug_assert!(
+                                            participant
+                                                .prepared
+                                                .as_ref()
+                                                .is_ok_and(Option::is_some)
+                                        );
+                                        participant.state.disarm();
+                                        continue;
+                                    }
+                                    let force_truncate = resize_lengths.contains_key(&(
+                                        participant.blob.partition().to_string(),
+                                        participant.blob.name().to_vec(),
+                                    ));
+                                    let prepared = participant.prepared.unwrap();
+                                    participant.blob.activate_batch_commit(
+                                        &mut participant.state,
+                                        prepared,
+                                        !has_removals,
+                                        force_truncate,
+                                    )?;
+                                    participant.state.disarm();
+                                }
+                                return Ok(!has_removals);
+                            }
+
+                            debug_assert!(!has_participant_mutations);
+                            notify_commit(&filesystem_operations);
+                            for mut participant in prepared_states.drain(..) {
+                                debug_assert!(!participant.removed);
+                                let prepared = participant.prepared.unwrap();
+                                debug_assert!(prepared.is_none());
                                 let force_truncate = resize_lengths.contains_key(&(
-                                    blob.partition().to_string(),
-                                    blob.name().to_vec(),
+                                    participant.blob.partition().to_string(),
+                                    participant.blob.name().to_vec(),
                                 ));
-                                blob.activate_batch_commit(
-                                    &mut state,
-                                    prepared.unwrap(),
-                                    !has_removals,
+                                participant.blob.activate_batch_commit(
+                                    &mut participant.state,
+                                    prepared,
+                                    false,
                                     force_truncate,
                                 )?;
+                                participant.state.disarm();
                             }
-                            return Ok(!has_removals);
-                        }
-
-                        debug_assert!(!has_participant_mutations);
-                        notify_commit(&filesystem_operations);
-                        for (blob, mut state, prepared, removed) in prepared_states.drain(..) {
-                            debug_assert!(!removed);
-                            let prepared = prepared.unwrap();
-                            debug_assert!(prepared.is_none());
-                            let force_truncate = resize_lengths.contains_key(&(
-                                blob.partition().to_string(),
-                                blob.name().to_vec(),
-                            ));
-                            blob.activate_batch_commit(
-                                &mut state,
-                                prepared,
-                                false,
-                                force_truncate,
-                            )?;
-                        }
-                        Ok(false)
-                    },
-                    Err,
-                )
+                            Ok(false)
+                        },
+                        Err,
+                    )
+                };
+                if !committed.get() {
+                    if result.is_ok() {
+                        namespace.invalidate_operations(&filesystem_operations);
+                    }
+                    if let Some(sender) = commit_sender.take() {
+                        let _ = sender.send(result.clone().map(|_| ()));
+                    }
+                }
+                if let Ok(carried) = &result {
+                    namespace
+                        .recovery_required
+                        .store(*carried, Ordering::Release);
+                    namespace
+                        .carried_batch_decision
+                        .store(*carried, Ordering::Release);
+                }
+                drop(guard);
+                if let Some(on_complete) = on_complete {
+                    on_complete();
+                }
+                let _ = completion_sender.send(result.map(|_| ()));
             };
-            if result.is_err() {
-                for (_, state, _, _) in &mut prepared_states {
-                    Blob::poison_batch_state(state);
-                }
+            if finish_inline {
+                finish();
+            } else {
+                drop(tokio::task::spawn_blocking(finish));
             }
-            if !committed.get() {
-                if result.is_ok() {
-                    namespace.invalidate_operations(&filesystem_operations);
-                }
-                if let Some(sender) = commit_sender.take() {
-                    let _ = sender.send(result.clone().map(|_| ()));
-                }
-            }
-            if let Ok(carried) = &result {
-                namespace
-                    .recovery_required
-                    .store(*carried, Ordering::Release);
-                namespace
-                    .carried_batch_decision
-                    .store(*carried, Ordering::Release);
-            }
-            drop(guard);
-            on_complete();
-            let _ = completion_sender.send(result.map(|_| ()));
         }));
 
         match commit_receiver.await {
@@ -1541,7 +1652,7 @@ impl crate::BatchStorage for Storage {
         &self,
         operations: Vec<BatchOperation<Self::AtomicBlob>>,
     ) -> Result<Handle<()>, Error> {
-        self.start_apply_guarded(operations, || {}, || {}, || {})
+        self.start_apply_guarded(operations, None::<fn()>, None::<fn()>, None::<fn()>)
             .await
     }
 }
@@ -1563,7 +1674,7 @@ mod tests {
     use rand::RngExt as _;
     #[cfg(unix)]
     use std::os::unix::fs::FileExt as _;
-    use std::{env, time::Duration};
+    use std::{env, sync::atomic::AtomicUsize, time::Duration};
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -1575,17 +1686,29 @@ mod tests {
         rng.random()
     }
 
-    #[test]
-    fn test_batch_worker_fanout_is_bounded() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_batch_worker_fanout_is_bounded_and_parallel() {
         let jobs = MAX_BATCH_WORKERS * 2 + 1;
-        let threads = commonware_utils::sync::Mutex::new(std::collections::HashSet::new());
-        let results = run_batch_workers((0..jobs).collect(), |job| {
-            threads.lock().insert(std::thread::current().id());
-            job
-        });
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let worker_active = active.clone();
+        let worker_maximum = maximum.clone();
+        let results = run_blocking_batch_chunks((0..jobs).collect(), move |chunk| {
+            let active = worker_active.fetch_add(1, Ordering::SeqCst) + 1;
+            worker_maximum.fetch_max(active, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(25));
+            worker_active.fetch_sub(1, Ordering::SeqCst);
+            chunk
+        })
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .flat_map(Result::unwrap)
+        .collect::<Vec<_>>();
 
         assert_eq!(results, (0..jobs).collect::<Vec<_>>());
-        assert!(threads.lock().len() <= MAX_BATCH_WORKERS);
+        assert!(maximum.load(Ordering::SeqCst) <= MAX_BATCH_WORKERS);
+        assert!(maximum.load(Ordering::SeqCst) > 1);
     }
 
     #[cfg(unix)]
@@ -1989,6 +2112,43 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn test_atomic_batch_with_one_blocking_thread() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = env::temp_dir().join(format!(
+            "storage_tokio_atomic_batch_single_blocking_{}",
+            random_suffix()
+        ));
+        let test_directory = directory.clone();
+        let result = runtime.block_on(async move {
+            let storage = Storage::new(Config::new(test_directory, 2 * 1024 * 1024), test_pool());
+            let (first, _) = storage.open_atomic("partition", b"first").await.unwrap();
+            let (second, _) = storage.open_atomic("partition", b"second").await.unwrap();
+            first.append(b"first-value").await.unwrap();
+            second.append(b"second-value").await.unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                storage.apply(vec![
+                    BatchOperation::Publish(first),
+                    BatchOperation::Publish(second),
+                ]),
+            )
+            .await
+        });
+        runtime.shutdown_timeout(Duration::from_secs(1));
+
+        result
+            .expect("atomic batch deadlocked behind its own blocking worker")
+            .unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_atomic_independent_opens_share_dirty_generation() {
         let directory =
@@ -2183,12 +2343,12 @@ mod tests {
             removing
                 .start_apply_guarded(
                     operations,
-                    move || {
+                    Some(move || {
                         started_tx.send(()).expect("caller waits for worker");
                         proceed_rx.recv().expect("caller releases worker");
-                    },
-                    || {},
-                    || {},
+                    }),
+                    None::<fn()>,
+                    None::<fn()>,
                 )
                 .await
         });
@@ -2220,10 +2380,7 @@ mod tests {
             Config::new(storage_directory.clone(), 2 * 1024 * 1024),
             test_pool(),
         );
-        let (old, _) = storage
-            .open_atomic("batch_start", b"victim")
-            .await
-            .unwrap();
+        let (old, _) = storage.open_atomic("batch_start", b"victim").await.unwrap();
         old.write_at(0, b"old", WriteOptions::SYNC).await.unwrap();
         let (resized, _) = storage
             .open_atomic("batch_resize", b"retained")
@@ -2249,16 +2406,16 @@ mod tests {
         let completion = storage
             .start_apply_guarded(
                 operations,
-                || {},
-                move || {
+                None::<fn()>,
+                Some(move || {
                     parked_tx
                         .send(())
                         .expect("caller waits for committed worker");
                     proceed_rx.recv().expect("caller releases committed worker");
-                },
-                move || {
+                }),
+                Some(move || {
                     let _ = finished_tx.send(());
-                },
+                }),
             )
             .await
             .unwrap();
@@ -2340,16 +2497,14 @@ mod tests {
                     BatchOperation::Publish(first.clone()),
                     BatchOperation::Publish(second.clone()),
                 ],
-                || {},
-                move || {
+                None::<fn()>,
+                Some(move || {
                     parked_tx
                         .send(())
                         .expect("test waits for the durable group decision");
-                    proceed_rx
-                        .recv()
-                        .expect("test releases group completion");
-                },
-                || {},
+                    proceed_rx.recv().expect("test releases group completion");
+                }),
+                None::<fn()>,
             )
             .await
             .unwrap();

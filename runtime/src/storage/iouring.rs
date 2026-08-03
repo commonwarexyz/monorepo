@@ -43,12 +43,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-type ResolvedHeader = (
-    u64,
-    u16,
-    u64,
-    Option<[u8; Header::V2_INCARNATION_LEN]>,
-);
+type ResolvedHeader = (u64, u16, u64, Option<[u8; Header::V2_INCARNATION_LEN]>);
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
 fn resolve_header(
@@ -62,17 +57,18 @@ fn resolve_header(
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    Ok(super::header::resolve(
-        &raw, raw_len, versions, partition, name,
-    )?
-    .map(|(logical_size, blob_version, data_offset)| {
-        (
-            logical_size,
-            blob_version,
-            data_offset,
-            Header::atomic_incarnation(&raw),
-        )
-    }))
+    Ok(
+        super::header::resolve(&raw, raw_len, versions, partition, name)?.map(
+            |(logical_size, blob_version, data_offset)| {
+                (
+                    logical_size,
+                    blob_version,
+                    data_offset,
+                    Header::atomic_incarnation(&raw),
+                )
+            },
+        ),
+    )
 }
 
 /// Syncs a directory to ensure directory entry changes are durable.
@@ -497,6 +493,21 @@ impl Storage {
                 state.validate_rewind(*len)?;
             }
         }
+        let mut participants = Vec::new();
+        for (blob, state) in &locked {
+            let key = (blob.partition.clone(), blob.name.clone());
+            let participates = if removals.contains(&key) {
+                true
+            } else if let Some(len) = rewind_lengths.get(&key) {
+                state.participates_after_rewind(*len)?
+            } else {
+                state.is_dirty()
+            };
+            if participates {
+                participants.push((blob.partition.as_str(), blob.name.as_slice()));
+            }
+        }
+        super::batch::preflight_descriptor(&filesystem_operations, participants)?;
 
         self.namespace
             .recovery_required
@@ -759,26 +770,27 @@ impl Storage {
             }
 
             let stage_witness = embedded_witness.clone();
-            let participant_commits = prepared_states
-                .iter_mut()
-                .filter_map(|(blob, _, prepared, removed)| {
-                    let prepared = prepared.as_mut().unwrap().as_mut()?;
-                    Some(async {
-                        if *removed {
-                            blob.stage_batch_delete(
-                                prepared,
-                                stage_witness
-                                    .as_deref()
-                                    .expect("eligible deletions have an embedded witness"),
-                            )
-                            .await
-                        } else {
-                            blob.stage_batch_commit(prepared, stage_witness.as_deref())
-                                .await?;
-                            blob.sync_batch_commit().await
-                        }
-                    })
-                });
+            let participant_commits =
+                prepared_states
+                    .iter_mut()
+                    .filter_map(|(blob, _, prepared, removed)| {
+                        let prepared = prepared.as_mut().unwrap().as_mut()?;
+                        Some(async {
+                            if *removed {
+                                blob.stage_batch_delete(
+                                    prepared,
+                                    stage_witness
+                                        .as_deref()
+                                        .expect("eligible deletions have an embedded witness"),
+                                )
+                                .await
+                            } else {
+                                blob.stage_batch_commit(prepared, stage_witness.as_deref())
+                                    .await?;
+                                blob.sync_batch_commit().await
+                            }
+                        })
+                    });
             let commit_error = join_all(participant_commits)
                 .await
                 .into_iter()
@@ -860,10 +872,9 @@ impl Storage {
                     }
                     operation.finish();
                 }
-                namespace.recovery_required.store(
-                    completion.is_err() || !has_removals,
-                    Ordering::Release,
-                );
+                namespace
+                    .recovery_required
+                    .store(completion.is_err() || !has_removals, Ordering::Release);
                 namespace
                     .carried_batch_decision
                     .store(completion.is_ok() && !has_removals, Ordering::Release);
@@ -1685,11 +1696,7 @@ impl Blob {
         let prepared = self.prepare_log_writes(state, false, true).await?;
         if let Some(prepared) = &prepared {
             let start = prepared.payload_start();
-            super::atomic::begin_payload_writeback(
-                &self.file,
-                start,
-                prepared.raw_len() - start,
-            )?;
+            super::atomic::begin_payload_writeback(&self.file, start, prepared.raw_len() - start)?;
         }
         Ok(prepared)
     }
@@ -2612,10 +2619,7 @@ mod tests {
     #[tokio::test]
     async fn test_committed_batch_survives_completion_drop() {
         let (storage, storage_directory) = create_test_storage();
-        let (old, _) = storage
-            .open_atomic("batch_start", b"victim")
-            .await
-            .unwrap();
+        let (old, _) = storage.open_atomic("batch_start", b"victim").await.unwrap();
         old.write_at(0, b"old", WriteOptions::SYNC).await.unwrap();
         let (resized, _) = storage
             .open_atomic("batch_resize", b"retained")

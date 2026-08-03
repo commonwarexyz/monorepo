@@ -143,6 +143,7 @@ pub(crate) mod tests {
         test_apply_batch_deduplication(&storage).await;
         test_apply_batch_mixed_success(&storage).await;
         test_apply_batch_publishes_two_pending_blobs(&storage).await;
+        test_apply_batch_does_not_charge_clean_publishes_to_witness(&storage).await;
         test_apply_batch_carries_consecutive_publications(&storage).await;
         test_apply_batch_carries_disjoint_publications(&storage).await;
         test_apply_batch_rejects_non_atomic_handle(&storage).await;
@@ -497,6 +498,25 @@ pub(crate) mod tests {
         );
     }
 
+    /// Clean publications do not occupy the embedded descriptor carried by dirty participants.
+    async fn test_apply_batch_does_not_charge_clean_publishes_to_witness<S>(storage: &S)
+    where
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let mut operations = Vec::new();
+        for name in 0u8..28 {
+            let (blob, _) = storage.open_atomic("p", &[name]).await.unwrap();
+            operations.push(BatchOperation::Publish(blob));
+        }
+        let (dirty, _) = storage.open_atomic("p", b"dirty").await.unwrap();
+        dirty.append(b"value").await.unwrap();
+        operations.push(BatchOperation::Publish(dirty.clone()));
+
+        storage.apply(operations).await.unwrap();
+        assert_eq!(dirty.read_at(0, 5).await.unwrap().coalesce(), b"value");
+    }
+
     /// A later batch can durably supersede a still-authoritative prior decision.
     async fn test_apply_batch_carries_consecutive_publications<S>(storage: &S)
     where
@@ -549,13 +569,14 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
+        // Materializing the carried first decision must not truncate this newer pending tail.
+        first.append(b"a2").await.unwrap();
         second.append(b"b1").await.unwrap();
         storage
             .apply(vec![BatchOperation::Publish(second.clone())])
             .await
             .unwrap();
-
-        first.append(b"a2").await.unwrap();
+        assert_eq!(first.read_at(0, 4).await.unwrap().coalesce(), b"a1a2");
         storage
             .apply(vec![BatchOperation::Publish(first.clone())])
             .await

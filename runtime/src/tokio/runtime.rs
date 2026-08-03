@@ -969,10 +969,7 @@ mod tests {
                 .unwrap();
 
             assert!(context.scan("batch_remove").await.unwrap().is_empty());
-            assert_eq!(
-                blob.read_at(0, 8).await.unwrap().coalesce(),
-                b"retained"
-            );
+            assert_eq!(blob.read_at(0, 8).await.unwrap().coalesce(), b"retained");
             let (_, len) = context.open_atomic("batch_remove", b"blob").await.unwrap();
             assert_eq!(len, 0);
         });

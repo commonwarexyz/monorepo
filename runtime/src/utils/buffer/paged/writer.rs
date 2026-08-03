@@ -3016,9 +3016,7 @@ mod tests {
                 ));
             }
 
-            self.inner
-                .write_at(offset, bufs, options)
-                .await
+            self.inner.write_at(offset, bufs, options).await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -3065,10 +3063,7 @@ mod tests {
         ) -> Result<(), Error> {
             let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
             if write != self.fail_on {
-                return self
-                    .inner
-                    .write_at(offset, bufs, options)
-                    .await;
+                return self.inner.write_at(offset, bufs, options).await;
             }
 
             let bytes = bufs.into().coalesce();
@@ -3262,9 +3257,7 @@ mod tests {
             bufs: impl Into<IoBufs> + Send,
             options: WriteOptions,
         ) -> Result<(), Error> {
-            self.inner
-                .write_at(offset, bufs, options)
-                .await
+            self.inner.write_at(offset, bufs, options).await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {

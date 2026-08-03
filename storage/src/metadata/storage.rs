@@ -435,11 +435,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                 .chain([
                     target
                         .blob
-                        .write_at(
-                            0,
-                            data.slice(0..u64::SIZE),
-                            WriteOptions::default(),
-                        ),
+                        .write_at(0, data.slice(0..u64::SIZE), WriteOptions::default()),
                     target.blob.write_at(
                         checksum_index as u64,
                         data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),

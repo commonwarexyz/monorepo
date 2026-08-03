@@ -536,10 +536,6 @@ impl Blob {
         Ok(())
     }
 
-    pub(super) const fn poison_batch_state(state: &mut V2State) {
-        state.poison();
-    }
-
     #[cfg(test)]
     pub(super) async fn wait_for_background_preflush(&self) -> Result<u64, Error> {
         let atomic = self

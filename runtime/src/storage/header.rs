@@ -647,9 +647,11 @@ pub(crate) mod tests {
 
         let incarnation = Header::atomic_incarnation(&region).unwrap();
         assert_ne!(incarnation, [0; Header::V2_INCARNATION_LEN]);
-        assert!(region[Header::V2_IMMUTABLE_LEN..]
-            .iter()
-            .all(|&byte| byte == 0));
+        assert!(
+            region[Header::V2_IMMUTABLE_LEN..]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
 
         let (size, parsed_blob_version, data_offset) =
             Header::parse(&region, Layout::V2.data_offset(), &(0..=7)).unwrap();
@@ -776,11 +778,7 @@ pub(crate) mod tests {
         let mut bad_incarnation = v2_header_region(0);
         bad_incarnation[Header::V2_INCARNATION_OFFSET] ^= 0x01;
         assert!(matches!(
-            Header::parse(
-                &bad_incarnation,
-                Layout::V2.data_offset(),
-                &(0..=0)
-            ),
+            Header::parse(&bad_incarnation, Layout::V2.data_offset(), &(0..=0)),
             Err(HeaderError::InvalidChecksum)
         ));
 
