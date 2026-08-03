@@ -228,8 +228,6 @@ pub struct Context<S, P> {
 
 impl<S, P> Context<S, P> {
     /// Creates a new handshake context.
-    ///
-    /// `namespace` must uniquely identify the application using the handshake.
     pub fn new(
         namespace: &[u8],
         current_time_ms: u64,
