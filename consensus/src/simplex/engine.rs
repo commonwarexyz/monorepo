@@ -123,7 +123,6 @@ impl<
                 epoch: cfg.epoch,
                 fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
-                certification_timeout: cfg.certification_timeout,
                 term_length,
             },
         );

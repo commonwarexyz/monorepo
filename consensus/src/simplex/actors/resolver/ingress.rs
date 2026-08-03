@@ -2,13 +2,12 @@ use crate::{
     Epochable, Viewable,
     simplex::{
         actors::Purpose,
-        types::{Certificate, Notarization},
+        types::Certificate,
     },
     types::{Round as Rnd, View},
 };
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_codec::Encode;
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Consumer, Delivery, Outcome, p2p::Producer};
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -31,8 +30,6 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         span: Span,
         /// The certified round.
         round: Rnd,
-        /// Exact notarization encoded for serving if certification succeeds.
-        encoded_notarization: Bytes,
         /// Whether certification succeeded.
         success: bool,
     },
@@ -226,18 +223,15 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Notify the resolver of a certification result.
-    pub fn certified(&mut self, notarization: &Notarization<S, D>, success: bool) {
-        let round = notarization.round();
-        let encoded_notarization = Certificate::Notarization(notarization.clone()).encode();
+    pub fn certified(&mut self, round: Rnd, success: bool) {
         let _ = self.sender.enqueue(MailboxMessage::Certified {
             span: info_span!(
                 "simplex.resolver.mailbox.certified",
-                epoch = notarization.epoch().traced(),
-                view = notarization.view().traced(),
+                epoch = round.epoch().traced(),
+                view = round.view().traced(),
                 success
             ),
             round,
-            encoded_notarization,
             success,
         });
     }
@@ -459,7 +453,6 @@ mod tests {
         MailboxMessage::Certified {
             span: Span::none(),
             round: Round::new(EPOCH, view),
-            encoded_notarization: Bytes::new(),
             success,
         }
     }

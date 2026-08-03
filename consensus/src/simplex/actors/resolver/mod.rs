@@ -97,7 +97,6 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
     pub mailbox_size: NonZeroUsize,
     pub fetch_concurrent: NonZeroUsize,
     pub fetch_timeout: Duration,
-    pub certification_timeout: Duration,
     pub term_length: TermLength,
 }
 
