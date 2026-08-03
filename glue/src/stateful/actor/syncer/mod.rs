@@ -7,7 +7,7 @@ use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
     marshal::{
         Identifier,
-        core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant},
+        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Variant},
     },
     simplex::types::Finalization,
     types::Height,
@@ -309,6 +309,7 @@ where
 /// durable processed height.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
+    floor: Floor,
     finalization: &Finalization<S, V::Commitment>,
 ) -> ResolvedFloor<E, A>
 where
@@ -317,29 +318,37 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    // Wait to retrieve the floor block from marshal. We use `Wait` here,
-    // since marshal triggers a fetch for the floor block if it is not
-    // already available.
-    let selected = {
-        let block = marshal
-            .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
-            .await
-            .expect("marshal must yield floor block");
-        V::into_inner_shared(block)
-    };
+    // Marshal skips installing a startup floor whose round is already processed. Its block may
+    // have been pruned, so apply the same rule before registering a local-only waiter.
+    let block = if let Some(height) = floor.height()
+        && floor.round() >= finalization.round()
+    {
+        V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+    } else {
+        // Marshal's configured startup floor fetches its anchor when needed. This local-only
+        // subscription observes that result without starting a separate fetch.
+        let selected = {
+            let block = marshal
+                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .await
+                .expect("marshal must yield floor block");
+            V::into_inner_shared(block)
+        };
 
-    // Marshal does not redeliver acknowledged blocks. A newly installed floor is the exception:
-    // its processed position is the predecessor so the retained anchor is dispatched once.
-    let floor = match marshal.get_processed_height().await {
-        Some(height) if height > selected.height() => {
-            V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+        // Marshal does not redeliver acknowledged blocks. A newly installed floor is the
+        // exception: its processed position is the predecessor so the retained anchor is
+        // dispatched once.
+        match marshal.get_processed_height().await {
+            Some(height) if height > selected.height() => {
+                V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+            }
+            _ => selected,
         }
-        _ => selected,
     };
 
     ResolvedFloor {
-        anchor: Anchor::from(floor.as_ref()),
-        targets: A::sync_targets(floor.as_ref()),
+        anchor: Anchor::from(block.as_ref()),
+        targets: A::sync_targets(block.as_ref()),
     }
 }
 

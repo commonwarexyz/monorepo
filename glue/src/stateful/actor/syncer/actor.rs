@@ -9,7 +9,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
-    marshal::core::{Mailbox as MarshalMailbox, Variant},
+    marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
     simplex::types::Finalization,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -49,8 +49,8 @@ where
     /// Finalized floor marshal should resolve before sync starts.
     pub finalization: Finalization<S, V::Commitment>,
 
-    /// Marshal mailbox used to query the finalized floor.
-    pub marshal: MarshalMailbox<S, V>,
+    /// Marshal mailbox and the durable floor returned with it during initialization.
+    pub marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Notifies the stateful actor when state sync has produced an artifact.
     pub sync_complete: oneshot::Sender<SyncResult<E, A>>,
@@ -85,8 +85,8 @@ where
     /// Finalized floor marshal should resolve before sync starts.
     finalization: Finalization<S, V::Commitment>,
 
-    /// Marshal mailbox used to query the finalized floor.
-    marshal: MarshalMailbox<S, V>,
+    /// Marshal mailbox and the durable floor returned with it during initialization.
+    marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Notifies the stateful actor when state sync has produced an artifact.
     sync_complete: Option<oneshot::Sender<SyncResult<E, A>>>,
@@ -125,8 +125,12 @@ where
     }
 
     pub async fn run(mut self) {
-        let resolved_floor =
-            resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
+        let resolved_floor = resolve_state_sync_floor::<E, A, S, V>(
+            &self.marshal.0,
+            self.marshal.1,
+            &self.finalization,
+        )
+        .await;
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);
@@ -236,8 +240,12 @@ mod tests {
         },
     };
     use commonware_consensus::{
+        Heightable as _, Reporter as _,
         marshal::ancestry::Ancestry,
-        simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
+        simplex::{
+            mocks::scheme as scheme_mocks,
+            types::{Activity, Context as SimplexContext},
+        },
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
@@ -380,6 +388,7 @@ mod tests {
             let processed_block = TestBlock::new(1, 1);
             let MarshalFixture {
                 mailbox: marshal,
+                floor,
                 guards: _guards,
             } = fixtures::marshal_fixture_with_finalized_block(
                 context.child("marshal"),
@@ -401,7 +410,7 @@ mod tests {
                 WedgeApp,
                 TestScheme,
                 TestVariant,
-            >(&marshal, &selected)
+            >(&marshal, floor, &selected)
             .await;
             assert_eq!(resolved.anchor.height, Height::new(1));
             assert_eq!(resolved.targets, 1);
@@ -417,6 +426,7 @@ mod tests {
             let MarshalFixture {
                 mailbox: marshal,
                 guards: _guards,
+                ..
             } = fixtures::marshal_fixture_with_floor(
                 context.child("marshal"),
                 "syncer-floor-install",
@@ -458,16 +468,17 @@ mod tests {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-resolve", 1);
             let selected = TestBlock::new(1, 1);
             let selected_finalization = fixtures::finalization(&fixture, 1, Sha256::fill(1));
-            let floor = TestBlock::new(3, 3);
+            let floor_block = TestBlock::new(3, 3);
             let floor_finalization = fixtures::finalization(&fixture, 3, Sha256::fill(3));
             let MarshalFixture {
                 mailbox: marshal,
+                floor,
                 guards: _guards,
             } = fixtures::marshal_fixture_with_floor(
                 context.child("marshal"),
                 "syncer-floor-resolve",
                 fixture.schemes[0].clone(),
-                &floor,
+                &floor_block,
                 floor_finalization,
                 NZUsize!(1),
             )
@@ -487,7 +498,7 @@ mod tests {
                         WedgeApp,
                         TestScheme,
                         TestVariant,
-                    >(&marshal, &selected_finalization)
+                    >(&marshal, floor, &selected_finalization)
                     .await
                 }
             });
@@ -504,6 +515,102 @@ mod tests {
         });
     }
 
+    #[test]
+    fn resolved_floor_skips_selected_block_pruned_by_newer_floor() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-pruned-floor", 1);
+            let selected_finalization = fixtures::finalization(&fixture, 1, Sha256::fill(1));
+            let first = fixtures::prunable_marshal_fixture(
+                context.child("marshal"),
+                "syncer-pruned-floor",
+                fixture.schemes[0].clone(),
+                None,
+                NZUsize!(1),
+            )
+            .await;
+            let mut marshal = first.mailbox.clone();
+
+            for height in 1..=9 {
+                let block = TestBlock::new(height, height as u8);
+                let finalization =
+                    fixtures::finalization(&fixture, height, Sha256::fill(height as u8));
+                let height = block.height();
+                assert!(marshal.verified(finalization.proposal.round, block).await);
+                let _ = marshal.report(Activity::Finalization(finalization));
+                for _ in 0..100 {
+                    if marshal.get_processed_height().await == Some(height) {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                assert_eq!(marshal.get_processed_height().await, Some(height));
+            }
+
+            let newer_floor = TestBlock::new(10, 10);
+            let newer_finalization = fixtures::finalization(&fixture, 10, Sha256::fill(10));
+            assert!(
+                marshal
+                    .verified(newer_finalization.proposal.round, newer_floor)
+                    .await
+            );
+            marshal.set_floor(newer_finalization);
+            for _ in 0..100 {
+                if marshal.get_block(Height::new(1)).await.is_none() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(marshal.get_block(Height::new(1)).await.is_none());
+            for _ in 0..100 {
+                if marshal.get_processed_height().await == Some(Height::new(10)) {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert_eq!(marshal.get_processed_height().await, Some(Height::new(10)));
+
+            first.abort();
+            drop(marshal);
+            context.sleep(Duration::from_millis(1)).await;
+
+            let MarshalFixture {
+                mailbox: marshal,
+                floor,
+                guards: _guards,
+            } = fixtures::prunable_marshal_fixture(
+                context.child("marshal_restart"),
+                "syncer-pruned-floor",
+                fixture.schemes[0].clone(),
+                Some(selected_finalization.clone()),
+                NZUsize!(1),
+            )
+            .await;
+            assert_eq!(floor.height(), Some(Height::new(10)));
+            assert!(floor.round() > selected_finalization.proposal.round);
+            assert!(
+                marshal
+                    .get_block(&selected_finalization.proposal.payload)
+                    .await
+                    .is_none(),
+                "stale selected block must remain unavailable after restart",
+            );
+
+            let resolved = commonware_macros::select! {
+                resolved = resolve_state_sync_floor::<
+                    deterministic::Context,
+                    WedgeApp,
+                    TestScheme,
+                    TestVariant,
+                >(&marshal, floor, &selected_finalization) => resolved,
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("a superseded floor must not wait for its pruned block");
+                },
+            };
+            assert_eq!(resolved.anchor.height, Height::new(10));
+            assert_eq!(resolved.targets, 10);
+        });
+    }
+
     /// A tip update stranded in the ring buffer by sync completion must resolve through the
     /// caller's retry with the completed artifact, not wedge its observation forever.
     #[test]
@@ -514,6 +621,7 @@ mod tests {
             let finalization = fixtures::finalization(&fixture, 0, Sha256::fill(0));
             let MarshalFixture {
                 mailbox: marshal,
+                floor,
                 guards: _guards,
             } = fixtures::marshal_fixture(
                 context.child("marshal"),
@@ -539,7 +647,7 @@ mod tests {
                     },
                     resolvers: (),
                     finalization,
-                    marshal,
+                    marshal: (marshal, floor),
                     sync_complete,
                 });
             let actor = syncer.start();

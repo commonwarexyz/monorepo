@@ -565,7 +565,7 @@ impl EngineDefinition for MultiDbEngine {
             max_pending_acks,
             strategy: Sequential,
         };
-        let (marshal_actor, marshal_mailbox, _last_height) =
+        let (marshal_actor, marshal_mailbox, floor) =
             MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
                 context.child("marshal"),
                 finalizations_by_height,
@@ -622,7 +622,7 @@ impl EngineDefinition for MultiDbEngine {
                 application,
                 db_config,
                 provider: (),
-                marshal: marshal_mailbox.clone(),
+                marshal: (marshal_mailbox.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),

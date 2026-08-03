@@ -18,7 +18,7 @@ use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
     marshal::{
         ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
+        core::{Floor, Mailbox as MarshalMailbox, Variant},
     },
     simplex::types::Finalization,
 };
@@ -117,8 +117,8 @@ where
     /// Provider cloned into each proposal.
     pub provider: A::Provider,
 
-    /// Marshal mailbox used for startup anchoring and lazy recovery.
-    pub marshal: MarshalMailbox<S, V>,
+    /// Marshal mailbox and the durable floor returned with it during initialization.
+    pub marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Capacity of the stateful actor mailbox channel.
     pub mailbox_size: NonZeroUsize,
@@ -164,8 +164,8 @@ where
     /// Provider cloned into each proposal.
     provider: A::Provider,
 
-    /// Marshal mailbox used for startup anchoring and lazy recovery.
-    marshal: MarshalMailbox<S, V>,
+    /// Marshal mailbox and the durable floor returned with it during initialization.
+    marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
@@ -201,7 +201,7 @@ where
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
-                config.marshal.max_pending_acks(),
+                config.marshal.0.max_pending_acks(),
                 &mut context,
             )
         });
@@ -240,12 +240,13 @@ where
 
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
-    async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
+    async fn start_state_sync(self, finalization: Finalization<S, V::Commitment>) {
+        let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
         let sync_metadata = self
             .plan
             .into_sync_metadata()
-            .begin_sync(floor.clone())
+            .begin_sync(finalization.clone())
             .await;
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
@@ -253,8 +254,8 @@ where
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),
-            finalization: floor,
-            marshal: self.marshal.clone(),
+            finalization,
+            marshal: (marshal.clone(), floor),
             sync_complete,
         });
         let syncing = Syncing {
@@ -262,7 +263,7 @@ where
             mailbox: self.mailbox,
             application: self.application,
             provider: self.provider,
-            marshal: self.marshal,
+            marshal,
             sync_metadata,
             syncer: syncer_mailbox,
             held_verify_requests: Vec::new(),
@@ -279,12 +280,13 @@ where
 
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(self) {
+        let (marshal, _) = self.marshal;
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
             skip_finalized_until,
         } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
-            &self.marshal,
+            &marshal,
             self.db_config,
             self.plan.into_sync_metadata(),
         )
@@ -303,7 +305,7 @@ where
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
-            marshal: self.marshal,
+            marshal,
             processor,
             skip_finalized_until,
         }
@@ -390,7 +392,7 @@ mod tests {
                     application: TestApp,
                     db_config: (),
                     provider: (),
-                    marshal: marshal.mailbox,
+                    marshal: (marshal.mailbox, marshal.floor),
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,

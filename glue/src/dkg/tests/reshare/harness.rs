@@ -834,7 +834,7 @@ impl EngineDefinition for ReshareEngine {
             };
             plan = plan.with_floor(finalization);
         }
-        let (marshal_actor, marshal, _) = MarshalActor::init(
+        let (marshal_actor, marshal, floor) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -976,7 +976,7 @@ impl EngineDefinition for ReshareEngine {
                 },
                 db_config,
                 provider: (),
-                marshal: marshal.clone(),
+                marshal: (marshal.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,

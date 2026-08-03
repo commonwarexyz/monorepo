@@ -7,14 +7,27 @@ use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
 use commonware_utils::vec::NonEmptyVec;
 
-/// Durable processed floor used to admit or reject resolver fetches.
-#[derive(Clone, Copy)]
-struct ProcessedFloor {
+/// Durable height and round bounds restored when marshal initializes.
+///
+/// The components are independent retention bounds and need not identify the
+/// same finalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Floor {
     height: Option<Height>,
     round: Round,
 }
 
-impl ProcessedFloor {
+impl Floor {
+    /// Returns the latest durably processed height, if any.
+    pub const fn height(&self) -> Option<Height> {
+        self.height
+    }
+
+    /// Returns the latest durably processed finalization round.
+    pub const fn round(&self) -> Round {
+        self.round
+    }
+
     /// Returns true when the resolver request is above all processed floors.
     fn permits<C: Digest>(&self, fetch: &Request<C>) -> bool {
         if let Some(height) = self.height
@@ -38,15 +51,15 @@ impl FetchAdmission {
 }
 
 /// The processed floor plus any pending floor update awaiting its anchor block.
-pub(super) struct Floor<S: Scheme, C: Digest> {
-    processed: ProcessedFloor,
+pub(super) struct State<S: Scheme, C: Digest> {
+    processed: Floor,
     pending: Option<Finalization<S, C>>,
 }
 
-impl<S: Scheme, C: Digest> Floor<S, C> {
+impl<S: Scheme, C: Digest> State<S, C> {
     pub(super) const fn resolved(height: Option<Height>, round: Round) -> Self {
         Self {
-            processed: ProcessedFloor { height, round },
+            processed: Floor { height, round },
             pending: None,
         }
     }
@@ -57,7 +70,7 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
         finalization: Finalization<S, C>,
     ) -> Self {
         Self {
-            processed: ProcessedFloor { height, round },
+            processed: Floor { height, round },
             pending: Some(finalization),
         }
     }
@@ -67,6 +80,10 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
             Some(height) => height,
             None => Height::zero(),
         }
+    }
+
+    pub(super) const fn processed(&self) -> Floor {
+        self.processed
     }
 
     pub(super) const fn processed_round(&self) -> Round {
@@ -259,8 +276,8 @@ mod tests {
         Sha256::fill(byte)
     }
 
-    fn floor() -> Floor<TestScheme, TestDigest> {
-        Floor::resolved(Some(Height::new(5)), round(5))
+    fn floor() -> State<TestScheme, TestDigest> {
+        State::resolved(Some(Height::new(5)), round(5))
     }
 
     #[test]
@@ -396,7 +413,7 @@ mod tests {
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor = Floor::<TestScheme, TestDigest>::resolved(None, round(5));
+        let floor = State::<TestScheme, TestDigest>::resolved(None, round(5));
         let mut resolver = TestResolver::default();
 
         assert!(matches!(

@@ -862,6 +862,7 @@ mod tests {
             let MarshalFixture {
                 mailbox: marshal,
                 guards: _guards,
+                ..
             } = fixtures::marshal_fixture(
                 context.child("marshal"),
                 "syncing-harness",
@@ -919,6 +920,7 @@ mod tests {
             let MarshalFixture {
                 mailbox: marshal,
                 guards: _guards,
+                ..
             } = fixtures::marshal_fixture(
                 context.child("marshal"),
                 "syncing-harness",
@@ -994,6 +996,7 @@ mod tests {
             let MarshalFixture {
                 mailbox: marshal,
                 guards: _guards,
+                ..
             } = fixtures::marshal_fixture(
                 context.child("marshal"),
                 "syncing-harness",
@@ -1094,6 +1097,7 @@ mod tests {
             let MarshalFixture {
                 mailbox: marshal,
                 guards: _guards,
+                ..
             } = fixtures::marshal_fixture(
                 context.child("marshal"),
                 "syncing-harness",
@@ -1139,6 +1143,7 @@ mod tests {
             let MarshalFixture {
                 mailbox: marshal,
                 guards: _guards,
+                ..
             } = fixtures::marshal_fixture(
                 context.child("marshal"),
                 "syncing-harness",
@@ -1195,6 +1200,7 @@ mod tests {
             let MarshalFixture {
                 mailbox: marshal,
                 guards: _guards,
+                ..
             } = fixtures::marshal_fixture(
                 context.child("marshal"),
                 "syncing-harness",

@@ -4,7 +4,7 @@ use super::{
     cache,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::Floor,
+    floor::{Floor, State as FloorState},
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
@@ -129,7 +129,7 @@ where
 
     // ---------- State ----------
     // Current processed floor and any pending floor update
-    floor: Floor<P::Scheme, V::Commitment>,
+    floor: FloorState<P::Scheme, V::Commitment>,
     // Application delivery cursor
     stream: Stream<E>,
     // Pending application acknowledgements
@@ -179,7 +179,7 @@ where
         finalizations_by_height: FC,
         mut finalized_blocks: FB,
         config: Config<P, ES, T, V::ApplicationBlock, V::Block, V::Commitment>,
-    ) -> (Self, Mailbox<P::Scheme, V>, Option<Height>) {
+    ) -> (Self, Mailbox<P::Scheme, V>, Floor) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix),
@@ -227,12 +227,17 @@ where
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
         }
-        let floor = pending_floor_anchor.map_or_else(
-            || Floor::resolved(last_processed_height, last_processed_round),
+        let floor_state = pending_floor_anchor.map_or_else(
+            || FloorState::resolved(last_processed_height, last_processed_round),
             |finalization| {
-                Floor::awaiting_anchor(last_processed_height, last_processed_round, finalization)
+                FloorState::awaiting_anchor(
+                    last_processed_height,
+                    last_processed_round,
+                    finalization,
+                )
             },
         );
+        let floor = floor_state.processed();
 
         // Initialize mailbox
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -246,7 +251,7 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
-                floor,
+                floor: floor_state,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
@@ -259,7 +264,7 @@ where
                 processed_height,
             },
             Mailbox::new(sender, config.max_pending_acks),
-            last_processed_height,
+            floor,
         )
     }
 

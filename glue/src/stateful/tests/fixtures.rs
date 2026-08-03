@@ -6,7 +6,7 @@ use commonware_consensus::{
     Heightable as _, Reporter,
     marshal::{
         self, Update,
-        core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+        core::{Actor as MarshalActor, Floor, Mailbox as MarshalMailbox},
         resolver::handler,
     },
     simplex::types::{Finalization, Finalize, Proposal},
@@ -20,8 +20,11 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_resolver::{Fetch, Resolver, TargetedResolver};
-use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
-use commonware_storage::archive::{Archive as _, immutable};
+use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_storage::{
+    archive::{Archive as _, immutable, prunable},
+    translator::TwoCap,
+};
 use commonware_utils::{
     NZU16, NZU64, NZUsize, acknowledgement::Acknowledgement as _, vec::NonEmptyVec,
 };
@@ -154,12 +157,40 @@ fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()
     }
 }
 
-/// A marshal actor fixture over freshly initialized immutable archives.
+fn prunable_archive_config(page_cache: CacheRef, partition: &str) -> prunable::Config<TwoCap, ()> {
+    prunable::Config {
+        translator: TwoCap,
+        key_partition: format!("{partition}-key"),
+        key_page_cache: page_cache,
+        value_partition: format!("{partition}-value"),
+        compression: None,
+        codec_config: (),
+        items_per_section: NZU64!(4),
+        key_write_buffer: NZUsize!(64),
+        value_write_buffer: NZUsize!(64),
+        replay_buffer: NZUsize!(64),
+    }
+}
+
+/// A marshal actor fixture over initialized finalization and block archives.
 pub(crate) struct MarshalFixture {
     pub(crate) mailbox: MarshalMailbox<TestScheme, TestVariant>,
+    pub(crate) floor: Floor,
     /// Keeps the fixture alive: the unstarted actor (its mailbox dead-letters once this
     /// drops) or the started actor's resolver handler and task handle.
     pub(crate) guards: Box<dyn std::any::Any>,
+}
+
+impl MarshalFixture {
+    /// Aborts a started fixture so its durable storage can be reopened.
+    pub(crate) fn abort(self) {
+        let guards = self
+            .guards
+            .downcast::<(handler::Handler<Sha256Digest>, Handle<()>)>()
+            .unwrap_or_else(|_| panic!("marshal fixture was not started"));
+        let (_, handle) = *guards;
+        handle.abort();
+    }
 }
 
 /// Initializes a marshal actor whose finalization archive is pre-seeded with `seed`.
@@ -250,13 +281,52 @@ pub(crate) async fn marshal_fixture_with_floor(
     .await
 }
 
+/// Initializes a started marshal actor over prunable finalized archives.
+pub(crate) async fn prunable_marshal_fixture(
+    context: deterministic::Context,
+    prefix: &str,
+    scheme: TestScheme,
+    floor: Option<Finalization<TestScheme, Sha256Digest>>,
+    max_pending_acks: NonZeroUsize,
+) -> MarshalFixture {
+    let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+    let finalizations_by_height = prunable::Archive::init(
+        context.child("finalizations_by_height"),
+        prunable_archive_config(page_cache.clone(), &format!("{prefix}-finalizations")),
+    )
+    .await
+    .expect("failed to initialize finalizations archive");
+    let finalized_blocks = prunable::Archive::init(
+        context.child("finalized_blocks"),
+        prunable_archive_config(page_cache.clone(), &format!("{prefix}-blocks")),
+    )
+    .await
+    .expect("failed to initialize blocks archive");
+
+    start_marshal_fixture(
+        context,
+        prefix,
+        scheme,
+        Options {
+            seed: None,
+            block: None,
+            floor,
+            max_pending_acks,
+            dispatch: Dispatch::Acknowledge,
+        },
+        page_cache,
+        finalizations_by_height,
+        finalized_blocks,
+    )
+    .await
+}
+
 async fn marshal_fixture_inner(
     context: deterministic::Context,
     prefix: &str,
     scheme: TestScheme,
-    options: Options<'_>,
+    mut options: Options<'_>,
 ) -> MarshalFixture {
-    let provider = ConstantProvider::new(scheme);
     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
     let mut finalizations_by_height = immutable::Archive::init(
         context.child("finalizations_by_height"),
@@ -279,7 +349,7 @@ async fn marshal_fixture_inner(
             .await
             .expect("failed to sync finalized blocks archive");
     }
-    if let Some((block, finalization)) = options.seed {
+    if let Some((block, finalization)) = options.seed.take() {
         finalizations_by_height = finalizations_by_height
             .put(block.height().get(), block.digest(), finalization)
             .await
@@ -289,7 +359,37 @@ async fn marshal_fixture_inner(
             .expect("failed to sync finalizations archive");
     }
 
-    let (actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+    start_marshal_fixture(
+        context,
+        prefix,
+        scheme,
+        options,
+        page_cache,
+        finalizations_by_height,
+        finalized_blocks,
+    )
+    .await
+}
+
+async fn start_marshal_fixture<FC, FB>(
+    context: deterministic::Context,
+    prefix: &str,
+    scheme: TestScheme,
+    options: Options<'_>,
+    page_cache: CacheRef,
+    finalizations_by_height: FC,
+    finalized_blocks: FB,
+) -> MarshalFixture
+where
+    FC: marshal::store::Certificates<
+            BlockDigest = Sha256Digest,
+            Commitment = Sha256Digest,
+            Scheme = TestScheme,
+        >,
+    FB: marshal::store::Blocks<Block = TestBlock>,
+{
+    let provider = ConstantProvider::new(scheme);
+    let (actor, mailbox, floor) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
         context.child("marshal_actor"),
         finalizations_by_height,
         finalized_blocks,
@@ -318,6 +418,7 @@ async fn marshal_fixture_inner(
     if matches!(options.dispatch, Dispatch::Stopped) {
         return MarshalFixture {
             mailbox,
+            floor,
             guards: Box::new(actor),
         };
     }
@@ -330,6 +431,7 @@ async fn marshal_fixture_inner(
     let handle = actor.start_unbuffered(reporter, (resolver_receiver, IgnoreResolver));
     MarshalFixture {
         mailbox,
+        floor,
         guards: Box::new((resolver_handler, handle)),
     }
 }
