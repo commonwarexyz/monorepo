@@ -3,7 +3,7 @@ use crate::{
     merkle::Family,
     qmdb::{
         any::{FixedValue, value::FixedEncoding},
-        operation::{commit_fixed_size, read_commit_fixed, write_commit_fixed},
+        operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
     },
 };
 use commonware_codec::{
@@ -23,7 +23,7 @@ const fn set_op_size<K: Array, V: FixedSize>() -> usize {
 }
 
 const fn total_op_size<K: Array, V: FixedSize>() -> usize {
-    const_max(set_op_size::<K, V>(), commit_fixed_size::<V>())
+    const_max(set_op_size::<K, V>(), commit_fixed_operation_size::<V>())
 }
 
 impl<F: Family, K: Array, V: FixedValue> FixedSize for Operation<F, K, FixedEncoding<V>> {
@@ -43,7 +43,7 @@ impl<F: Family, K: Array, V: FixedValue> Write for Operation<F, K, FixedEncoding
             Self::Commit(v, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 write_commit_fixed(v, *floor_loc, buf);
-                buf.put_bytes(0, total - commit_fixed_size::<V>());
+                buf.put_bytes(0, total - commit_fixed_operation_size::<V>());
             }
         }
     }
@@ -65,7 +65,7 @@ impl<F: Family, K: Array, V: FixedValue> Read for Operation<F, K, FixedEncoding<
             }
             COMMIT_CONTEXT => {
                 let (value, floor_loc) = read_commit_fixed(buf)?;
-                ensure_zeros(buf, total - commit_fixed_size::<V>())?;
+                ensure_zeros(buf, total - commit_fixed_operation_size::<V>())?;
                 Ok(Self::Commit(value, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),

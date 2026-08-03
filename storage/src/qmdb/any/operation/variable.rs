@@ -9,7 +9,9 @@ use crate::{
             },
             value::VariableEncoding,
         },
-        operation::{Key, commit_variable_size, read_commit_variable, write_commit_variable},
+        operation::{
+            Key, commit_variable_payload_size, read_commit_variable, write_commit_variable,
+        },
     },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -77,7 +79,7 @@ where
         1 + match self {
             Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => commit_variable_size(v, *floor),
+            Self::CommitFloor(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }
@@ -94,7 +96,7 @@ where
         1 + match self {
             Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => commit_variable_size(v, *floor),
+            Self::CommitFloor(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }

@@ -3,7 +3,7 @@ use crate::{
     qmdb::{
         any::{FixedValue, value::FixedEncoding},
         keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Codec, Operation},
-        operation::{commit_fixed_size, read_commit_fixed, write_commit_fixed},
+        operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
     },
 };
 use commonware_codec::{
@@ -12,11 +12,10 @@ use commonware_codec::{
 };
 use commonware_runtime::{Buf, BufMut};
 
-/// Fixed padded operation size. `Commit` (1 context + 1 option tag + `V::SIZE` + `u64` floor) is
-/// always the larger variant, so the uniform size is the commit size; `Append` (1 context +
-/// `V::SIZE`) pads to match.
+/// Fixed padded operation size: `Commit` is always the larger variant, so the uniform size is the
+/// commit size, which `Append` pads to match.
 const fn op_size<V: FixedSize>() -> usize {
-    commit_fixed_size::<V>()
+    commit_fixed_operation_size::<V>()
 }
 
 impl<V: FixedValue> Codec for FixedEncoding<V> {

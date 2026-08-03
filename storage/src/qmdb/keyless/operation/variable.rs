@@ -3,7 +3,7 @@ use crate::{
     qmdb::{
         any::{VariableValue, value::VariableEncoding},
         keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Codec, Operation},
-        operation::{commit_variable_size, read_commit_variable, write_commit_variable},
+        operation::{commit_variable_payload_size, read_commit_variable, write_commit_variable},
     },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -44,7 +44,7 @@ impl<F: Family, V: VariableValue> EncodeSize for Operation<F, VariableEncoding<V
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Append(v) => v.encode_size(),
-            Self::Commit(v, floor) => commit_variable_size(v, *floor),
+            Self::Commit(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }

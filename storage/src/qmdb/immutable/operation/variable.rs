@@ -3,7 +3,9 @@ use crate::{
     merkle::Family,
     qmdb::{
         any::{VariableValue, value::VariableEncoding},
-        operation::{Key, commit_variable_size, read_commit_variable, write_commit_variable},
+        operation::{
+            Key, commit_variable_payload_size, read_commit_variable, write_commit_variable,
+        },
     },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -13,7 +15,7 @@ impl<F: Family, K: Key, V: VariableValue> EncodeSize for Operation<F, K, Variabl
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Set(k, v) => k.encode_size() + v.encode_size(),
-            Self::Commit(v, floor) => commit_variable_size(v, *floor),
+            Self::Commit(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }

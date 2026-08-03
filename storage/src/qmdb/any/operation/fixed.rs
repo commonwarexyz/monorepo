@@ -9,7 +9,7 @@ use crate::{
             },
             value::FixedEncoding,
         },
-        operation::{commit_fixed_size, read_commit_fixed, write_commit_fixed},
+        operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
     },
 };
 use commonware_codec::{
@@ -35,7 +35,7 @@ const fn delete_op_size<K: Array>() -> usize {
 const fn total_op_size<K: Array, V: FixedSize, S: FixedSize>() -> usize {
     const_max(
         update_op_size::<S>(),
-        const_max(commit_fixed_size::<V>(), delete_op_size::<K>()),
+        const_max(commit_fixed_operation_size::<V>(), delete_op_size::<K>()),
     )
 }
 
@@ -64,7 +64,7 @@ where
             Operation::CommitFloor(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 write_commit_fixed(metadata, *floor_loc, buf);
-                buf.put_bytes(0, total - commit_fixed_size::<V>());
+                buf.put_bytes(0, total - commit_fixed_operation_size::<V>());
             }
         }
     }
@@ -89,7 +89,7 @@ where
             }
             COMMIT_CONTEXT => {
                 let (metadata, floor_loc) = read_commit_fixed(buf)?;
-                ensure_zeros(buf, total - commit_fixed_size::<V>())?;
+                ensure_zeros(buf, total - commit_fixed_operation_size::<V>())?;
                 Ok(Operation::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),

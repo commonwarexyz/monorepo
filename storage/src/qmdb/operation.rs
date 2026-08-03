@@ -50,18 +50,14 @@ pub trait Committable {
 }
 
 // Commit operations are shared across the `any`, `immutable`, and `keyless` families: every commit
-// carries optional metadata and an inactivity floor, encoded identically. These helpers write and
-// read that shared payload, so each family's codec only supplies its own context byte (and, in the
-// fixed encoding, any trailing padding to a uniform operation size).
+// carries optional metadata and an inactivity floor, encoded identically.
 
-/// On-disk size of a fixed-encoded commit operation: the context byte, the option tag, the value
-/// padded to `V::SIZE`, and the `u64` inactivity floor.
-pub(crate) const fn commit_fixed_size<V: FixedSize>() -> usize {
+/// On-disk size of a fixed-encoded commit operation.
+pub(crate) const fn commit_fixed_operation_size<V: FixedSize>() -> usize {
     1 + 1 + V::SIZE + u64::SIZE
 }
 
-/// Writes the fixed-encoded commit payload that follows the context byte: an option tag, the value
-/// (or `V::SIZE` zero bytes when absent), and the inactivity floor as a big-endian `u64`.
+/// Writes a commit's optional metadata and inactivity floor in the fixed encoding.
 pub(crate) fn write_commit_fixed<F: Family, V: Write + FixedSize>(
     metadata: &Option<V>,
     floor: Location<F>,
@@ -76,11 +72,7 @@ pub(crate) fn write_commit_fixed<F: Family, V: Write + FixedSize>(
     buf.put_slice(&floor.as_u64().to_be_bytes());
 }
 
-/// Reads the fixed-encoded commit payload following the context byte written by
-/// [`write_commit_fixed`]: the option tag, the value (validating the zero padding of an absent
-/// value), and the inactivity floor.
-///
-/// Returns [`CodecError::Invalid`] if the floor overflows the location space.
+/// Reads a commit's optional metadata and inactivity floor from the fixed encoding.
 pub(crate) fn read_commit_fixed<F: Family, V: Read<Cfg = ()> + FixedSize>(
     buf: &mut impl Buf,
 ) -> Result<(Option<V>, Location<F>), CodecError> {
@@ -100,17 +92,15 @@ pub(crate) fn read_commit_fixed<F: Family, V: Read<Cfg = ()> + FixedSize>(
     Ok((metadata, floor))
 }
 
-/// Encoded size of the variable-encoded commit payload following the context byte: the optional
-/// value and the inactivity floor varint.
-pub(crate) fn commit_variable_size<F: Family, V: EncodeSize>(
+/// Encoded size of a variable-encoded commit payload.
+pub(crate) fn commit_variable_payload_size<F: Family, V: EncodeSize>(
     metadata: &Option<V>,
     floor: Location<F>,
 ) -> usize {
     metadata.encode_size() + floor.encode_size()
 }
 
-/// Writes the variable-encoded commit payload following the context byte: the optional value, then
-/// the inactivity floor as a varint.
+/// Writes a commit's optional metadata and inactivity floor in the variable encoding.
 pub(crate) fn write_commit_variable<F: Family, V: Write>(
     metadata: &Option<V>,
     floor: Location<F>,
@@ -120,9 +110,7 @@ pub(crate) fn write_commit_variable<F: Family, V: Write>(
     floor.write(buf);
 }
 
-/// Reads the variable-encoded commit payload following the context byte written by
-/// [`write_commit_variable`]: the optional value, then the inactivity floor (validated by
-/// [`Location`]'s decoder).
+/// Reads a commit's optional metadata and inactivity floor from the variable encoding.
 pub(crate) fn read_commit_variable<F: Family, V: Read>(
     buf: &mut impl Buf,
     value_cfg: &V::Cfg,
