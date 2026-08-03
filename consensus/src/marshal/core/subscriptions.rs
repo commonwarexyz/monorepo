@@ -142,7 +142,7 @@ mod tests {
     use futures::FutureExt;
     use std::sync::Arc;
 
-    type TestBlock = EmptyBlock<Digest>;
+    type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
     type TestWaiters = AbortablePool<Result<Arc<TestBlock>, KeyFor<TestVariant>>>;
     type Subscriber = oneshot::Sender<Arc<TestBlock>>;
@@ -199,7 +199,7 @@ mod tests {
     }
 
     fn block(height: u64, timestamp: u64) -> TestBlock {
-        EmptyBlock::new::<Sha256>(Sha256::fill(0), Height::new(height), timestamp)
+        TestBlock::new(Sha256::fill(0), Height::new(height), timestamp)
     }
 
     fn assert_receives(receiver: oneshot::Receiver<Arc<TestBlock>>, expected: &TestBlock) {

@@ -587,7 +587,7 @@ mod test {
     type H = Sha256;
     type RS = ReedSolomon<H>;
     type RShard = Shard<RS, H>;
-    type TestBlock = EmptyBlock<<H as Hasher>::Digest>;
+    type TestBlock = EmptyBlock<H>;
 
     #[test]
     fn test_shard_wrapper_codec_roundtrip() {
@@ -657,8 +657,7 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
 
         let encoded = coded_block.encode();
@@ -685,8 +684,7 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let expected =
             CodedBlock::<TestBlock, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
                 .commitment();
@@ -715,8 +713,7 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let cloned = coded_block.clone();
 
@@ -734,8 +731,7 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block.clone());
 
@@ -759,8 +755,7 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let original_commitment = coded_block.commitment();
         let original_digest = coded_block.digest();
@@ -781,8 +776,7 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block =
-            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block);
 

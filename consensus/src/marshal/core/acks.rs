@@ -113,7 +113,7 @@ mod tests {
     use commonware_cryptography::sha256::{Digest, Sha256};
     use commonware_utils::acknowledgement::Exact;
 
-    type TestBlock = EmptyBlock<Digest>;
+    type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
 
     fn digest(byte: u8) -> Digest {

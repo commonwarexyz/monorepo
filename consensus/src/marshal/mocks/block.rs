@@ -6,95 +6,113 @@ use std::fmt::Debug;
 
 /// A mock block with no explicit consensus context.
 /// Its parent digest also serves as its certification context.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EmptyBlock<D: Digest> {
+pub struct EmptyBlock<H: Hasher> {
     /// The parent block's digest.
-    pub parent: D,
+    pub parent: H::Digest,
 
     /// The height of the block in the blockchain.
     pub height: Height,
 
     /// The timestamp of the block (in milliseconds since the Unix epoch).
     pub timestamp: u64,
-
-    /// Pre-computed digest of the block.
-    digest: D,
 }
 
-impl<D: Digest> EmptyBlock<D> {
-    pub fn new<H: Hasher<Digest = D>>(parent: D, height: Height, timestamp: u64) -> Self {
-        let digest = H::hash(&[
-            parent.as_ref(),
-            &height.get().to_be_bytes(),
-            &timestamp.to_be_bytes(),
-        ]);
+impl<H: Hasher> EmptyBlock<H> {
+    pub const fn new(parent: H::Digest, height: Height, timestamp: u64) -> Self {
         Self {
             parent,
             height,
             timestamp,
-            digest,
         }
     }
 }
 
-impl<D: Digest> Write for EmptyBlock<D> {
+impl<H: Hasher> Clone for EmptyBlock<H> {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent,
+            height: self.height,
+            timestamp: self.timestamp,
+        }
+    }
+}
+
+impl<H: Hasher> Debug for EmptyBlock<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmptyBlock")
+            .field("parent", &self.parent)
+            .field("height", &self.height)
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
+}
+
+impl<H: Hasher> PartialEq for EmptyBlock<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.parent == other.parent
+            && self.height == other.height
+            && self.timestamp == other.timestamp
+    }
+}
+
+impl<H: Hasher> Eq for EmptyBlock<H> {}
+
+impl<H: Hasher> Write for EmptyBlock<H> {
     fn write(&self, writer: &mut impl BufMut) {
         self.parent.write(writer);
         self.height.write(writer);
         UInt(self.timestamp).write(writer);
-        self.digest.write(writer);
     }
 }
 
-impl<D: Digest> Read for EmptyBlock<D> {
+impl<H: Hasher> Read for EmptyBlock<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        let parent = D::read(reader)?;
+        let parent = H::Digest::read(reader)?;
         let height = Height::read(reader)?;
         let timestamp = UInt::read(reader)?.into();
-        let digest = D::read(reader)?;
 
         Ok(Self {
             parent,
             height,
             timestamp,
-            digest,
         })
     }
 }
 
-impl<D: Digest> EncodeSize for EmptyBlock<D> {
+impl<H: Hasher> EncodeSize for EmptyBlock<H> {
     fn encode_size(&self) -> usize {
-        self.parent.encode_size()
-            + self.height.encode_size()
-            + UInt(self.timestamp).encode_size()
-            + self.digest.encode_size()
+        self.parent.encode_size() + self.height.encode_size() + UInt(self.timestamp).encode_size()
     }
 }
 
-impl<D: Digest> Digestible for EmptyBlock<D> {
-    type Digest = D;
+impl<H: Hasher> Digestible for EmptyBlock<H> {
+    type Digest = H::Digest;
 
-    fn digest(&self) -> D {
-        self.digest
+    fn digest(&self) -> H::Digest {
+        H::hash(&[
+            self.parent.as_ref(),
+            &self.height.get().to_be_bytes(),
+            &self.timestamp.to_be_bytes(),
+        ])
     }
 }
 
-impl<D: Digest> crate::Heightable for EmptyBlock<D> {
+impl<H: Hasher> crate::Heightable for EmptyBlock<H> {
     fn height(&self) -> Height {
         self.height
     }
 }
 
-impl<D: Digest> crate::Block for EmptyBlock<D> {
+impl<H: Hasher> crate::Block for EmptyBlock<H> {
     fn parent(&self) -> Self::Digest {
         self.parent
     }
 }
 
-impl<D: Digest> crate::CertifiableBlock for EmptyBlock<D> {
-    type Context = D;
+impl<H: Hasher> crate::CertifiableBlock for EmptyBlock<H> {
+    type Context = H::Digest;
 
     fn context(&self) -> Self::Context {
         self.parent
