@@ -31,10 +31,10 @@
 //! targets the first gap at the proposal's leader. Matching evidence or finalization retires that
 //! request, whereas a certified-floor raise retires only background work.
 //!
-//! The wire key names the certificate wanted alongside the view, so a responder holding both a
-//! notarization and a covering nullification does not have to guess, and any other certificate is
-//! invalid for the key. A valid notarization may wait up to the certification timeout for its local
-//! verdict while other deliveries continue independently.
+//! The wire key names only the view. A responder holding both a notarization and a covering
+//! nullification cannot tell which one the requester wants, so it serves one at random. The
+//! requester recognizes a response that does not settle its demand and retries without faulting the
+//! peer.
 //!
 //! # Mid-Term Floor Raises
 //!

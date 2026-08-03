@@ -78,7 +78,7 @@ pub(crate) enum Until {
     /// The view is finalized.
     ///
     /// Used for ancestry a proposal named. A proposal may name ancestry below the
-    /// local floor, which is exactly the case where a peer holds a nullification
+    /// local floor, which is the case where a peer holds a nullification
     /// for a view this node has certified a notarization for, so only
     /// finalization can retire it.
     Finalization,

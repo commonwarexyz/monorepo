@@ -83,12 +83,9 @@ pub struct Actor<
 
     /// Certificates still wanted from peers, paired with what retires each.
     ///
-    /// This mirrors the resolver's outstanding fetches. Whether a demand still
-    /// needs fetching is decided by [Self::settled], which reads local evidence
-    /// and so needs `&self`, while [Resolver::retain] takes a `'static`
-    /// predicate. Owning the demands here keeps that decision in one place and
-    /// lets the survivors be snapshotted into the predicate (see
-    /// [Self::sync_demands]).
+    /// This mirrors the resolver's outstanding fetches. Owning them here keeps
+    /// retirement in one place: [Self::settled] decides it from local evidence,
+    /// and [Self::sync_demands] publishes the survivors to the resolver.
     demands: BTreeSet<(View, Demand)>,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
@@ -324,15 +321,13 @@ impl<
     /// [Self::settled] directly, which is why the survivors are snapshotted into
     /// it.
     fn sync_demands<R: Resolver<Key = U64, Subscriber = Demand>>(&mut self, resolver: &mut R) {
-        let settled: Vec<_> = self
+        let live: BTreeSet<_> = self
             .demands
             .iter()
             .copied()
-            .filter(|(view, demand)| self.settled(*view, demand.kind))
+            .filter(|(view, demand)| !self.settled(*view, demand.kind))
             .collect();
-        self.demands.retain(|entry| !settled.contains(entry));
-
-        let live = self.demands.clone();
+        self.demands = live.clone();
         let _ = resolver
             .retain(move |key, demand| live.contains(&(View::new(u64::from(key)), *demand)));
     }
@@ -444,8 +439,8 @@ impl<
     ///
     /// The request does not say which certificate it wants, so when both a
     /// notarization and a covering nullification are held either may be the one
-    /// the requester needs. The choice is random rather than fixed: a fixed
-    /// preference would answer every retry from a requester wanting the other
+    /// the requester needs. The choice is random: a fixed preference
+    /// would answer every retry from a requester wanting the other
     /// kind with the same useless certificate.
     fn produce_certificate(&mut self, view: View) -> Option<Bytes> {
         // A finalization settles either kind, so weaker evidence would only
@@ -476,7 +471,7 @@ impl<
     /// Validity is judged against `view` alone, because that is all the request
     /// named. Any certificate an honest peer could serve for the view is accepted,
     /// including one that answers the other kind: rejecting it would fault a peer
-    /// that answered the only question the wire key actually asked. Whether it
+    /// that answered the only question the wire key asked. Whether it
     /// settles the demand is a separate judgement (see [Self::settled]).
     fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         let incoming =
