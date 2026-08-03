@@ -67,9 +67,10 @@
 //! peer. Unlinks begin only after every final-root durability operation returns.
 //!
 //! The configured recovery cap is 32 dirty participants, but the root slot is tighter: the current
-//! encoding fits at most 28 even with empty names, and real names or removals lower that bound. At
-//! most 64 MiB of payload is revalidated across a group. Larger or non-contiguous pending append
-//! epochs are preflushed before roots are staged. CRC32C detects accidental local-disk crash
+//! encoding fits at most 28 even with empty names, and real names or removals lower that bound.
+//! Total pending append bytes have no protocol batch limit. At most 64 MiB is left for
+//! revalidation across a group; larger or non-contiguous pending epochs preflush immutable payload
+//! before roots are staged instead of being rejected. CRC32C detects accidental local-disk crash
 //! corruption probabilistically; it does not authenticate storage against an actor that can also
 //! rewrite checksums.
 

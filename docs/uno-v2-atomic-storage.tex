@@ -250,7 +250,7 @@
     \end{tikzpicture}
   \end{center}
 
-  \vspace{0.08cm}
+  \vspace{0.04cm}
   \small A checksum can detect a torn overwrite; it cannot restore overwritten bytes. Append-only preserves the old prefix, so a root can select a complete visible prefix.
 
   \vfill
@@ -364,11 +364,11 @@
   \note{The barriers are issued concurrently. If start_apply returns Ok, all required participant states are durably recoverable, even if the completion handle is dropped. Awaiting the handle waits for activation and namespace cleanup. A failed or cancelled start remains indeterminate because every barrier may in fact have reached disk.}
 \end{frame}
 
-\begin{frame}[t]{Current atomic batches are root-slot bounded}
-  \vspace{0.01cm}
+\begin{frame}[t]{Batch limits: descriptor bytes, not payload bytes}
+  \vspace{0cm}
   \eyebrow{Every dirty participant: one 4 KiB root slot holds the complete decision}
 
-  \vspace{0.08cm}
+  \vspace{0.07cm}
   \noindent\hfill
     \begin{tikzpicture}[node distance=.06cm]
       \node[oldroot,text width=1.75cm,minimum height=.72cm] (roothead) {40 B\\\scriptsize candidate root};
@@ -377,7 +377,7 @@
     \end{tikzpicture}
   \hfill\null
 
-  \vspace{0.2cm}
+  \vspace{0.02cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.49\textwidth}
       \eyebrow{Hard admission limit}
@@ -392,22 +392,73 @@
       \scriptsize Only dirty participants count. Each costs 140 B + partition + blob name; a delete repeats its target. Real names lower 28. Oversize is rejected before roots are staged.
     \end{column}
     \begin{column}{0.49\textwidth}
-      \eyebrow{Soft recovery-work bound}
+      \eyebrow{Payload size: no protocol batch cap}
 
       \vspace{0.08cm}
       \begin{tikzpicture}
-        \node[root,text width=5.4cm,minimum height=.78cm] {\Large\bfseries 64 MiB aggregate\\\scriptsize maximum unresolved payload suffix revalidated after crash};
+        \node[root,text width=5.4cm,minimum height=.78cm] {\Large\bfseries arbitrarily large epoch\\\scriptsize streamed once + incrementally preflushed};
       \end{tikzpicture}
 
       \vspace{0.08cm}
-      \scriptsize Larger or non-contiguous epochs preflush before roots are staged. They are not rejected and payload is not written twice; publication may wait only for the uncovered durability frontier.
+      \scriptsize At most \textbf{64 MiB aggregate} remains as an unresolved CRC tail for restart. Older bytes preflush before roots are staged: no rejection and no second payload write.
     \end{column}
   \end{columns}
 
   \vfill
-  \takeaway{Descriptor bytes set the hard ceiling; 64 MiB only bounds recovery work. Contiguous uses at most 2 fixed or 4 variable participants.}
+  \takeaway{Descriptor bytes cap participants. Payload bytes do not: 64 MiB caps only restart CRC work. Contiguous uses at most 2 fixed or 4 variable participants.}
 
-  \note{The Vec-based API is not an unbounded transaction. The implementation rejects more than 32 dirty participants, but the replicated descriptor reaches the 4 KiB root-slot limit first: 28 is only the zero-name upper bound, and real partition names, blob names, and deletion records consume more space. This is checked before roots are staged. The separate 64 MiB limit is deliberately soft. It bounds bytes that restart may need to read and CRC, so large epochs establish a durable payload prefix before publishing roots instead of failing or copying payload. The contiguous design is comfortably inside the participant limit: fixed rollover publishes at most prior and current roots; variable publishes the data/offsets pair for each, at most four roots.}
+  \note{The Vec-based API is bounded in participant metadata, not payload bytes. The implementation rejects more than 32 dirty participants, but the replicated descriptor reaches the 4 KiB root-slot limit first: 28 is only the zero-name upper bound, and real partition names, blob names, and deletion records consume more space. This is checked before roots are staged. An epoch may contain arbitrarily much payload within ordinary storage and offset limits. As appends arrive, completed durability operations turn older immutable bytes into a trusted prefix. Publication leaves at most 64 MiB across the group under CRC32C, so restart work stays bounded without rejecting or copying a large epoch. Fixed contiguous rollover publishes at most prior and current roots; variable publishes the data/offsets pair for each, at most four roots.}
+\end{frame}
+
+\begin{frame}[t]{Large epochs advance a trusted payload prefix}
+  \vspace{0cm}
+  \eyebrow{While appending: payload is at final offsets; no candidate root exists yet}
+
+  \vspace{0.03cm}
+  \noindent\hfill
+    \begin{tikzpicture}[node distance=.07cm]
+      \node[oldroot,text width=2.05cm,minimum height=.7cm] (old) {old root\\\scriptsize authoritative};
+      \node[box,text width=4.15cm,minimum height=.7cm,right=.28cm of old] (prefix) {trusted prefix through $F$\\\scriptsize only completed durability counts};
+      \node[root,text width=3.35cm,minimum height=.7cm,right=of prefix] (tail) {tail $[F,E)$\\\scriptsize rolling CRC32C};
+      \draw[flow] ([yshift=.18cm]prefix.north west) -- node[above,font=\scriptsize,text=Accent] {coalesced preflush moves $F$} ([yshift=.18cm]prefix.north east);
+      \draw[flow,draw=Amber] ([yshift=-.16cm]tail.south east) -- node[below,font=\scriptsize,text=Amber] {pending rewind: drain preflush $\rightarrow$ reset $F$/CRC $\rightarrow$ reclaim + reuse tail} ([yshift=-.16cm]prefix.south west);
+    \end{tikzpicture}
+  \hfill\null
+
+  \vspace{0cm}
+  \eyebrow{At \texttt{sync}: freeze one epoch, then publish}
+
+  \vspace{0.02cm}
+  \noindent\hfill
+    \begin{tikzpicture}[node distance=.2cm]
+      \node[box,text width=1.65cm,minimum height=.64cm] (freeze) {freeze $E$};
+      \node[box,text width=1.85cm,minimum height=.64cm,right=of freeze] (wait) {preflush\\\scriptsize if needed};
+      \node[box,text width=1.9cm,minimum height=.64cm,right=of wait] (crc) {CRC $[F,E)$\\\scriptsize tail only};
+      \node[root,text width=1.9cm,minimum height=.64cm,right=of crc] (stage) {write P root\\+ descriptor};
+      \node[root,text width=1.9cm,minimum height=.64cm,right=of stage] (barrier) {durability\\barrier};
+      \draw[flow] (freeze) -- (wait);
+      \draw[flow] (wait) -- (crc);
+      \draw[flow] (crc) -- (stage);
+      \draw[flow] (stage) -- (barrier);
+    \end{tikzpicture}
+  \hfill\null
+
+  \vspace{0cm}
+  \eyebrow{Crash outcome}
+
+  \vspace{0cm}
+  \noindent\hfill
+    \begin{tikzpicture}[node distance=.08cm]
+      \node[oldroot,text width=3.4cm,minimum height=.58cm] (before) {before P: \textbf{old}\\\scriptsize preflush stays unreachable};
+      \node[warn,text width=4.25cm,minimum height=.58cm,right=of before] (during) {in flight: \textbf{old or new}\\\scriptsize new is always complete};
+      \node[root,text width=3.35cm,minimum height=.58cm,right=of during] (after) {after \texttt{Ok}: \textbf{new}\\\scriptsize complete epoch is durable};
+    \end{tikzpicture}
+  \hfill\null
+
+  \vfill
+  \takeaway{Repeat per participant: no payload-byte cap, at most 64 MiB aggregate restart tail, and concurrent final barriers.}
+
+  \note{Only a completed fdatasync-equivalent advances the trusted frontier F; sync_file_range or another writeback hint never does. Background preflush is coalesced while the producer continues, and it writes no root. At publication, each participant waits only for any durability frontier it must rely on. The descriptor names that trusted prefix and carries CRC32C for the remaining tail; tail budgets sum to at most 64 MiB across the group. The final participant barriers run concurrently. A very large append followed immediately by sync may still wait for a payload preflush and then the root barrier, but payload is never copied or written twice. Before root staging, a crash can expose only old. Once staging begins, the ordinary indeterminate window applies: old or complete new.}
 \end{frame}
 
 \begin{frame}[t]{Intentional limitation: no global sync order}
@@ -682,7 +733,7 @@
 
       \vspace{0.12cm}
       \begin{tikzpicture}
-        \node[panel,text width=4.72cm,align=left] {\textbf{What remains non-free}\\\scriptsize root/descriptor work + group locking;\\recovery evidence; one barrier per\\participant\\[.06cm]\textbf{Recovery bound:} 64 MiB aggregate\\suffix; larger or non-contiguous epochs\\preflush};
+        \node[panel,text width=4.72cm,align=left] {\textbf{What remains non-free}\\\scriptsize root/descriptor work + group locking;\\recovery evidence; one barrier per\\participant\\[.06cm]\textbf{No epoch-byte cap:} at most 64 MiB\\remains as the restart CRC tail; older\\payload preflushes};
       \end{tikzpicture}
     \end{column}
   \end{columns}

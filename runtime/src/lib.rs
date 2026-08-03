@@ -826,11 +826,12 @@ stability_scope!(BETA {
         ///
         /// The Tokio and io_uring implementations reject more than 32 dirty mutation
         /// participants, but descriptor space is currently tighter: even empty names fit at most
-        /// 28 participants, and real names or removals lower that bound. At most 64 MiB of newly
-        /// appended payload is revalidated after a crash; larger or non-contiguous pending epochs
-        /// are made durable before their roots are staged rather than rejected. The exact
-        /// descriptor must fit in the unused portion of every participant's 4 KiB root slot.
-        /// Clean publishes do not count as participants.
+        /// 28 participants, and real names or removals lower that bound. Total pending append bytes
+        /// have no protocol batch limit. At most 64 MiB is left for revalidation after a crash;
+        /// larger or non-contiguous pending epochs preflush immutable payload before their roots
+        /// are staged rather than being rejected. The exact descriptor must fit in the unused
+        /// portion of every participant's 4 KiB root slot. Clean publishes do not count as
+        /// participants.
         fn start_apply(
             &self,
             operations: Vec<BatchOperation<Self::AtomicBlob>>,
