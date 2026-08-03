@@ -39,10 +39,13 @@ pub struct Config<C: Signer> {
     /// (allows known peers to connect from unknown IPs).
     pub bypass_ip_check: bool,
 
-    /// Maximum size allowed for messages over any connection.
+    /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The actual size of the network message will be higher due to overhead from the protocol;
-    /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
+    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
+    /// part of the payload and counts toward this limit.
+    ///
+    /// Framing and transport overhead are added after this size check and do not count toward
+    /// the limit, so the resulting network message will be larger.
     pub max_message_size: u32,
 
     /// Message backlog allowed for internal actors.

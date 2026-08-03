@@ -94,13 +94,13 @@
 //! - `channel`: A `u32` identifier used to route the message to the correct application handler.
 //! - `message`: The arbitrary application payload as `IoBuf`.
 //!
-//! The size of the `message` bytes must not exceed the configured
-//! `max_message_size`. If it does, the sending operation will panic. Messages can be sent with `priority`, allowing certain
-//! communications to potentially bypass lower-priority messages waiting in send queues across all
-//! channels. Each registered logical channel has one bounded inbound mailbox shared by all peer
-//! connections. Inbound rate limiting is enforced independently for each peer.
-//! Authentication identifies the sender, but the network does not inspect application payload
-//! semantics before adding a message to this mailbox.
+//! Sending an application payload larger than the configured `max_message_size` panics.
+//! Framing and transport overhead are added after this check and do not count toward the limit.
+//! Messages can be sent with `priority`, allowing certain communications to potentially bypass
+//! lower-priority messages waiting in send queues across all channels. Each registered logical
+//! channel has one bounded inbound mailbox shared by all peer connections. Inbound rate limiting
+//! is enforced independently for each peer. Authentication identifies the sender, but the network
+//! does not inspect application payload semantics before adding a message to this mailbox.
 //!
 //! ## Compression
 //!
@@ -632,6 +632,21 @@ mod tests {
 
             // Ensure no message rate limiting occurred
             assert_no_rate_limiting(&context.encode());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "maximum frame size overflow")]
+    fn test_max_message_size_overflow_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                u32::MAX,
+            );
+            let _ = Network::new(context.child("network"), config);
         });
     }
 
