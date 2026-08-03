@@ -464,6 +464,9 @@ impl Executor {
     fn wake_until_ready_or_empty(&self, mut current: SystemTime) {
         loop {
             current = self.skip_idle_time(current);
+            if self.deadline.is_some_and(|deadline| current >= deadline) {
+                panic!("runtime timeout");
+            }
             self.wake_ready_sleepers(current);
 
             if cfg!(feature = "external")
@@ -1758,6 +1761,26 @@ mod tests {
 
             // The stale child alarm must not prevent a later live alarm from firing.
             context.sleep(Duration::from_secs(2)).await;
+        });
+    }
+
+    #[cfg(not(feature = "external"))]
+    #[test]
+    #[should_panic(expected = "runtime timeout")]
+    fn test_dropped_sleeper_beyond_timeout() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (started_sender, started_receiver) = oneshot::channel();
+            let sleeper = context.child("sleeper").spawn(|context| async move {
+                let mut sleep = Box::pin(context.sleep(Duration::from_secs(20)));
+                assert!(sleep.as_mut().now_or_never().is_none());
+                started_sender.send(()).unwrap();
+                sleep.await;
+            });
+
+            started_receiver.await.unwrap();
+            sleeper.abort();
+            pending::<()>().await;
         });
     }
 

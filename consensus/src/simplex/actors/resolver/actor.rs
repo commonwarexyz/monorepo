@@ -32,13 +32,9 @@ use commonware_utils::{
     sequence::U64,
     vec::NonEmptyVec,
 };
+use rand::RngExt as _;
 use rand_core::CryptoRng;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    future::Future,
-    num::NonZeroUsize,
-    time::Duration,
-};
+use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info_span};
 
 /// A valid delivery waiting for local certification to determine whether it
@@ -153,10 +149,16 @@ pub struct Actor<
     /// view can no longer be required by a valid proposal.
     last_finalized: View,
 
-    /// Nullifications that still cover views above finalization. These are
-    /// retained as compact lifecycle tombstones even when resolver state no
-    /// longer stores their certificates below a certified floor.
-    known_nullifications: BTreeSet<View>,
+    /// Nullifications cached in the encoded form expected by [p2p::Producer].
+    /// These response payloads remain available while they cover views above
+    /// finalization so kindless retries survive later floor raises.
+    nullification_responses: BTreeMap<View, Bytes>,
+
+    /// Successfully certified notarizations cached in the encoded form
+    /// expected by [p2p::Producer]. These response payloads are not certificate
+    /// identities and remain available until finalization so exact parents
+    /// survive later floor raises.
+    notarization_responses: BTreeMap<View, Bytes>,
 
     /// Terminal certification outcomes retained until covering finalization.
     certification_outcomes: BTreeMap<View, bool>,
@@ -191,7 +193,8 @@ impl<
 
                 state: State::new(cfg.fetch_concurrent, cfg.term_length),
                 last_finalized: View::zero(),
-                known_nullifications: BTreeSet::new(),
+                nullification_responses: BTreeMap::new(),
+                notarization_responses: BTreeMap::new(),
                 certification_outcomes: BTreeMap::new(),
                 pending: PendingDeliveries::default(),
 
@@ -269,8 +272,18 @@ impl<
                     MailboxMessage::Certificate { certificate, .. } => {
                         self.updated(&mut resolver, certificate);
                     }
-                    MailboxMessage::Certified { round, success, .. } => {
-                        self.certified(&mut resolver, round.view(), success);
+                    MailboxMessage::Certified {
+                        round,
+                        encoded_notarization,
+                        success,
+                        ..
+                    } => {
+                        self.certified_notarization(
+                            &mut resolver,
+                            round.view(),
+                            encoded_notarization,
+                            success,
+                        );
                     }
                     MailboxMessage::Resolve {
                         proposal_view,
@@ -399,11 +412,13 @@ impl<
         };
 
         // A nullification retires background and targeted nullification demand across the rest of
-        // its term. Retain a tombstone above finalization so delayed requests cannot recreate it.
+        // its term. Retain the evidence above finalization so delayed requests cannot recreate the
+        // demand and kindless retries can still serve it after a certified-floor raise.
         if let Some(nullified) = nullified {
             let term_end = nullified.term_end(self.state.term_length());
             if term_end > self.last_finalized {
-                self.known_nullifications.insert(nullified);
+                self.nullification_responses
+                    .insert(nullified, certificate.encode());
             }
             self.retire(resolver, Purpose::Nullification, nullified, term_end);
         }
@@ -417,14 +432,31 @@ impl<
         if let Some(finalized) = finalized {
             self.last_finalized = self.last_finalized.max(finalized);
             let term_length = self.state.term_length();
-            self.known_nullifications
-                .retain(|view| view.term_end(term_length) > self.last_finalized);
+            self.nullification_responses
+                .retain(|view, _| view.term_end(term_length) > self.last_finalized);
+            self.notarization_responses
+                .retain(|view, _| *view > self.last_finalized);
             self.certification_outcomes
                 .retain(|view, _| *view > self.last_finalized);
             let floor = U64::from(self.last_finalized);
             let _ = resolver.retain(move |candidate, _| *candidate > floor);
         }
         self.resolve_pending_deliveries(None);
+    }
+
+    /// Retains a successful exact parent before applying its certification outcome.
+    fn certified_notarization<R: Resolver<Key = U64, Subscriber = Purpose>>(
+        &mut self,
+        resolver: &mut R,
+        view: View,
+        encoded_notarization: Bytes,
+        success: bool,
+    ) {
+        if success && view > self.last_finalized {
+            self.notarization_responses
+                .insert(view, encoded_notarization);
+        }
+        self.certified(resolver, view, success);
     }
 
     /// Handles a certification outcome from the voter.
@@ -439,6 +471,9 @@ impl<
         // global retirement boundary.
         if view > self.last_finalized {
             self.certification_outcomes.insert(view, success);
+            if !success {
+                self.notarization_responses.remove(&view);
+            }
         }
 
         // Exact parent demand is terminal regardless of the verdict. Apply
@@ -564,12 +599,48 @@ impl<
         }
         match purpose {
             Purpose::Nullification => self
-                .known_nullifications
+                .nullification_responses
                 .range(view.covering_range(self.state.term_length()))
                 .next_back()
                 .is_some(),
             Purpose::Parent => self.certification_outcomes.get(&view) == Some(&true),
             Purpose::Backfill => self.state.get(view).is_some(),
+        }
+    }
+
+    /// Selects among the valid artifacts for a kindless wire key.
+    ///
+    /// Every retained evidence class must remain selectable on an ambiguous
+    /// retry. Otherwise a newer floor can permanently hide the exact parent or
+    /// covering nullification requested from a proposal leader.
+    fn produce_certificate(&mut self, view: View) -> Option<Bytes> {
+        let exact_parent = (self.certification_outcomes.get(&view) == Some(&true))
+            .then(|| self.notarization_responses.get(&view))
+            .flatten();
+        let covering_nullification = self
+            .nullification_responses
+            .range(view.covering_range(self.state.term_length()))
+            .next_back()
+            .map(|(_, nullification)| nullification);
+        let fallback = self.state.get(view);
+
+        // A finalization satisfies every purpose, so selecting weaker
+        // evidence would only delay completion.
+        if let Some(certificate @ Certificate::Finalization(_)) = fallback {
+            return Some(certificate.encode());
+        }
+
+        // Either purpose-specific certificate also satisfies ordinary
+        // backfill, so a newer floor adds no useful response class here.
+        // Independent selection prevents concurrent requesters from being
+        // pinned to opposite sides of a shared rotation.
+        match (exact_parent, covering_nullification) {
+            (Some(parent), Some(nullification)) => {
+                let candidates = [parent, nullification];
+                Some(candidates[self.context.random_range(0..2)].clone())
+            }
+            (Some(certificate), None) | (None, Some(certificate)) => Some(certificate.clone()),
+            (None, None) => fallback.map(|certificate| certificate.encode()),
         }
     }
 
@@ -740,13 +811,13 @@ impl<
                 let _guard = span.entered();
 
                 // Produce message for view
-                let Some(certificate) = self.state.get(view) else {
+                let Some(certificate) = self.produce_certificate(view) else {
                     // If we drop the response channel, the resolver will automatically
                     // send an error response to the caller (so they don't need to wait
                     // the full timeout)
                     return;
                 };
-                response.send_lossy(certificate.encode());
+                response.send_lossy(certificate);
             }
         }
     }
@@ -1229,7 +1300,7 @@ mod tests {
             first_responder_mailbox.updated(Certificate::Notarization(notarization.clone()));
             // Model the Byzantine peer as willing to serve this notarization.
             // Honest certification at the requester may still reject it.
-            first_responder_mailbox.certified(notarization.round(), true);
+            first_responder_mailbox.certified(&notarization, true);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, requested);
             nullification_holder_mailbox.updated(Certificate::Nullification(nullification.clone()));
             context.sleep(Duration::from_millis(10)).await;
@@ -1481,7 +1552,7 @@ mod tests {
                 )),
             );
             assert!(resolver.outstanding().is_empty());
-            assert!(actor.known_nullifications.is_empty());
+            assert!(actor.nullification_responses.is_empty());
             assert!(actor.certification_outcomes.is_empty());
             actor.resolve(
                 &mut resolver,
@@ -1492,6 +1563,76 @@ mod tests {
             );
             assert!(resolver.outstanding().is_empty());
             assert_eq!(resolver.targeted().len(), 4);
+        });
+    }
+
+    #[test_async]
+    async fn concurrent_kindless_retries_serve_required_ancestry() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let term_length = TermLength::new(NZU32!(5));
+            let mut responder = build_actor_with_term_length(
+                context.child("responder"),
+                verifier.clone(),
+                term_length,
+            );
+            let mut responder_resolver = RecordingResolver::default();
+
+            let requested = View::new(3);
+            let nullification = Certificate::Nullification(build_nullification(
+                &schemes, &verifier, EPOCH, requested,
+            ));
+            let expected_nullification = nullification.encode();
+            responder.updated(&mut responder_resolver, nullification);
+            let parent = build_notarization(&schemes, &verifier, EPOCH, requested);
+            let expected_parent = Certificate::Notarization(parent.clone()).encode();
+            responder.updated(&mut responder_resolver, Certificate::Notarization(parent));
+            responder.certified_notarization(
+                &mut responder_resolver,
+                requested,
+                expected_parent.clone(),
+                true,
+            );
+            let floor = View::new(4);
+            let floor_notarization = build_notarization(&schemes, &verifier, EPOCH, floor);
+            let floor_certificate = Certificate::Notarization(floor_notarization.clone()).encode();
+            responder.updated(
+                &mut responder_resolver,
+                Certificate::Notarization(floor_notarization),
+            );
+            responder.certified_notarization(
+                &mut responder_resolver,
+                floor,
+                floor_certificate,
+                true,
+            );
+
+            let mut first_saw_nullification = false;
+            let mut second_saw_parent = false;
+            for _ in 0..32 {
+                // Interleave two requesters so a shared two-class rotation
+                // would pin each one to the evidence needed by the other.
+                first_saw_nullification |= responder
+                    .produce_certificate(requested)
+                    .expect("responder has ancestry")
+                    == expected_nullification;
+                second_saw_parent |= responder
+                    .produce_certificate(requested)
+                    .expect("responder has ancestry")
+                    == expected_parent;
+            }
+
+            assert!(
+                first_saw_nullification,
+                "first requester stayed pinned to the exact parent"
+            );
+            assert!(
+                second_saw_parent,
+                "second requester stayed pinned to the nullification"
+            );
         });
     }
 
@@ -1540,8 +1681,8 @@ mod tests {
                 vec![Purpose::Nullification]
             );
 
-            // The resolver still prefers the certified floor when producing
-            // a kindless response, but locally observing the nullification
+            // Certificate state still prefers the certified floor for
+            // background bookkeeping, but locally observing the nullification
             // must retire the exact targeted demand it satisfies.
             actor.updated(
                 &mut resolver,
