@@ -128,7 +128,7 @@ where
     strategy: T,
 
     // ---------- State ----------
-    // Current processed floor and any pending floor update
+    // Current durable floor and any update awaiting its anchor block
     floor: FloorState<P::Scheme, V::Commitment>,
     // Application delivery cursor
     stream: Stream<E>,
@@ -218,8 +218,12 @@ where
             }
             Start::Floor(finalization) => Some(finalization),
         };
-        let last_processed_round =
-            Self::latest_processed_round(&finalizations_by_height, last_processed_height).await;
+        let last_processed_round = Self::latest_processed_round(
+            &finalizations_by_height,
+            &finalized_blocks,
+            last_processed_height,
+        )
+        .await;
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
@@ -237,7 +241,7 @@ where
                 )
             },
         );
-        let floor = floor_state.processed();
+        let floor = floor_state.snapshot();
 
         // Initialize mailbox
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -996,7 +1000,7 @@ where
         // durable without blocking the mailbox. Dispatch of the written
         // heights resumes when the sync completes. A batch has no single
         // round, so the label is the node's processed round when it started.
-        let round = self.floor.processed_round();
+        let round = self.floor.round();
         self = self.start_finalized_sync(round, syncs).await;
 
         // Handle produce requests in parallel.
@@ -1144,10 +1148,11 @@ where
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let round = finalization.round();
-        if round <= self.floor.processed_round() {
+        let processed_round = self.floor.round();
+        if round <= processed_round {
             warn!(
                 ?round,
-                floor = ?self.floor.processed_round(),
+                floor = ?processed_round,
                 "floor not updated, below existing round floor"
             );
             return self;
@@ -2319,27 +2324,54 @@ where
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
     }
 
-    /// Returns the latest known finalization round at or below the processed height.
-    async fn latest_processed_round(finalizations_by_height: &FC, height: Option<Height>) -> Round {
-        let Some(height) = height else {
-            return Round::zero();
-        };
-        let Some(finalization_height) = finalizations_by_height
-            .ranges_from(Height::zero())
-            .filter_map(|(start, end)| (start <= height).then_some(end.min(height)))
-            .max()
-        else {
-            return Round::zero();
+    /// Returns the latest recoverable round at or immediately after the processed height.
+    ///
+    /// A finalization above the processed height advances the round floor only when its matching
+    /// block is also durable, so recovery never suppresses a fetch for a certificate-only successor.
+    async fn latest_processed_round(
+        finalizations_by_height: &FC,
+        finalized_blocks: &FB,
+        height: Option<Height>,
+    ) -> Round {
+        let processed_round = height.and_then(|height| {
+            finalizations_by_height
+                .ranges_from(Height::zero())
+                .filter_map(|(start, end)| (start <= height).then_some(end.min(height)))
+                .max()
+        });
+        let processed_round = match processed_round {
+            Some(finalization_height) => match finalizations_by_height
+                .get(ArchiveID::Index(finalization_height.get()))
+                .await
+            {
+                Ok(Some(finalization)) => finalization.round(),
+                Ok(None) => panic!("processed finalization missing from stored range"),
+                Err(err) => panic!("failed to get processed finalization: {err}"),
+            },
+            None => Round::zero(),
         };
 
-        match finalizations_by_height
-            .get(ArchiveID::Index(finalization_height.get()))
-            .await
-        {
-            Ok(Some(finalization)) => finalization.round(),
-            Ok(None) => panic!("processed finalization missing from stored range"),
-            Err(err) => panic!("failed to get processed finalization: {err}"),
-        }
+        let successor = match height {
+            Some(height) if height.get() == u64::MAX => return processed_round,
+            Some(height) => height.next(),
+            None => Height::zero(),
+        };
+        let (block, finalization) = join(
+            finalized_blocks.get(ArchiveID::Index(successor.get())),
+            finalizations_by_height.get(ArchiveID::Index(successor.get())),
+        )
+        .await;
+        let block = block.unwrap_or_else(|err| panic!("failed to get successor block: {err}"));
+        let finalization = finalization
+            .unwrap_or_else(|err| panic!("failed to get successor finalization: {err}"));
+        let (Some(block), Some(finalization)) = (block, finalization) else {
+            return processed_round;
+        };
+        assert!(
+            V::stored_commitment(&block) == finalization.proposal.payload,
+            "successor block does not match stored finalization"
+        );
+        processed_round.max(finalization.round())
     }
 
     /// Buffers a processed round update in memory and prunes round-bound requests.
@@ -2362,25 +2394,23 @@ where
         round: Round,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
-        if height > self.floor.processed_height() || round <= self.floor.processed_round() {
+        let processed_round = self.floor.round();
+        if height > self.floor.processed_height() || round <= processed_round {
             return self;
         }
 
-        let previous = self.floor.processed_round();
         self.floor.set_processed_round(round);
 
         // Retain view-indexed cache data for a window behind the previously
         // processed finalized block.
         let prune_round = Round::new(
-            previous.epoch(),
-            previous.view().saturating_sub(self.view_retention),
+            processed_round.epoch(),
+            processed_round.view().saturating_sub(self.view_retention),
         );
         self.cache = self.cache.prune_by_view(prune_round).await;
 
         // Resolver request retention is independent of caller-owned block subscriptions.
-        resolver.retain(handler::above_round_floor::<V::Commitment>(
-            self.floor.processed_round(),
-        ));
+        resolver.retain(handler::above_round_floor::<V::Commitment>(round));
         self
     }
 

@@ -125,12 +125,9 @@ where
     }
 
     pub async fn run(mut self) {
-        let resolved_floor = resolve_state_sync_floor::<E, A, S, V>(
-            &self.marshal.0,
-            self.marshal.1,
-            &self.finalization,
-        )
-        .await;
+        let (marshal, floor) = &self.marshal;
+        let resolved_floor =
+            resolve_state_sync_floor::<E, A, S, V>(marshal, *floor, &self.finalization).await;
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);
@@ -525,7 +522,9 @@ mod tests {
                 "syncer-pruned-floor",
                 fixture.schemes[0].clone(),
                 None,
+                None,
                 NZUsize!(1),
+                true,
             )
             .await;
             let mut marshal = first.mailbox.clone();
@@ -581,8 +580,10 @@ mod tests {
                 context.child("marshal_restart"),
                 "syncer-pruned-floor",
                 fixture.schemes[0].clone(),
+                None,
                 Some(selected_finalization.clone()),
                 NZUsize!(1),
+                true,
             )
             .await;
             assert_eq!(floor.height(), Some(Height::new(10)));
@@ -608,6 +609,113 @@ mod tests {
             };
             assert_eq!(resolved.anchor.height, Height::new(10));
             assert_eq!(resolved.targets, 10);
+        });
+    }
+
+    #[test]
+    fn resolved_floor_recovers_round_after_boundary_prune() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-boundary-floor", 1);
+            let selected_block = TestBlock::new(1, 1);
+            let selected_finalization = fixtures::finalization(&fixture, 1, Sha256::fill(1));
+            let first = fixtures::prunable_marshal_fixture(
+                context.child("marshal_first"),
+                "syncer-boundary-floor",
+                fixture.schemes[0].clone(),
+                None,
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let mut marshal = first.mailbox.clone();
+            for height in 1..=5 {
+                let block = if height == 1 {
+                    selected_block.clone()
+                } else {
+                    TestBlock::new(height, height as u8)
+                };
+                let finalization = if height == 1 {
+                    selected_finalization.clone()
+                } else {
+                    fixtures::finalization(&fixture, height, Sha256::fill(height as u8))
+                };
+                let height = block.height();
+                assert!(marshal.verified(finalization.proposal.round, block).await);
+                let _ = marshal.report(Activity::Finalization(finalization));
+                while marshal.get_processed_height().await != Some(height) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            }
+            first.abort();
+            drop(marshal);
+            context.sleep(Duration::from_millis(1)).await;
+
+            let newer_block = TestBlock::new(8, 8);
+            let newer_finalization = fixtures::finalization(&fixture, 8, Sha256::fill(8));
+            let second = fixtures::prunable_marshal_fixture(
+                context.child("marshal_second"),
+                "syncer-boundary-floor",
+                fixture.schemes[0].clone(),
+                Some(&newer_block),
+                Some(newer_finalization.clone()),
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let marshal = second.mailbox.clone();
+            while marshal.get_processed_height().await != Some(Height::new(7)) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                marshal
+                    .get_block(&selected_finalization.proposal.payload)
+                    .await
+                    .is_none(),
+                "stale selected block must be unavailable before restart",
+            );
+            assert!(marshal.get_block(Height::new(8)).await.is_some());
+            second.abort();
+            drop(marshal);
+            context.sleep(Duration::from_millis(1)).await;
+
+            let MarshalFixture {
+                mailbox: marshal,
+                floor,
+                guards: _guards,
+            } = fixtures::prunable_marshal_fixture(
+                context.child("marshal_third"),
+                "syncer-boundary-floor",
+                fixture.schemes[0].clone(),
+                None,
+                Some(selected_finalization.clone()),
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            assert_eq!(floor.height(), Some(Height::new(7)));
+            assert_eq!(floor.round(), newer_finalization.proposal.round);
+            assert!(
+                marshal
+                    .get_block(&selected_finalization.proposal.payload)
+                    .await
+                    .is_none(),
+                "stale selected block must remain unavailable after restart",
+            );
+
+            let resolved = commonware_macros::select! {
+                resolved = resolve_state_sync_floor::<
+                    deterministic::Context,
+                    WedgeApp,
+                    TestScheme,
+                    TestVariant,
+                >(&marshal, floor, &selected_finalization) => resolved,
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("a superseded floor must not wait for its pruned block");
+                },
+            };
+            assert_eq!(resolved.anchor.height, Height::new(8));
+            assert_eq!(resolved.targets, 8);
         });
     }
 

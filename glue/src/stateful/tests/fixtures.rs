@@ -282,13 +282,29 @@ pub(crate) async fn marshal_fixture_with_floor(
 }
 
 /// Initializes a started marshal actor over prunable finalized archives.
+///
+/// When provided, `block` is pre-seeded. Dispatched blocks are abandoned unless
+/// `acknowledge` is set.
 pub(crate) async fn prunable_marshal_fixture(
     context: deterministic::Context,
     prefix: &str,
     scheme: TestScheme,
+    block: Option<&TestBlock>,
     floor: Option<Finalization<TestScheme, Sha256Digest>>,
     max_pending_acks: NonZeroUsize,
+    acknowledge: bool,
 ) -> MarshalFixture {
+    let options = Options {
+        seed: None,
+        block,
+        floor,
+        max_pending_acks,
+        dispatch: if acknowledge {
+            Dispatch::Acknowledge
+        } else {
+            Dispatch::Freeze
+        },
+    };
     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
     let finalizations_by_height = prunable::Archive::init(
         context.child("finalizations_by_height"),
@@ -296,24 +312,27 @@ pub(crate) async fn prunable_marshal_fixture(
     )
     .await
     .expect("failed to initialize finalizations archive");
-    let finalized_blocks = prunable::Archive::init(
+    let mut finalized_blocks = prunable::Archive::init(
         context.child("finalized_blocks"),
         prunable_archive_config(page_cache.clone(), &format!("{prefix}-blocks")),
     )
     .await
     .expect("failed to initialize blocks archive");
+    if let Some(block) = options.block {
+        finalized_blocks = finalized_blocks
+            .put(block.height().get(), block.digest(), block.clone())
+            .await
+            .expect("failed to seed finalized block")
+            .sync()
+            .await
+            .expect("failed to sync finalized blocks archive");
+    }
 
     start_marshal_fixture(
         context,
         prefix,
         scheme,
-        Options {
-            seed: None,
-            block: None,
-            floor,
-            max_pending_acks,
-            dispatch: Dispatch::Acknowledge,
-        },
+        options,
         page_cache,
         finalizations_by_height,
         finalized_blocks,
