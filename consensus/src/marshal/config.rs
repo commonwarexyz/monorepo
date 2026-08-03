@@ -107,7 +107,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{coding::types::CodedBlock, mocks::block::Block as MockBlock},
+        marshal::{coding::types::CodedBlock, mocks::block::Block},
         simplex::{scheme::ed25519, types::Context},
         types::{FixedEpocher, coding::Commitment},
     };
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn config_compiles_with_distinct_application_and_start_blocks() {
-        type AB = MockBlock<Sha256Digest, Context<Commitment, PublicKey>>;
+        type AB = Block<Sha256Digest, Context<Commitment, PublicKey>>;
         type B = CodedBlock<AB, ReedSolomon<Sha256>, Sha256>;
         type Provider = ConstantProvider<ed25519::Scheme, Epoch>;
 

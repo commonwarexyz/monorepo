@@ -195,7 +195,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{coding::types::StoredCodedBlock, mocks::block::Block as MockBlock},
+        marshal::{coding::types::StoredCodedBlock, mocks::block::Block},
         types::{Epoch, Height, View},
     };
     use bytes::{Buf, BufMut};
@@ -211,7 +211,7 @@ mod tests {
     use commonware_utils::{NZU16, test_rng};
 
     type TestContext = Context<Commitment, PublicKey>;
-    type InnerBlock = MockBlock<Sha256Digest, TestContext>;
+    type InnerBlock = Block<Sha256Digest, TestContext>;
 
     struct NoCloneBlock {
         inner: InnerBlock,
