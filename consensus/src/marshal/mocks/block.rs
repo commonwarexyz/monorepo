@@ -4,9 +4,10 @@ use commonware_codec::{Codec, EncodeSize, Error, Read, ReadExt, Write, varint::U
 use commonware_cryptography::{Digest, Digestible, Hasher};
 use std::fmt::Debug;
 
-/// A mock block whose parent digest also serves as its certification context.
+/// A mock block with no explicit consensus context.
+/// Its parent digest also serves as its certification context.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ParentBlock<D: Digest> {
+pub struct EmptyBlock<D: Digest> {
     /// The parent block's digest.
     pub parent: D,
 
@@ -20,7 +21,7 @@ pub struct ParentBlock<D: Digest> {
     digest: D,
 }
 
-impl<D: Digest> ParentBlock<D> {
+impl<D: Digest> EmptyBlock<D> {
     pub fn new<H: Hasher<Digest = D>>(parent: D, height: Height, timestamp: u64) -> Self {
         let digest = H::hash(&[
             parent.as_ref(),
@@ -36,7 +37,7 @@ impl<D: Digest> ParentBlock<D> {
     }
 }
 
-impl<D: Digest> Write for ParentBlock<D> {
+impl<D: Digest> Write for EmptyBlock<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.parent.write(writer);
         self.height.write(writer);
@@ -45,7 +46,7 @@ impl<D: Digest> Write for ParentBlock<D> {
     }
 }
 
-impl<D: Digest> Read for ParentBlock<D> {
+impl<D: Digest> Read for EmptyBlock<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
@@ -63,7 +64,7 @@ impl<D: Digest> Read for ParentBlock<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for ParentBlock<D> {
+impl<D: Digest> EncodeSize for EmptyBlock<D> {
     fn encode_size(&self) -> usize {
         self.parent.encode_size()
             + self.height.encode_size()
@@ -72,7 +73,7 @@ impl<D: Digest> EncodeSize for ParentBlock<D> {
     }
 }
 
-impl<D: Digest> Digestible for ParentBlock<D> {
+impl<D: Digest> Digestible for EmptyBlock<D> {
     type Digest = D;
 
     fn digest(&self) -> D {
@@ -80,19 +81,19 @@ impl<D: Digest> Digestible for ParentBlock<D> {
     }
 }
 
-impl<D: Digest> crate::Heightable for ParentBlock<D> {
+impl<D: Digest> crate::Heightable for EmptyBlock<D> {
     fn height(&self) -> Height {
         self.height
     }
 }
 
-impl<D: Digest> crate::Block for ParentBlock<D> {
+impl<D: Digest> crate::Block for EmptyBlock<D> {
     fn parent(&self) -> Self::Digest {
         self.parent
     }
 }
 
-impl<D: Digest> crate::CertifiableBlock for ParentBlock<D> {
+impl<D: Digest> crate::CertifiableBlock for EmptyBlock<D> {
     type Context = D;
 
     fn context(&self) -> Self::Context {

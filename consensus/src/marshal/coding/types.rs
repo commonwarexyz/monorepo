@@ -573,7 +573,7 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Block as _, marshal::mocks::block::ParentBlock as MockBlock};
+    use crate::marshal::mocks::block::EmptyBlock;
     use bytes::Buf;
     use commonware_codec::{Decode, Encode, Error};
     use commonware_coding::{CodecConfig, ReedSolomon};
@@ -587,7 +587,7 @@ mod test {
     type H = Sha256;
     type RS = ReedSolomon<H>;
     type RShard = Shard<RS, H>;
-    type Block = MockBlock<<H as Hasher>::Digest>;
+    type TestBlock = EmptyBlock<<H as Hasher>::Digest>;
 
     #[test]
     fn test_shard_wrapper_codec_roundtrip() {
@@ -657,11 +657,12 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let block =
+            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
 
         let encoded = coded_block.encode();
-        let decoded = CodedBlock::<Block, RS, H>::decode_cfg(
+        let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             encoded,
             &CodedBlockCfg {
                 inner: (),
@@ -684,12 +685,14 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let expected = CodedBlock::<Block, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
-            .commitment();
+        let block =
+            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let expected =
+            CodedBlock::<TestBlock, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
+                .commitment();
         let encoded = (block, EMBEDDED_CONFIG).encode();
 
-        let Err(err) = CodedBlock::<Block, RS, H>::decode_cfg(
+        let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             encoded.as_ref(),
             &CodedBlockCfg {
                 inner: (),
@@ -712,8 +715,9 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let block =
+            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let cloned = coded_block.clone();
 
         assert!(Arc::ptr_eq(&coded_block.inner, &cloned.inner));
@@ -730,9 +734,10 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
-        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block.clone());
+        let block =
+            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block.clone());
 
         assert_eq!(stored.commitment(), coded_block.commitment());
         assert_eq!(stored.digest(), coded_block.digest());
@@ -740,7 +745,7 @@ mod test {
         assert_eq!(stored.parent(), coded_block.parent());
 
         let encoded = stored.encode();
-        let decoded = StoredCodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
+        let decoded = StoredCodedBlock::<TestBlock, RS, H>::decode_cfg(encoded, &()).unwrap();
 
         assert!(stored == decoded);
         assert_eq!(decoded.commitment(), coded_block.commitment());
@@ -754,14 +759,15 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let block =
+            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let original_commitment = coded_block.commitment();
         let original_digest = coded_block.digest();
 
-        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block);
+        let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block);
         let encoded = stored.encode();
-        let decoded = StoredCodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
+        let decoded = StoredCodedBlock::<TestBlock, RS, H>::decode_cfg(encoded, &()).unwrap();
         let restored = decoded.into_coded_block();
 
         assert_eq!(restored.commitment(), original_commitment);
@@ -775,9 +781,10 @@ mod test {
             extra_shards: NZU16!(2),
         };
 
-        let block = Block::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
-        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block);
+        let block =
+            EmptyBlock::new::<Sha256>(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        let stored = StoredCodedBlock::<TestBlock, RS, H>::new(coded_block);
 
         let mut encoded = stored.encode().to_vec();
 
@@ -786,7 +793,7 @@ mod test {
         encoded[block_size] ^= 0xFF;
 
         // Decoding should fail due to digest mismatch
-        let result = StoredCodedBlock::<Block, RS, H>::decode_cfg(&mut encoded.as_slice(), &());
+        let result = StoredCodedBlock::<TestBlock, RS, H>::decode_cfg(&mut encoded.as_slice(), &());
         assert!(result.is_err());
     }
 

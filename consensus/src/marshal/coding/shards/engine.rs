@@ -1656,9 +1656,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{
-            coding::types::coding_config_for_participants, mocks::block::ParentBlock as MockBlock,
-        },
+        marshal::{coding::types::coding_config_for_participants, mocks::block::EmptyBlock},
         types::{Epoch, Height, View},
     };
     use bytes::Bytes;
@@ -1796,7 +1794,7 @@ mod tests {
     }
 
     // Type aliases for test convenience.
-    type B = MockBlock<Sha256Digest>;
+    type B = EmptyBlock<Sha256Digest>;
     type H = Sha256;
     type P = PublicKey;
     type C = ReedSolomon<H>;
