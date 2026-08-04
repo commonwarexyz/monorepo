@@ -183,10 +183,10 @@ mod transposed {
             }
             let updated = backend
                 .g_add_mixed(
-                    GVec::from_lanes(&current),
+                    GVec::transpose(current),
                     GAffineVec::from_signed_lanes(backend, &incoming, &negative),
                 )
-                .to_lanes();
+                .untranspose();
             for lane in 0..LANES {
                 if let Some(i) = bucket_index[lane] {
                     buckets[lane * nb + i] = updated[lane];
@@ -209,7 +209,7 @@ mod transposed {
         let mut window_sum = GVec::identity();
         for d in (0..used).rev() {
             let bucket_group: [G; LANES] = core::array::from_fn(|lane| buckets[lane * nb + d]);
-            sum = backend.g_add(sum, GVec::from_lanes(&bucket_group));
+            sum = backend.g_add(sum, GVec::transpose(bucket_group));
             window_sum = backend.g_add(window_sum, sum);
         }
         backend.g_add(result, window_sum)
@@ -304,7 +304,7 @@ fn fold_windows<B: Backend>(backend: B, windows: &[G], width: u32) -> G {
         }
         result = backend.g_add(result, GVec::splat(*window));
     }
-    result.to_lanes()[0]
+    result.untranspose()[0]
 }
 
 /// Floor on terms per tile range: a shorter range's fixed per-tile cost (folding the bucket
@@ -395,7 +395,7 @@ pub(super) fn multiscalar_mul<B: Backend>(
     }
     let window_sums: Vec<G> = window_sums
         .into_iter()
-        .map(|window| window.to_lanes()[0])
+        .map(|window| window.untranspose()[0])
         .collect();
     fold_windows(backend, &window_sums, width)
 }

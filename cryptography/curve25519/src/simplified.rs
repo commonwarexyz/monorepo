@@ -1,3 +1,5 @@
+use core::array;
+
 /// How many parallel operations we try and do via SIMD.
 ///
 /// This is set to the highest realistic number, targetting AVX-512.
@@ -177,13 +179,13 @@ impl F {
     /// Returns `self + rhs`.
     #[inline]
     pub(crate) fn add(self, rhs: Self) -> Self {
-        Self::reduce(core::array::from_fn(|i| self.0[i] + rhs.0[i]))
+        Self::reduce(array::from_fn(|i| self.0[i] + rhs.0[i]))
     }
 
     /// Returns `self - rhs`.
     #[inline]
     pub(crate) fn sub(self, rhs: Self) -> Self {
-        Self::reduce(core::array::from_fn(|i| self.0[i] + BIAS_16P[i] - rhs.0[i]))
+        Self::reduce(array::from_fn(|i| self.0[i] + BIAS_16P[i] - rhs.0[i]))
     }
 
     /// Returns `-self`.
@@ -209,7 +211,7 @@ impl F {
         c[1] += c[0] >> 51;
         c[0] &= MASK;
 
-        Self(core::array::from_fn(|i| c[i] as u64))
+        Self(array::from_fn(|i| c[i] as u64))
     }
 
     /// Returns `self * rhs`.
@@ -276,19 +278,6 @@ impl F {
     fn pow_p58(self) -> Self {
         self.mul(self.pow_2_250_minus_1().pow2k(2))
     }
-
-    /// Splats this field element into every lane of an [`FVec`].
-    pub(crate) const fn splat(self) -> FVec {
-        FVec {
-            limbs: [
-                [self.0[0]; LANES],
-                [self.0[1]; LANES],
-                [self.0[2]; LANES],
-                [self.0[3]; LANES],
-                [self.0[4]; LANES],
-            ],
-        }
-    }
 }
 
 /// A vector of base field elements in the field of order `p = 2^255 - 19`.
@@ -320,8 +309,21 @@ pub(crate) struct FVec {
 }
 
 impl FVec {
-    /// Packs field elements by transposing lanes into limb rows.
-    pub(crate) fn from_lanes(lanes: &[F; LANES]) -> Self {
+    /// Returns every lane set to `element`.
+    pub(crate) const fn splat(element: F) -> Self {
+        Self {
+            limbs: [
+                [element.0[0]; LANES],
+                [element.0[1]; LANES],
+                [element.0[2]; LANES],
+                [element.0[3]; LANES],
+                [element.0[4]; LANES],
+            ],
+        }
+    }
+
+    /// Transposes scalar field elements into limb rows.
+    pub(crate) fn transpose(lanes: [F; LANES]) -> Self {
         let mut limbs = [[0u64; LANES]; 5];
         for (i, lane) in lanes.iter().enumerate() {
             for (row, value) in limbs.iter_mut().zip(lane.0) {
@@ -331,17 +333,17 @@ impl FVec {
         Self { limbs }
     }
 
-    /// Unpacks field elements by transposing limb rows into lanes.
-    pub(crate) fn to_lanes(self) -> [F; LANES] {
-        core::array::from_fn(|i| F(core::array::from_fn(|limb| self.limbs[limb][i])))
+    /// Untransposes limb rows into scalar field elements.
+    pub(crate) fn untranspose(self) -> [F; LANES] {
+        array::from_fn(|i| F(array::from_fn(|limb| self.limbs[limb][i])))
     }
 
     /// Selects `other` in lanes whose corresponding mask is true.
     fn select_lanes(self, other: Self, select_other: &[bool; LANES]) -> Self {
         let masks = select_other.map(|select| 0u64.wrapping_sub(select as u64));
         Self {
-            limbs: core::array::from_fn(|limb| {
-                core::array::from_fn(|lane| {
+            limbs: array::from_fn(|limb| {
+                array::from_fn(|lane| {
                     (self.limbs[limb][lane] & !masks[lane])
                         | (other.limbs[limb][lane] & masks[lane])
                 })
@@ -593,21 +595,21 @@ impl GAffine {
     ) -> [Option<Self>; LANES] {
         let signs = bytes.map(|encoding| encoding[31] >> 7);
         let ys = bytes.map(|encoding| F::from_bytes(&encoding));
-        let y = FVec::from_lanes(&ys);
-        let one = F::ONE.splat();
+        let y = FVec::transpose(ys);
+        let one = FVec::splat(F::ONE);
 
         // Recover x from x^2 = u/v, where u = y^2 - 1 and v = d*y^2 + 1.
         let y2 = backend.square(y);
         let u = backend.sub(y2, one);
-        let v = backend.add(backend.mul(F::EDWARDS_D.splat(), y2), one);
+        let v = backend.add(backend.mul(FVec::splat(F::EDWARDS_D), y2), one);
         let uv = backend.mul(u, v);
         let candidate = backend.mul(u, pow_p58(backend, uv));
         let vxx = backend.mul(v, backend.square(candidate));
 
-        let u_lanes = u.to_lanes();
-        let negative_u_lanes = backend.neg(u).to_lanes();
-        let vxx_lanes = vxx.to_lanes();
-        let factors = core::array::from_fn(|i| {
+        let u_lanes = u.untranspose();
+        let negative_u_lanes = backend.neg(u).untranspose();
+        let vxx_lanes = vxx.untranspose();
+        let factors = array::from_fn(|i| {
             if vxx_lanes[i].eq(&u_lanes[i]) {
                 Some(F::ONE)
             } else if vxx_lanes[i].eq(&negative_u_lanes[i]) {
@@ -617,11 +619,11 @@ impl GAffine {
             }
         });
         let factor_lanes = factors.map(|factor| factor.unwrap_or(F::ONE));
-        let x = backend.mul(candidate, FVec::from_lanes(&factor_lanes));
-        let x_lanes = x.to_lanes();
-        let negative_x_lanes = backend.neg(x).to_lanes();
+        let x = backend.mul(candidate, FVec::transpose(factor_lanes));
+        let x_lanes = x.untranspose();
+        let negative_x_lanes = backend.neg(x).untranspose();
 
-        let final_x = core::array::from_fn(|i| {
+        let final_x = array::from_fn(|i| {
             if x_lanes[i].is_odd() == (signs[i] == 1) {
                 x_lanes[i]
             } else {
@@ -630,12 +632,12 @@ impl GAffine {
         });
         let t2d_lanes = backend
             .mul(
-                backend.mul(FVec::from_lanes(&final_x), y),
-                F::EDWARDS_D2.splat(),
+                backend.mul(FVec::transpose(final_x), y),
+                FVec::splat(F::EDWARDS_D2),
             )
-            .to_lanes();
+            .untranspose();
 
-        core::array::from_fn(|i| {
+        array::from_fn(|i| {
             factors[i]?;
             if x_lanes[i].is_zero() && signs[i] == 1 {
                 return None;
@@ -668,23 +670,23 @@ pub(crate) struct GVec {
 }
 
 impl GVec {
-    /// Packs compact points by transposing coordinates into backend lanes.
-    pub(crate) fn from_lanes(lanes: &[G; LANES]) -> Self {
+    /// Transposes scalar points into backend lanes.
+    pub(crate) fn transpose(lanes: [G; LANES]) -> Self {
         Self {
-            x: FVec::from_lanes(&lanes.map(|point| point.x)),
-            y: FVec::from_lanes(&lanes.map(|point| point.y)),
-            t: FVec::from_lanes(&lanes.map(|point| point.t)),
-            z: FVec::from_lanes(&lanes.map(|point| point.z)),
+            x: FVec::transpose(lanes.map(|point| point.x)),
+            y: FVec::transpose(lanes.map(|point| point.y)),
+            t: FVec::transpose(lanes.map(|point| point.t)),
+            z: FVec::transpose(lanes.map(|point| point.z)),
         }
     }
 
-    /// Unpacks backend lanes into compact points.
-    pub(crate) fn to_lanes(self) -> [G; LANES] {
-        let x = self.x.to_lanes();
-        let y = self.y.to_lanes();
-        let t = self.t.to_lanes();
-        let z = self.z.to_lanes();
-        core::array::from_fn(|i| G {
+    /// Untransposes backend lanes into scalar points.
+    pub(crate) fn untranspose(self) -> [G; LANES] {
+        let x = self.x.untranspose();
+        let y = self.y.untranspose();
+        let t = self.t.untranspose();
+        let z = self.z.untranspose();
+        array::from_fn(|i| G {
             x: x[i],
             y: y[i],
             t: t[i],
@@ -695,10 +697,10 @@ impl GVec {
     /// Returns every lane set to `point`.
     pub(crate) const fn splat(point: G) -> Self {
         Self {
-            x: point.x.splat(),
-            y: point.y.splat(),
-            t: point.t.splat(),
-            z: point.z.splat(),
+            x: FVec::splat(point.x),
+            y: FVec::splat(point.y),
+            t: FVec::splat(point.t),
+            z: FVec::splat(point.z),
         }
     }
 
@@ -709,7 +711,7 @@ impl GVec {
 
     /// Sums all eight lanes with a three-level vector addition tree.
     pub(crate) fn sum_lanes<B: GBackend>(self, backend: B) -> G {
-        let lanes = self.to_lanes();
+        let lanes = self.untranspose();
         let mut left = [G::IDENTITY; LANES];
         let mut right = [G::IDENTITY; LANES];
         for i in 0..4 {
@@ -717,8 +719,8 @@ impl GVec {
             right[i] = lanes[2 * i + 1];
         }
         let pairs = backend
-            .g_add(Self::from_lanes(&left), Self::from_lanes(&right))
-            .to_lanes();
+            .g_add(Self::transpose(left), Self::transpose(right))
+            .untranspose();
 
         left = [G::IDENTITY; LANES];
         right = [G::IDENTITY; LANES];
@@ -727,16 +729,16 @@ impl GVec {
         left[1] = pairs[2];
         right[1] = pairs[3];
         let quarters = backend
-            .g_add(Self::from_lanes(&left), Self::from_lanes(&right))
-            .to_lanes();
+            .g_add(Self::transpose(left), Self::transpose(right))
+            .untranspose();
 
         left = [G::IDENTITY; LANES];
         right = [G::IDENTITY; LANES];
         left[0] = quarters[0];
         right[0] = quarters[1];
         backend
-            .g_add(Self::from_lanes(&left), Self::from_lanes(&right))
-            .to_lanes()[0]
+            .g_add(Self::transpose(left), Self::transpose(right))
+            .untranspose()[0]
     }
 }
 
@@ -753,13 +755,25 @@ pub(crate) struct GAffineVec {
 }
 
 impl GAffineVec {
-    /// Packs compact affine points by transposing coordinates into backend lanes.
-    pub(crate) fn from_lanes(lanes: &[GAffine; LANES]) -> Self {
+    /// Transposes scalar affine points into backend lanes.
+    pub(crate) fn transpose(lanes: [GAffine; LANES]) -> Self {
         Self {
-            x: FVec::from_lanes(&lanes.map(|point| point.x)),
-            y: FVec::from_lanes(&lanes.map(|point| point.y)),
-            t2d: FVec::from_lanes(&lanes.map(|point| point.t2d)),
+            x: FVec::transpose(lanes.map(|point| point.x)),
+            y: FVec::transpose(lanes.map(|point| point.y)),
+            t2d: FVec::transpose(lanes.map(|point| point.t2d)),
         }
+    }
+
+    /// Untransposes backend lanes into scalar affine points.
+    pub(crate) fn untranspose(self) -> [GAffine; LANES] {
+        let x = self.x.untranspose();
+        let y = self.y.untranspose();
+        let t2d = self.t2d.untranspose();
+        array::from_fn(|i| GAffine {
+            x: x[i],
+            y: y[i],
+            t2d: t2d[i],
+        })
     }
 
     /// Packs affine points, negating the selected lanes.
@@ -768,7 +782,7 @@ impl GAffineVec {
         lanes: &[GAffine; LANES],
         negative: &[bool; LANES],
     ) -> Self {
-        let packed = Self::from_lanes(lanes);
+        let packed = Self::transpose(*lanes);
         if !negative.iter().any(|&value| value) {
             return packed;
         }

@@ -74,35 +74,33 @@ fn assert_f_nonzero(value: FVec, property: &str) {
 
 fn identity() -> GVec {
     GVec {
-        x: F::ZERO.splat(),
-        y: F::ONE.splat(),
-        t: F::ZERO.splat(),
-        z: F::ONE.splat(),
+        x: FVec::splat(F::ZERO),
+        y: FVec::splat(F::ONE),
+        t: FVec::splat(F::ZERO),
+        z: FVec::splat(F::ONE),
     }
 }
 
 fn basepoint<B: FBackend>(backend: B) -> GVec {
-    let x = F([
+    let x = FVec::splat(F([
         1738742601995546,
         1146398526822698,
         2070867633025821,
         562264141797630,
         587772402128613,
-    ])
-    .splat();
-    let y = F([
+    ]));
+    let y = FVec::splat(F([
         1801439850948184,
         1351079888211148,
         450359962737049,
         900719925474099,
         1801439850948198,
-    ])
-    .splat();
+    ]));
     GVec {
         x,
         y,
         t: backend.mul(x, y),
-        z: F::ONE.splat(),
+        z: FVec::splat(F::ONE),
     }
 }
 
@@ -162,7 +160,7 @@ fn assert_on_curve<B: FBackend>(backend: B, point: GVec) {
     let lhs = backend.sub(backend.square(point.y), backend.square(point.x));
     let rhs = backend.add(
         backend.square(point.z),
-        backend.mul(F::EDWARDS_D.splat(), backend.square(point.t)),
+        backend.mul(FVec::splat(F::EDWARDS_D), backend.square(point.t)),
     );
     assert_f_eq(lhs, rhs, "curve equation");
     assert_f_eq(
@@ -176,8 +174,8 @@ fn fuzz_field<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Re
     let a = arbitrary_fvec(u)?;
     let b = arbitrary_fvec(u)?;
     let c = arbitrary_fvec(u)?;
-    let zero = F::ZERO.splat();
-    let one = F::ONE.splat();
+    let zero = FVec::splat(F::ZERO);
+    let one = FVec::splat(F::ONE);
 
     assert_f_eq(backend.add(a, zero), a, "additive identity");
     assert_f_eq(backend.add(a, backend.neg(a)), zero, "additive inverse");
@@ -265,7 +263,7 @@ fn fuzz_group<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Re
     let affine_basepoint = GAffineVec {
         x: basepoint.x,
         y: basepoint.y,
-        t2d: backend.mul(basepoint.t, F::EDWARDS_D2.splat()),
+        t2d: backend.mul(basepoint.t, FVec::splat(F::EDWARDS_D2)),
     };
     assert_g_eq(
         backend,
@@ -294,7 +292,7 @@ pub(super) fn check_backend_at_bounds<R: Backend, B: Backend>(reference: R, back
     let max = FVec {
         limbs: [[MASK_52; LANES]; 5],
     };
-    let zero = F::ZERO.splat();
+    let zero = FVec::splat(F::ZERO);
     assert_f_eq(
         reference.add(max, max),
         backend.add(max, max),
@@ -351,7 +349,7 @@ pub(super) fn fuzz_backend_against<R: Backend, B: Backend>(
     let affine_basepoint = GAffineVec {
         x: basepoint.x,
         y: basepoint.y,
-        t2d: reference.mul(basepoint.t, F::EDWARDS_D2.splat()),
+        t2d: reference.mul(basepoint.t, FVec::splat(F::EDWARDS_D2)),
     };
     assert_g_eq(
         reference,
@@ -412,7 +410,7 @@ fn with_backend_matches_portable() {
         affine: GAffineVec {
             x: basepoint.x,
             y: basepoint.y,
-            t2d: portable.mul(basepoint.t, F::EDWARDS_D2.splat()),
+            t2d: portable.mul(basepoint.t, FVec::splat(F::EDWARDS_D2)),
         },
     };
     let expected = computation.call(portable);
