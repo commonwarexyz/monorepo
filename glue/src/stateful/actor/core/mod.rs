@@ -23,7 +23,9 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
-use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
+use commonware_runtime::{
+    AttributeContext, ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt,
+};
 use commonware_storage::Context;
 use commonware_utils::{Acknowledgement as _, acknowledgement::Exact, channel::oneshot};
 use futures::join;
@@ -105,7 +107,7 @@ impl PruneConfig {
 /// Configuration for constructing a [`Stateful`] application.
 pub struct Config<E, A, S, V, R>
 where
-    E: Rng + Spawner + Context,
+    E: Rng + Spawner + Context + AttributeContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -149,7 +151,7 @@ where
 /// application and verifying traits.
 pub struct Stateful<E, A, S, V, R>
 where
-    E: Rng + Spawner + Context,
+    E: Rng + Spawner + Context + AttributeContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -187,7 +189,7 @@ where
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
 where
-    E: Rng + Spawner + Context,
+    E: Rng + Spawner + Context + AttributeContext,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,

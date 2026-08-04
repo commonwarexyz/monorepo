@@ -255,13 +255,6 @@ stability_scope!(BETA {
         /// `consensus_engine_votes_total{epoch="$latest_epoch"}`.
         #[must_use]
         fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self;
-
-        /// Copy all attributes from `source` to this context.
-        ///
-        /// Existing attributes with the same key are replaced. The context's
-        /// label and supervision-tree position remain unchanged.
-        #[must_use]
-        fn with_attributes_from(self, source: &Self) -> Self;
     }
 
     /// Interface that any task scheduler must implement to spawn tasks.
@@ -401,6 +394,26 @@ stability_scope!(BETA {
 
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
+    }
+
+    /// A runtime context whose metric attributes can be retained independently.
+    ///
+    /// Snapshots allow work to move to a different supervision tree without
+    /// retaining or exposing the source runtime context.
+    pub trait AttributeContext: Metrics {
+        /// Opaque snapshot of the context's metric attributes.
+        type Snapshot: Clone + Send + Sync + 'static;
+
+        /// Capture the context's current metric attributes.
+        #[must_use]
+        fn attribute_snapshot(&self) -> Self::Snapshot;
+
+        /// Apply a captured set of metric attributes to this context.
+        ///
+        /// Snapshot attributes replace existing attributes with the same key.
+        /// The context's label and supervision-tree position remain unchanged.
+        #[must_use]
+        fn with_attribute_snapshot(self, snapshot: &Self::Snapshot) -> Self;
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
@@ -2519,20 +2532,21 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
-    fn test_supervisor_with_attributes_from<R: Runner>(#[case] runner: R)
+    fn test_attribute_snapshot<R: Runner>(#[case] runner: R)
     where
-        R::Context: Metrics,
+        R::Context: AttributeContext,
     {
         runner.start(|context| async move {
             let source = context
                 .child("source")
                 .with_attribute("round", 7)
                 .with_attribute("shard", "west");
+            let snapshot = source.attribute_snapshot();
             let destination = context
                 .child("destination")
                 .with_attribute("round", 3)
                 .with_attribute("worker", "verify")
-                .with_attributes_from(&source);
+                .with_attribute_snapshot(&snapshot);
 
             let name = destination.name();
             assert_eq!(name.label, "destination");
