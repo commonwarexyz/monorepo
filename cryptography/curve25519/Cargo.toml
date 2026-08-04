@@ -14,8 +14,12 @@ documentation = "https://docs.rs/commonware-cryptography-curve25519"
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+commonware-codec.workspace = true
 commonware-macros.workspace = true
+commonware-math.workspace = true
 commonware-parallel.workspace = true
+commonware-utils.workspace = true
 rand_core.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
@@ -38,4 +42,12 @@ path = "benches/batch_verify.rs"
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "commonware-parallel/std", "thiserror/std" ]
+std = [
+	"bytes/std",
+	"commonware-codec/std",
+	"commonware-macros/std",
+	"commonware-math/std",
+	"commonware-parallel/std",
+	"commonware-utils/std",
+	"thiserror/std",
+]

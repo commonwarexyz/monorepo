@@ -255,6 +255,11 @@ impl F {
     fn pow_p58(self) -> Self {
         self.mul(self.pow_2_250_minus_1().pow2k(2))
     }
+
+    /// Returns the multiplicative inverse of `self`.
+    fn invert(self) -> Self {
+        self.pow_p58().pow2k(3).mul(self.square().mul(self))
+    }
 }
 
 /// A vector of base field elements in the field of order `p = 2^255 - 19`.
@@ -371,6 +376,15 @@ impl G {
         t: F::ZERO,
         z: F::ONE,
     };
+
+    /// Compresses this point to its canonical Ed25519 encoding.
+    pub(crate) fn to_bytes(self) -> [u8; 32] {
+        let z_inverse = self.z.invert();
+        let x = self.x.mul(z_inverse);
+        let mut bytes = self.y.mul(z_inverse).to_bytes();
+        bytes[31] |= u8::from(x.is_odd()) << 7;
+        bytes
+    }
 
     /// Negates this point.
     pub(crate) fn negate(self) -> Self {
