@@ -275,9 +275,13 @@ check-stability *args='':
             COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib $excludes $extra_args || exit 1
         done
         echo "All stability levels pass!"
+        ./scripts/check_runtime_alpha_surface.sh
         echo "Checking for unmarked public items..."
         ./scripts/find_unstable_public.sh $extra_args
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
-        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib $excludes $extra_args
+        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib $excludes $extra_args || exit 1
+        if [ "$level" = "1" ]; then
+            ./scripts/check_runtime_alpha_surface.sh
+        fi
     fi

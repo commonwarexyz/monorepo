@@ -44,16 +44,18 @@ use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write
 use commonware_cryptography::{Crc32, crc32};
 use std::num::NonZeroU16;
 
-mod atomic;
+commonware_macros::stability_mod!(ALPHA, mod atomic);
 mod cache;
 mod read;
 mod sealed;
 mod view;
 mod writer;
 
-pub use atomic::{
-    ATOMIC_MARKER_LEN, AtomicReplay, AtomicSnapshot, AtomicWriter, atomic_page_size,
-};
+commonware_macros::stability_scope!(ALPHA {
+    pub use atomic::{
+        ATOMIC_MARKER_LEN, AtomicReplay, AtomicSnapshot, AtomicWriter, atomic_page_size,
+    };
+});
 pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;

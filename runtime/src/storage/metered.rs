@@ -1,11 +1,13 @@
 use crate::{
-    AtomicBlob, AtomicStorage, BatchOperation, BatchStorage, Buf, Error, Handle, IoBufs, IoBufsMut,
-    WriteOptions,
+    Buf, Error, Handle, IoBufs, IoBufsMut, WriteOptions,
     telemetry::{
         metrics::{Counter, Gauge, Register, raw},
         traces::TracedExt as _,
     },
 };
+commonware_macros::stability_scope!(ALPHA {
+    use crate::{AtomicBlob, AtomicStorage, BatchOperation, BatchStorage};
+});
 use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
@@ -101,6 +103,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             Blob {
                 inner,
                 partition: partition.into(),
+                #[cfg(not(any(
+                    commonware_stability_BETA,
+                    commonware_stability_GAMMA,
+                    commonware_stability_DELTA,
+                    commonware_stability_EPSILON,
+                    commonware_stability_RESERVED
+                )))]
                 name: Arc::from(name),
                 metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
             },
@@ -118,6 +127,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl<S: AtomicStorage> AtomicStorage for Storage<S> {
     type AtomicBlob = Blob<S::AtomicBlob>;
 
@@ -148,6 +158,7 @@ impl<S: AtomicStorage> AtomicStorage for Storage<S> {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl<S: BatchStorage> BatchStorage for Storage<S> {
     async fn start_apply(
         &self,
@@ -177,6 +188,13 @@ impl<S: BatchStorage> BatchStorage for Storage<S> {
 pub struct Blob<B> {
     inner: B,
     partition: Arc<str>,
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))]
     name: Arc<[u8]>,
     metrics: Arc<MetricsHandle>,
 }
@@ -293,6 +311,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl<B: AtomicBlob> AtomicBlob for Blob<B> {
     async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
         self.inner.tag().await

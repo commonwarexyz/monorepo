@@ -8,9 +8,9 @@
 //! ([page bytes][CRC32C: u32 big-endian])* [partial page bytes]?
 //! ```
 //!
-//! The first eight bytes of the root tag are an application-owned marker. This codec owns the
-//! final four bytes and updates them whenever the partial page changes. Full pages are validated
-//! when read; opening validates only the bounded partial tail.
+//! The first 60 bytes of the root tag are an application-owned marker. This codec owns the final
+//! four bytes and updates them whenever the partial page changes. Full pages are validated when
+//! read; opening validates only the bounded partial tail.
 
 use crate::{ATOMIC_BLOB_TAG_LEN, AtomicBlob, Buf, Error, Handle, IoBuf, IoBufs};
 use commonware_cryptography::{Crc32, Hasher as _};
@@ -21,10 +21,10 @@ use std::{
     num::{NonZeroU16, NonZeroUsize},
 };
 
-/// Number of application-owned marker bytes in an atomic checked-page tag.
-pub const ATOMIC_MARKER_LEN: usize = 8;
-
 const CRC_LEN: usize = size_of::<u32>();
+/// Number of application-owned marker bytes in an atomic checked-page tag.
+pub const ATOMIC_MARKER_LEN: usize = ATOMIC_BLOB_TAG_LEN - CRC_LEN;
+
 const CRC_OFFSET: usize = ATOMIC_MARKER_LEN;
 const _: () = assert!(ATOMIC_MARKER_LEN + CRC_LEN == ATOMIC_BLOB_TAG_LEN);
 
@@ -110,15 +110,9 @@ fn shared_read<B: AtomicBlob>(
     len: usize,
 ) -> impl Future<Output = Result<IoBuf, Error>> + Send + Sync + 'static {
     let blob = blob.clone();
-    async move {
-        Ok(blob
-            .read_at(offset, len)
-            .await?
-            .coalesce()
-            .freeze())
-    }
-    .boxed()
-    .shared()
+    async move { Ok(blob.read_at(offset, len).await?.coalesce().freeze()) }
+        .boxed()
+        .shared()
 }
 
 /// Immutable point-in-time read view of an [`AtomicWriter`].
@@ -890,7 +884,12 @@ mod tests {
         Error,
     > {
         let (blob, physical_size) = context.open_atomic(partition, b"blob").await?;
-        AtomicWriter::new(GatedMutationBlob { inner: blob, gate }, physical_size, PAGE_SIZE).await
+        AtomicWriter::new(
+            GatedMutationBlob { inner: blob, gate },
+            physical_size,
+            PAGE_SIZE,
+        )
+        .await
     }
 
     #[test_traced("DEBUG")]
@@ -986,10 +985,12 @@ mod tests {
             let before_size = writer.physical_size();
             let before_crc = writer.tag()[CRC_OFFSET..].to_vec();
 
-            writer = writer.set_marker(*b"marker01").await.unwrap();
+            let marker =
+                std::array::from_fn(|index| (index as u8).wrapping_mul(13).wrapping_add(7));
+            writer = writer.set_marker(marker).await.unwrap();
             assert_eq!(writer.physical_size(), before_size);
             assert_eq!(&writer.tag()[CRC_OFFSET..], before_crc);
-            assert_eq!(writer.marker(), *b"marker01");
+            assert_eq!(writer.marker(), marker);
             writer.sync().await.unwrap();
             drop(writer);
 
@@ -1000,7 +1001,7 @@ mod tests {
             let reopened = AtomicWriter::new(blob, physical_size, PAGE_SIZE)
                 .await
                 .unwrap();
-            assert_eq!(reopened.marker(), *b"marker01");
+            assert_eq!(reopened.marker(), marker);
             assert_eq!(reopened.read_at(0, 7).await.unwrap().coalesce(), b"partial");
         });
     }
@@ -1018,6 +1019,10 @@ mod tests {
             let data: Vec<u8> = (0..39).collect();
             (writer, _) = writer.append_owned(data.clone().into()).await.unwrap();
             writer.sync().await.unwrap();
+
+            let marker =
+                std::array::from_fn(|index| (index as u8).wrapping_mul(29).wrapping_add(5));
+            writer = writer.set_marker(marker).await.unwrap();
 
             writer = writer.rewind(19).await.unwrap();
             assert_eq!(writer.size(), 19);
@@ -1041,6 +1046,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(reopened.size(), 22);
+            assert_eq!(reopened.marker(), marker);
             assert_eq!(
                 reopened.read_at(16, 6).await.unwrap().coalesce(),
                 [16, 17, 18, b'x', b'y', b'z']
@@ -1251,7 +1257,10 @@ mod tests {
                 assert!(append_gate.entered.load(Ordering::SeqCst));
             }
             assert!(release.send(()).is_err());
-            assert_eq!(publisher.read_at(0, 7).await.unwrap().coalesce(), b"partial");
+            assert_eq!(
+                publisher.read_at(0, 7).await.unwrap().coalesce(),
+                b"partial"
+            );
             assert!(publisher.read_at(7, 1).await.is_err());
             publisher.sync().await.unwrap();
             drop(publisher);

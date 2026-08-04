@@ -57,6 +57,9 @@ stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouri
     pub mod tokio;
 });
 stability_scope!(BETA {
+    /// Number of application-owned bytes encoded in a V2 root.
+    pub(crate) const ATOMIC_BLOB_TAG_LEN: usize = 64;
+
     pub mod metered;
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -144,6 +147,7 @@ pub(crate) mod tests {
         test_apply_batch_mixed_success(&storage).await;
         test_apply_batch_publishes_two_pending_blobs(&storage).await;
         test_apply_batch_publishes_tags(&storage).await;
+        test_apply_batch_supports_participants_beyond_worker_fanout(&storage).await;
         test_apply_batch_does_not_charge_clean_publishes_to_witness(&storage).await;
         test_apply_batch_carries_consecutive_publications(&storage).await;
         test_apply_batch_carries_disjoint_publications(&storage).await;
@@ -799,7 +803,35 @@ pub(crate) mod tests {
         assert_eq!(second.tag().await.unwrap(), SHARED_TAG);
     }
 
-    /// Clean publications do not occupy the embedded descriptor carried by dirty participants.
+    /// Participant count is not limited by the filesystem worker fanout or aggregate name bytes.
+    async fn test_apply_batch_supports_participants_beyond_worker_fanout<S>(storage: &S)
+    where
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        const PARTICIPANTS: usize = 64;
+
+        let mut blobs = Vec::with_capacity(PARTICIPANTS);
+        let mut operations = Vec::with_capacity(PARTICIPANTS);
+        for index in 0..PARTICIPANTS {
+            let name = format!("participant-{index:012}");
+            assert_eq!(name.len(), 24);
+            let (blob, _) = storage
+                .open_atomic("batch_capacity", name.as_bytes())
+                .await
+                .unwrap();
+            blob.append(vec![index as u8]).await.unwrap();
+            operations.push(BatchOperation::Publish(blob.clone()));
+            blobs.push(blob);
+        }
+
+        storage.apply(operations).await.unwrap();
+        for (index, blob) in blobs.into_iter().enumerate() {
+            assert_eq!(blob.read_at(0, 1).await.unwrap().coalesce(), [index as u8]);
+        }
+    }
+
+    /// Clean publications do not occupy the linked decision carried by dirty participants.
     async fn test_apply_batch_does_not_charge_clean_publishes_to_witness<S>(storage: &S)
     where
         S: BatchStorage + Send + Sync,

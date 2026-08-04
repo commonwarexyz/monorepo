@@ -179,6 +179,7 @@ impl crate::Blob for Blob {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl crate::AtomicBlob for Blob {
     async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
         Err(super::unsupported_atomic(&self.partition, &self.name))

@@ -21,7 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const PARTITION: &str = "_COMMONWARE_STORAGE_JOURNAL_FIXED_APPEND_PAIRED";
+const PLAIN_PARTITION: &str = "_COMMONWARE_STORAGE_JOURNAL_FIXED_APPEND_PAIRED_PLAIN";
+const UNO_PARTITION: &str = "_COMMONWARE_STORAGE_JOURNAL_FIXED_APPEND_PAIRED_UNO";
 const ITEMS: u64 = 100_000;
 const ITEM_SIZE: usize = 32;
 const STEADY_ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
@@ -104,7 +105,7 @@ async fn ordinary_journal(
     items_per_blob: NonZeroU64,
 ) -> OrdinaryJournal<Context, Item> {
     let config = OrdinaryConfig {
-        partition: PARTITION.into(),
+        partition: PLAIN_PARTITION.into(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
         page_cache: CacheRef::from_pooler(&context, page_size(PHYSICAL_PAGE_SIZE), PAGE_CACHE_SIZE),
@@ -119,7 +120,7 @@ async fn atomic_journal(
     items_per_blob: NonZeroU64,
 ) -> AtomicJournal<Context, Item> {
     let config = AtomicConfig {
-        partition: PARTITION.into(),
+        partition: UNO_PARTITION.into(),
         items_per_blob,
         page_size: atomic_page_size(PHYSICAL_PAGE_SIZE),
     };

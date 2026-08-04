@@ -841,6 +841,7 @@ impl crate::Storage for Context {
     }
 }
 
+#[stability(ALPHA)]
 impl crate::BatchStorage for Context {
     async fn start_apply(
         &self,
@@ -850,6 +851,7 @@ impl crate::BatchStorage for Context {
     }
 }
 
+#[stability(ALPHA)]
 impl crate::AtomicStorage for Context {
     type AtomicBlob = <Storage as crate::AtomicStorage>::AtomicBlob;
 

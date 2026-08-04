@@ -1,78 +1,73 @@
-//! Participant-replicated crash recovery for atomic storage batches.
+//! Participant-linked crash recovery for atomic storage batches.
 //!
-//! There is no coordinator file. Every dirty V2 participant stores the same canonical descriptor
-//! beside its prepared root. The descriptor identifies each exact path creation with a persistent
-//! 128-bit incarnation, names its candidate root, and covers any newly appended payload with a
-//! bounded CRC32C. Deleted blobs are participants too.
-//!
-//! ```text
-//!       blob A root slot                    blob B root slot
-//! +---------------------------+       +---------------------------+
-//! | P root | descriptor A,B,C |<----->| P root | descriptor A,B,C |
-//! +---------------------------+       +---------------------------+
-//!             \                            /
-//!              +-- concurrent barriers ---+
-//!                         |
-//!                    durable decision
-//!                         |
-//!             +-----------+-----------+
-//!             |                       |
-//!       retained: P -> M         deleted: P -> T
-//!       independent root         payload-preserving tombstone
-//!             |                       |
-//!             +----- all durable -----+
-//!                         |
-//!               unlink exact T names
-//!               fsync parent directories
-//! ```
-//!
-//! `P` roots are invisible to ordinary blob recovery. `M` roots expose retained candidates as
-//! independent blobs. `T` roots remain invisible and preserve the old inode's payload for already
-//! open handles. The implementation writes all `M` and `T` roots before the first unlink, and a
-//! deletion-bearing batch keeps the namespace and participant guards until the unlinks and parent
-//! directory syncs finish. Write-only batches may keep their replicated decision for the next
-//! same-participant batch instead of materializing immediately.
-//!
-//! The canonical `CWUNOD12` descriptor has this logical layout. Names carry unsigned 32-bit
-//! lengths, and participants and removals are independently canonicalized.
+//! There is no coordinator file. Every dirty V2 participant stores one checksummed local witness
+//! beside its prepared root. The witness identifies the batch, describes only this participant's
+//! exact candidate, and points to the next exact path incarnation. Canonical participant order
+//! forms one closed ring; deleted blobs participate with a local removal bit.
 //!
 //! ```text
-//! descriptor  = header | participant* | removal*
-//! header      = magic | participant_count | removal_count | decision_kind
-//! participant = partition | name | incarnation | base_generation | root_slot
-//!             | prepared_root | committed_root
-//!             | payload_start | payload_length | payload_crc32c
+//!       blob A                    blob B                    blob C
+//! +----------------+       +----------------+       +----------------+
+//! | P | A state |--+------>| P | B state |--+------>| P | C state |--+
+//! +----------------+       +----------------+       +----------------+ |
+//!        ^                                                              |
+//!        +--------------------------------------------------------------+
+//!                         same group ID, count, ordinals
 //! ```
+//!
+//! A `CWUNOL14` witness contains a fresh 128-bit group ID, participant count, canonical ordinal,
+//! local removal bit, local incarnation and candidate roots, the bounded pending-payload CRC32C
+//! range, and the successor's partition, blob name, and incarnation. The containing path supplies
+//! the local name, so every participant path is encoded once across the whole ring rather than in
+//! every root.
 //!
 //! # Recovery
 //!
-//! Opening one V2 participant reads only its immutable page and two fixed root slots. An intact
-//! witness names every peer directly, so no application transaction identifier, coordinator file,
-//! payload scan, or root-wide namespace scan is needed. Partition scans inspect bounded V2 root
-//! metadata before returning names so they cannot expose a surviving tombstone.
+//! Opening one V2 participant follows exactly the ring's declared number of links. Recovery
+//! requires the same group ID and count, consecutive ordinals, unique path incarnations,
+//! canonical ordering, and closure back to the opener after exactly the declared count. The count
+//! is decoded before traversal, and recovery grows its state only after validating each exact
+//! successor. It never scans unrelated names or historical payload. A missing, torn, duplicated,
+//! or differently incarnated link leaves a prepared (`P`) root invisible, so ordinary root
+//! recovery selects the preceding slot.
 //!
-//! With no exact `M` or `T` root, recovery commits only if every exact incarnation, candidate,
-//! descriptor, and required payload suffix validates. Otherwise the other root slot remains the
-//! complete fallback. A missing participant alone never proves commitment: an independent remove
-//! could erase one member of an incomplete prepare. Once any exact `M` or `T` exists, all barriers
-//! necessarily completed, so recovery repairs every surviving exact witness and rolls forward.
-//! Missing or differently incarnated delete paths are already applied or recreated and are never
-//! unlinked. A later serialized namespace operation may also retire a retained participant after
-//! making the group independent; its stale descriptor is safely ignored.
+//! A complete ring commits only when every candidate root and bounded pending-payload suffix
+//! validates. Once installation starts, a materialized (`M`) root or tombstone (`T`) proves that
+//! every participant's prepare barrier completed, so the intact ring repairs all remaining roots.
+//! Candidate validation accepts arbitrary bytewise mixtures of the exact `P`, committed, `M`, and
+//! `T` spellings rather than assuming a prefix survived.
 //!
-//! Materialization overwrites only the 40-byte root header. Candidate validation accepts any
-//! bytewise mixture of the exact `P`, committed, `M`, and `T` spellings, so a crash may retain an
-//! arbitrary subset of an in-flight root overwrite rather than a prefix. The checksummed descriptor
-//! is decoded independently from that header, allowing another final participant to repair a torn
-//! peer. Unlinks begin only after every final-root durability operation returns.
+//! Materialization writes and synchronizes every final root before the first unlink:
 //!
-//! The configured recovery cap is 32 dirty participants, but the root slot is tighter: the current
-//! encoding fits at most 28 even with empty names, and real names or removals lower that bound.
-//! Total pending append bytes have no protocol batch limit. At most 64 MiB is left for
-//! revalidation across a group; larger or non-contiguous pending epochs preflush immutable payload
-//! before roots are staged instead of being rejected. CRC32C detects accidental local-disk crash
-//! corruption probabilistically; it does not authenticate storage against an actor that can also
-//! rewrite checksums.
+//! ```text
+//! complete durable ring
+//!          |
+//!          +---- retained: P -> M (independent visible root)
+//!          |
+//!          +---- deleted:  P -> T (payload-preserving tombstone)
+//!          |
+//!      every M/T durable
+//!          |
+//!      unlink T from highest ordinal to zero,
+//!      synchronizing its parent after every unlink
+//! ```
+//!
+//! The per-unlink directory barrier turns crash survivors into a prefix of that descending order.
+//! Ordinal zero remains until every higher tombstone is durably gone, so it is a bounded recovery
+//! anchor for the remaining forward-linked prefix. Every retained `M` root is already independent.
+//! Recreated same-name paths are protected by their distinct immutable incarnations. Write-only
+//! groups may retain their typed in-memory decision and materialize or supersede it before either
+//! root slot is reused.
+//!
+//! Group membership has no UNO-specific limit and is not coupled to worker fanout; only the `u32`
+//! count encoded in each link bounds the format. Each root stores only its local link (296 fixed
+//! bytes plus at most 1,644 bytes for one successor path), with 1,940 bytes available in a 2 KiB
+//! slot; there is no aggregate name-dependent metadata limit. Installation uses at most 32
+//! concurrent workers while
+//! processing larger rings in chunks. Total pending append bytes have no protocol batch limit. At
+//! most 64 MiB is left for crash-time CRC32C validation across a group; larger epochs make older
+//! immutable payload durable while writes continue. CRC32C detects accidental local-disk crash
+//! corruption probabilistically and is not an authentication mechanism.
 
 use super::{Operation, is_canonical_operations};
 use crate::{RemoveTarget, storage::atomic};
@@ -83,26 +78,27 @@ use std::{
     io::{self, ErrorKind},
     os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _},
     path::Path,
+    sync::Arc,
 };
 
-const DESCRIPTOR_MAGIC: &[u8; 8] = b"CWUNOD12";
-const MAX_DESCRIPTOR_LEN: usize = 4096 - atomic::ROOT_LEN - 16;
-const MAX_RECORDS: usize = 1_000_000;
-const DESCRIPTOR_HEADER_LEN: usize = 20;
-const PARTICIPANT_FIXED_LEN: usize = 4
-    + 4
-    + super::super::header::Header::V2_INCARNATION_LEN
+const LINK_MAGIC: &[u8; 8] = b"CWUNOL14";
+const GROUP_ID_LEN: usize = 16;
+const PARTICIPANT_CORE_LEN: usize = super::super::header::Header::V2_INCARNATION_LEN
     + 8
     + 8
     + atomic::ROOT_LEN * 2
     + PAYLOAD_CHECKSUM_LEN;
-const BLOB_REMOVAL_FIXED_LEN: usize = 1 + 4 + 4;
-const TAG_PARTITION_REMOVE: u8 = 0;
-const TAG_BLOB_REMOVE: u8 = 1;
-const DECISION_SPECULATIVE: u32 = 1;
+const LINK_REMOVED: u32 = 1;
+const LINK_FIXED_LEN: usize = 8
+    + GROUP_ID_LEN
+    + 4
+    + 4
+    + 4
+    + PARTICIPANT_CORE_LEN
+    + 4
+    + 4
+    + super::super::header::Header::V2_INCARNATION_LEN;
 const PAYLOAD_CHECKSUM_LEN: usize = 8 + 8 + 4;
-const MAX_SPECULATIVE_PARTICIPANTS: usize =
-    super::super::atomic::MAX_SPECULATIVE_PARTICIPANTS as usize;
 const MAX_SPECULATIVE_BYTES: u64 = atomic::MAX_VALIDATED_PAYLOAD_LEN;
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -113,10 +109,73 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message.into())
 }
 
+fn reserve<T>(values: &mut Vec<T>, additional: usize, what: &str) -> io::Result<()> {
+    values.try_reserve(additional).map_err(|_| {
+        io::Error::new(
+            ErrorKind::OutOfMemory,
+            format!("unable to reserve memory for {what}"),
+        )
+    })
+}
+
+fn clone_bytes(bytes: &[u8], what: &str) -> io::Result<Vec<u8>> {
+    let mut cloned = Vec::new();
+    reserve(&mut cloned, bytes.len(), what)?;
+    cloned.extend_from_slice(bytes);
+    Ok(cloned)
+}
+
+fn clone_string(value: &str, what: &str) -> io::Result<String> {
+    let bytes = clone_bytes(value.as_bytes(), what)?;
+    Ok(String::from_utf8(bytes).expect("cloning a string preserves UTF-8"))
+}
+
+fn clone_participant(participant: &Participant) -> io::Result<Participant> {
+    Ok(Participant {
+        partition: clone_string(&participant.partition, "batch participant partition")?,
+        name: clone_bytes(&participant.name, "batch participant name")?,
+        incarnation: participant.incarnation,
+        candidate: participant.candidate.clone(),
+        payload_start: participant.payload_start,
+        payload_checksum: participant.payload_checksum,
+    })
+}
+
+fn clone_remove_target(target: &RemoveTarget) -> io::Result<RemoveTarget> {
+    Ok(match target {
+        RemoveTarget::Partition(partition) => {
+            RemoveTarget::Partition(clone_string(partition, "batch removal partition")?)
+        }
+        RemoveTarget::Blob { partition, name } => RemoveTarget::Blob {
+            partition: clone_string(partition, "batch removal partition")?,
+            name: clone_bytes(name, "batch removal name")?,
+        },
+    })
+}
+
+fn clone_location(location: &Location) -> io::Result<Location> {
+    Ok(Location {
+        partition: clone_string(&location.partition, "batch participant location partition")?,
+        name: clone_bytes(&location.name, "batch participant location name")?,
+        incarnation: location.incarnation,
+    })
+}
+
+fn clone_link(link: &Link) -> io::Result<Link> {
+    Ok(Link {
+        group_id: link.group_id,
+        participant_count: link.participant_count,
+        ordinal: link.ordinal,
+        removed: link.removed,
+        participant: clone_participant(&link.participant)?,
+        next: clone_location(&link.next)?,
+    })
+}
+
 fn checked_end(offset: u64, len: u64) -> io::Result<u64> {
     offset
         .checked_add(len)
-        .ok_or_else(|| invalid_data("batch descriptor offset overflow"))
+        .ok_or_else(|| invalid_data("batch witness offset overflow"))
 }
 
 fn read_exact_at(file: &File, mut offset: u64, mut output: &mut [u8]) -> io::Result<()> {
@@ -129,7 +188,7 @@ fn read_exact_at(file: &File, mut offset: u64, mut output: &mut [u8]) -> io::Res
         if read == 0 {
             return Err(io::Error::new(
                 ErrorKind::UnexpectedEof,
-                "batch descriptor record is truncated",
+                "batch witness record is truncated",
             ));
         }
         offset = checked_end(offset, read as u64)?;
@@ -138,7 +197,7 @@ fn read_exact_at(file: &File, mut offset: u64, mut output: &mut [u8]) -> io::Res
     Ok(())
 }
 
-/// Per-blob durable candidate named by an exact batch descriptor.
+/// Per-blob durable candidate named by an exact batch decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Participant {
     pub(crate) partition: String,
@@ -157,8 +216,60 @@ impl Participant {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Decision {
+    group_id: [u8; GROUP_ID_LEN],
     participants: Vec<Participant>,
     removals: Vec<RemoveTarget>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Location {
+    partition: String,
+    name: Vec<u8>,
+    incarnation: [u8; super::super::header::Header::V2_INCARNATION_LEN],
+}
+
+impl Location {
+    fn key(&self) -> (&str, &[u8]) {
+        (&self.partition, &self.name)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Link {
+    group_id: [u8; GROUP_ID_LEN],
+    participant_count: usize,
+    ordinal: usize,
+    removed: bool,
+    participant: Participant,
+    next: Location,
+}
+
+/// One in-memory decision and the distinct local witness written beside each participant root.
+#[derive(Clone)]
+pub(crate) struct EmbeddedBatch {
+    decision: Decision,
+    witnesses: Arc<[LocalWitness]>,
+}
+
+struct LocalWitness {
+    partition: String,
+    name: Vec<u8>,
+    encoded: Arc<[u8]>,
+}
+
+impl EmbeddedBatch {
+    pub(crate) fn witness(&self, partition: &str, name: &[u8]) -> Option<&[u8]> {
+        self.witnesses
+            .binary_search_by(|witness| {
+                witness
+                    .partition
+                    .as_str()
+                    .cmp(partition)
+                    .then_with(|| witness.name.as_slice().cmp(name))
+            })
+            .ok()
+            .map(|index| self.witnesses[index].encoded.as_ref())
+    }
 }
 
 fn push_len(encoded: &mut Vec<u8>, len: usize, what: &str) -> io::Result<()> {
@@ -167,81 +278,28 @@ fn push_len(encoded: &mut Vec<u8>, len: usize, what: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn encode_descriptor(
-    participants: &[Participant],
-    operations: &[Operation],
-) -> io::Result<Vec<u8>> {
-    if participants.len() > MAX_RECORDS || operations.len() > MAX_RECORDS {
-        return Err(invalid_input("batch descriptor has too many records"));
+fn encode_participant_core(encoded: &mut Vec<u8>, participant: &Participant) {
+    encoded.extend_from_slice(&participant.incarnation);
+    encoded.extend_from_slice(&participant.candidate.base_generation.to_be_bytes());
+    encoded.extend_from_slice(&participant.candidate.root_offset.to_be_bytes());
+    encoded.extend_from_slice(&participant.candidate.prepared_root);
+    encoded.extend_from_slice(&participant.candidate.committed_root);
+    if let Some(checksum) = participant.payload_checksum {
+        encoded.extend_from_slice(&checksum.offset.to_be_bytes());
+        encoded.extend_from_slice(&checksum.len.to_be_bytes());
+        encoded.extend_from_slice(&checksum.checksum.to_be_bytes());
+    } else {
+        encoded.extend_from_slice(&participant.payload_start.to_be_bytes());
+        encoded.extend_from_slice(&[0u8; 12]);
     }
-    let removals = operations
-        .iter()
-        .filter_map(|operation| match operation {
-            Operation::Remove(target) => Some(target),
-            Operation::Publish { .. } | Operation::Rewind { .. } => None,
-        })
-        .collect::<Vec<_>>();
+}
 
-    let mut encoded = Vec::new();
-    encoded.extend_from_slice(DESCRIPTOR_MAGIC);
-    encoded.extend_from_slice(&(participants.len() as u32).to_be_bytes());
-    encoded.extend_from_slice(&(removals.len() as u32).to_be_bytes());
-    encoded.extend_from_slice(&DECISION_SPECULATIVE.to_be_bytes());
-    for participant in participants {
-        push_len(
-            &mut encoded,
-            participant.partition.len(),
-            "batch participant partition name",
-        )?;
-        encoded.extend_from_slice(participant.partition.as_bytes());
-        push_len(
-            &mut encoded,
-            participant.name.len(),
-            "batch participant blob name",
-        )?;
-        encoded.extend_from_slice(&participant.name);
-        encoded.extend_from_slice(&participant.incarnation);
-        encoded.extend_from_slice(&participant.candidate.base_generation.to_be_bytes());
-        encoded.extend_from_slice(&participant.candidate.root_offset.to_be_bytes());
-        encoded.extend_from_slice(&participant.candidate.prepared_root);
-        encoded.extend_from_slice(&participant.candidate.committed_root);
-        if let Some(checksum) = participant.payload_checksum {
-            encoded.extend_from_slice(&checksum.offset.to_be_bytes());
-            encoded.extend_from_slice(&checksum.len.to_be_bytes());
-            encoded.extend_from_slice(&checksum.checksum.to_be_bytes());
-        } else {
-            encoded.extend_from_slice(&participant.payload_start.to_be_bytes());
-            encoded.extend_from_slice(&[0u8; 12]);
-        }
-    }
-    for target in removals {
-        match target {
-            RemoveTarget::Partition(partition) => {
-                encoded.push(TAG_PARTITION_REMOVE);
-                push_len(
-                    &mut encoded,
-                    partition.len(),
-                    "batch removal partition name",
-                )?;
-                encoded.extend_from_slice(partition.as_bytes());
-            }
-            RemoveTarget::Blob { partition, name } => {
-                encoded.push(TAG_BLOB_REMOVE);
-                push_len(
-                    &mut encoded,
-                    partition.len(),
-                    "batch removal partition name",
-                )?;
-                encoded.extend_from_slice(partition.as_bytes());
-                push_len(&mut encoded, name.len(), "batch removal blob name")?;
-                encoded.extend_from_slice(name);
-            }
-        }
-    }
-    if encoded.len() > MAX_DESCRIPTOR_LEN {
-        return Err(invalid_input("batch descriptor is too large"));
-    }
-    Ok(encoded)
+fn new_group_id() -> [u8; GROUP_ID_LEN] {
+    let random = ahash::RandomState::new();
+    let mut group_id = [0u8; GROUP_ID_LEN];
+    group_id[..8].copy_from_slice(&random.hash_one(0u8).to_be_bytes());
+    group_id[8..].copy_from_slice(&random.hash_one(1u8).to_be_bytes());
+    group_id
 }
 
 struct Cursor<'a> {
@@ -258,17 +316,13 @@ impl<'a> Cursor<'a> {
         let end = self
             .position
             .checked_add(len)
-            .ok_or_else(|| invalid_data("batch descriptor length overflow"))?;
+            .ok_or_else(|| invalid_data("batch witness length overflow"))?;
         let bytes = self
             .bytes
             .get(self.position..end)
-            .ok_or_else(|| invalid_data("batch descriptor is truncated"))?;
+            .ok_or_else(|| invalid_data("batch witness is truncated"))?;
         self.position = end;
         Ok(bytes)
-    }
-
-    fn read_u8(&mut self) -> io::Result<u8> {
-        Ok(self.read(1)?[0])
     }
 
     fn read_u32(&mut self) -> io::Result<u32> {
@@ -291,120 +345,170 @@ impl<'a> Cursor<'a> {
     }
 }
 
-fn decode_descriptor(encoded: &[u8]) -> io::Result<Decision> {
-    if encoded.len() < DESCRIPTOR_HEADER_LEN || encoded.len() > MAX_DESCRIPTOR_LEN {
-        return Err(invalid_data("batch descriptor has an invalid length"));
+fn decode_participant_core(
+    cursor: &mut Cursor<'_>,
+    partition: String,
+    name: Vec<u8>,
+) -> io::Result<Participant> {
+    let incarnation = cursor
+        .read(super::super::header::Header::V2_INCARNATION_LEN)?
+        .try_into()
+        .expect("V2 incarnations have a fixed length");
+    let base_generation = cursor.read_u64()?;
+    let root_offset = cursor.read_u64()?;
+    let prepared_root = cursor.read(atomic::ROOT_LEN)?.try_into().unwrap();
+    let committed_root = cursor.read(atomic::ROOT_LEN)?.try_into().unwrap();
+    let payload_offset = cursor.read_u64()?;
+    let payload_len = cursor.read_u64()?;
+    let payload_checksum = cursor.read_u32()?;
+    let payload_checksum = match (payload_len, payload_checksum) {
+        (0, 0) => None,
+        (len, checksum) if len != 0 => Some(atomic::PayloadChecksum {
+            offset: payload_offset,
+            len,
+            checksum,
+        }),
+        _ => {
+            return Err(invalid_data(
+                "batch payload checksum has an invalid empty range",
+            ));
+        }
+    };
+    Ok(Participant {
+        partition,
+        name,
+        incarnation,
+        candidate: atomic::Candidate {
+            base_generation,
+            root_offset,
+            prepared_root,
+            committed_root,
+        },
+        payload_start: payload_offset,
+        payload_checksum,
+    })
+}
+
+fn encode_link(decision: &Decision, ordinal: usize) -> io::Result<Vec<u8>> {
+    let participant_count = decision.participants.len();
+    if participant_count == 0 {
+        return Err(invalid_input("batch participant count is out of range"));
+    }
+    let participant = decision
+        .participants
+        .get(ordinal)
+        .ok_or_else(|| invalid_input("batch link ordinal is out of range"))?;
+    let next = &decision.participants[(ordinal + 1) % participant_count];
+    let encoded_len = LINK_FIXED_LEN
+        .checked_add(next.partition.len())
+        .and_then(|len| len.checked_add(next.name.len()))
+        .ok_or_else(|| invalid_input("batch participant link length overflow"))?;
+    if encoded_len > atomic::MAX_BATCH_WITNESS_LEN {
+        return Err(invalid_input(
+            "batch participant link exceeds its root slot",
+        ));
+    }
+    let participant_count = u32::try_from(participant_count)
+        .map_err(|_| invalid_input("batch participant count does not fit its encoding"))?;
+    let ordinal = u32::try_from(ordinal)
+        .map_err(|_| invalid_input("batch participant ordinal does not fit its encoding"))?;
+    let mut encoded = Vec::new();
+    reserve(&mut encoded, encoded_len, "batch participant link")?;
+    encoded.extend_from_slice(LINK_MAGIC);
+    encoded.extend_from_slice(&decision.group_id);
+    encoded.extend_from_slice(&participant_count.to_be_bytes());
+    encoded.extend_from_slice(&ordinal.to_be_bytes());
+    let removed = u32::from(participant_is_removed(decision, participant));
+    encoded.extend_from_slice(&removed.to_be_bytes());
+    encode_participant_core(&mut encoded, participant);
+    push_len(
+        &mut encoded,
+        next.partition.len(),
+        "batch successor partition",
+    )?;
+    encoded.extend_from_slice(next.partition.as_bytes());
+    push_len(&mut encoded, next.name.len(), "batch successor blob")?;
+    encoded.extend_from_slice(&next.name);
+    encoded.extend_from_slice(&next.incarnation);
+    debug_assert_eq!(encoded.len(), encoded_len);
+    Ok(encoded)
+}
+
+fn decode_link(encoded: &[u8], partition: &str, name: &[u8]) -> io::Result<Link> {
+    if encoded.len() < LINK_FIXED_LEN || encoded.len() > atomic::MAX_BATCH_WITNESS_LEN {
+        return Err(invalid_data("batch participant link has an invalid length"));
     }
     let mut cursor = Cursor::new(encoded);
-    if cursor.read(DESCRIPTOR_MAGIC.len())? != DESCRIPTOR_MAGIC {
-        return Err(invalid_data("batch descriptor magic mismatch"));
+    if cursor.read(LINK_MAGIC.len())? != LINK_MAGIC {
+        return Err(invalid_data("batch participant link magic mismatch"));
     }
+    let group_id = cursor
+        .read(GROUP_ID_LEN)?
+        .try_into()
+        .expect("group IDs have a fixed length");
     let participant_count = usize::try_from(cursor.read_u32()?)
         .map_err(|_| invalid_data("batch participant count overflow"))?;
-    let removal_count = usize::try_from(cursor.read_u32()?)
-        .map_err(|_| invalid_data("batch removal count overflow"))?;
-    if cursor.read_u32()? != DECISION_SPECULATIVE {
-        return Err(invalid_data("batch decision kind is invalid"));
+    let ordinal = usize::try_from(cursor.read_u32()?)
+        .map_err(|_| invalid_data("batch participant ordinal overflow"))?;
+    let flags = cursor.read_u32()?;
+    if participant_count == 0 || ordinal >= participant_count || flags & !LINK_REMOVED != 0 {
+        return Err(invalid_data("batch participant link header is invalid"));
     }
-    if participant_count > MAX_RECORDS || removal_count > MAX_RECORDS {
-        return Err(invalid_data("batch descriptor has too many records"));
+    let participant = decode_participant_core(
+        &mut cursor,
+        clone_string(partition, "decoded batch participant partition")?,
+        clone_bytes(name, "decoded batch participant name")?,
+    )?;
+    let next_partition = cursor.read_partition()?;
+    let next_name = cursor.read_vec("batch successor blob")?;
+    let next_incarnation = cursor
+        .read(super::super::header::Header::V2_INCARNATION_LEN)?
+        .try_into()
+        .expect("V2 incarnations have a fixed length");
+    if cursor.position != encoded.len() {
+        return Err(invalid_data("batch participant link has trailing bytes"));
     }
-    const MIN_PARTICIPANT_LEN: usize = 4
-        + 4
-        + super::super::header::Header::V2_INCARNATION_LEN
-        + 8
-        + 8
-        + atomic::ROOT_LEN * 2
-        + PAYLOAD_CHECKSUM_LEN;
-    const MIN_REMOVAL_LEN: usize = 1 + 4;
-    let minimum = participant_count
-        .checked_mul(MIN_PARTICIPANT_LEN)
-        .and_then(|len| len.checked_add(removal_count.saturating_mul(MIN_REMOVAL_LEN)))
-        .ok_or_else(|| invalid_data("batch descriptor record count overflow"))?;
-    if minimum > encoded.len() - DESCRIPTOR_HEADER_LEN {
-        return Err(invalid_data("batch record count exceeds descriptor length"));
-    }
+    super::super::validate_partition_name(&next_partition)
+        .map_err(|_| invalid_data("batch successor has an invalid partition"))?;
+    Ok(Link {
+        group_id,
+        participant_count,
+        ordinal,
+        removed: flags & LINK_REMOVED != 0,
+        participant,
+        next: Location {
+            partition: next_partition,
+            name: next_name,
+            incarnation: next_incarnation,
+        },
+    })
+}
 
-    let mut participants = Vec::with_capacity(participant_count);
-    for _ in 0..participant_count {
-        let partition = cursor.read_partition()?;
-        let name = cursor.read_vec("batch participant blob")?;
-        let incarnation = cursor
-            .read(super::super::header::Header::V2_INCARNATION_LEN)?
-            .try_into()
-            .expect("V2 incarnations have a fixed length");
-        let base_generation = cursor.read_u64()?;
-        let root_offset = cursor.read_u64()?;
-        let prepared_root = cursor.read(atomic::ROOT_LEN)?.try_into().unwrap();
-        let committed_root = cursor.read(atomic::ROOT_LEN)?.try_into().unwrap();
-        let payload_offset = cursor.read_u64()?;
-        let payload_len = cursor.read_u64()?;
-        let payload_checksum = cursor.read_u32()?;
-        let payload_checksum = match (payload_len, payload_checksum) {
-            (0, 0) => None,
-            (len, checksum) if len != 0 => Some(atomic::PayloadChecksum {
-                offset: payload_offset,
-                len,
-                checksum,
-            }),
-            _ => {
-                return Err(invalid_data(
-                    "batch payload checksum has an invalid empty range",
-                ));
-            }
-        };
-        if payload_checksum
-            .as_ref()
-            .is_some_and(|checksum| checksum.offset != payload_offset)
-        {
-            return Err(invalid_data("batch payload checksum start is inconsistent"));
-        }
-        participants.push(Participant {
-            partition,
-            name,
-            incarnation,
-            candidate: atomic::Candidate {
-                base_generation,
-                root_offset,
-                prepared_root,
-                committed_root,
-            },
-            payload_start: payload_offset,
-            payload_checksum,
+fn prepare_links(decision: Decision) -> io::Result<EmbeddedBatch> {
+    let mut witnesses = Vec::new();
+    reserve(
+        &mut witnesses,
+        decision.participants.len(),
+        "batch participant witnesses",
+    )?;
+    for (ordinal, participant) in decision.participants.iter().enumerate() {
+        witnesses.push(LocalWitness {
+            partition: clone_string(&participant.partition, "batch witness partition")?,
+            name: clone_bytes(&participant.name, "batch witness name")?,
+            encoded: Arc::<[u8]>::from(encode_link(&decision, ordinal)?),
         });
     }
-
-    let mut removals = Vec::with_capacity(removal_count);
-    for _ in 0..removal_count {
-        let tag = cursor.read_u8()?;
-        let partition = cursor.read_partition()?;
-        let target = match tag {
-            TAG_PARTITION_REMOVE => RemoveTarget::Partition(partition),
-            TAG_BLOB_REMOVE => RemoveTarget::Blob {
-                partition,
-                name: cursor.read_vec("batch removal blob")?,
-            },
-            _ => return Err(invalid_data("batch removal tag is invalid")),
-        };
-        removals.push(target);
-    }
-    if cursor.position != encoded.len() {
-        return Err(invalid_data("batch descriptor has trailing bytes"));
-    }
-
-    validate_decision(&participants, &removals)?;
-    Ok(Decision {
-        participants,
-        removals,
+    Ok(EmbeddedBatch {
+        decision,
+        witnesses: witnesses.into(),
     })
 }
 
 fn validate_decision(participants: &[Participant], removals: &[RemoveTarget]) -> io::Result<()> {
-    if participants.len() > MAX_SPECULATIVE_PARTICIPANTS {
-        return Err(invalid_data(
-            "speculative batch decision has too many participants",
-        ));
-    }
+    u32::try_from(participants.len())
+        .map_err(|_| invalid_data("batch participant count does not fit its encoding"))?;
+    u32::try_from(removals.len())
+        .map_err(|_| invalid_data("batch removal count does not fit its encoding"))?;
     let verified_bytes = participants.iter().try_fold(0u64, |total, participant| {
         total
             .checked_add(
@@ -432,24 +536,26 @@ fn validate_decision(participants: &[Participant], removals: &[RemoveTarget]) ->
         previous = Some(participant.key());
     }
 
-    let removal_operations = removals
-        .iter()
-        .cloned()
-        .map(Operation::Remove)
-        .collect::<Vec<_>>();
-    let canonical = is_canonical_operations(&removal_operations)
-        .map_err(|_| invalid_data("batch removals are invalid"))?;
-    if !canonical {
-        return Err(invalid_data("batch removals are not canonical"));
-    }
-    for participant in participants {
-        if removals.iter().any(|target| {
-            matches!(target, RemoveTarget::Partition(partition) if partition == &participant.partition)
-        }) {
+    let mut previous_removal = None;
+    for removal in removals {
+        let RemoveTarget::Blob { partition, name } = removal else {
             return Err(invalid_data(
-                "batch removes a partition containing a publication participant",
+                "embedded batch decisions cannot remove partitions",
             ));
+        };
+        super::super::validate_partition_name(partition)
+            .map_err(|_| invalid_data("batch removal has an invalid partition"))?;
+        let key = (partition.as_str(), name.as_slice());
+        if previous_removal.is_some_and(|previous| previous >= key) {
+            return Err(invalid_data("batch removals are not canonical"));
         }
+        if participants
+            .binary_search_by(|participant| participant.key().cmp(&key))
+            .is_err()
+        {
+            return Err(invalid_data("batch removal has no participant"));
+        }
+        previous_removal = Some(key);
     }
     Ok(())
 }
@@ -458,44 +564,45 @@ fn validate_operation_participants(
     participants: &[Participant],
     operations: &[Operation],
 ) -> io::Result<()> {
-    let mut matching_operations = operations.iter().filter_map(|operation| match operation {
-        Operation::Publish { partition, name }
-        | Operation::Rewind {
-            partition, name, ..
-        }
-        | Operation::Remove(RemoveTarget::Blob { partition, name }) => {
-            Some((partition.as_str(), name.as_slice()))
-        }
-        Operation::Remove(RemoveTarget::Partition(_)) => None,
-    });
-    for participant in participants {
-        loop {
-            match matching_operations.next() {
-                Some(operation) if operation < participant.key() => continue,
-                Some(operation) if operation == participant.key() => break,
-                _ => {
-                    return Err(invalid_input(
-                        "storage batch participant has no matching blob operation",
-                    ));
-                }
-            }
-        }
-    }
+    let mut participant_index = 0;
     for operation in operations {
-        if matches!(operation, Operation::Remove(RemoveTarget::Partition(_))) {
+        let (key, removed) = match operation {
+            Operation::Publish { partition, name }
+            | Operation::Rewind {
+                partition, name, ..
+            } => ((partition.as_str(), name.as_slice()), false),
+            Operation::Remove(RemoveTarget::Blob { partition, name }) => {
+                ((partition.as_str(), name.as_slice()), true)
+            }
+            Operation::Remove(RemoveTarget::Partition(_)) => {
+                return Err(invalid_input(
+                    "atomic batch deletion requires an exact V2 blob participant",
+                ));
+            }
+        };
+        if participants
+            .get(participant_index)
+            .is_some_and(|participant| participant.key() < key)
+        {
             return Err(invalid_input(
-                "atomic batch deletion requires an exact V2 blob participant",
+                "storage batch participant has no matching blob operation",
             ));
         }
-        if let Operation::Remove(RemoveTarget::Blob { partition, name }) = operation
-            && !participants
-                .iter()
-                .any(|participant| participant.key() == (partition.as_str(), name.as_slice()))
+        if participants
+            .get(participant_index)
+            .is_some_and(|participant| participant.key() == key)
         {
+            participant_index += 1;
+        } else if removed {
             return Err(invalid_input(
                 "atomic batch deletion has no matching V2 participant",
             ));
         }
+    }
+    if participant_index != participants.len() {
+        return Err(invalid_input(
+            "storage batch participant has no matching blob operation",
+        ));
     }
     Ok(())
 }
@@ -520,10 +627,8 @@ fn validate_v2_header(
         .ok_or_else(|| invalid_data("batch participant has no V2 incarnation"))
 }
 
-fn inspect_participant(root: &Path, participant: &Participant) -> io::Result<Option<File>> {
-    let path = root
-        .join(&participant.partition)
-        .join(hex(&participant.name));
+fn inspect_location(root: &Path, location: &Location) -> io::Result<Option<File>> {
+    let path = root.join(&location.partition).join(hex(&location.name));
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if path_is_missing(&error) => return Ok(None),
@@ -554,10 +659,21 @@ fn inspect_participant(root: &Path, participant: &Participant) -> io::Result<Opt
         }
         Err(error) => return Err(error),
     };
-    if incarnation != participant.incarnation {
+    if incarnation != location.incarnation {
         return Ok(None);
     }
     Ok(Some(file))
+}
+
+fn inspect_participant(root: &Path, participant: &Participant) -> io::Result<Option<File>> {
+    inspect_location(
+        root,
+        &Location {
+            partition: clone_string(&participant.partition, "inspected participant partition")?,
+            name: clone_bytes(&participant.name, "inspected participant name")?,
+            incarnation: participant.incarnation,
+        },
+    )
 }
 
 fn open_participant(root: &Path, participant: &Participant) -> io::Result<File> {
@@ -566,27 +682,253 @@ fn open_participant(root: &Path, participant: &Participant) -> io::Result<File> 
 }
 
 fn participant_is_removed(decision: &Decision, participant: &Participant) -> bool {
-    decision.removals.iter().any(|target| {
-        matches!(
-            target,
-            RemoveTarget::Blob { partition, name }
-                if partition == &participant.partition && name == &participant.name
-        )
-    })
+    decision
+        .removals
+        .binary_search_by(|target| match target {
+            RemoveTarget::Blob { partition, name } => (partition.as_str(), name.as_slice())
+                .cmp(&(participant.partition.as_str(), participant.name.as_slice())),
+            RemoveTarget::Partition(partition) => partition
+                .as_str()
+                .cmp(participant.partition.as_str())
+                .then(std::cmp::Ordering::Less),
+        })
+        .is_ok()
+}
+
+fn matching_link(
+    file: &File,
+    data_offset: u64,
+    location: &Location,
+    group_id: &[u8; GROUP_ID_LEN],
+    participant_count: usize,
+    ordinal: usize,
+) -> io::Result<Option<Link>> {
+    let mut matching = None;
+    for embedded in atomic::embedded_batch_witnesses(file, data_offset)? {
+        let link = match decode_link(&embedded.witness, &location.partition, &location.name) {
+            Ok(link) => link,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if &link.group_id != group_id
+            || link.participant_count != participant_count
+            || link.ordinal != ordinal
+            || link.participant.incarnation != location.incarnation
+            || link.participant.candidate.root_offset != embedded.root_offset
+            || !atomic::candidate_has_embedded_batch_witness(
+                file,
+                &link.participant.candidate,
+                &embedded.witness,
+            )?
+        {
+            continue;
+        }
+        if matching.replace(link).is_some() {
+            // A well-formed group installs exactly one generation in each participant. Treat an
+            // ambiguous pair of matching slots as an incomplete decision, never as authority.
+            return Ok(None);
+        }
+    }
+    Ok(matching)
+}
+
+fn matching_materialized_link(
+    file: &File,
+    data_offset: u64,
+    location: &Location,
+    group_id: &[u8; GROUP_ID_LEN],
+    participant_count: usize,
+    ordinal: usize,
+) -> io::Result<Option<(Link, Vec<u8>)>> {
+    let mut matching = None;
+    for embedded in atomic::materialized_batch_candidates(file, data_offset)? {
+        let link = match decode_link(&embedded.witness, &location.partition, &location.name) {
+            Ok(link) => link,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if &link.group_id != group_id
+            || link.participant_count != participant_count
+            || link.ordinal != ordinal
+            || link.participant.incarnation != location.incarnation
+            || link.participant.candidate != embedded.candidate
+            || !atomic::candidate_has_embedded_batch_witness(
+                file,
+                &embedded.candidate,
+                &embedded.witness,
+            )?
+            || if link.removed {
+                !atomic::candidate_is_tombstoned(file, &embedded.candidate)?
+            } else {
+                !atomic::candidate_is_materialized(file, &embedded.candidate)?
+            }
+        {
+            continue;
+        }
+        if matching.replace((link, embedded.witness)).is_some() {
+            return Ok(None);
+        }
+    }
+    Ok(matching)
+}
+
+fn recover_linked_decision(
+    root: &Path,
+    partition: &str,
+    name: &[u8],
+    file: &File,
+    data_offset: u64,
+    root_offset: u64,
+    witness: &[u8],
+) -> io::Result<Option<Decision>> {
+    let local_incarnation = validate_v2_header(file)?;
+    let first = match decode_link(witness, partition, name) {
+        Ok(link) => link,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if first.participant.incarnation != local_incarnation
+        || first.participant.candidate.root_offset != root_offset
+        || !atomic::candidate_has_embedded_batch_witness(
+            file,
+            &first.participant.candidate,
+            witness,
+        )?
+    {
+        return Ok(None);
+    }
+
+    let start = Location {
+        partition: clone_string(partition, "recovery start partition")?,
+        name: clone_bytes(name, "recovery start name")?,
+        incarnation: local_incarnation,
+    };
+    let participant_count = first.participant_count;
+    let start_ordinal = first.ordinal;
+    let group_id = first.group_id;
+    let mut links = Vec::new();
+    let mut current_location = clone_location(&start)?;
+    let mut current_link = first;
+
+    for step in 0..participant_count {
+        let expected_ordinal = (start_ordinal + step) % participant_count;
+        if current_link.group_id != group_id
+            || current_link.participant_count != participant_count
+            || current_link.ordinal != expected_ordinal
+            || current_link.participant.key() != current_location.key()
+            || current_link.participant.incarnation != current_location.incarnation
+        {
+            return Ok(None);
+        }
+
+        let next = clone_location(&current_link.next)?;
+        reserve(&mut links, 1, "recovered batch participant links")?;
+        links.push(current_link);
+        if step + 1 == participant_count {
+            if next != start {
+                return Ok(None);
+            }
+            break;
+        }
+        if next == start {
+            return Ok(None);
+        }
+        let Some(next_file) = inspect_location(root, &next)? else {
+            return Ok(None);
+        };
+        let Some(next_link) = matching_link(
+            &next_file,
+            data_offset,
+            &next,
+            &group_id,
+            participant_count,
+            (expected_ordinal + 1) % participant_count,
+        )?
+        else {
+            return Ok(None);
+        };
+        current_location = next;
+        current_link = next_link;
+    }
+
+    links.rotate_left((participant_count - start_ordinal) % participant_count);
+    for (ordinal, link) in links.iter().enumerate() {
+        let next = &links[(ordinal + 1) % participant_count].participant;
+        if link.ordinal != ordinal
+            || link.next.partition != next.partition
+            || link.next.name != next.name
+            || link.next.incarnation != next.incarnation
+        {
+            return Ok(None);
+        }
+    }
+
+    let mut participants: Vec<Participant> = Vec::new();
+    reserve(
+        &mut participants,
+        participant_count,
+        "recovered batch participants",
+    )?;
+    let removal_count = links.iter().filter(|link| link.removed).count();
+    let mut removals = Vec::new();
+    reserve(&mut removals, removal_count, "recovered batch removals")?;
+    for link in links {
+        if link.removed {
+            removals.push(RemoveTarget::Blob {
+                partition: clone_string(
+                    &link.participant.partition,
+                    "recovered batch removal partition",
+                )?,
+                name: clone_bytes(&link.participant.name, "recovered batch removal name")?,
+            });
+        }
+        participants.push(link.participant);
+    }
+    let decision = Decision {
+        group_id,
+        participants,
+        removals,
+    };
+    if validate_decision(&decision.participants, &decision.removals).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(decision))
 }
 
 fn materialize_decision_participant(
     root: &Path,
     decision: &Decision,
+    ordinal: usize,
     participant: &Participant,
-    descriptor: &[u8],
 ) -> io::Result<()> {
     let removed = participant_is_removed(decision, participant);
     let file = match inspect_participant(root, participant)? {
         Some(file) => file,
         None => return Ok(()),
     };
-    if !atomic::candidate_has_embedded_batch_witness(&file, &participant.candidate, descriptor)? {
+    let witness = encode_link(decision, ordinal)?;
+    if !atomic::candidate_has_embedded_batch_witness(&file, &participant.candidate, &witness)? {
         // Once any final root proves the decision, a missing witness means this exact participant
         // was independently retired or replaced by a later namespace operation. Prepared and torn
         // installation roots retain the checksummed witness and are repaired here instead.
@@ -607,19 +949,21 @@ fn materialize_decision_participant(
     }
 }
 
-fn materialize_decision_participants(
-    root: &Path,
-    decision: &Decision,
-    descriptor: &[u8],
-) -> io::Result<()> {
+fn materialize_decision_participants(root: &Path, decision: &Decision) -> io::Result<()> {
     const MAX_INSTALL_WORKERS: usize = 32;
-    for chunk in decision.participants.chunks(MAX_INSTALL_WORKERS) {
+    for (chunk_index, chunk) in decision
+        .participants
+        .chunks(MAX_INSTALL_WORKERS)
+        .enumerate()
+    {
         std::thread::scope(|scope| {
             let handles = chunk
                 .iter()
-                .map(|participant| {
+                .enumerate()
+                .map(|(index, participant)| {
+                    let ordinal = chunk_index * MAX_INSTALL_WORKERS + index;
                     scope.spawn(move || {
-                        materialize_decision_participant(root, decision, participant, descriptor)
+                        materialize_decision_participant(root, decision, ordinal, participant)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -635,78 +979,93 @@ fn materialize_decision_participants(
     Ok(())
 }
 
-fn unlink_deleted_participants(
-    root: &Path,
-    decision: &Decision,
-    descriptor: &[u8],
-) -> io::Result<()> {
-    let mut partitions = BTreeSet::new();
-    for target in &decision.removals {
+fn unlink_deleted_participants(root: &Path, decision: &Decision) -> io::Result<()> {
+    for target in decision.removals.iter().rev() {
         let RemoveTarget::Blob { partition, name } = target else {
             return Err(invalid_data(
                 "embedded decisions cannot remove entire partitions",
             ));
         };
-        let participant = decision
+        let ordinal = decision
             .participants
-            .iter()
-            .find(|participant| participant.partition == *partition && participant.name == *name)
-            .ok_or_else(|| invalid_data("embedded deletion has no participant"))?;
-        let path = root.join(partition).join(hex(name));
-        let file = match open_participant(root, participant) {
-            Ok(file) => file,
-            Err(error) if path_is_missing(&error) => continue,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::InvalidData | ErrorKind::UnexpectedEof
-                ) =>
-            {
-                // The exact old incarnation was already unlinked and this path was recreated.
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if !atomic::candidate_has_embedded_batch_witness(&file, &participant.candidate, descriptor)?
-        {
-            // A different incarnation at the same path belongs to a later open/create and must
-            // never be removed by replay of this decision.
-            continue;
-        }
-        if !atomic::candidate_is_tombstoned(&file, &participant.candidate)? {
-            return Err(invalid_data(
-                "embedded deletion participant is not durably tombstoned",
-            ));
-        }
-        let opened = file.metadata()?;
-        let current = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if path_is_missing(&error) => continue,
-            Err(error) => return Err(error),
-        };
-        if opened.dev() != current.dev() || opened.ino() != current.ino() {
-            continue;
-        }
-        fs::remove_file(&path)?;
-        partitions.insert(root.join(partition));
-        atomic::discard(root, partition, name)?;
-    }
-    for partition in partitions {
-        sync_directory(&partition)?;
+            .binary_search_by(|participant| {
+                participant
+                    .key()
+                    .cmp(&(partition.as_str(), name.as_slice()))
+            })
+            .map_err(|_| invalid_data("embedded deletion has no participant"))?;
+        let participant = &decision.participants[ordinal];
+        let witness = encode_link(decision, ordinal)?;
+        unlink_exact_tombstone(root, participant, &witness)?;
     }
     Ok(())
 }
 
-fn finish_embedded_decision(root: &Path, decision: &Decision, descriptor: &[u8]) -> io::Result<()> {
-    materialize_decision_participants(root, decision, descriptor)?;
-    unlink_deleted_participants(root, decision, descriptor)
+fn unlink_exact_tombstone(
+    root: &Path,
+    participant: &Participant,
+    witness: &[u8],
+) -> io::Result<()> {
+    let path = root
+        .join(&participant.partition)
+        .join(hex(&participant.name));
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_data("embedded deletion target has no parent directory"))?;
+    let file = match open_participant(root, participant) {
+        Ok(file) => file,
+        Err(error) if path_is_missing(&error) => return sync_directory(parent),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+            ) =>
+        {
+            // The exact old incarnation was already unlinked and this path was recreated.
+            return sync_directory(parent);
+        }
+        Err(error) => return Err(error),
+    };
+    if !atomic::candidate_has_embedded_batch_witness(&file, &participant.candidate, witness)? {
+        // A different incarnation at the same path belongs to a later open/create and must never
+        // be removed by replay of this decision.
+        return Ok(());
+    }
+    if !atomic::candidate_is_tombstoned(&file, &participant.candidate)? {
+        return Err(invalid_data(
+            "embedded deletion participant is not durably tombstoned",
+        ));
+    }
+    let opened = file.metadata()?;
+    let current = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if path_is_missing(&error) => return sync_directory(parent),
+        Err(error) => return Err(error),
+    };
+    if opened.dev() != current.dev() || opened.ino() != current.ino() {
+        return sync_directory(parent);
+    }
+
+    // Remove an abandoned creation inode before the live tombstone. The live unlink is then made
+    // durable before the next ordinal is touched, so any crash leaves a descending-prefix delete
+    // frontier and ordinal zero remains the final recovery anchor.
+    atomic::discard(root, &participant.partition, &participant.name)?;
+    fs::remove_file(&path)?;
+    sync_directory(parent)
+}
+
+fn finish_embedded_decision(root: &Path, decision: &Decision) -> io::Result<()> {
+    // Resolve and durably materialize the whole ring before removing any link. Once this returns,
+    // every retained root is independent and every deleted root is a retryable tombstone.
+    materialize_decision_participants(root, decision)?;
+    unlink_deleted_participants(root, decision)
 }
 
 fn validate_speculative_participant(
     root: &Path,
     participant: &Participant,
     removed: bool,
-    embedded_descriptor: Option<&[u8]>,
+    embedded_witness: Option<&[u8]>,
 ) -> io::Result<bool> {
     let file = match open_participant(root, participant) {
         Ok(file) => file,
@@ -721,8 +1080,8 @@ fn validate_speculative_participant(
         }
         Err(error) => return Err(error),
     };
-    if let Some(descriptor) = embedded_descriptor
-        && !atomic::candidate_has_embedded_batch_witness(&file, &participant.candidate, descriptor)?
+    if let Some(witness) = embedded_witness
+        && !atomic::candidate_has_embedded_batch_witness(&file, &participant.candidate, witness)?
     {
         return Ok(false);
     }
@@ -782,9 +1141,8 @@ pub(crate) fn preflight(operations: &[Operation]) -> io::Result<()> {
     if !canonical {
         return Err(invalid_input("storage batch operations are not canonical"));
     }
-    if operations.len() > MAX_RECORDS {
-        return Err(invalid_input("storage batch has too many operations"));
-    }
+    u32::try_from(operations.len())
+        .map_err(|_| invalid_input("storage batch operation count does not fit its encoding"))?;
     for operation in operations {
         let (partition, name) = match operation {
             Operation::Remove(RemoveTarget::Partition(partition)) => (partition, None),
@@ -806,42 +1164,51 @@ pub(crate) fn preflight(operations: &[Operation]) -> io::Result<()> {
     Ok(())
 }
 
-/// Validate the exact descriptor size before mutating any participant state.
-pub(crate) fn preflight_descriptor<'a>(
+/// Validate every per-link recovery resource before mutating participant state.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) fn preflight_embedded<'a>(
     operations: &[Operation],
     participants: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> io::Result<()> {
     preflight(operations)?;
-    let mut encoded_len = DESCRIPTOR_HEADER_LEN;
-    for (partition, name) in participants {
-        encoded_len = encoded_len
-            .checked_add(PARTICIPANT_FIXED_LEN)
-            .and_then(|len| len.checked_add(partition.len()))
-            .and_then(|len| len.checked_add(name.len()))
-            .ok_or_else(|| invalid_input("storage batch descriptor length overflow"))?;
+    if operations
+        .iter()
+        .any(|operation| matches!(operation, Operation::Remove(RemoveTarget::Partition(_))))
+    {
+        return Err(invalid_input(
+            "atomic batch deletion requires exact V2 blob participants",
+        ));
     }
-    for operation in operations {
-        let removal_len = match operation {
-            Operation::Remove(RemoveTarget::Partition(partition)) => {
-                Some((1 + 4, partition.len(), 0))
-            }
-            Operation::Remove(RemoveTarget::Blob { partition, name }) => {
-                Some((BLOB_REMOVAL_FIXED_LEN, partition.len(), name.len()))
-            }
-            Operation::Publish { .. } | Operation::Rewind { .. } => None,
-        };
-        let Some((fixed, partition_len, name_len)) = removal_len else {
-            continue;
-        };
-        encoded_len = encoded_len
-            .checked_add(fixed)
-            .and_then(|len| len.checked_add(partition_len))
-            .and_then(|len| len.checked_add(name_len))
-            .ok_or_else(|| invalid_input("storage batch descriptor length overflow"))?;
+    let mut participant_paths: Vec<(&'a str, &'a [u8])> = Vec::new();
+    for participant in participants {
+        reserve(&mut participant_paths, 1, "batch participant preflight")?;
+        participant_paths.push(participant);
     }
-    if encoded_len > MAX_DESCRIPTOR_LEN {
-        return Err(invalid_input("storage batch descriptor is too large"));
+    u32::try_from(participant_paths.len())
+        .map_err(|_| invalid_input("storage batch participant count does not fit its encoding"))?;
+    for pair in participant_paths.windows(2) {
+        if pair[0] >= pair[1] {
+            return Err(invalid_input(
+                "storage batch participants are not strictly ordered",
+            ));
+        }
     }
+
+    for (_, (next_partition, next_name)) in participant_paths
+        .iter()
+        .zip(participant_paths.iter().cycle().skip(1))
+    {
+        let link_len = LINK_FIXED_LEN
+            .checked_add(next_partition.len())
+            .and_then(|len| len.checked_add(next_name.len()))
+            .ok_or_else(|| invalid_input("storage batch participant link length overflow"))?;
+        if link_len > atomic::MAX_BATCH_WITNESS_LEN {
+            return Err(invalid_input(
+                "storage batch participant name exceeds its root witness slot",
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -887,27 +1254,31 @@ pub(crate) fn supports_speculation(
     verified_bytes: u64,
 ) -> bool {
     participant_count != 0
-        && participant_count <= MAX_SPECULATIVE_PARTICIPANTS
+        && u32::try_from(participant_count).is_ok()
         && verified_bytes <= MAX_SPECULATIVE_BYTES
         && operations
             .iter()
             .all(|operation| !matches!(operation, Operation::Remove(RemoveTarget::Partition(_))))
 }
 
-/// Encode an exact speculative decision for duplication inside every participant root slot.
+/// Build one exact speculative decision and a distinct linked witness for each participant.
 pub(crate) fn prepare_embedded(
     participants: &[Participant],
     operations: &[Operation],
-) -> io::Result<Vec<u8>> {
+) -> io::Result<EmbeddedBatch> {
     preflight(operations)?;
     validate_operation_participants(participants, operations)?;
-    let removals = operations
+    let removal_count = operations
         .iter()
-        .filter_map(|operation| match operation {
-            Operation::Remove(target) => Some(target.clone()),
-            Operation::Publish { .. } | Operation::Rewind { .. } => None,
-        })
-        .collect::<Vec<_>>();
+        .filter(|operation| matches!(operation, Operation::Remove(_)))
+        .count();
+    let mut removals = Vec::new();
+    reserve(&mut removals, removal_count, "batch removal decision")?;
+    for operation in operations {
+        if let Operation::Remove(target) = operation {
+            removals.push(clone_remove_target(target)?);
+        }
+    }
     validate_decision(participants, &removals).map_err(|error| {
         if error.kind() == ErrorKind::InvalidData {
             invalid_input(error.to_string())
@@ -932,7 +1303,20 @@ pub(crate) fn prepare_embedded(
             "storage batch is not eligible for embedded publication",
         ));
     }
-    encode_descriptor(participants, operations)
+    let mut decision_participants = Vec::new();
+    reserve(
+        &mut decision_participants,
+        participants.len(),
+        "batch participant decision",
+    )?;
+    for participant in participants {
+        decision_participants.push(clone_participant(participant)?);
+    }
+    prepare_links(Decision {
+        group_id: new_group_id(),
+        participants: decision_participants,
+        removals,
+    })
 }
 
 /// Encode the self-contained decision used by the one-participant publication fast path.
@@ -941,7 +1325,7 @@ pub(in crate::storage) fn prepare_single_publish(
     name: &[u8],
     incarnation: [u8; super::super::header::Header::V2_INCARNATION_LEN],
     prepared: &atomic::PreparedCommit,
-) -> io::Result<(Participant, Vec<u8>)> {
+) -> io::Result<(Participant, EmbeddedBatch)> {
     let atomic::PayloadChecksumEligibility::Eligible(payload_checksum) =
         prepared.payload_checksum()
     else {
@@ -950,27 +1334,27 @@ pub(in crate::storage) fn prepare_single_publish(
         ));
     };
     let participant = Participant {
-        partition: partition.to_string(),
-        name: name.to_vec(),
+        partition: clone_string(partition, "single publication partition")?,
+        name: clone_bytes(name, "single publication name")?,
         incarnation,
         candidate: prepared.candidate(),
         payload_start: prepared.payload_start(),
         payload_checksum,
     };
     let operations = [Operation::Publish {
-        partition: participant.partition.clone(),
-        name: participant.name.clone(),
+        partition: clone_string(&participant.partition, "single publication operation")?,
+        name: clone_bytes(&participant.name, "single publication operation")?,
     }];
-    let descriptor = prepare_embedded(std::slice::from_ref(&participant), &operations)?;
-    Ok((participant, descriptor))
+    let batch = prepare_embedded(std::slice::from_ref(&participant), &operations)?;
+    Ok((participant, batch))
 }
 
 /// Return whether a new exact group can replace the preceding embedded decision in two slots.
 pub(crate) fn can_supersede_embedded(
-    encoded: &[u8],
+    previous: &EmbeddedBatch,
     participants: &[Participant],
 ) -> io::Result<bool> {
-    let previous = decode_descriptor(encoded)?;
+    let previous = &previous.decision;
     if !previous.removals.is_empty() {
         return Ok(false);
     }
@@ -989,17 +1373,11 @@ pub(crate) fn can_supersede_embedded(
 }
 
 /// Install a successfully completed embedded decision before its participant set changes.
-pub(crate) fn materialize_embedded(root: &Path, encoded: &[u8]) -> io::Result<()> {
-    let decision = decode_descriptor(encoded)?;
-    finish_embedded_decision(root, &decision, encoded)
+pub(crate) fn materialize_embedded(root: &Path, batch: &EmbeddedBatch) -> io::Result<()> {
+    finish_embedded_decision(root, &batch.decision)
 }
 
-/// Resolve participant-embedded decisions before opening one V2 blob's logical state.
-///
-/// A decision becomes authoritative only when every exact participant retains the same descriptor,
-/// candidate metadata, and bounded payload CRC32C. Invalid newest candidates are skipped so the
-/// other root slot remains a complete fallback. The local descriptor names every peer directly, so
-/// this does not require application transaction state or a namespace scan.
+/// Resolve participant-linked decisions before opening one V2 blob's logical state.
 pub(crate) fn recover_embedded(
     root: &Path,
     partition: &str,
@@ -1007,31 +1385,19 @@ pub(crate) fn recover_embedded(
     file: &File,
     data_offset: u64,
 ) -> io::Result<bool> {
-    let local_incarnation = validate_v2_header(file)?;
     let mut embedded_decisions = Vec::new();
     for embedded in atomic::embedded_batch_witnesses(file, data_offset)? {
-        let decision = match decode_descriptor(&embedded.descriptor) {
-            Ok(decision)
-                if decision.removals.iter().all(|target| {
-                    matches!(target, RemoveTarget::Blob { partition, name }
-                    if decision.participants.iter().any(|participant| {
-                        participant.partition == partition.as_str()
-                            && participant.name == name.as_slice()
-                    }))
-                }) =>
-            {
-                decision
-            }
-            Ok(_) => continue,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::InvalidData | ErrorKind::UnexpectedEof
-                ) =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error),
+        let Some(decision) = recover_linked_decision(
+            root,
+            partition,
+            name,
+            file,
+            data_offset,
+            embedded.root_offset,
+            &embedded.witness,
+        )?
+        else {
+            continue;
         };
         let Some(local) = decision
             .participants
@@ -1040,40 +1406,28 @@ pub(crate) fn recover_embedded(
         else {
             continue;
         };
-        if local.incarnation != local_incarnation
-            || local.candidate.root_offset != embedded.root_offset
-        {
-            continue;
-        }
-        if !atomic::candidate_has_embedded_batch_witness(
-            file,
-            &local.candidate,
-            &embedded.descriptor,
-        )? {
-            continue;
-        }
         embedded_decisions.push((
             local.candidate.base_generation,
             participant_is_removed(&decision, local),
             decision,
-            embedded.descriptor,
         ));
     }
-    embedded_decisions.sort_by_key(|(generation, _, _, _)| std::cmp::Reverse(*generation));
+    embedded_decisions.sort_by_key(|(generation, _, _)| std::cmp::Reverse(*generation));
 
-    for (_, local_deleted, decision, descriptor) in embedded_decisions {
+    for (_, local_deleted, decision) in embedded_decisions {
         let mut install_started = false;
-        for participant in &decision.participants {
+        for (ordinal, participant) in decision.participants.iter().enumerate() {
             let removed = participant_is_removed(&decision, participant);
             let participant_file = match inspect_participant(root, participant)? {
                 Some(file) => file,
                 None if removed => continue,
                 None => continue,
             };
+            let witness = encode_link(&decision, ordinal)?;
             if !atomic::candidate_has_embedded_batch_witness(
                 &participant_file,
                 &participant.candidate,
-                &descriptor,
+                &witness,
             )? {
                 continue;
             }
@@ -1090,29 +1444,29 @@ pub(crate) fn recover_embedded(
             }
         }
         if install_started {
-            finish_embedded_decision(root, &decision, &descriptor)?;
+            finish_embedded_decision(root, &decision)?;
             return Ok(local_deleted);
         }
 
         let mut complete = true;
-        for participant in &decision.participants {
+        for (ordinal, participant) in decision.participants.iter().enumerate() {
+            let witness = encode_link(&decision, ordinal)?;
             if !validate_speculative_participant(
                 root,
                 participant,
                 participant_is_removed(&decision, participant),
-                Some(&descriptor),
+                Some(&witness),
             )? {
                 complete = false;
                 break;
             }
         }
         if complete {
-            finish_embedded_decision(root, &decision, &descriptor)?;
+            finish_embedded_decision(root, &decision)?;
             return Ok(local_deleted);
         }
     }
-    recover_materialized_witnesses(root, partition, name, file)?;
-    Ok(false)
+    recover_materialized_witnesses(root, partition, name, file)
 }
 
 pub(crate) fn recover_named_embedded(
@@ -1161,30 +1515,21 @@ pub(crate) fn recover_named_embedded(
     )
 }
 
-/// Use a materialized participant's retained descriptor to make any dependent peers independent.
+/// Use a materialized participant's retained link to make any dependent peers independent.
 ///
-/// This transfer runs before the local participant can fence or remove the retained witness.
+/// Tombstones are unlinked in descending ordinal order with a directory barrier after each one.
+/// Ordinal zero therefore remains a recovery anchor until every higher tombstone is durably gone.
 fn recover_materialized_witnesses(
     root: &Path,
     partition: &str,
     name: &[u8],
     file: &File,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let data_offset = super::super::Layout::V2.data_offset();
+    let local_incarnation = validate_v2_header(file)?;
     for embedded in atomic::materialized_batch_candidates(file, data_offset)? {
-        let decision = match decode_descriptor(&embedded.descriptor) {
-            Ok(decision)
-                if decision.removals.iter().all(|target| {
-                    matches!(target, RemoveTarget::Blob { partition, name }
-                    if decision.participants.iter().any(|participant| {
-                        participant.partition == partition.as_str()
-                            && participant.name == name.as_slice()
-                    }))
-                }) =>
-            {
-                decision
-            }
-            Ok(_) => continue,
+        let link = match decode_link(&embedded.witness, partition, name) {
+            Ok(link) => link,
             Err(error)
                 if matches!(
                     error.kind(),
@@ -1195,28 +1540,118 @@ fn recover_materialized_witnesses(
             }
             Err(error) => return Err(error),
         };
-        let Some(local) = decision
-            .participants
-            .iter()
-            .find(|participant| participant.partition == partition && participant.name == name)
-        else {
-            continue;
-        };
-        if local.incarnation != validate_v2_header(file)?
-            || local.candidate != embedded.candidate
+        if link.participant.incarnation != local_incarnation
+            || link.participant.candidate != embedded.candidate
             || !atomic::candidate_has_embedded_batch_witness(
                 file,
                 &embedded.candidate,
-                &embedded.descriptor,
+                &embedded.witness,
             )?
         {
             continue;
         }
 
-        finish_embedded_decision(root, &decision, &embedded.descriptor)?;
-        break;
+        if let Some(decision) = recover_linked_decision(
+            root,
+            partition,
+            name,
+            file,
+            data_offset,
+            embedded.candidate.root_offset,
+            &embedded.witness,
+        )? {
+            let local_deleted = participant_is_removed(&decision, &link.participant);
+            finish_embedded_decision(root, &decision)?;
+            return Ok(local_deleted);
+        }
+
+        if link.ordinal == 0
+            && recover_ordered_delete_frontier(
+                root,
+                partition,
+                name,
+                file,
+                &link,
+                &embedded.witness,
+            )?
+        {
+            return Ok(link.removed);
+        }
+        // A non-anchor tombstone remains logically deleted, but cannot unlink itself without
+        // creating a hole below the durable descending frontier. Opening ordinal zero or scanning
+        // its partition completes the bounded cleanup.
+        return Ok(link.removed);
     }
-    Ok(())
+    Ok(false)
+}
+
+fn recover_ordered_delete_frontier(
+    root: &Path,
+    partition: &str,
+    name: &[u8],
+    file: &File,
+    first: &Link,
+    first_witness: &[u8],
+) -> io::Result<bool> {
+    if first.ordinal != 0 || first.participant_count == 0 {
+        return Ok(false);
+    }
+    let data_offset = super::super::Layout::V2.data_offset();
+    let start = Location {
+        partition: clone_string(partition, "delete recovery start partition")?,
+        name: clone_bytes(name, "delete recovery start name")?,
+        incarnation: validate_v2_header(file)?,
+    };
+    if first.participant.key() != start.key() || first.participant.incarnation != start.incarnation
+    {
+        return Ok(false);
+    }
+
+    let mut frontier = Vec::new();
+    let mut current = clone_link(first)?;
+    let mut current_witness = clone_bytes(first_witness, "ordered delete witness")?;
+    for expected_ordinal in 1..first.participant_count {
+        let next = clone_location(&current.next)?;
+        if next == start {
+            return Ok(false);
+        }
+        reserve(&mut frontier, 1, "ordered delete recovery frontier")?;
+        frontier.push((current, current_witness));
+        let Some(next_file) = inspect_location(root, &next)? else {
+            // Descending, individually synchronized unlinks make the first absent successor the
+            // delete frontier. Persist that observed absence before touching the lower prefix, so
+            // a retry after an indeterminate directory sync preserves the same ordering invariant.
+            sync_directory(&root.join(&next.partition))?;
+            for (link, witness) in frontier.into_iter().rev() {
+                if link.removed {
+                    unlink_exact_tombstone(root, &link.participant, &witness)?;
+                }
+            }
+            return Ok(true);
+        };
+        let Some((next_link, witness)) = matching_materialized_link(
+            &next_file,
+            data_offset,
+            &next,
+            &first.group_id,
+            first.participant_count,
+            expected_ordinal,
+        )?
+        else {
+            return Ok(false);
+        };
+        if next_link.participant.key() != next.key()
+            || next_link.participant.incarnation != next.incarnation
+        {
+            return Ok(false);
+        }
+        current = next_link;
+        current_witness = witness;
+    }
+
+    // An intact ring is handled by full decision recovery above. A non-closing final chain is not
+    // a valid delete frontier and must not authorize namespace changes.
+    Ok(false)
 }
 
 pub(crate) fn recover_partition_embedded(root: &Path, partition: &str) -> io::Result<()> {
@@ -1411,20 +1846,20 @@ mod tests {
 
     struct StagedGroup {
         participants: Vec<Participant>,
-        descriptor: Vec<u8>,
+        batch: EmbeddedBatch,
         decision: Decision,
         records: Vec<Vec<u8>>,
     }
 
     impl StagedGroup {
-        fn write_mask(&self, blobs: &[TestBlob], mask: u64) {
+        fn write_selected(&self, blobs: &[TestBlob], include: impl Fn(usize) -> bool) {
             for (index, ((blob, participant), record)) in blobs
                 .iter()
                 .zip(&self.participants)
                 .zip(&self.records)
                 .enumerate()
             {
-                if mask & (1 << index) == 0 {
+                if !include(index) {
                     continue;
                 }
                 blob.file
@@ -1434,8 +1869,16 @@ mod tests {
             }
         }
 
+        fn write_mask(&self, blobs: &[TestBlob], mask: u64) {
+            self.write_selected(blobs, |index| mask & (1 << index) != 0);
+        }
+
         fn write_all(&self, blobs: &[TestBlob]) {
-            self.write_mask(blobs, (1 << blobs.len()) - 1);
+            self.write_selected(blobs, |_| true);
+        }
+
+        fn witness(&self, ordinal: usize) -> Vec<u8> {
+            encode_link(&self.decision, ordinal).unwrap()
         }
     }
 
@@ -1503,8 +1946,8 @@ mod tests {
             prepared.push(commit);
         }
 
-        let descriptor = if participants.len() == 1 && matches!(roles[0], Role::Retain(_)) {
-            let (participant, descriptor) = prepare_single_publish(
+        let batch = if participants.len() == 1 && matches!(roles[0], Role::Retain(_)) {
+            let (participant, batch) = prepare_single_publish(
                 PARTITION,
                 &blobs[0].name,
                 blobs[0].incarnation,
@@ -1512,21 +1955,24 @@ mod tests {
             )
             .unwrap();
             assert_eq!(participant, participants[0]);
-            descriptor
+            batch
         } else {
             prepare_embedded(&participants, &operations).unwrap()
         };
-        for commit in &mut prepared {
-            commit.attach_batch_witness(&descriptor).unwrap();
+        for (commit, participant) in prepared.iter_mut().zip(&participants) {
+            let witness = batch
+                .witness(&participant.partition, &participant.name)
+                .expect("every participant has one local link");
+            commit.attach_batch_witness(witness).unwrap();
         }
         let records = prepared
             .into_iter()
             .map(|commit| commit.prepared_root)
             .collect();
-        let decision = decode_descriptor(&descriptor).unwrap();
+        let decision = batch.decision.clone();
         StagedGroup {
             participants,
-            descriptor,
+            batch,
             decision,
             records,
         }
@@ -1568,7 +2014,156 @@ mod tests {
         recreated[0].candidate.base_generation += 1;
         recreated[0].candidate.root_offset += 1;
 
-        assert!(!can_supersede_embedded(&group.descriptor, &recreated).unwrap());
+        assert!(!can_supersede_embedded(&group.batch, &recreated).unwrap());
+    }
+
+    #[test]
+    fn local_link_path_budget_is_exact_and_preflighted() {
+        assert_eq!(LINK_FIXED_LEN, 296);
+        assert_eq!(atomic::MAX_BATCH_WITNESS_LEN, 1_940);
+        assert_eq!(atomic::MAX_BATCH_WITNESS_LEN - LINK_FIXED_LEN, 1_644);
+        let short = b"a".as_slice();
+        let exact = vec![b'z'; atomic::MAX_BATCH_WITNESS_LEN - LINK_FIXED_LEN];
+        assert_eq!(LINK_FIXED_LEN + exact.len(), atomic::MAX_BATCH_WITNESS_LEN);
+        preflight_embedded(&[], [("", short), ("", exact.as_slice())]).unwrap();
+
+        let overlong = vec![b'z'; exact.len() + 1];
+        let error = preflight_embedded(&[], [("", short), ("", overlong.as_slice())])
+            .expect_err("an oversized successor path must fail before staging");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn decoded_link_accepts_the_format_count_and_rejects_invalid_headers() {
+        const U32_LEN: usize = std::mem::size_of::<u32>();
+        const COUNT_OFFSET: usize = LINK_MAGIC.len() + GROUP_ID_LEN;
+        const ORDINAL_OFFSET: usize = COUNT_OFFSET + U32_LEN;
+
+        let root = TestRoot::new("unbounded-count");
+        let mut blobs = vec![TestBlob::create(root.path(), b"a", 1, b"old")];
+        let group = stage_group(&mut blobs, &[Role::Retain(b"-new".to_vec())]);
+        let original = group.witness(0);
+
+        let mut witness = original.clone();
+        witness[..LINK_MAGIC.len()].copy_from_slice(b"CWUNOL13");
+        let error = decode_link(&witness, PARTITION, &blobs[0].name)
+            .expect_err("an older link format must be rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+
+        let mut witness = original.clone();
+        witness[COUNT_OFFSET..COUNT_OFFSET + U32_LEN].copy_from_slice(&0u32.to_be_bytes());
+        let error = decode_link(&witness, PARTITION, &blobs[0].name)
+            .expect_err("an empty ring must be rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+
+        let mut witness = original.clone();
+        witness[COUNT_OFFSET..COUNT_OFFSET + U32_LEN].copy_from_slice(&u32::MAX.to_be_bytes());
+        let decoded = decode_link(&witness, PARTITION, &blobs[0].name)
+            .expect("the full format count must not hit a policy cap");
+        assert_eq!(decoded.participant_count, u32::MAX as usize);
+
+        let mut witness = original;
+        witness[COUNT_OFFSET..COUNT_OFFSET + U32_LEN].copy_from_slice(&2u32.to_be_bytes());
+        witness[ORDINAL_OFFSET..ORDINAL_OFFSET + U32_LEN].copy_from_slice(&2u32.to_be_bytes());
+        let error = decode_link(&witness, PARTITION, &blobs[0].name)
+            .expect_err("an ordinal outside its count must be rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn participant_ring_beyond_worker_fanout_recovers() {
+        const PARTICIPANTS: usize = 64;
+
+        let root = TestRoot::new("maximum-ring");
+        let mut blobs = (0..PARTICIPANTS)
+            .map(|index| {
+                let name = format!("participant-{index:012}");
+                assert_eq!(name.len(), 24);
+                TestBlob::create(root.path(), name.as_bytes(), index as u8, &[index as u8])
+            })
+            .collect::<Vec<_>>();
+        let roles = (0..PARTICIPANTS)
+            .map(|index| Role::Retain(vec![index as u8 ^ 0xff]))
+            .collect::<Vec<_>>();
+        let group = stage_group(&mut blobs, &roles);
+        group.write_all(&blobs);
+
+        assert!(!recover_from(root.path(), &blobs[0]));
+        for (index, (blob, participant)) in blobs.iter().zip(&group.participants).enumerate() {
+            assert!(atomic::candidate_is_materialized(&blob.file, &participant.candidate).unwrap());
+            assert_eq!(blob.recovered_payload(), [index as u8, index as u8 ^ 0xff]);
+        }
+    }
+
+    #[test]
+    fn incomplete_large_ring_rolls_back_across_worker_boundaries() {
+        const PARTICIPANTS: usize = 64;
+
+        for missing in [0, 31, 32, PARTICIPANTS - 1] {
+            let root = TestRoot::new(&format!("large-incomplete-ring-{missing}"));
+            let mut blobs = (0..PARTICIPANTS)
+                .map(|index| {
+                    let name = format!("participant-{index:012}");
+                    TestBlob::create(root.path(), name.as_bytes(), index as u8, &[index as u8])
+                })
+                .collect::<Vec<_>>();
+            let roles = (0..PARTICIPANTS)
+                .map(|index| Role::Retain(vec![index as u8 ^ 0xff]))
+                .collect::<Vec<_>>();
+            let group = stage_group(&mut blobs, &roles);
+            group.write_selected(&blobs, |index| index != missing);
+
+            let anchor = (missing + 1) % PARTICIPANTS;
+            assert!(
+                !recover_from(root.path(), &blobs[anchor]),
+                "missing {missing}"
+            );
+            for (index, (blob, participant)) in blobs.iter().zip(&group.participants).enumerate() {
+                assert_not_final(
+                    blob,
+                    participant,
+                    &format!("missing {missing}, index {index}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_delete_ring_beyond_worker_fanout_recovers() {
+        const PARTICIPANTS: usize = 64;
+
+        let root = TestRoot::new("large-mixed-delete-ring");
+        let mut blobs = (0..PARTICIPANTS)
+            .map(|index| {
+                let name = format!("participant-{index:012}");
+                TestBlob::create(root.path(), name.as_bytes(), index as u8, &[index as u8])
+            })
+            .collect::<Vec<_>>();
+        let roles = (0..PARTICIPANTS)
+            .map(|index| {
+                if index.is_multiple_of(2) {
+                    Role::Delete
+                } else {
+                    Role::Retain(vec![index as u8 ^ 0xff])
+                }
+            })
+            .collect::<Vec<_>>();
+        let group = stage_group(&mut blobs, &roles);
+        group.write_all(&blobs);
+
+        assert!(recover_from(root.path(), &blobs[0]));
+        for (index, blob) in blobs.iter().enumerate() {
+            if index.is_multiple_of(2) {
+                assert!(!blob.path.exists(), "deleted participant {index}");
+            } else {
+                assert!(blob.path.exists(), "retained participant {index}");
+                assert_eq!(
+                    blob.recovered_payload(),
+                    [index as u8, index as u8 ^ 0xff],
+                    "retained participant {index}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1771,7 +2366,7 @@ mod tests {
         let group = stage_group(&mut blobs, &[Role::Delete, Role::Delete, Role::Delete]);
         group.write_all(&blobs);
 
-        materialize_decision_participants(root.path(), &group.decision, &group.descriptor).unwrap();
+        materialize_decision_participants(root.path(), &group.decision).unwrap();
         for ((blob, participant), (payload, raw_len)) in blobs
             .iter()
             .zip(&group.participants)
@@ -1783,7 +2378,7 @@ mod tests {
             assert_eq!(&blob.raw_payload(), payload);
         }
 
-        unlink_deleted_participants(root.path(), &group.decision, &group.descriptor).unwrap();
+        unlink_deleted_participants(root.path(), &group.decision).unwrap();
         for ((blob, participant), payload) in blobs.iter().zip(&group.participants).zip(&expected) {
             assert!(!blob.path.exists());
             assert!(atomic::candidate_is_tombstoned(&blob.file, &participant.candidate).unwrap());
@@ -1801,6 +2396,135 @@ mod tests {
         for (blob, participant) in recovery_blobs.iter().zip(&recovery_group.participants) {
             assert!(!blob.path.exists());
             assert!(atomic::candidate_is_tombstoned(&blob.file, &participant.candidate).unwrap());
+        }
+    }
+
+    #[test]
+    fn ordinal_zero_anchor_finishes_after_highest_unlink_breaks_the_ring() {
+        let root = TestRoot::new("partial-delete-ring");
+        let mut blobs = vec![
+            TestBlob::create(root.path(), b"a", 13, b"a-old"),
+            TestBlob::create(root.path(), b"b", 33, b"b-old"),
+            TestBlob::create(root.path(), b"c", 53, b"c-old"),
+        ];
+        let group = stage_group(
+            &mut blobs,
+            &[Role::Retain(b"-new".to_vec()), Role::Delete, Role::Delete],
+        );
+        group.write_all(&blobs);
+        materialize_decision_participants(root.path(), &group.decision).unwrap();
+
+        fs::remove_file(&blobs[2].path).unwrap();
+        sync_directory(&root.path().join(PARTITION)).unwrap();
+        assert!(blobs[1].path.exists());
+        assert!(!blobs[2].path.exists());
+
+        assert!(!recover_from(root.path(), &blobs[0]));
+        assert!(!blobs[1].path.exists());
+        assert!(!blobs[2].path.exists());
+        assert!(blobs[0].path.exists());
+        assert!(
+            atomic::candidate_is_materialized(&blobs[0].file, &group.participants[0].candidate,)
+                .unwrap()
+        );
+        assert_eq!(blobs[0].recovered_payload(), b"a-old-new");
+    }
+
+    #[test]
+    fn reverse_ordered_delete_frontier_is_completed_from_ordinal_zero() {
+        for durable_unlinks in 1..3 {
+            let root = TestRoot::new(&format!("ordered-delete-frontier-{durable_unlinks}"));
+            let mut blobs = vec![
+                TestBlob::create(root.path(), b"a", 14, b"a-old"),
+                TestBlob::create(root.path(), b"b", 34, b"b-old"),
+                TestBlob::create(root.path(), b"c", 54, b"c-old"),
+            ];
+            let group = stage_group(&mut blobs, &[Role::Delete, Role::Delete, Role::Delete]);
+            group.write_all(&blobs);
+            materialize_decision_participants(root.path(), &group.decision).unwrap();
+
+            // Every durable crash frontier is a prefix of descending ordinals. Ordinal zero
+            // remains an anchor that must enumerate and finish all lower-ordinal tombstones.
+            for blob in blobs.iter().rev().take(durable_unlinks) {
+                fs::remove_file(&blob.path).unwrap();
+                sync_directory(&root.path().join(PARTITION)).unwrap();
+            }
+
+            assert!(recover_from(root.path(), &blobs[0]));
+            for blob in &blobs {
+                assert!(!blob.path.exists(), "durable unlinks: {durable_unlinks}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_mixed_delete_frontier_recovers_in_descending_order() {
+        const NAMES: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];
+        for removal_mask in 1u8..(1 << NAMES.len()) {
+            let removal_count = removal_mask.count_ones() as usize;
+            for durable_unlinks in 0..=removal_count {
+                let root = TestRoot::new(&format!(
+                    "mixed-delete-{removal_mask:04b}-{durable_unlinks}"
+                ));
+                let mut blobs = NAMES
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, name)| {
+                        TestBlob::create(
+                            root.path(),
+                            name,
+                            70 + ordinal as u8,
+                            &[b'0' + ordinal as u8],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let roles = (0..NAMES.len())
+                    .map(|ordinal| {
+                        if removal_mask & (1 << ordinal) != 0 {
+                            Role::Delete
+                        } else {
+                            Role::Retain(vec![b'A' + ordinal as u8])
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let group = stage_group(&mut blobs, &roles);
+                group.write_all(&blobs);
+                materialize_decision_participants(root.path(), &group.decision).unwrap();
+
+                let removed = (0..NAMES.len())
+                    .filter(|ordinal| removal_mask & (1 << ordinal) != 0)
+                    .rev()
+                    .take(durable_unlinks);
+                for ordinal in removed {
+                    unlink_exact_tombstone(
+                        root.path(),
+                        &group.participants[ordinal],
+                        &group.witness(ordinal),
+                    )
+                    .unwrap();
+                }
+
+                // If ordinal zero was removed, every requested removal is already durable because
+                // it is always the final delete. Otherwise it remains the bounded recovery anchor.
+                if blobs[0].path.exists() {
+                    recover_from(root.path(), &blobs[0]);
+                }
+
+                for (ordinal, blob) in blobs.iter().enumerate() {
+                    if removal_mask & (1 << ordinal) != 0 {
+                        assert!(
+                            !blob.path.exists(),
+                            "mask {removal_mask:04b}, durable unlinks {durable_unlinks}, ordinal {ordinal}"
+                        );
+                    } else {
+                        assert!(blob.path.exists());
+                        assert_eq!(
+                            blob.recovered_payload(),
+                            vec![b'0' + ordinal as u8, b'A' + ordinal as u8]
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1834,7 +2558,7 @@ mod tests {
             atomic::candidate_has_embedded_batch_witness(
                 &blobs[0].file,
                 candidate,
-                &group.descriptor,
+                &group.witness(0),
             )
             .unwrap()
         );
@@ -1862,10 +2586,13 @@ mod tests {
         let tombstone = read_candidate_root(&blobs[1], deleted);
         group.write_all(&blobs);
 
-        for (blob, candidate, final_root) in [
+        for (ordinal, (blob, candidate, final_root)) in [
             (&blobs[0], retained, materialized),
             (&blobs[1], deleted, tombstone),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut torn = candidate.prepared_root;
             let changed = torn
                 .iter()
@@ -1883,7 +2610,7 @@ mod tests {
                 atomic::candidate_has_embedded_batch_witness(
                     &blob.file,
                     candidate,
-                    &group.descriptor,
+                    &group.witness(ordinal),
                 )
                 .unwrap()
             );
@@ -1979,7 +2706,7 @@ mod tests {
                 atomic::candidate_has_embedded_batch_witness(
                     &blobs[2].file,
                     candidate,
-                    &group.descriptor,
+                    &group.witness(2),
                 )
                 .unwrap(),
                 "case {case}"

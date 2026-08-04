@@ -104,7 +104,7 @@ stability_scope!(BETA {
         V0,
         /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
         V1,
-        /// An atomic-blob header with one immutable page and two mutable root pages.
+        /// An atomic-blob header with one immutable page and one mutable root page.
         V2,
     }
 
@@ -147,8 +147,8 @@ stability_scope!(BETA {
         /// The offset where blob data begins under this layout. Not stored on disk (the
         /// layout's magic implies it): a [Layout::V0] header is the bare prelude, a
         /// [Layout::V1] header region occupies exactly one 4096-byte page, and a
-        /// [Layout::V2] region occupies an immutable header page followed by two atomic-root
-        /// pages.
+        /// [Layout::V2] region occupies an immutable header page followed by one atomic-root
+        /// page containing two alternating root slots.
         ///
         /// Each offset is frozen for the lifetime of its layout: torn-creation recovery
         /// relies on every creation producing its layout's exact region, so a different offset
@@ -157,14 +157,14 @@ stability_scope!(BETA {
             match self {
                 Self::V0 => Header::PRELUDE_SIZE as u64,
                 Self::V1 => 4096,
-                Self::V2 => 12288,
+                Self::V2 => 8192,
             }
         }
 
         /// Validates the header region past the prelude for this layout, which must be
         /// fully present: a [Layout::V0] region is the prelude alone, [Layout::V1] adds a CRC over
         /// the prelude and immutable zero padding, and [Layout::V2] also authenticates a persistent
-        /// creation incarnation before its zero padding and mutable root pages.
+        /// creation incarnation before its zero padding and mutable root page.
         fn validate_region(self, raw: &[u8], raw_len: u64) -> Result<(), HeaderError> {
             match self {
                 Self::V0 => Ok(()),
@@ -301,8 +301,8 @@ stability_scope!(BETA {
     ///
     /// The magic selects the header region layout ([Layout]), and the layout fully
     /// determines the geometry: a V0 header region is the 8-byte prelude alone with data at
-    /// offset 8, V1 extends to one page of zero padding, and V2 adds two mutable atomic-root
-    /// pages after that immutable page.
+    /// offset 8, V1 extends to one page of zero padding, and V2 adds one mutable root page split
+    /// into two alternating slots after that immutable page.
     ///
     /// The blob version is opaque to the runtime: creation stamps the newest version the caller
     /// requested, reopening rejects versions outside the caller's range, and the stored value is
@@ -343,7 +343,7 @@ stability_scope!(BETA {
         /// Number of leading bytes [resolve] needs for a blob of raw on-disk length
         /// `raw_len`: the immutable header page, capped by the file itself.
         ///
-        /// V2 root pages are mutable recovery records read separately by atomic recovery. Header
+        /// The V2 root page contains mutable recovery records read separately by atomic recovery. Header
         /// resolution must not read them or any bytes beyond the first page.
         pub(crate) const fn resolve_len(raw_len: u64) -> usize {
             if raw_len < Layout::V1.data_offset() {
@@ -635,6 +635,7 @@ pub(crate) mod tests {
     fn test_header_create_atomic_v2() {
         let (region, blob_version) = Header::create_atomic(&(0..=7));
         assert_eq!(blob_version, 7);
+        assert_eq!(Layout::V2.data_offset(), 2 * 4096);
         assert_eq!(region.len(), Layout::V2.data_offset() as usize);
         assert_eq!(&region[..4], &Layout::V2.magic());
         assert_eq!(&region[4..6], &Layout::V2.runtime_version().to_be_bytes());

@@ -147,30 +147,37 @@ impl Blob {
         }
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn partition(&self) -> &str {
         &self.partition
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn name(&self) -> &[u8] {
         &self.name
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) const fn generation(&self) -> &Arc<super::Generation> {
         &self.generation
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn file(&self) -> Arc<File> {
         self.file.clone()
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) const fn data_offset(&self) -> u64 {
         self.data_offset
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) const fn is_atomic(&self) -> bool {
         self.atomic.is_some()
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) const fn incarnation(
         &self,
     ) -> [u8; super::super::header::Header::V2_INCARNATION_LEN] {
@@ -376,7 +383,7 @@ impl Blob {
     async fn rewind_atomic(
         &self,
         len: u64,
-        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+        tag: Option<[u8; super::super::ATOMIC_BLOB_TAG_LEN]>,
     ) -> Result<(), Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
@@ -415,10 +422,11 @@ impl Blob {
         })?
     }
 
+    #[commonware_macros::stability(ALPHA)]
     async fn append_atomic(
         &self,
         data: IoBufs,
-        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+        tag: Option<[u8; super::super::ATOMIC_BLOB_TAG_LEN]>,
     ) -> Result<u64, Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
@@ -528,7 +536,7 @@ impl Blob {
 
     /// Publish one blob with the same recoverable prepared-root decision used by a batch.
     ///
-    /// The payload, root, and embedded self-descriptor share one inode barrier. If that barrier is
+    /// The payload, root, and embedded self-link share one inode barrier. If that barrier is
     /// interrupted, recovery validates the bounded payload suffix before accepting the root.
     fn commit_uno(&self, state: &mut V2State) -> Result<(), Error> {
         if !state.is_dirty() {
@@ -554,7 +562,7 @@ impl Blob {
             .atomic
             .as_ref()
             .expect("atomic commits require V2 state");
-        let (participant, descriptor) = super::super::batch::prepare_single_publish(
+        let (participant, batch) = super::super::batch::prepare_single_publish(
             &self.partition,
             &self.name,
             atomic.incarnation,
@@ -582,7 +590,10 @@ impl Blob {
             let root = atomic::materialized_candidate_root(&candidate)?;
             self.file.write_all_at(&root, candidate.root_offset)?;
         }
-        prepared.attach_batch_witness(&descriptor)?;
+        let witness = batch
+            .witness(&self.partition, &self.name)
+            .expect("single-participant batches retain their local witness");
+        prepared.attach_batch_witness(witness)?;
         self.file
             .write_all_at(&prepared.prepared_root, prepared.root_offset)?;
         Self::sync_inner(&self.file, &self.partition, &self.name)?;
@@ -590,7 +601,7 @@ impl Blob {
         let requires_truncate = prepared.requires_truncate();
         atomic
             .namespace
-            .set_embedded_batch_decision(Some(Arc::<[u8]>::from(descriptor)));
+            .set_embedded_batch_decision(Some(Arc::new(batch)));
         atomic
             .namespace
             .recovery_required
@@ -609,6 +620,7 @@ impl Blob {
         Ok(())
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn lock_batch_state(&self) -> Result<OwnedMutexGuard<V2State>, Error> {
         let atomic = self
             .atomic
@@ -619,6 +631,7 @@ impl Blob {
         Ok(state)
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn prepare_batch_commit_unflushed(
         &self,
         state: &mut V2State,
@@ -631,6 +644,7 @@ impl Blob {
         Ok(prepared)
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn prepare_batch_delete_unflushed(
         &self,
         state: &V2State,
@@ -640,6 +654,7 @@ impl Blob {
         Ok(prepared)
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn stage_batch_commit(
         &self,
         prepared: &mut atomic::PreparedCommit,
@@ -654,6 +669,7 @@ impl Blob {
     }
 
     /// Durably stage a deletion witness without flushing payload that the deletion discards.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn stage_batch_delete(
         &self,
         prepared: &mut atomic::PreparedCommit,
@@ -664,10 +680,12 @@ impl Blob {
             .map_err(Error::from)
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn sync_batch_commit(&self) -> Result<(), Error> {
         Self::sync_inner(&self.file, &self.partition, &self.name)
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn activate_batch_commit(
         &self,
         state: &mut V2State,
@@ -699,6 +717,7 @@ impl Blob {
     }
 
     /// Reclaim a batch-rewound suffix after the group decision is durable.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn truncate_batch_rewind(&self, state: &mut V2State) -> Result<(), Error> {
         let raw_len = state.raw_len()?;
         if let Err(error) = self.file.set_len(raw_len) {
@@ -1092,8 +1111,9 @@ impl crate::Blob for Blob {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl crate::AtomicBlob for Blob {
-    async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
+    async fn tag(&self) -> Result<[u8; super::super::ATOMIC_BLOB_TAG_LEN], Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
         };
@@ -1102,7 +1122,7 @@ impl crate::AtomicBlob for Blob {
         Ok(state.tag())
     }
 
-    async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
+    async fn set_tag(&self, tag: [u8; super::super::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
         };
@@ -1119,7 +1139,7 @@ impl crate::AtomicBlob for Blob {
     async fn append_tagged(
         &self,
         data: impl Into<IoBufs> + Send,
-        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+        tag: [u8; super::super::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<u64, Error> {
         self.append_atomic(data.into(), Some(tag)).await
     }
@@ -1131,7 +1151,7 @@ impl crate::AtomicBlob for Blob {
     async fn rewind_tagged(
         &self,
         len: u64,
-        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+        tag: [u8; super::super::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<(), Error> {
         self.rewind_atomic(len, Some(tag)).await
     }

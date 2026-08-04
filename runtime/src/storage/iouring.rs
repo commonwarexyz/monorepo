@@ -115,7 +115,7 @@ struct Namespace {
     lock: Arc<Mutex<()>>,
     recovery_required: AtomicBool,
     carried_batch_decision: AtomicBool,
-    embedded_batch_decision: SyncMutex<Option<Arc<[u8]>>>,
+    embedded_batch_decision: SyncMutex<Option<Arc<super::batch::EmbeddedBatch>>>,
     storage_directory: PathBuf,
     generations: super::generation::Registry,
     atomic_states: SyncMutex<BTreeMap<(String, Vec<u8>), AtomicStateEntry>>,
@@ -508,7 +508,7 @@ impl Storage {
                 participants.push((blob.partition.as_str(), blob.name.as_slice()));
             }
         }
-        super::batch::preflight_descriptor(&filesystem_operations, participants)?;
+        super::batch::preflight_embedded(&filesystem_operations, participants)?;
 
         self.namespace
             .recovery_required
@@ -661,14 +661,7 @@ impl Storage {
                 .transpose()
                 .ok()
                 .flatten()
-                .filter(|descriptor| {
-                    prepared_states.iter().all(|(_, _, prepared, _)| {
-                        prepared.as_ref().unwrap().as_ref().is_none_or(|prepared| {
-                            prepared.batch_witness_capacity() >= descriptor.len()
-                        })
-                    })
-                })
-                .map(Arc::<[u8]>::from);
+                .map(Arc::new);
 
             if carry_decision && embedded_decision.is_none() {
                 let error: Error = IoError::new(
@@ -686,14 +679,14 @@ impl Storage {
                 return;
             }
 
-            let transition = embedded_decision.as_deref().map_or(Ok(None), |previous| {
+            let transition = embedded_decision.as_ref().map_or(Ok(None), |previous| {
                 embedded_witness
-                    .as_deref()
+                    .as_ref()
                     .map_or(Ok(false), |_| {
                         super::batch::can_supersede_embedded(previous, &participants)
                             .map_err(Error::from)
                     })
-                    .map(|can_supersede| (!can_supersede).then(|| previous.to_vec()))
+                    .map(|can_supersede| (!can_supersede).then(|| previous.clone()))
             });
             let transition = match transition {
                 Ok(transition) => transition,
@@ -777,17 +770,17 @@ impl Storage {
                     .filter_map(|(blob, _, prepared, removed)| {
                         let prepared = prepared.as_mut().unwrap().as_mut()?;
                         Some(async {
+                            let witness = stage_witness
+                                .as_ref()
+                                .and_then(|batch| batch.witness(&blob.partition, &blob.name));
                             if *removed {
                                 blob.stage_batch_delete(
                                     prepared,
-                                    stage_witness
-                                        .as_deref()
-                                        .expect("eligible deletions have an embedded witness"),
+                                    witness.expect("eligible deletions have an embedded witness"),
                                 )
                                 .await
                             } else {
-                                blob.stage_batch_commit(prepared, stage_witness.as_deref())
-                                    .await?;
+                                blob.stage_batch_commit(prepared, witness).await?;
                                 blob.sync_batch_commit().await
                             }
                         })
@@ -807,11 +800,11 @@ impl Storage {
                 return;
             }
 
-            if let Some(witness) = embedded_witness {
+            if let Some(batch) = embedded_witness {
                 let has_removals = filesystem_operations
                     .iter()
                     .any(|operation| matches!(operation, super::batch::Operation::Remove(_)));
-                *namespace.embedded_batch_decision.lock() = Some(witness.clone());
+                *namespace.embedded_batch_decision.lock() = Some(batch.clone());
                 namespace.invalidate_operations(&filesystem_operations);
                 namespace
                     .carried_batch_decision
@@ -826,7 +819,7 @@ impl Storage {
                 }
                 let mut completion = if has_removals {
                     let materialization_root = root.clone();
-                    let materialization_witness = witness.clone();
+                    let materialization_witness = batch.clone();
                     match tokio::task::spawn_blocking(move || {
                         super::batch::materialize_embedded(
                             &materialization_root,
@@ -1806,7 +1799,7 @@ impl Blob {
             .namespace
             .as_ref()
             .expect("V2 blobs always retain their namespace");
-        let (participant, descriptor) = super::batch::prepare_single_publish(
+        let (participant, batch) = super::batch::prepare_single_publish(
             &self.partition,
             &self.name,
             self.incarnation(),
@@ -1849,7 +1842,10 @@ impl Blob {
                 )
                 .await?;
         }
-        prepared.attach_batch_witness(&descriptor)?;
+        let witness = batch
+            .witness(&self.partition, &self.name)
+            .expect("single-participant batches retain their local witness");
+        prepared.attach_batch_witness(witness)?;
         self.io_handle
             .write_at(
                 self.file.clone(),
@@ -1862,7 +1858,7 @@ impl Blob {
         self.sync_batch_commit().await?;
         let raw_len = prepared.raw_len();
         let requires_truncate = prepared.requires_truncate();
-        *namespace.embedded_batch_decision.lock() = Some(Arc::<[u8]>::from(descriptor));
+        *namespace.embedded_batch_decision.lock() = Some(Arc::new(batch));
         namespace.recovery_required.store(true, Ordering::Release);
         namespace
             .carried_batch_decision

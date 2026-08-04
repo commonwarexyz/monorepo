@@ -86,7 +86,7 @@
 }
 
 \title{Atomic append-only storage,\\without writing payload twice}
-\subtitle{UNO / V2 and the contiguous journal simplification}
+\subtitle{Participant-linked UNO / V2 and the contiguous journal simplification}
 \author{Commonware storage design walkthrough}
 \date{PR \#4368}
 
@@ -102,33 +102,33 @@
   \vspace{0.28cm}
   {\usebeamerfont{subtitle}\color{Slate}\insertsubtitle\par}
 
+  \vspace{0.18cm}
+  {\small\color{Amber}\textbf{Status: opt-in ALPHA API; ordinary Storage and V0/V1 remain unchanged.}\par}
+
   \vfill
   \begin{center}
-    \begin{tikzpicture}[node distance=.08cm]
-      \node[oldroot,text width=2.15cm,minimum height=.9cm] (old) {fallback root\\\scriptsize generation $g$};
-      \node[root,text width=2.35cm,minimum height=.9cm,right=of old] (next) {next root\\\scriptsize embedded decision};
-      \node[box,text width=3.15cm,minimum height=.9cm,right=.18cm of next] (prefix) {stable payload prefix};
-      \node[root,text width=2.45cm,minimum height=.9cm,right=of prefix] (append) {new append\\\scriptsize written once};
+    \begin{tikzpicture}[node distance=.52cm]
+      \node[root,text width=3.15cm,minimum height=.9cm] (a) {blob A: \textbf{P}\\\scriptsize local A state $\rightarrow$ B};
+      \node[root,text width=3.15cm,minimum height=.9cm,right=of a] (b) {blob B: \textbf{P}\\\scriptsize local B state $\rightarrow$ C};
+      \node[root,text width=3.15cm,minimum height=.9cm,right=of b] (c) {blob C: \textbf{P}\\\scriptsize local C state $\rightarrow$ A};
+      \draw[flow] (a) -- (b);
+      \draw[flow] (b) -- (c);
+      \draw[flow] (c.south) -- ++(0,-.43cm) -| (a.south);
 
-      \draw[plainline]
-        ([yshift=.12cm]next.north west) --
-        ([yshift=.34cm]next.north west) --
-        ([yshift=.34cm]append.north east) --
-        ([yshift=.12cm]append.north east);
-      \coordinate (barrier) at ($(next.north)!0.5!(append.north)+(0,.34cm)$);
-      \node[above=.05cm of barrier,font=\scriptsize,text=Accent] {eligible sync: one inode barrier};
-
-      \coordinate (fileleft) at ([yshift=-.12cm]old.south west);
-      \coordinate (fileright) at (fileleft -| append.south east);
-      \draw[faintline] (fileleft) -- (fileright);
-      \node[below=.2cm of $(fileleft)!0.5!(fileright)$,font=\scriptsize,text=Muted] {one V2 inode \quad payload at final offsets \quad old or complete new after crash};
+      \node[box,text width=3.15cm,minimum height=.46cm,below=.82cm of a] (pa) {payload A written once};
+      \node[box,text width=3.15cm,minimum height=.46cm,below=.82cm of b] (pb) {payload B written once};
+      \node[box,text width=3.15cm,minimum height=.46cm,below=.82cm of c] (pc) {payload C written once};
+      \draw[faintline] (a) -- (pa);
+      \draw[faintline] (b) -- (pb);
+      \draw[faintline] (c) -- (pc);
+      \node[below=.12cm of pb,font=\scriptsize,text=Muted] {concurrent inode barriers \quad closed recovery ring \quad no coordinator file};
     \end{tikzpicture}
   \end{center}
 
   \vfill
   {\color{Muted}\small\insertauthor\hfill\insertdate}
 
-  \note{The goal is not a general transactional filesystem. It is the narrower primitive our journals actually need: append, rewind, and delete, with publication at the existing sync boundary. UNO is the development nickname for the one-write, one-hot-path-barrier target.}
+  \note{The goal is not a general transactional filesystem. It is the narrower primitive our journals actually need: append, rewind, and delete, with publication at the existing sync boundary. AtomicStorage, AtomicBlob, BatchStorage, BatchOperation, and the atomic paged-buffer helpers are explicitly ALPHA; the ordinary BETA storage surface remains unchanged. UNO is the development nickname for the one-write, one-hot-path-barrier target. Each participant carries only its local proof and an exact link to the next participant; no payload or complete group descriptor is replicated.}
 \end{frame}
 
 \begin{frame}[t]{The contract we actually need}
@@ -259,18 +259,19 @@
   \note{This is why CRC32C becomes sufficient once we narrow the primitive. It is not an authentication mechanism and it does not protect against someone deliberately editing the disk and checksum. The threat here is crash-torn local storage. For random overwrite, a CRC only tells us that data is bad; it does not provide rollback material.}
 \end{frame}
 
-\begin{frame}[t]{V2: payload at final offsets, authority in two roots}
+\begin{frame}[t]{V2: one root page, payload at final offsets}
   \vspace{0.03cm}
   \begin{tikzpicture}[x=1cm,y=1cm]
-    \node[box,minimum width=2.05cm,minimum height=1.0cm] (hdr) {immutable header\\\scriptsize 4 KiB};
-    \node[oldroot,minimum width=2.05cm,minimum height=1.0cm,right=.08cm of hdr] (r0) {root slot 0\\\scriptsize 4 KiB};
-    \node[root,minimum width=2.05cm,minimum height=1.0cm,right=.08cm of r0] (r1) {root slot 1\\\scriptsize 4 KiB};
-    \node[box,minimum width=5.65cm,minimum height=1.0cm,right=.08cm of r1] (payload) {append-only payload log\\\scriptsize physical and logical order agree};
+    \node[box,minimum width=2.45cm,minimum height=1.0cm] (hdr) {immutable header\\\scriptsize 4 KiB};
+    \node[oldroot,minimum width=1.25cm,minimum height=1.0cm,right=.08cm of hdr] (r0) {slot 0\\\scriptsize 2 KiB};
+    \node[root,minimum width=1.25cm,minimum height=1.0cm,right=0cm of r0] (r1) {slot 1\\\scriptsize 2 KiB};
+    \node[box,minimum width=6.75cm,minimum height=1.0cm,right=.08cm of r1] (payload) {append-only payload log\\\scriptsize physical and logical order agree};
+    \node[draw=Accent,dashed,rounded corners=.04cm,fit=(r0)(r1),inner sep=.05cm,label={[font=\tiny,text=Accent]above:one mutable 4 KiB root page split into two slots}] {};
     \draw[plainline] ($(payload.south west)+(0,-.14)$) -- ($(payload.south east)+(0,-.14)$);
-    \node[below=.17cm of payload,font=\scriptsize,text=Muted] {payload begins at 12 KiB};
+    \node[below=.17cm of payload,font=\scriptsize,text=Muted] {payload begins at 8 KiB};
 
-    \node[panel,below=.82cm of hdr.south west,anchor=north west,text width=5.75cm,minimum height=1.24cm] (rootfields) {\textbf{40-byte root header}\\\scriptsize spelling \quad generation \quad logical length\\12-byte app tag \quad CRC32C};
-    \node[panel,right=.42cm of rootfields,text width=6.15cm,minimum height=1.24cm] (witness) {\textbf{Prepared group witness}\\\scriptsize root header + magic / length / CRC\\+ exact descriptor};
+    \node[panel,below=.82cm of hdr.south west,anchor=north west,text width=5.75cm,minimum height=1.24cm] (rootfields) {\textbf{92-byte root header}\\\scriptsize spelling \quad generation \quad logical length\\64-byte app tag \quad CRC32C};
+    \node[panel,right=.42cm of rootfields,text width=6.15cm,minimum height=1.24cm] (witness) {\textbf{One 2 KiB slot}\\\scriptsize 92 B root + 16 B witness envelope\\+ $\leq$1,940 B local link / unused space};
   \end{tikzpicture}
 
   \vspace{0.3cm}
@@ -292,20 +293,20 @@
   \vfill
   \takeaway{No extent map, hole punching, or compaction: a root selects a reachable payload prefix.}
 
-  \note{UNO is a development nickname, not a new public acronym: it reflects the one payload write and one hot-path barrier target. The two root pages are deliberately fixed and small. The application gets twelve tag bytes; contiguous uses those bytes to encode its start authority and partial-page checksum.}
+  \note{UNO is a development nickname, not a new public acronym: it reflects the one payload write and one hot-path barrier target. Both alternating 2 KiB slots share one 4 KiB mutable page after the immutable header. They are disjoint addressed ranges: generation parity writes one while preserving the other as fallback under the old/new/subset-of-addressed-write model. Collateral corruption of the containing physical block is a stronger media-failure model and is not made atomic by this layout. The application gets 64 tag bytes. The checked-page wrapper exposes 60 as its marker and reserves four for the partial-page checksum; contiguous currently uses the marker's first eight bytes for its start authority.}
 \end{frame}
 
 \begin{frame}[t]{One blob: the durable decision fits in one barrier}
   \vspace{0.14cm}
   \begin{tikzpicture}[node distance=.7cm]
     \node[box,minimum width=2.7cm,minimum height=1.0cm] (append) {append payload\\\scriptsize final offsets, written once};
-    \node[root,minimum width=3.0cm,minimum height=1.0cm,right=of append] (stage) {write \textbf{P} root\\\scriptsize + self descriptor};
+    \node[root,minimum width=3.0cm,minimum height=1.0cm,right=of append] (stage) {write \textbf{P} root\\\scriptsize + self-link witness};
     \node[root,minimum width=2.6cm,minimum height=1.0cm,right=of stage] (sync) {\texttt{fdatasync}\\\scriptsize same inode};
     \node[root,minimum width=2.5cm,minimum height=1.0cm,right=of sync] (done) {decision durable\\\scriptsize return \texttt{Ok}};
     \draw[flow] (append) -- (stage);
     \draw[flow] (stage) -- (sync);
     \draw[flow] (sync) -- (done);
-    \node[below=.31cm of sync,font=\scriptsize,text=Muted,align=center] {covers earlier payload + root + descriptor\\eligible bounded suffix; otherwise payload preflushes first};
+    \node[below=.31cm of sync,font=\scriptsize,text=Muted,align=center] {covers earlier payload + root + witness\\eligible bounded suffix; otherwise payload preflushes first};
   \end{tikzpicture}
 
   \vspace{0.42cm}
@@ -313,14 +314,14 @@
     \begin{column}{0.47\textwidth}
       \begin{tikzpicture}
         \node[oldroot,minimum width=2.15cm] (a) {slot A\\old root};
-        \node[root,minimum width=2.15cm,right=.35cm of a] (b) {slot B\\P + descriptor};
+        \node[root,minimum width=2.15cm,right=.35cm of a] (b) {slot B\\P + self link};
         \node[below=.28cm of $(a.south)!0.5!(b.south)$,font=\small,text=Muted,align=center] {the old root is never overwritten\\while publishing its successor};
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.51\textwidth}
       \eyebrow{On restart}
       \begin{itemize}
-        \item If the prepared root, descriptor, and required suffix CRC all validate: expose new.
+        \item If the prepared root, self link, and required suffix CRC all validate: expose new.
         \item Otherwise: expose the preceding committed root.
         \item No follow-up P$\rightarrow$C marker and no second durability barrier.
       \end{itemize}
@@ -328,40 +329,51 @@
   \end{columns}
 
   \vfill
-  \takeaway{The descriptor remains the durable decision; later compatible epochs alternate and supersede it.}
+  \takeaway{The self-link is the durable decision; later compatible epochs alternate and supersede it.}
 
   \note{The one-barrier claim is for the compatible append-only hot path. An incompatible change in participant set can require materializing a prior embedded decision first. Large or non-contiguous pending epochs may also preflush immutable payload before the root is staged, but they do not write that payload a second time.}
 \end{frame}
 
-\begin{frame}[t]{Several blobs: replicate the decision, not the payload}
-  \vspace{0.02cm}
-  \begin{columns}[T,onlytextwidth]
-    \begin{column}{0.61\textwidth}
-      \begin{tikzpicture}[node distance=.25cm]
-        \foreach \i in {0,...,2} {
-          \node[box,minimum width=2.2cm,minimum height=.62cm] (b\i) at (0,-0.85*\i) {blob \i{} payload};
-          \node[root,minimum width=2.45cm,minimum height=.62cm] (p\i) at (2.75,-0.85*\i) {P + identical D};
-          \node[root,minimum width=1.9cm,minimum height=.62cm] (s\i) at (5.4,-0.85*\i) {\texttt{fdatasync}};
-          \draw[flow] (b\i) -- (p\i);
-          \draw[flow] (p\i) -- (s\i);
-        }
-        \node[font=\scriptsize,text=Muted] at (4.05,-2.3) {participant barriers run concurrently};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.37\textwidth}
-      \begin{tikzpicture}
-        \node[panel,minimum width=4.35cm,align=left] {\textbf{Canonical descriptor D}\\[.08cm]\scriptsize exact partition + name\\persistent 128-bit incarnation\\candidate root and logical length\\suffix start + CRC32C\\removal operations};
-      \end{tikzpicture}
+\begin{frame}[t]{Several blobs: each root stores one link in a closed ring}
+  \vspace{0.06cm}
+  \begin{center}
+    \begin{tikzpicture}[node distance=.52cm]
+      \node[root,text width=3.25cm,minimum height=1.14cm] (a) {blob A: \textbf{P} \quad {\tiny ordinal 0/3}\\\scriptsize local candidate + CRC\\next: exact B incarnation};
+      \node[root,text width=3.25cm,minimum height=1.14cm,right=of a] (b) {blob B: \textbf{P} \quad {\tiny ordinal 1/3}\\\scriptsize local candidate + CRC\\next: exact C incarnation};
+      \node[root,text width=3.25cm,minimum height=1.14cm,right=of b] (c) {blob C: \textbf{P} \quad {\tiny ordinal 2/3}\\\scriptsize local candidate + CRC\\next: exact A incarnation};
+      \draw[flow] (a) -- (b);
+      \draw[flow] (b) -- (c);
+      \draw[flow] (c.south) -- ++(0,-.46cm) -| node[pos=.25,below,font=\tiny,text=Muted]{same group ID + count; close after exactly three hops} (a.south);
 
-      \vspace{0.2cm}
-      \scriptsize \textbf{Slot bound:} at most 28 empty-name participants fit in 4 KiB; real names/removals lower it. Configured cap: 32.
+      \node[box,text width=3.25cm,minimum height=.55cm,below=.92cm of a] (sa) {\texttt{fdatasync(A)}};
+      \node[box,text width=3.25cm,minimum height=.55cm,below=.92cm of b] (sb) {\texttt{fdatasync(B)}};
+      \node[box,text width=3.25cm,minimum height=.55cm,below=.92cm of c] (sc) {\texttt{fdatasync(C)}};
+      \draw[faintline] (a) -- (sa);
+      \draw[faintline] (b) -- (sb);
+      \draw[faintline] (c) -- (sc);
+      \node[below=.12cm of sb,font=\scriptsize,text=Muted] {participant barriers run concurrently};
+    \end{tikzpicture}
+  \end{center}
+
+  \vspace{0.2cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \eyebrow{What one local witness carries}\par\smallskip
+      \scriptsize Fresh 128-bit group ID, count + ordinal, local incarnation/candidate/removal bit, bounded suffix CRC32C, and only the successor's partition/name/incarnation.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \eyebrow{What restart proves}\par\smallskip
+      \scriptsize Opening one unresolved P follows exactly the declared ring, growing state only after each valid link. Only one unique, consecutive, closed ring can publish the complete new group.
     \end{column}
   \end{columns}
 
-  \vfill
-  \takeaway{\textbf{Durable frontier:} every barrier completes. Any member leads to exact peers; no coordinator file. Variable data + offsets are one such group.}
+  \vspace{0.12cm}
+  \centering\scriptsize Live process: one typed \texttt{Decision} in RAM. On disk: distinct local links only.
 
-  \note{The barriers are issued concurrently. If start_apply returns Ok, all required participant states are durably recoverable, even if the completion handle is dropped. Awaiting the handle waits for activation and namespace cleanup. A failed or cancelled start remains indeterminate because every barrier may in fact have reached disk.}
+  \vfill
+  \takeaway{No coordinator file and no replicated group descriptor: the participant files are the recovery index.}
+
+  \note{The barriers are issued concurrently. The full typed decision exists only in memory while the operation is live. On disk, each root stores one local witness and one successor link. If start_apply returns Ok, all required participant states are durably recoverable, even if the completion handle is dropped. Awaiting the handle waits for activation and namespace cleanup. A failed or cancelled start remains indeterminate because every barrier may in fact have reached disk.}
 \end{frame}
 
 \begin{frame}[t]{Dependent writes can be built, then published together}
@@ -400,49 +412,49 @@
       \vspace{0.08cm}
       \begin{tikzpicture}[node distance=.36cm]
         \node[oldroot,text width=1.35cm,minimum height=.86cm] (oldpair) {old data\\+ offsets};
-        \node[root,text width=2.0cm,minimum height=.86cm,right=of oldpair] (decision) {one UNO\\decision};
+        \node[root,text width=2.0cm,minimum height=.86cm,right=of oldpair] (decision) {one linked\\UNO group};
         \node[root,text width=1.35cm,minimum height=.86cm,right=of decision] (newpair) {new data\\+ offsets};
         \draw[flow] (oldpair) -- (decision);
         \draw[flow] (decision) -- (newpair);
       \end{tikzpicture}
 
-      \vspace{0.07cm}
+      \vspace{0.03cm}
       \scriptsize Restart sees the old pair or complete new pair---never mismatched data and offsets lengths.
     \end{column}
   \end{columns}
 
   \vfill
-  \takeaway{Stage dependency-aware writes first; one UNO decision publishes the finished set.}
+  \takeaway{Stage dependency-aware writes first; one linked UNO group publishes the finished set.}
 
   \note{The batch operation is a publication boundary, not a simultaneous-write scheduler. prepare_append encodes all frames and records each relative start before I/O. Appending the data slice returns its stable append-only base B; the journal adds B to each relative start and appends those u64 entries to the offsets blob. Those pending writes are immediately available to the current writer but remain outside the committed roots. start_sync then creates Publish operations for both blobs in every dirty pair and starts one UNO group. If staging fails, publication never begins and the consuming MutableV2 API prevents reuse of partially mutated state. On rollover the same pattern covers the prior and current data/offsets pairs, at most four roots.}
 \end{frame}
 
-\begin{frame}[t]{Batch limits: descriptor bytes, not payload bytes}
+\begin{frame}[t]{Batch scale: fixed local metadata per participant}
   \vspace{0cm}
-  \eyebrow{Every dirty participant: one 4 KiB root slot holds the complete decision}
+  \eyebrow{Every dirty participant: one 2 KiB slot contains its root and local witness}
 
   \vspace{0.07cm}
   \noindent\hfill
     \begin{tikzpicture}[node distance=.06cm]
-      \node[oldroot,text width=1.75cm,minimum height=.72cm] (roothead) {40 B\\\scriptsize candidate root};
+      \node[oldroot,text width=1.75cm,minimum height=.72cm] (roothead) {92 B\\\scriptsize candidate root};
       \node[box,text width=1.55cm,minimum height=.72cm,right=of roothead] (witness) {16 B\\\scriptsize witness header};
-      \node[root,text width=7.65cm,minimum height=.72cm,right=of witness] (descriptor) {$\leq$ 4,040 B exact group descriptor\\\scriptsize paths + incarnations + roots + CRC ranges + removals};
+      \node[root,text width=7.65cm,minimum height=.72cm,right=of witness] (link) {$\leq$ 1,940 B local link\\\scriptsize 296 B fixed fields + one successor partition/name};
     \end{tikzpicture}
   \hfill\null
 
   \vspace{0.02cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.49\textwidth}
-      \eyebrow{Hard admission limit}
+      \eyebrow{Participant metadata}
 
       \vspace{0.08cm}
       \begin{tikzpicture}[node distance=.14cm]
-        \node[panel,text width=2.1cm,minimum height=.78cm,align=center] (configured) {\Large\bfseries 32\\\scriptsize configured dirty-participant cap};
-        \node[warn,text width=2.65cm,minimum height=.78cm,right=of configured] (encoded) {\Large\bfseries $\leq 28$\\\scriptsize fit even with zero-byte names};
+        \node[root,text width=2.35cm,minimum height=.78cm,align=center] (configured) {\Large\bfseries one link\\\scriptsize candidate + successor};
+        \node[panel,text width=2.40cm,minimum height=.78cm,right=of configured] (encoded) {\Large\bfseries 1,644 B\\\scriptsize maximum successor path};
       \end{tikzpicture}
 
       \vspace{0.08cm}
-      \scriptsize Only dirty participants count. Each costs 140 B + partition + blob name; a delete repeats its target. Real names lower 28. Oversize is rejected before roots are staged.
+      \scriptsize Each participant names only its next exact incarnation. The paths are distributed once around the ring rather than gathered into one record.
     \end{column}
     \begin{column}{0.49\textwidth}
       \eyebrow{Payload size: no protocol batch cap}
@@ -453,14 +465,14 @@
       \end{tikzpicture}
 
       \vspace{0.08cm}
-      \scriptsize At most \textbf{64 MiB aggregate} remains as an unresolved CRC tail for restart. Older bytes preflush before roots are staged: no rejection and no second payload write.
+      \scriptsize At most \textbf{64 MiB aggregate} remains for restart CRC work. Older immutable bytes preflush while appends continue.
     \end{column}
   \end{columns}
 
   \vfill
-  \takeaway{Descriptor bytes cap participants. Payload bytes do not: 64 MiB caps only restart CRC work. Contiguous uses at most 2 fixed or 4 variable participants.}
+  \takeaway{Metadata grows one local link per participant; payload is streamed once rather than copied.}
 
-  \note{The Vec-based API is bounded in participant metadata, not payload bytes. The implementation rejects more than 32 dirty participants, but the replicated descriptor reaches the 4 KiB root-slot limit first: 28 is only the zero-name upper bound, and real partition names, blob names, and deletion records consume more space. This is checked before roots are staged. An epoch may contain arbitrarily much payload within ordinary storage and offset limits. As appends arrive, completed durability operations turn older immutable bytes into a trusted prefix. Publication leaves at most 64 MiB across the group under CRC32C, so restart work stays bounded without rejecting or copying a large epoch. Fixed contiguous rollover publishes at most prior and current roots; variable publishes the data/offsets pair for each, at most four roots.}
+  \note{Every participant stores only its own candidate and one successor path. Every local link must fit its 1,940-byte witness body, leaving 1,644 bytes for the successor partition and blob name after fixed fields. The entire group name set is never encoded in one slot, so moderate names do not reduce group membership. Recovery grows state only after validating each exact successor, and installation can process a large ring in bounded chunks. An epoch may contain arbitrarily much payload within ordinary storage and offset limits. As appends arrive, completed durability operations turn older immutable bytes into a trusted prefix. Publication leaves at most 64 MiB across the group under CRC32C, so restart work stays bounded without rejecting or copying a large epoch. Fixed contiguous rollover publishes at most prior and current roots; variable publishes the data/offsets pair for each, at most four roots.}
 \end{frame}
 
 \begin{frame}[t]{Large epochs advance a trusted payload prefix}
@@ -487,7 +499,7 @@
       \node[box,text width=1.65cm,minimum height=.64cm] (freeze) {freeze $E$};
       \node[box,text width=1.85cm,minimum height=.64cm,right=of freeze] (wait) {preflush\\\scriptsize if needed};
       \node[box,text width=1.9cm,minimum height=.64cm,right=of wait] (crc) {CRC $[F,E)$\\\scriptsize tail only};
-      \node[root,text width=1.9cm,minimum height=.64cm,right=of crc] (stage) {write P root\\+ descriptor};
+      \node[root,text width=1.9cm,minimum height=.64cm,right=of crc] (stage) {write P root\\+ local link};
       \node[root,text width=1.9cm,minimum height=.64cm,right=of stage] (barrier) {durability\\barrier};
       \draw[flow] (freeze) -- (wait);
       \draw[flow] (wait) -- (crc);
@@ -511,7 +523,7 @@
   \vfill
   \takeaway{Repeat per participant: no payload-byte cap, at most 64 MiB aggregate restart tail, and concurrent final barriers.}
 
-  \note{Only a completed fdatasync-equivalent advances the trusted frontier F; sync_file_range or another writeback hint never does. Background preflush is coalesced while the producer continues, and it writes no root. At publication, each participant waits only for any durability frontier it must rely on. The descriptor names that trusted prefix and carries CRC32C for the remaining tail; tail budgets sum to at most 64 MiB across the group. The final participant barriers run concurrently. A very large append followed immediately by sync may still wait for a payload preflush and then the root barrier, but payload is never copied or written twice. Before root staging, a crash can expose only old. Once staging begins, the ordinary indeterminate window applies: old or complete new.}
+  \note{Only a completed fdatasync-equivalent advances the trusted frontier F; sync_file_range or another writeback hint never does. Background preflush is coalesced while the producer continues, and it writes no root. At publication, each participant waits only for any durability frontier it must rely on. Its local witness names that trusted prefix and carries CRC32C for the remaining tail; tail budgets sum to at most 64 MiB across the group. The final participant barriers run concurrently. A very large append followed immediately by sync may still wait for a payload preflush and then the root barrier, but payload is never copied or written twice. Before root staging, a crash can expose only old. Once staging begins, the ordinary indeterminate window applies: old or complete new.}
 \end{frame}
 
 \begin{frame}[t]{Intentional limitation: no global sync order}
@@ -533,7 +545,7 @@
     \end{column}
     \begin{column}{0.42\textwidth}
       \begin{tikzpicture}
-        \node[warn,text width=5.15cm] {\textbf{No global order}\\\scriptsize no root WAL, coordinator, LSN, or commit sequence\\[.1cm]\textbf{What this avoids}\\\scriptsize no global lock or volume-like filesystem layer; disjoint groups stay concurrent};
+        \node[warn,text width=5.15cm] {\textbf{No global order}\\\scriptsize no root WAL, durable global coordinator, LSN, or commit sequence\\[.1cm]\textbf{What this avoids}\\\scriptsize no global lock or volume-like filesystem layer; disjoint groups stay concurrent};
       \end{tikzpicture}
     \end{column}
   \end{columns}
@@ -550,7 +562,7 @@
   \vspace{0.14cm}
   \eyebrow{When B has a temporal dependency on A}
 
-  \vspace{0.08cm}
+  \vspace{0.03cm}
   \noindent\hfill
     \begin{tikzpicture}[node distance=.72cm]
       \node[box,text width=2.25cm] (pa) {publish A};
@@ -565,7 +577,7 @@
   \vfill
   \takeaway{Atomic membership is local. Put a temporal dependency in one group, wait at its edge, or add a higher-level WAL only when a total order is required.}
 
-  \note{Removing the coordinator is both the performance win and a semantic boundary. Two disjoint start_apply calls have no shared sequence number and may cross their durable frontiers in either order. That locality is what avoids a global lock and a volume-like transaction layer interposed on the filesystem. Opening one participant repairs only its exact descriptor group; recovery does not scan or order unrelated groups. If B semantically depends on A, either include both mutations in one group or do not begin B until A's durable decision is proven. start_apply returning Ok proves durability; awaiting its handle additionally waits for activation and namespace cleanup. A workload that needs one total order across arbitrary groups still needs a higher-level root WAL or coordination layer.}
+  \note{Removing the durable global coordinator is both the performance win and a semantic boundary. Two disjoint start_apply calls have no shared sequence number and may cross their durable frontiers in either order. That locality is what avoids a global lock and a volume-like transaction layer interposed on the filesystem. Opening one participant follows and repairs only its exact linked ring; recovery does not scan or order unrelated groups. If B semantically depends on A, either stage both pending mutations and publish them in one group, or do not begin B's separate group until A's durable decision is proven. start_apply returning Ok proves durability; awaiting its handle additionally waits for activation and namespace cleanup. A workload that needs one total order across arbitrary groups still needs a higher-level root WAL or coordination layer.}
 \end{frame}
 
 \begin{frame}[t]{Adoption example: not every file needs V2}
@@ -609,7 +621,7 @@
     \begin{tikzpicture}[node distance=.52cm]
       \node[box,text width=2.35cm,minimum height=.66cm] (stage) {1. stage\\\scriptsize pending epoch $E$};
       \node[warn,text width=3.5cm,minimum height=.66cm,right=of stage] (materialize) {2. sync table +\\Ordinal\\\scriptsize await; old checkpoint wins};
-      \node[root,text width=4.7cm,minimum height=.66cm,right=of materialize] (publish) {3. UNO publishes journals + state $E$\\\scriptsize application authority becomes visible};
+      \node[root,text width=4.7cm,minimum height=.66cm,right=of materialize] (publish) {3. one linked UNO group publishes journals + state $E$\\\scriptsize application authority becomes visible};
       \draw[flow] (stage) -- (materialize);
       \draw[flow] (materialize) -- (publish);
     \end{tikzpicture}
@@ -625,7 +637,7 @@
   \vfill
   \takeaway{Ordinary indexes first; atomic authority second.}
 
-  \note{This is an adoption pattern enabled by UNO, not a Freezer or immutable Archive change in this PR. Today Archive sync waits for Freezer and Ordinal, then publishes Metadata. A future prepared-sync API could stage V2 value and key-index roots, write the Freezer table's future epoch and Ordinal's sparse records, and await the ordinary table and Ordinal durability handles. Only then may it start the UNO group that publishes the journal roots and an application archive-state record carrying the Freezer checkpoint and ordinal bitmaps. Under an arbitrary surviving-write subset, a crash before UNO leaves the old checkpoint authoritative; complete but future-epoch table slots and uncommitted Ordinal records are ignored or cleared. During UNO, replicated recovery selects old or complete new. If new is selected, the ordinary materializations are safe because their durability barrier completed first. The archive-state record is application authority, not a global filesystem coordinator or total-order WAL.}
+  \note{This is an adoption pattern enabled by UNO, not a Freezer or immutable Archive change in this PR. Today Archive sync waits for Freezer and Ordinal, then publishes Metadata. A future prepared-sync API could stage V2 value and key-index roots, write the Freezer table's future epoch and Ordinal's sparse records, and await the ordinary table and Ordinal durability handles. Only then may it start the UNO group that publishes the journal roots and an application archive-state record carrying the Freezer checkpoint and ordinal bitmaps. Under an arbitrary surviving-write subset, a crash before UNO leaves the old checkpoint authoritative; complete but future-epoch table slots and uncommitted Ordinal records are ignored or cleared. During UNO, linked-ring recovery selects old or complete new. If new is selected, the ordinary materializations are safe because their durability barrier completed first. The archive-state record is application authority, not a global filesystem coordinator or total-order WAL.}
 \end{frame}
 
 \begin{frame}[t]{Recovery is correct for arbitrary surviving write subsets}
@@ -636,9 +648,9 @@
     \toprule
     \textbf{What validates after restart} & \textbf{What recovery can prove} & \textbf{Exposed result} \\
     \midrule
-    No M/T proof; every exact P, descriptor, incarnation, candidate, and required suffix validates & The replicated descriptor names one complete group decision & New roots for the whole group \\
-    No M/T proof; any required check is missing or mismatched & The exact group decision is incomplete & Old roots for the whole group \\
-    Any exact materialized (M) or tombstone (T) root validates & The group crossed its durable frontier & Roll forward; repair peers and finish removal \\
+    No M/T proof; every exact P, local link, incarnation, candidate, and suffix validates & One group ID/count; unique consecutive ordinals close after exactly $N$ hops & New roots for the whole group \\
+    No M/T proof; any link, incarnation, candidate, or suffix is missing/mismatched & The linked group decision is incomplete & Old roots for the whole group \\
+    An exact materialized M or tombstone T validates & Installation began only after the P ring was durable & Finish peers; after unlink begins, resume the descending frontier from ordinal 0 \\
     \bottomrule
   \end{tabularx}
 
@@ -661,53 +673,101 @@
   \vfill
   \takeaway{The protocol never assumes that surviving writes form a prefix in submission order.}
 
-  \note{This is the central correctness argument. Unsynchronized writes can survive in any combination. The old roots remain self-contained. A new group is selected only from exact, checksummed evidence replicated in the named participants, or from a later materialized/tombstone proof that makes roll-forward mandatory.}
+  \note{This is the central correctness argument. Unsynchronized writes can survive in any combination. The old roots remain self-contained. A new group is selected only from one complete closed ring of exact, checksummed local evidence, or from a later materialized/tombstone proof that makes roll-forward mandatory.}
 \end{frame}
 
-\begin{frame}[t]{Append is the fast path; rewind and delete remain recoverable}
+\begin{frame}[t]{Append is the fast path; delete is ordered by phase}
   \vspace{0.03cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.32\textwidth}
       \eyebrow{Append}
       \begin{tikzpicture}
-        \node[root,minimum width=3.65cm,minimum height=1.45cm] {write final tail once\\publish longer root\\\scriptsize no relocation or compaction};
+        \node[root,minimum width=3.65cm,minimum height=1.18cm] {write final tail once\\publish longer root\\\scriptsize no relocation or compaction};
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.32\textwidth}
       \eyebrow{Rewind}
       \begin{tikzpicture}
-        \node[warn,minimum width=3.65cm,minimum height=1.45cm] {publish shorter root\\then \texttt{ftruncate} in place\\\scriptsize restart repeats a lost truncate};
+        \node[warn,minimum width=3.65cm,minimum height=1.18cm] {publish shorter root\\then \texttt{ftruncate} in place\\\scriptsize restart repeats a lost truncate};
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.32\textwidth}
       \eyebrow{Delete}
       \begin{tikzpicture}
-        \node[panel,minimum width=3.65cm,minimum height=1.45cm,align=center] {durable tombstone\\then unlink + directory sync\\\scriptsize no separate delete manifest};
+        \node[panel,minimum width=3.65cm,minimum height=1.18cm,align=center] {durable tombstone\\then unlink + directory sync\\\scriptsize no separate delete manifest};
       \end{tikzpicture}
     \end{column}
   \end{columns}
 
-  \vspace{0.42cm}
-  \eyebrow{Compatibility and migration}
+  \vspace{0.05cm}
+  \eyebrow{Group delete: finish the ring walk before changing the namespace}
 
-  \vspace{0.14cm}
-  \begin{tikzpicture}[node distance=.48cm]
-    \node[oldroot,minimum width=2.55cm] (legacy) {ordinary V0/V1\\blob};
-    \node[box,minimum width=3.4cm,right=of legacy] (copy) {explicit \texttt{migrate\_atomic}\\\scriptsize bounded streamed copy};
-    \node[box,minimum width=2.2cm,right=of copy] (rename) {fsync + rename\\\scriptsize sync directory};
-    \node[root,minimum width=2.25cm,right=of rename] (v2) {atomic V2 blob};
-    \draw[flow] (legacy) -- (copy);
-    \draw[flow] (copy) -- (rename);
-    \draw[flow] (rename) -- (v2);
-  \end{tikzpicture}
+  \vspace{0.12cm}
+  \begin{center}
+    \begin{tikzpicture}[node distance=.24cm]
+      \node[box,text width=2.35cm,minimum height=.76cm] (walk) {1. validate the\\complete closed ring};
+      \node[root,text width=2.35cm,minimum height=.76cm,right=of walk] (materialize) {2. write every\\final M or T root};
+      \node[root,text width=2.15cm,minimum height=.76cm,right=of materialize] (sync) {3. sync every\\participant inode};
+      \node[warn,text width=2.05cm,minimum height=.76cm,right=of sync] (unlink) {4. unlink T\\highest ordinal first};
+      \node[panel,text width=2.05cm,minimum height=.76cm,right=of unlink] (dir) {5. sync its parent\\before next unlink};
+      \draw[flow] (walk) -- (materialize);
+      \draw[flow] (materialize) -- (sync);
+      \draw[flow] (sync) -- (unlink);
+      \draw[flow] (unlink) -- (dir);
+      \node[below=.12cm of materialize,font=\tiny,text=Muted,align=center] {M = retained materialized root\\T = durable tombstone};
+      \node[below=.12cm of unlink,font=\tiny,text=Muted,align=center] {ordinal 0 stays present until last:\\the durable recovery anchor};
+    \end{tikzpicture}
+  \end{center}
 
-  \vspace{0.25cm}
-  \small Ordinary opens, V0/V1 formats, and legacy contiguous journals are unchanged. Migration is explicit, idempotent one blob at a time, needs temporary space for one full copy, and does not require reflinks or Linux-only copy commands.
+  \vspace{0.12cm}
+  \small After step 3, each M is independent. Descending, individually durable unlinks leave every remaining T in the forward prefix reachable from ordinal 0.
 
   \vfill
-  \takeaway{V2 is opt-in; main's ordinary blob behavior is not silently reinterpreted.}
+  \takeaway{All final roots first; then a durable descending unlink frontier. Ordinal 0 replaces a delete manifest.}
 
-  \note{Rewind is allowed to wait for synchronization before truncating, which removes the old hole-punch and compaction machinery. Delete is intentionally not sold as the same cheap write-only path because it has namespace durability work. Migration chooses robustness and portability over reflink tricks.}
+  \note{Rewind is allowed to wait for synchronization before truncating, which removes the old hole-punch and compaction machinery. Delete has namespace durability work and is not the same cheap write-only path. Recovery first follows and validates the whole linked ring. It then materializes retained roots as M and deleted roots as T, and completes every participant durability barrier before unlinking any T. Tombstones are unlinked from the highest ordinal toward zero, with the parent directory synchronized after each unlink. Therefore a crash cannot preserve an arbitrary subset of namespace removals: it leaves a prefix of the descending order. Ordinal zero remains as an exact, durable anchor that follows the surviving forward prefix and resumes deletion. A recreated same-name path has a different incarnation and is never removed.}
+\end{frame}
+
+\begin{frame}[t]{First contiguous V2 open: recover, replace, then switch authority}
+  \vspace{0cm}
+  \eyebrow{Resumable, section-at-a-time conversion}
+
+  \vspace{0.03cm}
+  \begin{center}
+    \begin{tikzpicture}[node distance=.18cm]
+      \node[oldroot,text width=2.15cm,minimum height=.72cm] (recover) {recover legacy\\\scriptsize repair tail + checkpoint};
+      \node[box,text width=2.15cm,minimum height=.72cm,right=of recover] (witness) {migration witness\\\scriptsize exact retained start};
+      \node[box,text width=2.15cm,minimum height=.72cm,right=of witness] (copy) {re-encode section $N$\\\scriptsize page $+12 \rightarrow +4$};
+      \node[root,text width=2.15cm,minimum height=.72cm,right=of copy] (durable) {sync V2 $N$\\\scriptsize then prune legacy $N$};
+      \node[root,text width=2.15cm,minimum height=.72cm,right=of durable] (activate) {publish authority\\\scriptsize root or linked pair};
+      \draw[flow] (recover) -- (witness);
+      \draw[flow] (witness) -- (copy);
+      \draw[flow] (copy) -- (durable);
+      \draw[flow] (durable) -- (activate);
+    \end{tikzpicture}
+  \end{center}
+
+  \vspace{0.02cm}
+  \eyebrow{Crash authority}
+
+  \vspace{0cm}
+  \begin{center}
+    \begin{tikzpicture}[node distance=.3cm]
+      \node[oldroot,text width=3.55cm,minimum height=.76cm] (before) {before final marker: \textbf{legacy}\\\scriptsize resume from durable V2 prefix};
+      \node[root,text width=3.55cm,minimum height=.76cm,right=of before] (after) {after final marker: \textbf{V2}\\\scriptsize remove legacy debris};
+      \node[panel,text width=3.55cm,minimum height=.76cm,right=of after] (future) {later opens: \textbf{bounded}\\\scriptsize no migration witness / V0 recovery};
+      \draw[flow] (before) -- (after);
+      \draw[flow] (after) -- (future);
+    \end{tikzpicture}
+  \end{center}
+
+  \vspace{0cm}
+  \scriptsize Ordinary V0/V1 opens/formats stay unchanged; generic \texttt{migrate\_atomic} remains explicit. Peak migration space is V2 plus roughly one overlapping legacy section.
+
+  \vfill
+  \takeaway{Init returns one V2-only journal; the mixed state exists only inside resumable migration.}
+
+  \note{The temporary witness is deliberately not a new steady-state manifest. It only distinguishes unmarked conversion roots from malformed native V2 state and stores the original retained start after old sections are pruned. A source section is never removed until its V2 replacement root is durable. A crash before activation reruns normal legacy recovery and resumes at the staged prefix end. The final marker is the single authority switch. After it commits, init never trusts or reopens legacy contents; cleanup can delete even malformed leftovers and then removes the witness. Future runs enter the ordinary bounded V2 open path immediately.}
 \end{frame}
 
 \begin{frame}[t]{Contiguous V2 removes its \texttt{Metadata} checkpoint}
@@ -730,10 +790,12 @@
       \vspace{0.12cm}
       \begin{tikzpicture}[node distance=.33cm]
         \node[root,minimum width=5.25cm] (section) {section name + committed root length};
-        \node[root,minimum width=5.25cm,below=of section] (tag) {12-byte application tag};
-        \node[box,minimum width=3.25cm,below=.34cm of tag,anchor=north east,xshift=-.04cm] (start) {start + 1\\\scriptsize 8-byte big endian};
-        \node[box,minimum width=2.0cm,below=.34cm of tag,anchor=north west,xshift=.04cm] (crc) {page CRC32C\\\scriptsize 4 bytes};
+        \node[root,minimum width=5.25cm,below=of section] (tag) {64-byte application tag};
+        \node[box,minimum width=1.65cm,below=.34cm of tag.south west,anchor=north west] (start) {start + 1\\\scriptsize 8 bytes};
+        \node[panel,minimum width=2.2cm,right=0cm of start] (available) {reserved\\\scriptsize 52 zero bytes};
+        \node[box,minimum width=1.4cm,right=0cm of available] (crc) {tail CRC32C\\\scriptsize 4 bytes};
         \draw[faintline] (tag) -- (start);
+        \draw[faintline] (tag) -- (available);
         \draw[faintline] (tag) -- (crc);
       \end{tikzpicture}
     \end{column}
@@ -750,7 +812,7 @@
   \vfill
   \takeaway{Offsets remain as the variable index; the separate checkpoint object disappears.}
 
-  \note{This is the direct contiguous payoff. We do not encode more journal frames just to recover the start. We use the application-owned root tag. Consuming mutation methods prevent reuse after failed or cancelled storage operations, while snapshots remain available for concurrent readers.}
+  \note{This is the direct contiguous payoff. We do not encode more journal frames just to recover the start. We use the application-owned root tag. Contiguous's current marker encoding requires the remaining 52 bytes to be zero, leaving room for a deliberately versioned extension without making arbitrary trailing bytes authoritative. Consuming mutation methods prevent reuse after failed or cancelled storage operations, while snapshots remain available for concurrent readers.}
 \end{frame}
 
 \begin{frame}[t]{Small writes: the root checks the unfinished page}
@@ -763,7 +825,7 @@
         \node[root,text width=3.2cm,minimum height=.78cm] (r1) {
           root $g$ in slot 0\\[-.04cm]
           \scriptsize len $=10$ B\\[-.04cm]
-          \scriptsize \texttt{tag[8..12]} $=C(A)$
+          \scriptsize \texttt{tag[60..64]} $=C(A)$
         };
         \node[box,text width=3.2cm,below=of r1,minimum height=.58cm] (p1) {
           payload: \texttt{[A: 10 B]}
@@ -772,7 +834,7 @@
         \node[root,text width=3.45cm,minimum height=.78cm,right=.55cm of r1] (r2) {
           root $g+1$ in slot 1\\[-.04cm]
           \scriptsize len $=20$ B\\[-.04cm]
-          \scriptsize \texttt{tag[8..12]} $=C(A \Vert B)$
+          \scriptsize \texttt{tag[60..64]} $=C(A \Vert B)$
         };
         \node[box,text width=3.45cm,below=of r2,minimum height=.58cm] (p2) {
           payload: \texttt{[A][B]}
@@ -790,7 +852,7 @@
     \begin{column}{0.42\textwidth}
       \eyebrow{When the page boundary arrives}
 
-      \vspace{0.07cm}
+      \vspace{0.03cm}
       \begin{tikzpicture}[node distance=0cm]
         \node[box,text width=2.45cm,minimum height=.68cm] (page) {full page\\\scriptsize $P$ logical bytes};
         \node[root,text width=1.12cm,minimum height=.68cm,right=of page] (footer) {CRC\\\scriptsize 4 B};
@@ -799,7 +861,7 @@
           \tiny in-progress\\[-.05cm]tail CRC\\[-.05cm]4 B
         };
         \node[box,minimum width=3.55cm,minimum height=.68cm,inner xsep=.06cm,inner ysep=.03cm,left=of pendingcrc] (pendingmarker) {
-          \small pending tag in RAM\\[-.05cm]\tiny application marker: 8 B
+          \small pending tag in RAM\\[-.05cm]\tiny application marker: 60 B
         };
         \draw[flow,draw=Amber] (tail.south) --
           node[left,font=\tiny,text=Amber]{hash}
@@ -816,36 +878,36 @@
     \end{column}
   \end{columns}
 
-  \vspace{0.08cm}
-  \eyebrow{Underlying V2 blob: 40-byte root in alternating 4 KiB slots}
+  \vspace{0.03cm}
+  \eyebrow{92-byte root header inside the selected 2 KiB root/witness slot}
 
   \vspace{0.03cm}
   \begin{center}
     \begin{tikzpicture}[node distance=0cm]
-      \node[oldroot,minimum width=5.6cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm] (identity) {
+      \node[oldroot,minimum width=2.4cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm] (identity) {
         \small magic + generation\\[-.04cm]\tiny 16 bytes
       };
-      \node[box,minimum width=2.8cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of identity] (length) {
-        \small encoded length\\[-.04cm]\tiny 8 bytes
+      \node[box,minimum width=1.2cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of identity] (length) {
+        \scriptsize length\\[-.04cm]\tiny 8 bytes
       };
-      \node[box,minimum width=2.8cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of length] (marker) {
-        \small application marker\\[-.04cm]\tiny 8 bytes
+      \node[box,minimum width=9.0cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of length] (marker) {
+        \small application marker\\[-.04cm]\tiny 60 bytes
       };
-      \node[warn,minimum width=1.4cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of marker] (tailcrc) {
-        \scriptsize tail\\[-.06cm]\tiny CRC32C\\[-.06cm]\tiny 4 bytes
+      \node[warn,minimum width=.6cm,minimum height=1.05cm,inner xsep=.01cm,inner ysep=.02cm,right=of marker] (tailcrc) {
+        \tiny $C_t$\\[-.04cm]\tiny 4 B
       };
-      \node[oldroot,minimum width=1.4cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of tailcrc] (rootcrc) {
-        \scriptsize root\\[-.06cm]\tiny CRC32C\\[-.06cm]\tiny 4 bytes
+      \node[oldroot,minimum width=.6cm,minimum height=1.05cm,inner xsep=.01cm,inner ysep=.02cm,right=of tailcrc] (rootcrc) {
+        \tiny $C_r$\\[-.04cm]\tiny 4 B
       };
-      \node[above=.04cm of tailcrc,font=\tiny,text=Amber] (persist) {\texttt{sync} writes here};
+      \node[above=.04cm of tailcrc,font=\tiny,text=Amber] (persist) {wrapper stages before \texttt{sync}};
       \draw[flow,draw=Amber] (persist.south) -- (tailcrc.north);
     \end{tikzpicture}
   \end{center}
 
   \vfill
-  \takeaway{\textbf{In progress:} pending tag in RAM \quad \textbf{At sync:} alternate root slot \quad \textbf{Never:} payload.}
+  \takeaway{\textbf{In progress:} CRC in RAM \quad \textbf{At sync:} root + local witness slot \quad \textbf{Never at sync:} rewrite payload.}
 
-  \note{This is the complete small-write story on one slide. A ten-byte append writes ten payload bytes at their final offset. AtomicWriter computes the CRC of the entire current partial page and passes it in the last four application-tag bytes to append-tagged; that method stages length and tag as one in-memory mutation. Sync writes the next root generation into the alternate fixed slot. No checksum bytes appear after A or B. The prior root remains the fallback, and each root header has its own CRC, so an arbitrary torn candidate is rejected. Once P logical bytes accumulate, AtomicWriter appends one four-byte footer. Any remainder becomes the next tail and its CRC moves into the selected root. The footer makes that completed payload page immutable and eligible for the planned page cache. This is storage-page integrity, not an application record checksum or item-boundary map.}
+  \note{This is the complete small-write story on one slide. A ten-byte append writes ten payload bytes at their final offset. AtomicWriter computes the CRC of the entire current partial page and passes it in the last four application-tag bytes to append-tagged; that method stages length and tag as one in-memory mutation. Sync writes the next root generation, witness envelope, and any local ring link into the alternate 2 KiB slot. The lower bar expands only the 92-byte root header, with widths proportional to bytes. No checksum bytes appear after A or B. The prior root remains the fallback, and each root header has its own CRC, so an arbitrary torn candidate is rejected. Once P logical bytes accumulate, AtomicWriter appends one four-byte footer. Any remainder becomes the next tail and its CRC moves into the selected root. The footer makes that completed payload page immutable and eligible for the planned page cache. This is storage-page integrity, not an application record checksum or item-boundary map.}
 \end{frame}
 
 \begin{frame}[t]{V2 caching: immutable payload pages, mutable RAM}
@@ -862,8 +924,8 @@
         };
       \end{tikzpicture}
 
-      \vspace{0.08cm}
-      \scriptsize Append/rewind may rewrite that tip. Two slots retain the prior logical prefix; this is \textbf{not} arbitrary record overwrite.
+      \vspace{0.02cm}
+      \scriptsize Append/rewind may rewrite that tip. The legacy tip's two length/CRC records retain the prior logical prefix; this is \textbf{not} arbitrary record overwrite.
 
       \vspace{0.17cm}
       \eyebrow{Current V2 is different}
@@ -959,7 +1021,7 @@
       \vspace{0.14cm}
       \begin{tikzpicture}[node distance=.26cm]
         \node[box,minimum width=4.35cm] (names) {scan section names};
-        \node[box,minimum width=4.35cm,below=of names] (roots) {read bounded V2 roots};
+        \node[box,minimum width=4.35cm,below=of names] (roots) {read roots; if P, follow\\\scriptsize its one exact declared ring};
         \node[box,minimum width=4.35cm,below=of roots] (tailcheck) {validate bounded tail state};
         \node[root,minimum width=4.35cm,below=of tailcheck] (bounds) {reconstruct journal bounds};
         \draw[flow] (names) -- (roots);
@@ -978,45 +1040,50 @@
   \note{The bounded final group is the important optimization for contiguous. Rollover can stage sealed sections ahead of publication. The one movable authority marker makes all names between the retained start and active tail reachable at once. Variable needs four roots because both data and offsets for the prior authority and current tail must move together.}
 \end{frame}
 
-\begin{frame}[t]{UNO reaches 94.7\% of ordinary-write throughput}
+\begin{frame}[t]{Paired throughput: APFS 96.2\%; ext4 98.0\%}
   \vspace{0.02cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.54\textwidth}
-      \eyebrow{Paired Linux / ext4 hot-path benchmark}
+      \eyebrow{Final linked-witness hot path vs ordinary blobs}
 
-      \vspace{0.2cm}
-      \begin{tikzpicture}[x=.92cm,y=1cm]
-        \node[anchor=east,font=\small] at (1.25,1.25) {ordinary};
-        \fill[Slate] (1.45,1.03) rectangle (6.65,1.47);
-        \node[anchor=west,font=\small,text=Slate] at (6.8,1.25) {1.000};
-        \node[anchor=east,font=\small] at (1.25,.35) {UNO group};
-        \fill[Accent] (1.45,.13) rectangle (6.37,.57);
-        \node[anchor=west,font=\small,text=Accent] at (6.52,.35) {0.947};
-        \draw[faintline] (1.45,-.03) -- (6.65,-.03);
+      \vspace{0.12cm}
+      \begin{tikzpicture}[x=.88cm,y=1cm]
+        \node[anchor=east,font=\small] at (1.25,1.55) {ordinary};
+        \fill[Slate] (1.45,1.34) rectangle (6.25,1.76);
+        \node[anchor=west,font=\small,text=Slate] at (6.4,1.55) {1.000};
+        \node[anchor=east,font=\small] at (1.25,.86) {UNO / APFS};
+        \fill[Accent] (1.45,.65) rectangle (6.07,1.07);
+        \node[anchor=west,font=\small,text=Accent] at (6.22,.86) {0.962};
+        \node[anchor=east,font=\small] at (1.25,.17) {UNO / ext4};
+        \fill[Amber] (1.45,-.04) rectangle (6.15,.38);
+        \node[anchor=west,font=\small,text=Amber] at (6.30,.17) {0.980};
+        \draw[faintline] (1.45,-.18) -- (6.25,-.18);
       \end{tikzpicture}
 
-      \vspace{0.16cm}
-      {\fontsize{23}{27}\selectfont\bfseries\color{Accent}5.3\%}\quad
-      {\small median throughput overhead}
+      \vspace{0.08cm}
+      \begin{tikzpicture}[node distance=.16cm]
+        \node[root,text width=2.8cm,minimum height=.7cm] (apfsresult) {\Large\bfseries 3.8\%\\[-.04cm]\tiny APFS overhead};
+        \node[warn,text width=2.8cm,minimum height=.7cm,right=of apfsresult] {\Large\bfseries 2.0\%\\[-.04cm]\tiny ext4 overhead};
+      \end{tikzpicture}
 
-      \vspace{0.2cm}
-      \small Five seeded ratios: \texttt{.947, .947, .923, .937, .956}\\
-      \muted{range 92.3--95.6\%; median p50 $\approx$ 0.857 ms vs 0.785 ms ordinary}
+      \vspace{0.1cm}
+      \scriptsize APFS ratios: \texttt{.986, .964, .945, .955, .962}\\
+      ext4 ratios: \texttt{1.005, .984, .958, .921, .980}
     \end{column}
     \begin{column}{0.44\textwidth}
       \eyebrow{Workload}
       \small
       \begin{itemize}\setlength\itemsep{0.04cm}
         \item 4 blobs per group
-        \item one contiguous 64 KiB append per blob
-        \item 256 KiB logical payload per group
-        \item 3,000 groups per side, seeds 71--75
-        \item 2 workers; ordinary and UNO interleaved
+        \item sixteen contiguous 64 KiB appends per blob
+        \item 4 MiB logical payload per group
+        \item 250 groups per side; 5 paired seeds
+        \item Tokio, 2 worker threads; sides interleaved
       \end{itemize}
 
-      \vspace{0.12cm}
+      \vspace{0.08cm}
       \begin{tikzpicture}
-        \node[panel,text width=4.72cm,align=left] {\textbf{What remains non-free}\\\scriptsize root/descriptor work + group locking;\\recovery evidence; one barrier per\\participant\\[.06cm]\textbf{No epoch-byte cap:} at most 64 MiB\\remains as the restart CRC tail; older\\payload preflushes};
+        \node[panel,text width=4.72cm,align=left] {\textbf{Environments}\\\scriptsize native macOS APFS; ext4 volume\\inside a Linux Docker VM\\[.06cm]\textbf{What remains non-free}\\\scriptsize local-link construction + locking; one\\durability barrier per participant};
       \end{tikzpicture}
     \end{column}
   \end{columns}
@@ -1024,7 +1091,7 @@
   \vfill
   \takeaway{Payload is written once; the group has no coordinator file; variable data + offsets publish atomically.}
 
-  \note{This is the primary defensible comparison because both sides run in the same process on the same ext4 system and alternate order. Do not over-generalize it to deletes, migration, incompatible participant changes, or every journal configuration. The result supports the architectural claim: group atomicity need not imply two payload writes or another coordinator barrier.}
+  \note{These measurements use the final R14 linked-participant-witness worktree with the 64-byte application tag in optimized mode on 2026-08-04. Each trial alternates ordinary and UNO groups in one process and times full ordinary sync completion versus full UNO batch-handle completion. APFS is the native development filesystem. ext4 is a Docker-volume filesystem inside a Linux VM; its absolute latency and range reflect virtualization, so only the paired direction is claimed. Do not generalize these numbers to deletes, migration, incompatible participant changes, or every journal configuration. The result supports the architectural claim: group atomicity need not imply two payload writes or another coordinator-file barrier.}
 \end{frame}
 
 \begin{frame}[t]{Open question: can callers reuse V2's CRC work?}
@@ -1052,7 +1119,7 @@
       \begin{itemize}\setlength\itemsep{0.03cm}
         \item Accept caller-supplied spans; return composable \texttt{(offset, len, CRC32C)} receipts.
         \item Combine CRCs across write/preflush chunks without rereading bytes.
-        \item Caller maps receipts through its existing index and persists them in the same UNO group.
+        \item Caller maps receipts through its index and persists them in group-published data---not the local witness or 64-byte tag.
       \end{itemize}
     \end{column}
     \begin{column}{0.48\textwidth}
@@ -1073,12 +1140,12 @@
 \end{frame}
 
 \begin{frame}[t]{Open question: should every composite store adopt V2?}
-  \vspace{0.02cm}
+  \vspace{0cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.48\textwidth}
       \eyebrow{Stop at append-only primitives}
 
-      \vspace{0.06cm}
+      \vspace{0.02cm}
       \begin{tikzpicture}[node distance=.24cm]
         \node[root,text width=2.55cm,minimum height=.68cm] (contiguous) {contiguous V2\\
           \scriptsize fixed / variable};
@@ -1086,9 +1153,9 @@
           \scriptsize naturally append-only};
       \end{tikzpicture}
 
-      \vspace{0.08cm}
+      \vspace{0.02cm}
       \scriptsize
-      \begin{itemize}\setlength\itemsep{0.02cm}
+      \begin{itemize}\setlength\itemsep{0.01cm}
         \item Existing stores retain Metadata and current durability ordering.
         \item Smallest compatibility and migration surface.
         \item Retains serialized checkpoint barriers in composite stores.
@@ -1097,28 +1164,28 @@
     \begin{column}{0.50\textwidth}
       \eyebrow{Convert composite commit boundaries}
 
-      \vspace{0.06cm}
+      \vspace{0.02cm}
       \begin{tikzpicture}[node distance=.18cm]
         \node[box,text width=1.9cm,minimum height=.68cm] (ordinary) {table + Ordinal\\
           \scriptsize ordinary writes};
         \node[warn,text width=1.45cm,minimum height=.68cm,right=of ordinary] (fence) {durability\\fence};
-        \node[root,text width=2.25cm,minimum height=.68cm,right=of fence] (publish) {one UNO decision\\
+        \node[root,text width=2.25cm,minimum height=.68cm,right=of fence] (publish) {one linked group\\
           \scriptsize journals + archive state};
         \draw[flow] (ordinary) -- (fence);
         \draw[flow] (fence) -- (publish);
       \end{tikzpicture}
 
-      \vspace{0.08cm}
+      \vspace{0.02cm}
       \scriptsize
-      \begin{itemize}\setlength\itemsep{0.02cm}
+      \begin{itemize}\setlength\itemsep{0.01cm}
         \item Add opt-in V2 commit boundaries to Immutable Archive and peers.
         \item Fewer serial barriers; payload remains write-once.
-        \item Requires a new format, migration, rollover, and fault tests.
+        \item Requires a new format, migration, rollover, and fault tests; linked membership is not root-slot-sized.
       \end{itemize}
     \end{column}
   \end{columns}
 
-  \vspace{0.08cm}
+  \vspace{0.02cm}
   \begin{tikzpicture}
     \node[panel,text width=13.45cm,align=center] {\small \textbf{``Convert all'' does not mean making every file atomic.}\\[-.01cm]
       \scriptsize Random-write indexes remain ordinary materializations; V2 owns the append-only journals and the authority that makes those materializations reachable.};

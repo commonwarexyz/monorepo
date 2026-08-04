@@ -13,12 +13,15 @@
 
 use super::{
     super::{Contiguous, Many, blob_first_position, position_to_blob},
-    MutableV2,
+    MIGRATION_BATCH_BYTES, MIGRATION_BATCH_ITEMS, MIGRATION_NAME, MutableV2, NO_START_MARKER,
+    decode_start_marker, encode_start_marker, finish_migration, legacy_cache, legacy_write_buffer,
+    migration_start, partition_has_state, remove_partition, scan_partition, start_migration,
 };
 use crate::{
     Context,
     journal::{
         Error,
+        contiguous::variable as legacy,
         frame::{decode_item, decode_length_prefix, encode_frame_into},
     },
 };
@@ -39,7 +42,7 @@ use std::{
 const DATA_SUFFIX: &str = "-v2-data";
 const OFFSETS_SUFFIX: &str = "-v2-offsets";
 const OFFSET_SIZE: usize = size_of::<u64>();
-const NO_MARKER: [u8; ATOMIC_MARKER_LEN] = [0; ATOMIC_MARKER_LEN];
+const NO_MARKER: [u8; ATOMIC_MARKER_LEN] = NO_START_MARKER;
 
 type Blob<E> = <E as AtomicStorage>::AtomicBlob;
 
@@ -69,6 +72,8 @@ pub struct Config<C> {
     /// Logical bytes protected by one page CRC.
     ///
     /// Use [`commonware_runtime::buffer::paged::atomic_page_size`] to align full physical pages.
+    /// When migrating a legacy journal, choose the same physical page size that its `CacheRef`
+    /// used (for example, legacy `page_size(4096)` maps to V2 `atomic_page_size(4096)`).
     pub page_size: NonZeroU16,
 }
 
@@ -119,17 +124,6 @@ impl<B: commonware_runtime::AtomicBlob> Section<B> {
 struct SectionSnapshot<B: commonware_runtime::AtomicBlob> {
     data: AtomicSnapshot<B>,
     offsets: AtomicSnapshot<B>,
-}
-
-fn encode_marker(start: u64) -> Result<[u8; ATOMIC_MARKER_LEN], Error> {
-    Ok(start
-        .checked_add(1)
-        .ok_or(Error::SizeOverflow)?
-        .to_be_bytes())
-}
-
-const fn decode_marker(marker: [u8; ATOMIC_MARKER_LEN]) -> Option<u64> {
-    u64::from_be_bytes(marker).checked_sub(1)
 }
 
 fn first_in_section(start: u64, section: u64, items_per_section: u64) -> Result<u64, Error> {
@@ -365,6 +359,7 @@ where
     compression: Option<u8>,
     codec_config: V::Cfg,
     page_size: NonZeroU16,
+    active: bool,
     _item: PhantomData<V>,
 }
 
@@ -395,14 +390,6 @@ where
         padded_size(size, cfg.page_size)
             .map_err(|_| Error::InvalidConfiguration("offset section size exceeds u64".into()))?;
         Ok(())
-    }
-
-    async fn scan_names(context: &E, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        match context.scan(partition).await {
-            Ok(names) => Ok(names),
-            Err(commonware_runtime::Error::PartitionMissing(_)) => Ok(Vec::new()),
-            Err(error) => Err(error.into()),
-        }
     }
 
     async fn open_roots(
@@ -447,7 +434,7 @@ where
     ) -> Result<Option<(u64, u64)>, Error> {
         let mut authority = None;
         for (&index, root) in roots {
-            let Some(start) = decode_marker(root.marker) else {
+            let Some(start) = decode_start_marker(root.marker)? else {
                 continue;
             };
             if authority.replace((index, start)).is_some() {
@@ -504,7 +491,12 @@ where
         operations.push(BatchOperation::Publish(section.offsets.blob().clone()));
     }
 
-    async fn fresh(context: E, cfg: Config<V::Cfg>, start: u64) -> Result<Self, Error> {
+    async fn fresh(
+        context: E,
+        cfg: Config<V::Cfg>,
+        start: u64,
+        active: bool,
+    ) -> Result<Self, Error> {
         let data_partition = cfg.data_partition();
         let offsets_partition = cfg.offsets_partition();
         let tail = position_to_blob(start, cfg.items_per_section.get());
@@ -516,7 +508,11 @@ where
             cfg.page_size,
         )
         .await?;
-        let marker = encode_marker(start)?;
+        let marker = if active {
+            encode_start_marker(start)?
+        } else {
+            NO_MARKER
+        };
         let section = section.set_marker(marker).await?;
         let mut operations = Vec::with_capacity(2);
         Self::publish_pair(&mut operations, &section);
@@ -534,27 +530,45 @@ where
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             page_size: cfg.page_size,
+            active,
             _item: PhantomData,
         })
     }
 
-    async fn init_inner(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Self::validate_config(&cfg)?;
+    async fn open_existing(
+        context: E,
+        cfg: &Config<V::Cfg>,
+        data_names: Vec<Vec<u8>>,
+        offsets_names: Vec<Vec<u8>>,
+        staging_start: Option<u64>,
+    ) -> Result<Option<Self>, Error> {
+        Self::validate_config(cfg)?;
         let data_partition = cfg.data_partition();
         let offsets_partition = cfg.offsets_partition();
-        let data_names = Self::scan_names(&context, &data_partition).await?;
-        let offsets_names = Self::scan_names(&context, &offsets_partition).await?;
-        if data_names.is_empty() && offsets_names.is_empty() {
-            return Self::fresh(context, cfg, 0).await;
-        }
-
-        // Root inspection does not read payload. AtomicWriter is constructed only after the
-        // movable markers identify the retained interval.
+        let data_names = data_names
+            .into_iter()
+            .filter(|name| name != MIGRATION_NAME)
+            .collect();
         let mut data = Self::open_roots(&context, &data_partition, data_names).await?;
         let mut offsets = Self::open_roots(&context, &offsets_partition, offsets_names).await?;
+        if data.is_empty() && offsets.is_empty() {
+            return Ok(None);
+        }
+
         let data_authority = Self::authority(&data, "data")?;
         let offsets_authority = Self::authority(&offsets, "offsets")?;
-        let authority = match (data_authority, offsets_authority) {
+        let (authority, active) = match (data_authority, offsets_authority) {
+            (Some(data), Some(offsets)) if data == offsets => {
+                if let Some(staging_start) = staging_start
+                    && data.1 != staging_start
+                {
+                    return Err(Error::Corruption(
+                        "activated V2 variable journal disagrees with migration start".into(),
+                    ));
+                }
+                (Some(data), true)
+            }
+            (None, None) if staging_start.is_some() => (None, false),
             (None, None) => {
                 if data.values().any(|root| root.physical_size != 0)
                     || offsets.values().any(|root| root.physical_size != 0)
@@ -567,9 +581,8 @@ where
                 let offsets_indices = offsets.keys().copied().collect::<Vec<_>>();
                 Self::remove_named(&context, &data_partition, &data_indices).await?;
                 Self::remove_named(&context, &offsets_partition, &offsets_indices).await?;
-                return Self::fresh(context, cfg, 0).await;
+                return Ok(None);
             }
-            (Some(data), Some(offsets)) if data == offsets => data,
             _ => {
                 return Err(Error::Corruption(
                     "V2 variable data and offsets tail markers disagree".into(),
@@ -577,42 +590,71 @@ where
             }
         };
 
-        let (tail, start) = authority;
+        let start = authority
+            .map(|(_, start)| start)
+            .or(staging_start)
+            .expect("active or staging state has a start");
         let items_per_section = cfg.items_per_section.get();
         let oldest = position_to_blob(start, items_per_section);
-        if tail < oldest {
-            return Err(Error::Corruption(
-                "V2 variable tail marker precedes the journal start".into(),
-            ));
-        }
-
-        let marker = encode_marker(start)?;
+        let marker = encode_start_marker(start)?;
         let mut sections = BTreeMap::new();
-        let mut index = oldest;
-        let tail_count = loop {
-            let data_root = data.remove(&index).ok_or(Error::MissingBlob(index))?;
-            let offsets_root = offsets.remove(&index).ok_or(Error::MissingBlob(index))?;
-            let data_writer = Self::open_writer(data_root, cfg.page_size).await?;
-            let offsets_writer = Self::open_writer(offsets_root, cfg.page_size).await?;
-            let capacity = section_capacity(start, index, items_per_section)?;
 
-            if index == tail {
-                if data_writer.marker() != marker || offsets_writer.marker() != marker {
-                    return Err(Error::Corruption(
-                        "V2 variable active markers changed during open".into(),
-                    ));
+        let (tail, tail_count) = if let Some((tail, _)) = authority {
+            if tail < oldest {
+                return Err(Error::Corruption(
+                    "V2 variable tail marker precedes the journal start".into(),
+                ));
+            }
+            let mut index = oldest;
+            let tail_count = loop {
+                let data_root = data.remove(&index).ok_or(Error::MissingBlob(index))?;
+                let offsets_root = offsets.remove(&index).ok_or(Error::MissingBlob(index))?;
+                let data_writer = Self::open_writer(data_root, cfg.page_size).await?;
+                let offsets_writer = Self::open_writer(offsets_root, cfg.page_size).await?;
+                let capacity = section_capacity(start, index, items_per_section)?;
+
+                if index == tail {
+                    if data_writer.marker() != marker || offsets_writer.marker() != marker {
+                        return Err(Error::Corruption(
+                            "V2 variable active markers changed during open".into(),
+                        ));
+                    }
+                    if offsets_writer.size() % OFFSET_SIZE as u64 != 0 {
+                        return Err(Error::InvalidBlobSize(index, offsets_writer.size()));
+                    }
+                    let count = offsets_writer.size() / OFFSET_SIZE as u64;
+                    if count >= capacity {
+                        return Err(Error::InvalidBlobSize(index, offsets_writer.size()));
+                    }
+                    if (count == 0) != (data_writer.size() == 0) {
+                        return Err(Error::Corruption(format!(
+                            "V2 variable active section {index} has mismatched empty state"
+                        )));
+                    }
+                    sections.insert(
+                        index,
+                        Section {
+                            data: data_writer,
+                            offsets: offsets_writer,
+                        },
+                    );
+                    break count;
                 }
-                if offsets_writer.size() % OFFSET_SIZE as u64 != 0 {
-                    return Err(Error::InvalidBlobSize(index, offsets_writer.size()));
-                }
-                let count = offsets_writer.size() / OFFSET_SIZE as u64;
-                if count >= capacity {
-                    return Err(Error::InvalidBlobSize(index, offsets_writer.size()));
-                }
-                if (count == 0) != (data_writer.size() == 0) {
+
+                if data_writer.marker() != NO_MARKER || offsets_writer.marker() != NO_MARKER {
                     return Err(Error::Corruption(format!(
-                        "V2 variable active section {index} has mismatched empty state"
+                        "V2 variable sealed section {index} is marked active"
                     )));
+                }
+                if data_writer.size() == 0
+                    || data_writer.size() % u64::from(cfg.page_size.get()) != 0
+                {
+                    return Err(Error::InvalidBlobSize(index, data_writer.size()));
+                }
+                let sealed_entries = capacity.checked_add(1).ok_or(Error::OffsetOverflow)?;
+                let expected_offsets = padded_size(offsets_size(sealed_entries)?, cfg.page_size)?;
+                if offsets_writer.size() != expected_offsets {
+                    return Err(Error::InvalidBlobSize(index, offsets_writer.size()));
                 }
                 sections.insert(
                     index,
@@ -621,45 +663,88 @@ where
                         offsets: offsets_writer,
                     },
                 );
-                break count;
+                index = index.checked_add(1).ok_or(Error::OffsetOverflow)?;
+            };
+            (tail, tail_count)
+        } else {
+            let mut index = oldest;
+            loop {
+                let data_root = data.remove(&index);
+                let offsets_root = offsets.remove(&index);
+                let (data_writer, offsets_writer) = match (data_root, offsets_root) {
+                    (Some(data), Some(offsets)) => (
+                        Self::open_writer(data, cfg.page_size).await?,
+                        Self::open_writer(offsets, cfg.page_size).await?,
+                    ),
+                    (data_root, offsets_root) => {
+                        if data_root.is_some() {
+                            Self::remove_named(&context, &data_partition, &[index]).await?;
+                        }
+                        if offsets_root.is_some() {
+                            Self::remove_named(&context, &offsets_partition, &[index]).await?;
+                        }
+                        let section = Self::open_empty_section(
+                            &context,
+                            &data_partition,
+                            &offsets_partition,
+                            index,
+                            cfg.page_size,
+                        )
+                        .await?;
+                        sections.insert(index, section);
+                        break (index, 0);
+                    }
+                };
+                if data_writer.marker() != NO_MARKER || offsets_writer.marker() != NO_MARKER {
+                    return Err(Error::Corruption(format!(
+                        "V2 variable migration section {index} is marked active"
+                    )));
+                }
+                let capacity = section_capacity(start, index, items_per_section)?;
+                let sealed_entries = capacity.checked_add(1).ok_or(Error::OffsetOverflow)?;
+                let expected_offsets = padded_size(offsets_size(sealed_entries)?, cfg.page_size)?;
+                let sealed = data_writer.size() != 0
+                    && data_writer.size() % u64::from(cfg.page_size.get()) == 0
+                    && offsets_writer.size() == expected_offsets;
+                if sealed {
+                    sections.insert(
+                        index,
+                        Section {
+                            data: data_writer,
+                            offsets: offsets_writer,
+                        },
+                    );
+                    index = index.checked_add(1).ok_or(Error::OffsetOverflow)?;
+                    continue;
+                }
+                if offsets_writer.size() % OFFSET_SIZE as u64 != 0 {
+                    return Err(Error::InvalidBlobSize(index, offsets_writer.size()));
+                }
+                let count = offsets_writer.size() / OFFSET_SIZE as u64;
+                if count >= capacity || (count == 0) != (data_writer.size() == 0) {
+                    return Err(Error::InvalidBlobSize(index, offsets_writer.size()));
+                }
+                sections.insert(
+                    index,
+                    Section {
+                        data: data_writer,
+                        offsets: offsets_writer,
+                    },
+                );
+                break (index, count);
             }
-
-            if data_writer.marker() != NO_MARKER || offsets_writer.marker() != NO_MARKER {
-                return Err(Error::Corruption(format!(
-                    "V2 variable sealed section {index} is marked active"
-                )));
-            }
-            if data_writer.size() == 0 || data_writer.size() % u64::from(cfg.page_size.get()) != 0 {
-                return Err(Error::InvalidBlobSize(index, data_writer.size()));
-            }
-            let sealed_entries = capacity.checked_add(1).ok_or(Error::OffsetOverflow)?;
-            let expected_offsets = padded_size(offsets_size(sealed_entries)?, cfg.page_size)?;
-            if offsets_writer.size() != expected_offsets {
-                return Err(Error::InvalidBlobSize(index, offsets_writer.size()));
-            }
-            sections.insert(
-                index,
-                Section {
-                    data: data_writer,
-                    offsets: offsets_writer,
-                },
-            );
-            index = index.checked_add(1).ok_or(Error::OffsetOverflow)?;
         };
 
-        let tail_first = first_in_section(start, tail, items_per_section)?;
-        let end = tail_first
-            .checked_add(tail_count)
-            .ok_or(Error::SizeOverflow)?;
-
-        // Names outside the marker-defined interval are crash artifacts. Removing them cannot
-        // change logical state because neither root carries authority.
         let stale_data = data.keys().copied().collect::<Vec<_>>();
         let stale_offsets = offsets.keys().copied().collect::<Vec<_>>();
         Self::remove_named(&context, &data_partition, &stale_data).await?;
         Self::remove_named(&context, &offsets_partition, &stale_offsets).await?;
 
-        Ok(Self {
+        let tail_first = first_in_section(start, tail, items_per_section)?;
+        let end = tail_first
+            .checked_add(tail_count)
+            .ok_or(Error::SizeOverflow)?;
+        Ok(Some(Self {
             context,
             data_partition,
             offsets_partition,
@@ -670,13 +755,169 @@ where
             bounds: start..end,
             items_per_section: cfg.items_per_section,
             compression: cfg.compression,
-            codec_config: cfg.codec_config,
+            codec_config: cfg.codec_config.clone(),
             page_size: cfg.page_size,
+            active,
             _item: PhantomData,
+        }))
+    }
+
+    fn legacy_partitions(partition: &str) -> [String; 5] {
+        [
+            format!("{partition}_data"),
+            format!("{partition}_data-blobs"),
+            format!("{partition}_offsets"),
+            format!("{partition}_offsets-blobs"),
+            format!("{partition}_offsets-metadata"),
+        ]
+    }
+
+    fn legacy_config(context: &E, cfg: &Config<V::Cfg>) -> Result<legacy::Config<V::Cfg>, Error> {
+        Ok(legacy::Config {
+            partition: cfg.partition.clone(),
+            items_per_section: cfg.items_per_section,
+            compression: cfg.compression,
+            codec_config: cfg.codec_config.clone(),
+            page_cache: legacy_cache(context, cfg.page_size)?,
+            write_buffer: legacy_write_buffer(cfg.page_size)?,
         })
     }
 
-    /// Open or create a V2 variable journal.
+    async fn cleanup_legacy(context: &E, partition: &str) -> Result<(), Error> {
+        for partition in Self::legacy_partitions(partition) {
+            remove_partition(context, &partition).await?;
+        }
+        Ok(())
+    }
+
+    async fn activate(mut self) -> Result<Self, Error> {
+        if self.active {
+            return Ok(self);
+        }
+        let section = self
+            .sections
+            .remove(&self.tail)
+            .expect("migration tail exists");
+        let section = section
+            .set_marker(encode_start_marker(self.bounds.start)?)
+            .await?;
+        self.sections.insert(self.tail, section);
+        self.dirty.insert(self.tail);
+        self.apply_dirty().await?;
+        self.published_tail = self.tail;
+        self.active = true;
+        Ok(self)
+    }
+
+    async fn migrate_legacy(
+        mut legacy: legacy::Journal<E, V>,
+        mut target: Self,
+        cfg: &Config<V::Cfg>,
+    ) -> Result<Self, Error> {
+        let source = legacy.bounds();
+        if target.bounds.start > source.start
+            || target.bounds.end < source.start
+            || target.bounds.end > source.end
+        {
+            return Err(Error::Corruption(format!(
+                "variable migration ranges disagree: staged={:?} legacy={source:?}",
+                target.bounds
+            )));
+        }
+
+        while target.bounds.end < source.end {
+            let remaining_in_section =
+                cfg.items_per_section.get() - (target.bounds.end % cfg.items_per_section.get());
+            let end = target
+                .bounds
+                .end
+                .checked_add((source.end - target.bounds.end).min(remaining_in_section))
+                .ok_or(Error::SizeOverflow)?;
+            let prepared =
+                Self::prepare_migration_batch(&legacy, target.bounds.end, end, cfg.compression)
+                    .await?;
+            (target, _) = target.append_prepared(prepared).await?;
+            if target
+                .bounds
+                .end
+                .is_multiple_of(cfg.items_per_section.get())
+            {
+                target = target.sync().await?;
+                (legacy, _) = legacy.prune(target.bounds.end).await?;
+            }
+        }
+
+        target = target.sync().await?.activate().await?;
+        drop(legacy);
+        Self::cleanup_legacy(&target.context, &cfg.partition).await?;
+        finish_migration(&target.context, &target.data_partition).await?;
+        Ok(target)
+    }
+
+    async fn init_inner(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Self::validate_config(&cfg)?;
+        let data_partition = cfg.data_partition();
+        let offsets_partition = cfg.offsets_partition();
+        let data_names = scan_partition(&context, &data_partition).await?;
+        let offsets_names = scan_partition(&context, &offsets_partition).await?;
+        let witness = migration_start(&context, &data_partition, &data_names).await?;
+        let existing = Self::open_existing(
+            context.child("v2_open"),
+            &cfg,
+            data_names,
+            offsets_names,
+            witness.flatten(),
+        )
+        .await?;
+
+        if existing.as_ref().is_some_and(|journal| journal.active) {
+            let journal = existing.expect("active journal exists");
+            if witness.is_some() {
+                Self::cleanup_legacy(&journal.context, &cfg.partition).await?;
+                finish_migration(&journal.context, &journal.data_partition).await?;
+            }
+            return Ok(journal);
+        }
+
+        let legacy_partitions = Self::legacy_partitions(&cfg.partition);
+        if !partition_has_state(&context, &legacy_partitions).await? {
+            if witness.is_some() {
+                return Err(Error::Corruption(
+                    "variable migration witness has neither legacy nor active V2 state".into(),
+                ));
+            }
+            return Self::fresh(context, cfg, 0, true).await;
+        }
+
+        let legacy = legacy::Journal::<E, V>::init(
+            context.child("legacy"),
+            Self::legacy_config(&context, &cfg)?,
+        )
+        .await?;
+        let source = legacy.bounds();
+        let start = match witness {
+            Some(Some(start)) => start,
+            Some(None) | None => {
+                start_migration(&context, &data_partition, source.start).await?;
+                source.start
+            }
+        };
+        if start != source.start && existing.is_none() {
+            return Err(Error::Corruption(
+                "variable migration start no longer matches legacy state".into(),
+            ));
+        }
+        let target = match existing {
+            Some(target) => target,
+            None => Self::fresh(context.child("v2_migrate"), cfg.clone(), start, false).await?,
+        };
+        Self::migrate_legacy(legacy, target, &cfg).await
+    }
+
+    /// Open or create a V2 variable journal, eagerly migrating any recovered legacy journal.
+    ///
+    /// A successful migration removes the same-base legacy partitions, so selecting V2 is
+    /// forward-only for this journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Self::init_inner(context, cfg).await
     }
@@ -752,6 +993,50 @@ where
         })
     }
 
+    async fn prepare_migration_batch(
+        legacy: &legacy::Journal<E, V>,
+        start: u64,
+        end: u64,
+        compression: Option<u8>,
+    ) -> Result<PreparedAppend<V>, Error> {
+        // Encode as items are read so migration retains a bounded encoded batch rather than a
+        // decoded item vector. One item larger than the budget is admitted by itself.
+        let mut encoded = Vec::new();
+        let mut item_starts = Vec::new();
+        for position in start..end {
+            if item_starts.len() == MIGRATION_BATCH_ITEMS {
+                break;
+            }
+            let item = legacy.read(position).await?;
+            let mut frame = Vec::new();
+            encode_frame_into(compression, &item, &mut frame)?;
+
+            if item_starts.is_empty() {
+                item_starts.push(0);
+                encoded = frame;
+            } else {
+                let Some(next_size) = encoded.len().checked_add(frame.len()) else {
+                    break;
+                };
+                if next_size > MIGRATION_BATCH_BYTES {
+                    break;
+                }
+                item_starts.push(encoded.len());
+                encoded.extend_from_slice(&frame);
+            }
+            if encoded.len() >= MIGRATION_BATCH_BYTES {
+                break;
+            }
+        }
+        debug_assert!(!item_starts.is_empty());
+        Ok(PreparedAppend {
+            encoded,
+            item_starts,
+            compressed: compression.is_some(),
+            _item: PhantomData,
+        })
+    }
+
     async fn pad_writer(
         writer: AtomicWriter<Blob<E>>,
         page_size: NonZeroU16,
@@ -776,7 +1061,11 @@ where
             self.page_size,
         )
         .await?;
-        let marker = encode_marker(self.bounds.start)?;
+        let marker = if self.active {
+            encode_start_marker(self.bounds.start)?
+        } else {
+            NO_MARKER
+        };
 
         let mut tail = self.sections.remove(&self.tail).expect("tail must exist");
         let data_end = tail.data.size();
@@ -948,7 +1237,7 @@ where
             return Ok((self, false));
         }
         let start = blob_first_position(target, self.items_per_section.get())?;
-        let marker = encode_marker(start)?;
+        let marker = encode_start_marker(start)?;
         let tail = self.sections.remove(&self.tail).expect("tail must exist");
         let tail = tail.set_marker(marker).await?;
         self.sections.insert(self.tail, tail);
@@ -1007,7 +1296,7 @@ where
                 .ok_or(Error::MissingBlob(target))?;
             Self::writer_offset(&target_section.offsets, retained).await?
         };
-        let marker = encode_marker(self.bounds.start)?;
+        let marker = encode_start_marker(self.bounds.start)?;
         let stale = self
             .sections
             .keys()
@@ -1064,7 +1353,7 @@ where
             .await?;
             self.sections.insert(target, section);
         }
-        let marker = encode_marker(size)?;
+        let marker = encode_start_marker(size)?;
         let stale = self
             .sections
             .keys()
@@ -1096,11 +1385,16 @@ where
         Ok(self)
     }
 
-    /// Remove both V2 journal partitions.
+    /// Remove both V2 journal partitions and any same-base legacy partitions.
     ///
     /// This final teardown is not crash-safe; use [`clear_to_size`](Self::clear_to_size) for a
     /// recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
+        let base_partition = self
+            .data_partition
+            .strip_suffix(DATA_SUFFIX)
+            .expect("V2 variable data partition has its suffix");
+        Self::cleanup_legacy(&self.context, base_partition).await?;
         self.context.remove(&self.data_partition, None).await?;
         self.context.remove(&self.offsets_partition, None).await?;
         Ok(())
@@ -1180,8 +1474,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::contiguous::variable as legacy;
+    use bytes::Bytes;
+    use commonware_codec::RangeCfg;
     use commonware_runtime::{
-        Runner as _, Storage as _, Supervisor as _, buffer::paged::atomic_page_size, deterministic,
+        Runner as _, Storage as _, Supervisor as _,
+        buffer::paged::{CacheRef, atomic_page_size, page_size},
+        deterministic,
     };
     use commonware_utils::{NZU64, NZUsize};
     use futures::StreamExt as _;
@@ -1194,6 +1493,244 @@ mod tests {
             codec_config: (),
             page_size: atomic_page_size(64),
         }
+    }
+
+    #[test]
+    fn migration_batches_are_bounded_by_encoded_bytes() {
+        deterministic::Runner::default().start(|context| async move {
+            let item_len = MIGRATION_BATCH_BYTES * 3 / 5;
+            let cfg = legacy::Config {
+                partition: "v2_variable_migration_batch_bound".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: RangeCfg::new(0..=MIGRATION_BATCH_BYTES),
+                page_cache: CacheRef::from_pooler(&context, page_size(4096), NZUsize!(3)),
+                write_buffer: NZUsize!(1024 * 1024),
+            };
+            let values = [
+                Bytes::from(vec![1; item_len]),
+                Bytes::from(vec![2; item_len]),
+            ];
+            let legacy = legacy::Journal::init(context.child("legacy"), cfg)
+                .await
+                .unwrap();
+            let (legacy, _) = legacy.append_many(Many::Flat(&values)).await.unwrap();
+            let legacy = legacy.sync().await.unwrap();
+
+            let first =
+                Journal::<_, Bytes>::prepare_migration_batch(&legacy, 0, values.len() as u64, None)
+                    .await
+                    .unwrap();
+            assert_eq!(first.item_starts.len(), 1);
+            assert!(first.encoded.len() < MIGRATION_BATCH_BYTES);
+
+            let second = Journal::<_, Bytes>::prepare_migration_batch(&legacy, 1, 2, None)
+                .await
+                .unwrap();
+            assert_eq!(second.item_starts.len(), 1);
+            legacy.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn init_migrates_recovered_legacy_pairs_and_removes_legacy_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = config("v2_variable_migrate_legacy");
+            let legacy_cfg = legacy::Config {
+                partition: cfg.partition.clone(),
+                items_per_section: cfg.items_per_section,
+                compression: cfg.compression,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, page_size(64), NZUsize!(3)),
+                write_buffer: NZUsize!(128),
+            };
+            let values = (0..8u64).collect::<Vec<_>>();
+            let legacy = legacy::Journal::init(context.child("legacy"), legacy_cfg)
+                .await
+                .unwrap();
+            let (legacy, _) = legacy.append_many(Many::Flat(&values)).await.unwrap();
+            let (legacy, _) = legacy.prune(4).await.unwrap();
+            let legacy = legacy.sync().await.unwrap();
+            assert_eq!(legacy.bounds(), 3..8);
+            drop(legacy);
+
+            let journal = Journal::<_, u64>::init(context.child("migrate"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 3..8);
+            assert_eq!(
+                journal.read_many(&[3, 4, 5, 6, 7]).await.unwrap(),
+                vec![3, 4, 5, 6, 7]
+            );
+            drop(journal);
+
+            for partition in [
+                format!("{}_data", cfg.partition),
+                format!("{}_data-blobs", cfg.partition),
+                format!("{}_offsets", cfg.partition),
+                format!("{}_offsets-blobs", cfg.partition),
+                format!("{}_offsets-metadata", cfg.partition),
+            ] {
+                assert!(matches!(
+                    context.scan(&partition).await,
+                    Err(commonware_runtime::Error::PartitionMissing(_))
+                ));
+            }
+
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 3..8);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn init_resumes_after_a_staged_pair_replaced_its_legacy_source() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = config("v2_variable_resume_migration");
+            let legacy_cfg = legacy::Config {
+                partition: cfg.partition.clone(),
+                items_per_section: cfg.items_per_section,
+                compression: cfg.compression,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, page_size(64), NZUsize!(3)),
+                write_buffer: NZUsize!(128),
+            };
+            let values = (0..8u64).collect::<Vec<_>>();
+            let legacy = legacy::Journal::init(context.child("legacy"), legacy_cfg)
+                .await
+                .unwrap();
+            let (legacy, _) = legacy.append_many(Many::Flat(&values)).await.unwrap();
+            let mut legacy = legacy.sync().await.unwrap();
+
+            let data_partition = cfg.data_partition();
+            start_migration(&context, &data_partition, 0).await.unwrap();
+            let target = Journal::<_, u64>::fresh(context.child("stage"), cfg.clone(), 0, false)
+                .await
+                .unwrap();
+            let (target, _) = target.append_many(Many::Flat(&values[..3])).await.unwrap();
+            let target = target.sync().await.unwrap();
+            (legacy, _) = legacy.prune(3).await.unwrap();
+            assert_eq!(target.bounds(), 0..3);
+            assert_eq!(legacy.bounds(), 3..8);
+            drop(target);
+            drop(legacy);
+
+            let journal = Journal::<_, u64>::init(context.child("resume"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..8);
+            assert_eq!(
+                journal.read_many(&[0, 2, 3, 5, 7]).await.unwrap(),
+                vec![0, 2, 3, 5, 7,]
+            );
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn init_migrates_an_empty_legacy_journal_at_a_nonzero_start() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = config("v2_variable_migrate_empty_at_size");
+            let legacy_cfg = legacy::Config {
+                partition: cfg.partition.clone(),
+                items_per_section: cfg.items_per_section,
+                compression: cfg.compression,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, page_size(64), NZUsize!(3)),
+                write_buffer: NZUsize!(128),
+            };
+            let legacy =
+                legacy::Journal::<_, u64>::init_at_size(context.child("legacy"), legacy_cfg, 5)
+                    .await
+                    .unwrap();
+            assert_eq!(legacy.bounds(), 5..5);
+            drop(legacy);
+
+            let journal = Journal::<_, u64>::init(context.child("migrate"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 5..5);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn activated_migration_cleans_legacy_without_reopening_it() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = config("v2_variable_activated_cleanup");
+            let legacy_cfg = legacy::Config {
+                partition: cfg.partition.clone(),
+                items_per_section: cfg.items_per_section,
+                compression: cfg.compression,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, page_size(64), NZUsize!(3)),
+                write_buffer: NZUsize!(128),
+            };
+            let values = [10u64, 11];
+            let legacy = legacy::Journal::init(context.child("legacy"), legacy_cfg)
+                .await
+                .unwrap();
+            let (legacy, _) = legacy.append_many(Many::Flat(&values)).await.unwrap();
+            let legacy = legacy.sync().await.unwrap();
+
+            let data_partition = cfg.data_partition();
+            start_migration(&context, &data_partition, 0).await.unwrap();
+            let target = Journal::<_, u64>::fresh(context.child("stage"), cfg.clone(), 0, false)
+                .await
+                .unwrap();
+            let (target, _) = target.append_many(Many::Flat(&values)).await.unwrap();
+            let target = target.sync().await.unwrap().activate().await.unwrap();
+            drop(target);
+            drop(legacy);
+
+            let (bad, _) = context
+                .open(&format!("{}_data-blobs", cfg.partition), b"bad-name")
+                .await
+                .unwrap();
+            drop(bad);
+            let journal = Journal::<_, u64>::init(context.child("cleanup"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read_many(&[0, 1]).await.unwrap(), values);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn destroy_prevents_stale_legacy_state_from_reappearing() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = config("v2_variable_destroy_legacy");
+            let legacy_cfg = legacy::Config {
+                partition: cfg.partition.clone(),
+                items_per_section: cfg.items_per_section,
+                compression: cfg.compression,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, page_size(64), NZUsize!(3)),
+                write_buffer: NZUsize!(128),
+            };
+            let legacy = legacy::Journal::init(context.child("legacy"), legacy_cfg)
+                .await
+                .unwrap();
+            let (legacy, _) = legacy.append(&1u64).await.unwrap();
+            let legacy = legacy.sync().await.unwrap();
+            drop(legacy);
+
+            // Simulate V2 state created before transparent migration owned the base namespace.
+            let journal = Journal::<_, u64>::fresh(context.child("v2"), cfg.clone(), 0, true)
+                .await
+                .unwrap();
+            let (journal, _) = journal.append(&9u64).await.unwrap();
+            journal.sync().await.unwrap().destroy().await.unwrap();
+
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test]
@@ -1329,6 +1866,45 @@ mod tests {
             assert_eq!(journal.tail, 0);
             assert!(journal.dirty.is_empty());
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn noncanonical_markers_are_rejected_before_pair_cleanup() {
+        deterministic::Runner::default().start(|context| async move {
+            for (case, mut marker) in [
+                ("absent", NO_MARKER),
+                ("present", encode_start_marker(0).unwrap()),
+            ] {
+                marker[8] = 1;
+                let base = format!("v2_variable_noncanonical_marker_{case}");
+                let cfg = config(&base);
+                let data_partition = cfg.data_partition();
+                let offsets_partition = cfg.offsets_partition();
+                let mut journal = Journal::<_, u64>::init(context.child("initial"), cfg.clone())
+                    .await
+                    .unwrap();
+                let section = journal.sections.remove(&journal.tail).unwrap();
+                let section = section.set_marker(marker).await.unwrap();
+                section.sync().await.unwrap();
+                journal.sections.insert(journal.tail, section);
+                drop(journal);
+
+                let mut data_before = context.scan(&data_partition).await.unwrap();
+                let mut offsets_before = context.scan(&offsets_partition).await.unwrap();
+                data_before.sort();
+                offsets_before.sort();
+                let reopened = Journal::<_, u64>::init(context.child("reopen"), cfg).await;
+                assert!(matches!(reopened, Err(Error::Corruption(_))), "{case}");
+                let mut data_after = context.scan(&data_partition).await.unwrap();
+                let mut offsets_after = context.scan(&offsets_partition).await.unwrap();
+                data_after.sort();
+                offsets_after.sort();
+                assert_eq!(data_after, data_before, "{case}");
+                assert_eq!(offsets_after, offsets_before, "{case}");
+                context.remove(&data_partition, None).await.unwrap();
+                context.remove(&offsets_partition, None).await.unwrap();
+            }
         });
     }
 }

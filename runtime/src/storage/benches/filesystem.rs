@@ -32,12 +32,12 @@ pub const fn backend_name() -> &'static str {
 
 /// Protocol used by blobs opened through [`AtomicStorage`].
 pub const fn atomic_protocol() -> &'static str {
-    "uno_r11_append_root"
+    "uno_r12_append_root_64b_tag"
 }
 
 /// Protocol used to publish prepared roots as one multi-blob decision.
 pub const fn atomic_batch_protocol() -> &'static str {
-    "uno_r11_append_embedded_participant_witness"
+    "uno_r14_append_linked_participant_witness_64b_tag"
 }
 
 /// On-disk footprint of the benchmark blob after the timed workload.

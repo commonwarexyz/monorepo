@@ -15,44 +15,49 @@
 //!
 //! # V2 root slots
 //!
-//! A V2 file reserves one immutable header page followed by two 4 KiB root slots. Root generation
-//! parity selects the slot, so publishing a generation never overwrites its immediate fallback.
-//! Payload begins after both slots.
+//! A V2 file reserves one immutable header page followed by one 4 KiB root page split into two
+//! 2 KiB slots. Root generation parity selects the slot, so publishing a generation never
+//! overwrites its immediate fallback. Payload begins after the root page.
 //!
 //! ```text
 //! +----------------------+ offset 0
 //! | immutable V2 header  | 4 KiB
 //! +----------------------+ offset 4 KiB
-//! | root slot 0          | 4 KiB
+//! | root slot 0          | 2 KiB
+//! +----------------------+ offset 6 KiB
+//! | root slot 1          | 2 KiB
 //! +----------------------+ offset 8 KiB
-//! | root slot 1          | 4 KiB
-//! +----------------------+ offset 12 KiB
 //! | payload log          |
 //! +----------------------+
 //! ```
 //!
-//! An ordinary root slot contains a self-contained 40-byte root header: its spelling, generation,
-//! logical length, 12 application-owned tag bytes, and a CRC32C over all preceding fields. A
-//! batch-prepared slot also stores a 16-byte witness header and the exact group descriptor
-//! immediately after the root. The witness header contains magic, descriptor length, and a
-//! domain-separated CRC32C.
+//! The two logical slots share one physical page, so the crash model covers arbitrary subsets of
+//! bytes from the writes requested for either slot. It does not claim recovery from unrelated
+//! device corruption that overwrites bytes outside those requested ranges.
+//!
+//! An ordinary root slot contains a self-contained 92-byte root header: its spelling, generation,
+//! logical length, 64 application-owned tag bytes, and a CRC32C over all preceding fields. A
+//! batch-prepared slot also stores a 16-byte wrapper and the participant's local group link
+//! immediately after the root. The wrapper contains magic, link length, and a domain-separated
+//! CRC32C.
 //!
 //! ```text
-//! +-------------+---------------+------------+-----------------------------+
-//! | root header | magic/len/CRC | descriptor |            unused           |
-//! +-------------+---------------+------------+-----------------------------+
-//! 0            40              56                                      4096
+//! +-------------+---------------+----------------------+--------------------+
+//! | root header | magic/len/CRC | local linked witness |       unused       |
+//! +-------------+---------------+----------------------+--------------------+
+//! 0            92             108                                      2048
 //! ```
 //!
 //! The batch-prepared root spelling is deliberately invisible to ordinary recovery. Once the group
-//! decision is known, materialization durably rewrites only the 40-byte header to an independently
-//! recoverable spelling and leaves the descriptor witness available to repair peers. The batch
+//! decision is known, materialization durably rewrites only the 92-byte header to an independently
+//! recoverable spelling and leaves the linked witness available to repair peers. The batch
 //! recovery protocol and its crash outcomes are documented in `storage::batch::coordinator`.
 
-use crate::{
-    ATOMIC_BLOB_TAG_LEN, IoBufs,
-    storage::{Header, Layout},
-};
+use crate::{IoBufs, storage::ATOMIC_BLOB_TAG_LEN};
+commonware_macros::stability_scope!(ALPHA {
+    use crate::storage::{Header, Layout};
+    use std::os::unix::fs::MetadataExt as _;
+});
 use commonware_cryptography::{Crc32, Hasher as _};
 use commonware_formatting::hex;
 #[cfg(target_os = "linux")]
@@ -62,7 +67,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Seek as _, SeekFrom, Write as _},
     ops::Range,
-    os::unix::fs::{FileExt, MetadataExt as _},
+    os::unix::fs::FileExt,
     path::Path,
 };
 
@@ -81,7 +86,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    const DATA_OFFSET: u64 = 12_288;
+    const DATA_OFFSET: u64 = 8_192;
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     fn test_file() -> (std::path::PathBuf, File) {
@@ -477,19 +482,54 @@ mod tests {
         state.finish_mutation(append.mutation, true);
         let mut prepared = state.prepare_commit().unwrap().unwrap();
         prepared.mark_batch_prepared();
-        let descriptor = b"group descriptor";
-        prepared.attach_batch_witness(descriptor).unwrap();
+        let witness = b"group witness";
+        prepared.attach_batch_witness(witness).unwrap();
 
         assert_eq!(
             prepared.prepared_root.len(),
-            ROOT_LEN + BATCH_WITNESS_HEADER_LEN + descriptor.len()
+            ROOT_LEN + BATCH_WITNESS_HEADER_LEN + witness.len()
         );
         let mut slot = [0; ROOT_SLOT_LEN as usize];
         slot[..prepared.prepared_root.len()].copy_from_slice(&prepared.prepared_root);
         assert_eq!(
             decode_batch_witness(&slot),
-            Some((ROOT_LEN + BATCH_WITNESS_HEADER_LEN, descriptor.as_slice()))
+            Some((ROOT_LEN + BATCH_WITNESS_HEADER_LEN, witness.as_slice()))
         );
+    }
+
+    #[test]
+    fn one_root_page_has_two_bounded_witness_slots() {
+        assert_eq!(ROOT_OFFSETS[0], 4096);
+        assert_eq!(ROOT_OFFSETS[1], ROOT_OFFSETS[0] + ROOT_SLOT_LEN);
+        assert_eq!(ROOT_OFFSETS[1] + ROOT_SLOT_LEN, DATA_OFFSET);
+        assert_eq!(
+            ROOT_LEN + BATCH_WITNESS_HEADER_LEN + MAX_BATCH_WITNESS_LEN,
+            ROOT_SLOT_LEN as usize
+        );
+
+        let prepare = || {
+            let mut state = State::empty(DATA_OFFSET);
+            let append = state
+                .prepare_append(IoBufs::from(b"new".to_vec()))
+                .unwrap()
+                .unwrap();
+            state.finish_mutation(append.mutation, true);
+            let mut prepared = state.prepare_commit().unwrap().unwrap();
+            prepared.mark_batch_prepared();
+            prepared
+        };
+
+        let mut exact = prepare();
+        exact
+            .attach_batch_witness(&vec![0x5a; MAX_BATCH_WITNESS_LEN])
+            .unwrap();
+        assert_eq!(exact.prepared_root.len(), ROOT_SLOT_LEN as usize);
+
+        let mut oversized = prepare();
+        let error = oversized
+            .attach_batch_witness(&vec![0x5a; MAX_BATCH_WITNESS_LEN + 1])
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -543,8 +583,8 @@ mod tests {
             commit(&file, &mut state);
             let mut prepared = state.prepare_delete().unwrap();
             prepared.mark_batch_prepared();
-            let descriptor = format!("delete group {case}").into_bytes();
-            prepared.attach_batch_witness(&descriptor).unwrap();
+            let witness = format!("delete group {case}").into_bytes();
+            prepared.attach_batch_witness(&witness).unwrap();
             let candidate = prepared.candidate();
             file.write_all_at(&prepared.prepared_root, prepared.root_offset)
                 .unwrap();
@@ -561,14 +601,14 @@ mod tests {
             file.sync_all().unwrap();
 
             assert!(
-                candidate_has_embedded_batch_witness(&file, &candidate, &descriptor).unwrap(),
+                candidate_has_embedded_batch_witness(&file, &candidate, &witness).unwrap(),
                 "case {case}"
             );
             assert_eq!(
                 embedded_batch_witnesses(&file, DATA_OFFSET).unwrap(),
                 vec![EmbeddedBatchWitness {
                     root_offset: candidate.root_offset,
-                    descriptor,
+                    witness,
                 }],
                 "case {case}"
             );
@@ -628,6 +668,60 @@ mod tests {
         assert_eq!(recovered.unwrap().logical_len(), 4 * 1024 * 1024);
         assert!(read_bytes < 1024, "recovery read {read_bytes} bytes");
         assert!(durable_writes.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn root_layout_carries_a_nonuniform_64_byte_tag() {
+        let tag = std::array::from_fn(|index| (index as u8).wrapping_mul(17).wrapping_add(3));
+        let encoded = encode_root(ROOT_MAGIC, 7, 11, tag);
+
+        assert_eq!(ROOT_LEN, 92);
+        assert_eq!(&encoded[..8], ROOT_MAGIC);
+        assert_eq!(&encoded[8..16], &7u64.to_be_bytes());
+        assert_eq!(&encoded[16..24], &11u64.to_be_bytes());
+        assert_eq!(&encoded[24..88], &tag);
+        assert_eq!(
+            &encoded[88..92],
+            &checksum(&[ROOT_DOMAIN, &encoded[..88]]).to_be_bytes()
+        );
+        let decoded = decode_committed_root(&encoded).unwrap();
+        assert_eq!(decoded.generation, 7);
+        assert_eq!(decoded.logical_len, 11);
+        assert_eq!(decoded.tag, tag);
+
+        for index in [0, 8, 16, 24, 87, 88, 91] {
+            let mut corrupt = encoded;
+            corrupt[index] ^= 1;
+            assert!(
+                decode_committed_root(&corrupt).is_none(),
+                "corruption at byte {index} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_atomic_root_fails_without_truncating_payload() {
+        const LEGACY_ROOT_LEN: usize = 40;
+        const LEGACY_BODY_LEN: usize = 36;
+        let (path, file) = test_file();
+        let payload = b"legacy experimental V2 payload";
+        file.write_all_at(payload, DATA_OFFSET).unwrap();
+
+        let mut root = [0u8; LEGACY_ROOT_LEN];
+        root[..8].copy_from_slice(b"CWUNOR11");
+        root[8..16].copy_from_slice(&1u64.to_be_bytes());
+        root[16..24].copy_from_slice(&(payload.len() as u64).to_be_bytes());
+        root[24..36].copy_from_slice(&[0xA5; 12]);
+        let root_checksum = checksum(&[ROOT_DOMAIN, &root[..LEGACY_BODY_LEN]]);
+        root[LEGACY_BODY_LEN..].copy_from_slice(&root_checksum.to_be_bytes());
+        file.write_all_at(&root, ROOT_OFFSETS[1]).unwrap();
+        file.sync_all().unwrap();
+
+        let before = fs::read(&path).unwrap();
+        let error = State::recover(&file, DATA_OFFSET).expect_err("R11 must not open as empty R12");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(), before);
         fs::remove_file(path).unwrap();
     }
 
@@ -821,28 +915,39 @@ mod tests {
     }
 }
 
-const ROOT_MAGIC: &[u8; 8] = b"CWUNOR11";
-const PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOP11";
-const BATCH_PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOB11";
-const MATERIALIZED_ROOT_MAGIC: &[u8; 8] = b"CWUNOM11";
-const TOMBSTONE_ROOT_MAGIC: &[u8; 8] = b"CWUNOT11";
-const BATCH_WITNESS_MAGIC: &[u8; 8] = b"CWUNOW11";
+const ROOT_MAGIC: &[u8; 8] = b"CWUNOR12";
+const PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOP12";
+const BATCH_PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOB12";
+const MATERIALIZED_ROOT_MAGIC: &[u8; 8] = b"CWUNOM12";
+const TOMBSTONE_ROOT_MAGIC: &[u8; 8] = b"CWUNOT12";
+const BATCH_WITNESS_MAGIC: &[u8; 8] = b"CWUNOW12";
+const LEGACY_ROOT_MAGICS: [[u8; 8]; 5] = [
+    *b"CWUNOR11",
+    *b"CWUNOP11",
+    *b"CWUNOB11",
+    *b"CWUNOM11",
+    *b"CWUNOT11",
+];
 const CREATION_PREFIX: &str = ".commonware-uno-create-";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_LOG_ROOT";
 const BATCH_WITNESS_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_BATCH_WITNESS";
-const ROOT_BODY_LEN: usize = 36;
-pub(super) const ROOT_LEN: usize = 40;
-const ROOT_SLOT_LEN: u64 = 4096;
+const ROOT_PREFIX_LEN: usize = 24;
+const ROOT_CHECKSUM_LEN: usize = std::mem::size_of::<u32>();
+const ROOT_BODY_LEN: usize = ROOT_PREFIX_LEN + ATOMIC_BLOB_TAG_LEN;
+pub(super) const ROOT_LEN: usize = ROOT_BODY_LEN + ROOT_CHECKSUM_LEN;
+const ROOT_SLOT_LEN: u64 = 2048;
 const BATCH_WITNESS_HEADER_LEN: usize = 16;
-const ROOT_OFFSETS: [u64; 2] = [4096, 8192];
+pub(super) const MAX_BATCH_WITNESS_LEN: usize =
+    ROOT_SLOT_LEN as usize - ROOT_LEN - BATCH_WITNESS_HEADER_LEN;
+const ROOT_OFFSETS: [u64; 2] = [4096, 6144];
 pub(super) const MAX_VALIDATED_PAYLOAD_LEN: u64 = 64 * 1024 * 1024;
-pub(super) const MAX_SPECULATIVE_PARTICIPANTS: u64 = 32;
 const TARGET_PREFLUSH_PARTICIPANTS: u64 = 4;
 /// Bound the aggregate unflushed tail for the common four-participant group. Larger groups enforce
 /// their smaller per-participant budget during publication.
 pub(super) const BACKGROUND_PREFLUSH_INTERVAL: u64 =
     MAX_VALIDATED_PAYLOAD_LEN / TARGET_PREFLUSH_PARTICIPANTS;
 const PAYLOAD_CHECKSUM_READ_LEN: usize = 64 * 1024;
+#[commonware_macros::stability(ALPHA)]
 const MIGRATION_COPY_LEN: usize = 1024 * 1024;
 #[cfg(target_os = "linux")]
 const MIN_WRITEBACK_HINT_LEN: u64 = 64 * 1024;
@@ -988,7 +1093,7 @@ pub(super) fn begin_payload_writeback(file: &File, offset: u64, len: u64) -> io:
         .map_err(|_| invalid_input("atomic payload offset exceeds off64_t"))?;
     let len = libc::off64_t::try_from(len)
         .map_err(|_| invalid_input("atomic payload length exceeds off64_t"))?;
-    // SAFETY: the descriptor remains valid for the call and both offsets fit off64_t. This only
+    // SAFETY: the file descriptor remains valid for the call and both offsets fit off64_t. This only
     // initiates writeback; the existing inode sync remains the durability and ordering barrier.
     let result = unsafe {
         libc::sync_file_range(file.as_raw_fd(), offset, len, libc::SYNC_FILE_RANGE_WRITE)
@@ -1056,22 +1161,22 @@ pub(crate) struct Candidate {
     pub(crate) committed_root: [u8; ROOT_LEN],
 }
 
-/// A transaction candidate recovered with its participant-embedded batch descriptor.
+/// A transaction candidate recovered with its participant-embedded batch witness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EmbeddedBatchCandidate {
     pub(crate) candidate: Candidate,
-    pub(crate) descriptor: Vec<u8>,
+    pub(crate) witness: Vec<u8>,
 }
 
-/// A checksummed batch descriptor found in one fixed root slot.
+/// A checksummed batch witness found in one fixed root slot.
 ///
-/// The descriptor is decoded independently from the root header. This lets group recovery repair
+/// The witness is decoded independently from the root header. This lets group recovery repair
 /// a root whose final durable overwrite was interrupted after another participant made the group
 /// authoritative.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EmbeddedBatchWitness {
     pub(crate) root_offset: u64,
-    pub(crate) descriptor: Vec<u8>,
+    pub(crate) witness: Vec<u8>,
 }
 
 /// Payload bounds recovered while validating a transaction candidate.
@@ -1093,10 +1198,7 @@ pub(super) struct PreparedCommit {
 
 impl PreparedCommit {
     fn available_batch_witness_capacity(&self) -> Option<usize> {
-        let used = ROOT_LEN.checked_add(BATCH_WITNESS_HEADER_LEN)?;
-        (ROOT_SLOT_LEN as usize)
-            .checked_sub(used)
-            .map(|capacity| capacity.min(u32::MAX as usize))
+        Some(MAX_BATCH_WITNESS_LEN.min(u32::MAX as usize))
     }
 
     /// Return the first payload byte recovery must validate.
@@ -1135,24 +1237,19 @@ impl PreparedCommit {
     pub(super) fn mark_batch_prepared(&mut self) {
         self.prepared_root[..8].copy_from_slice(BATCH_PREPARED_ROOT_MAGIC);
         let root_checksum = checksum(&[ROOT_DOMAIN, &self.prepared_root[..ROOT_BODY_LEN]]);
-        self.prepared_root[36..ROOT_LEN].copy_from_slice(&root_checksum.to_be_bytes());
+        self.prepared_root[ROOT_BODY_LEN..ROOT_LEN].copy_from_slice(&root_checksum.to_be_bytes());
     }
 
-    /// Maximum descriptor bytes that can follow this root and its wrapper.
-    pub(super) fn batch_witness_capacity(&self) -> usize {
-        self.available_batch_witness_capacity().unwrap_or(0)
-    }
-
-    /// Return whether a descriptor can be embedded in this commit's root slot.
-    pub(super) fn batch_witness_fits(&self, descriptor_len: usize) -> bool {
-        u32::try_from(descriptor_len).is_ok()
+    /// Return whether a witness can be embedded in this commit's root slot.
+    pub(super) fn batch_witness_fits(&self, witness_len: usize) -> bool {
+        u32::try_from(witness_len).is_ok()
             && self
                 .available_batch_witness_capacity()
-                .is_some_and(|capacity| descriptor_len <= capacity)
+                .is_some_and(|capacity| witness_len <= capacity)
     }
 
-    /// Append a checksummed batch descriptor immediately after this root.
-    pub(super) fn attach_batch_witness(&mut self, descriptor: &[u8]) -> io::Result<()> {
+    /// Append a checksummed batch witness immediately after this root.
+    pub(super) fn attach_batch_witness(&mut self, witness: &[u8]) -> io::Result<()> {
         if self.prepared_root.get(..8) != Some(BATCH_PREPARED_ROOT_MAGIC) {
             return Err(invalid_input(
                 "atomic batch witness requires a batch-prepared root",
@@ -1163,24 +1260,24 @@ impl PreparedCommit {
                 "atomic batch-prepared root already has trailing bytes",
             ));
         }
-        if !self.batch_witness_fits(descriptor.len()) {
+        if !self.batch_witness_fits(witness.len()) {
             return Err(invalid_input("atomic batch witness exceeds its root slot"));
         }
 
-        let descriptor_len = u32::try_from(descriptor.len())
+        let witness_len = u32::try_from(witness.len())
             .map_err(|_| invalid_input("atomic batch witness length exceeds u32"))?;
-        let descriptor_len = descriptor_len.to_be_bytes();
-        let descriptor_checksum = checksum(&[
+        let witness_len = witness_len.to_be_bytes();
+        let witness_checksum = checksum(&[
             BATCH_WITNESS_DOMAIN,
             BATCH_WITNESS_MAGIC,
-            &descriptor_len,
-            descriptor,
+            &witness_len,
+            witness,
         ]);
         self.prepared_root.extend_from_slice(BATCH_WITNESS_MAGIC);
-        self.prepared_root.extend_from_slice(&descriptor_len);
+        self.prepared_root.extend_from_slice(&witness_len);
         self.prepared_root
-            .extend_from_slice(&descriptor_checksum.to_be_bytes());
-        self.prepared_root.extend_from_slice(descriptor);
+            .extend_from_slice(&witness_checksum.to_be_bytes());
+        self.prepared_root.extend_from_slice(witness);
         debug_assert!(self.prepared_root.len() <= ROOT_SLOT_LEN as usize);
         Ok(())
     }
@@ -1260,6 +1357,12 @@ impl State {
                 slot_zero[index] = true;
                 continue;
             }
+            if LEGACY_ROOT_MAGICS
+                .iter()
+                .any(|magic| encoded.starts_with(magic))
+            {
+                return Err(invalid_data("unsupported atomic root format"));
+            }
             if let Some(root) = decode_root(&encoded) {
                 if ROOT_OFFSETS[(root.generation as usize) & 1] != offset {
                     invalid_root_slot = true;
@@ -1319,6 +1422,7 @@ impl State {
         self.committed_len
     }
 
+    #[commonware_macros::stability(ALPHA)]
     pub(super) const fn tag(&self) -> [u8; ATOMIC_BLOB_TAG_LEN] {
         self.tag
     }
@@ -1348,6 +1452,7 @@ impl State {
     }
 
     /// Return whether applying a validated rewind would leave a root to publish.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn participates_after_rewind(&self, len: u64) -> io::Result<bool> {
         self.validate_rewind(len)?;
         if len == self.logical_len {
@@ -1357,6 +1462,7 @@ impl State {
     }
 
     /// Return whether batch preparation can finish without waiting for payload durability.
+    #[commonware_macros::stability(ALPHA)]
     #[cfg(any(not(feature = "iouring-storage"), test))]
     pub(super) fn can_prepare_batch_inline(&self, payload_budget: u64) -> io::Result<bool> {
         if self.poisoned || self.logical_len < self.committed_len || self.preflush_requested()? {
@@ -1607,6 +1713,7 @@ impl State {
     /// barrier therefore need not make discarded payload durable. The state is intentionally not
     /// advanced: a committed batch invalidates this namespace generation instead of returning the
     /// deleted handle to service.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn prepare_delete(&self) -> io::Result<PreparedCommit> {
         if self.poisoned {
             return Err(invalid_data("atomic blob generation is poisoned"));
@@ -1674,9 +1781,9 @@ fn encode_root(
     root[..8].copy_from_slice(magic);
     root[8..16].copy_from_slice(&generation.to_be_bytes());
     root[16..24].copy_from_slice(&logical_len.to_be_bytes());
-    root[24..36].copy_from_slice(&tag);
+    root[ROOT_PREFIX_LEN..ROOT_BODY_LEN].copy_from_slice(&tag);
     let root_checksum = checksum(&[ROOT_DOMAIN, &root[..ROOT_BODY_LEN]]);
-    root[36..40].copy_from_slice(&root_checksum.to_be_bytes());
+    root[ROOT_BODY_LEN..ROOT_LEN].copy_from_slice(&root_checksum.to_be_bytes());
     root
 }
 
@@ -1691,7 +1798,7 @@ fn decode_root_with_magic(encoded: &[u8; ROOT_LEN], magic: &[u8; 8]) -> Option<R
     if &encoded[..8] != magic {
         return None;
     }
-    let root_checksum = u32::from_be_bytes(encoded[36..40].try_into().unwrap());
+    let root_checksum = u32::from_be_bytes(encoded[ROOT_BODY_LEN..ROOT_LEN].try_into().unwrap());
     if root_checksum != checksum(&[ROOT_DOMAIN, &encoded[..ROOT_BODY_LEN]]) {
         return None;
     }
@@ -1701,7 +1808,7 @@ fn decode_root_with_magic(encoded: &[u8; ROOT_LEN], magic: &[u8; 8]) -> Option<R
 fn decode_root_fields(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
     let generation = u64::from_be_bytes(encoded[8..16].try_into().unwrap());
     let logical_len = u64::from_be_bytes(encoded[16..24].try_into().unwrap());
-    let tag = encoded[24..36].try_into().unwrap();
+    let tag = encoded[ROOT_PREFIX_LEN..ROOT_BODY_LEN].try_into().unwrap();
     (generation != 0).then_some(Root {
         generation,
         logical_len,
@@ -1736,14 +1843,14 @@ fn decode_batch_witness(slot: &[u8]) -> Option<(usize, &[u8])> {
     if &header[..8] != BATCH_WITNESS_MAGIC {
         return None;
     }
-    let descriptor_len = u32::from_be_bytes(header[8..12].try_into().unwrap());
-    let descriptor_len = usize::try_from(descriptor_len).ok()?;
-    let descriptor_offset = header_end;
-    let descriptor_end = descriptor_offset.checked_add(descriptor_len)?;
-    let descriptor = slot.get(descriptor_offset..descriptor_end)?;
+    let witness_len = u32::from_be_bytes(header[8..12].try_into().unwrap());
+    let witness_len = usize::try_from(witness_len).ok()?;
+    let witness_offset = header_end;
+    let witness_end = witness_offset.checked_add(witness_len)?;
+    let witness = slot.get(witness_offset..witness_end)?;
     let stored_checksum = u32::from_be_bytes(header[12..16].try_into().unwrap());
-    let expected_checksum = checksum(&[BATCH_WITNESS_DOMAIN, &header[..12], descriptor]);
-    (stored_checksum == expected_checksum).then_some((descriptor_offset, descriptor))
+    let expected_checksum = checksum(&[BATCH_WITNESS_DOMAIN, &header[..12], witness]);
+    (stored_checksum == expected_checksum).then_some((witness_offset, witness))
 }
 
 fn read_root_slot(
@@ -1889,12 +1996,7 @@ fn embedded_batch_candidates_with_materialized(
             root.logical_len,
             root.tag,
         );
-        let committed_root = encode_root(
-            ROOT_MAGIC,
-            root.generation,
-            root.logical_len,
-            root.tag,
-        );
+        let committed_root = encode_root(ROOT_MAGIC, root.generation, root.logical_len, root.tag);
         let candidate = Candidate {
             base_generation: root.generation - 1,
             root_offset,
@@ -1910,13 +2012,13 @@ fn embedded_batch_candidates_with_materialized(
         if !candidate_root_is_delete_transition(&encoded, &candidate) {
             continue;
         }
-        let Some((descriptor_offset, descriptor)) = decode_batch_witness(&slot) else {
+        let Some((witness_offset, witness)) = decode_batch_witness(&slot) else {
             continue;
         };
         if ROOT_OFFSETS[(root.generation as usize) & 1] != root_offset {
             continue;
         }
-        if descriptor_offset < ROOT_LEN {
+        if witness_offset < ROOT_LEN {
             continue;
         }
         if checked_end(data_offset, root.logical_len)
@@ -1927,14 +2029,14 @@ fn embedded_batch_candidates_with_materialized(
         }
         candidates.push(EmbeddedBatchCandidate {
             candidate,
-            descriptor: descriptor.to_vec(),
+            witness: witness.to_vec(),
         });
     }
     candidates.sort_by_key(|embedded| std::cmp::Reverse(embedded.candidate.base_generation));
     Ok(candidates)
 }
 
-/// Discover intact embedded descriptors even when their root header was torn during installation.
+/// Discover intact embedded witnesses even when their root header was torn during installation.
 pub(crate) fn embedded_batch_witnesses(
     file: &File,
     data_offset: u64,
@@ -1953,21 +2055,21 @@ pub(crate) fn embedded_batch_witnesses(
         let Some(slot) = read_root_slot(file, root_offset)? else {
             continue;
         };
-        let Some((descriptor_offset, descriptor)) = decode_batch_witness(&slot) else {
+        let Some((witness_offset, witness)) = decode_batch_witness(&slot) else {
             continue;
         };
-        if descriptor_offset < ROOT_LEN {
+        if witness_offset < ROOT_LEN {
             continue;
         }
         witnesses.push(EmbeddedBatchWitness {
             root_offset,
-            descriptor: descriptor.to_vec(),
+            witness: witness.to_vec(),
         });
     }
     Ok(witnesses)
 }
 
-/// Discover descriptors retained beside independently recoverable roots.
+/// Discover witnesses retained beside independently recoverable roots or tombstones.
 ///
 /// Unresolved-candidate selection ignores these stale witnesses. A separate transfer pass uses
 /// them to make dependent peers independently recoverable before this witness is reused or removed.
@@ -1978,24 +2080,27 @@ pub(crate) fn materialized_batch_candidates(
     let candidates = embedded_batch_candidates_with_materialized(file, data_offset, true)?;
     let mut materialized = Vec::with_capacity(candidates.len());
     for embedded in candidates {
-        let Some(expected) = candidate_materialized_root(&embedded.candidate) else {
+        let (Some(expected), Some(tombstone)) = (
+            candidate_materialized_root(&embedded.candidate),
+            candidate_tombstone_root(&embedded.candidate),
+        ) else {
             continue;
         };
         let Some(slot) = read_root_slot(file, embedded.candidate.root_offset)? else {
             continue;
         };
-        if slot[..ROOT_LEN] == expected {
+        if slot[..ROOT_LEN] == expected || slot[..ROOT_LEN] == tombstone {
             materialized.push(embedded);
         }
     }
     Ok(materialized)
 }
 
-/// Verify that an exact descriptor remains beside a known batch candidate's root transition.
+/// Verify that an exact witness remains beside a known batch candidate's root transition.
 pub(crate) fn candidate_has_embedded_batch_witness(
     file: &File,
     candidate: &Candidate,
-    descriptor: &[u8],
+    witness: &[u8],
 ) -> io::Result<bool> {
     let Some(prepared) = decode_batch_prepared_root(&candidate.prepared_root) else {
         return Ok(false);
@@ -2006,7 +2111,7 @@ pub(crate) fn candidate_has_embedded_batch_witness(
     if !candidate_roots_match(candidate, prepared, committed) {
         return Ok(false);
     }
-    if descriptor.len()
+    if witness.len()
         > (ROOT_SLOT_LEN as usize)
             .saturating_sub(ROOT_LEN)
             .saturating_sub(BATCH_WITNESS_HEADER_LEN)
@@ -2042,7 +2147,7 @@ pub(crate) fn candidate_has_embedded_batch_witness(
         return Ok(false);
     }
     Ok(decode_batch_witness(&slot)
-        .is_some_and(|(offset, found)| offset >= ROOT_LEN && found == descriptor))
+        .is_some_and(|(offset, found)| offset >= ROOT_LEN && found == witness))
 }
 
 /// Return whether a candidate's exact committed header is installed in its generation slot.
@@ -2175,7 +2280,7 @@ pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Re
                 iov_len: bytes.len(),
             };
             // SAFETY: `iovec` references readable `bytes` for the duration of the syscall, the file
-            // descriptor remains open, and the checked offset is representable by the ABI.
+            // file descriptor remains open, and the checked offset is representable by the ABI.
             let written = unsafe {
                 libc::pwritev2(
                     file.as_raw_fd(),
@@ -2222,7 +2327,7 @@ pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Re
 /// Validate a transaction-bound candidate without changing its root.
 ///
 /// A prepared root is deliberately invisible to ordinary blob recovery. An exact durable batch
-/// descriptor supplies the prepared and committed headers, allowing validation to accept any
+/// witness supplies the prepared and committed headers, allowing validation to accept any
 /// bytewise prefix-independent transition between those headers.
 fn validate_candidate_transition(
     file: &File,
@@ -2256,7 +2361,7 @@ fn validate_candidate_transition(
 
     let mut installed = [0u8; ROOT_LEN];
     read_exact_at(file, candidate.root_offset, &mut installed)?;
-    // The durable batch descriptor is the authority for this exact self-contained
+    // The durable batch witness is the authority for this exact self-contained
     // candidate. Its prior base root may already have been reused while preparing a later batch,
     // so validation must not depend on finding that base in the other root slot.
     let torn_transition = if deletion {
@@ -2399,6 +2504,7 @@ pub(super) fn create_live(
 /// hidden creation name until its complete header, initial committed root, and payload are durable.
 /// An ordinary same-directory rename then publishes the replacement atomically. The caller must
 /// serialize namespace operations and prevent concurrent mutation through other source handles.
+#[commonware_macros::stability(ALPHA)]
 pub(super) fn migrate_live(
     root: &Path,
     partition: &str,
@@ -2452,12 +2558,7 @@ pub(super) fn migrate_live(
         .create_new(true)
         .open(&creation_path)?;
     let mut region = Header::create_atomic(&(blob_version..=blob_version)).0;
-    let initial_root = encode_root(
-        ROOT_MAGIC,
-        1,
-        logical_len,
-        [0; ATOMIC_BLOB_TAG_LEN],
-    );
+    let initial_root = encode_root(ROOT_MAGIC, 1, logical_len, [0; ATOMIC_BLOB_TAG_LEN]);
     let root_offset = ROOT_OFFSETS[1] as usize;
     region[root_offset..root_offset + ROOT_LEN].copy_from_slice(&initial_root);
     replacement.write_all(&region)?;
@@ -2497,6 +2598,7 @@ pub(super) fn migrate_live(
 }
 
 /// Persist a same-directory live-name update after its target inode is durable.
+#[commonware_macros::stability(ALPHA)]
 fn sync_live_directories(root: &Path, live_path: &Path) -> io::Result<()> {
     let parent = live_path
         .parent()

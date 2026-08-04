@@ -1,7 +1,7 @@
 use super::{Header, Layout};
 use crate::{
-    ATOMIC_BLOB_TAG_LEN, BatchOperation, Buf, BufferPool, Handle, IoBufs, IoBufsMut,
-    RemoveTarget, WriteOptions, deterministic::AuditHasher,
+    ATOMIC_BLOB_TAG_LEN, BatchOperation, Buf, BufferPool, Handle, IoBufs, IoBufsMut, RemoveTarget,
+    WriteOptions, deterministic::AuditHasher,
 };
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
@@ -48,11 +48,7 @@ struct V2Live {
 }
 
 impl V2Live {
-    fn new(
-        content: Vec<u8>,
-        logical_len: u64,
-        tag: [u8; ATOMIC_BLOB_TAG_LEN],
-    ) -> Self {
+    fn new(content: Vec<u8>, logical_len: u64, tag: [u8; ATOMIC_BLOB_TAG_LEN]) -> Self {
         Self {
             content: Arc::new(RwLock::new(content)),
             state: Mutex::new(V2State::new(logical_len, tag)),
@@ -282,9 +278,7 @@ impl Storage {
                     // immutable CRC is random as a consequence, so omit both from the
                     // deterministic audit. Invalid headers remain byte-exact.
                     hasher.update(&content[..Header::PRELUDE_SIZE]);
-                    hasher.update(
-                        &content[Header::PARSE_LEN + Header::V2_INCARNATION_LEN..],
-                    );
+                    hasher.update(&content[Header::PARSE_LEN + Header::V2_INCARNATION_LEN..]);
                 } else {
                     hasher.update(content);
                 }
@@ -711,8 +705,8 @@ impl Blob {
         if data.is_empty() {
             if let Some(tag) = tag {
                 state.tag = tag;
-                state.dirty = state.logical_len != state.committed_len
-                    || state.tag != state.committed_tag;
+                state.dirty =
+                    state.logical_len != state.committed_len || state.tag != state.committed_tag;
             }
             return Ok(offset);
         }
@@ -1617,10 +1611,7 @@ mod tests {
     async fn test_atomic_audit_is_deterministic() {
         let storages = [Storage::new(test_pool()), Storage::new(test_pool())];
         for storage in &storages {
-            let (blob, _) = storage
-                .open_atomic("partition", b"blob")
-                .await
-                .unwrap();
+            let (blob, _) = storage.open_atomic("partition", b"blob").await.unwrap();
             blob.append(b"payload").await.unwrap();
             blob.sync().await.unwrap();
         }

@@ -2,7 +2,7 @@
 //!
 //! A frontier is credited only after a full-file data-synchronization operation completes. The
 //! backend never stages a root that omits prefix bytes from CRC32C until that credit is visible.
-//! Bytes after the credited frontier remain covered by the descriptor checksum, so recovery does
+//! Bytes after the credited frontier remain covered by the local-witness checksum, so recovery does
 //! not depend on unsynchronized writes reaching disk in submission order. Rewind drains the
 //! active driver and removes credit above the new tail before those physical offsets can be reused.
 

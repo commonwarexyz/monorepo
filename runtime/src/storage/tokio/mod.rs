@@ -1,5 +1,10 @@
 use super::{Header, Layout};
-use crate::{BatchOperation, BufferPool, Error, Handle};
+use crate::{BufferPool, Error};
+commonware_macros::stability_scope!(ALPHA {
+    use crate::{BatchOperation, Handle};
+    use std::collections::BTreeSet;
+    use tokio::sync::oneshot;
+});
 use commonware_formatting::{from_hex, hex};
 #[cfg(unix)]
 use commonware_utils::sync::Mutex as SyncMutex;
@@ -8,7 +13,7 @@ use std::path::Path;
 #[cfg(unix)]
 use std::sync::Weak;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     ops::RangeInclusive,
     path::PathBuf,
     sync::{
@@ -19,7 +24,7 @@ use std::{
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::{Mutex, OwnedMutexGuard, oneshot},
+    sync::{Mutex, OwnedMutexGuard},
 };
 
 #[cfg(not(unix))]
@@ -33,6 +38,7 @@ type Blob = fallback::Blob;
 type Blob = unix::Blob;
 
 #[cfg(not(unix))]
+#[commonware_macros::stability(ALPHA)]
 fn unsupported_atomic(partition: &str, name: &[u8]) -> Error {
     Error::BlobOpenFailed(
         partition.into(),
@@ -45,6 +51,7 @@ fn unsupported_atomic(partition: &str, name: &[u8]) -> Error {
     )
 }
 
+commonware_macros::stability_scope!(ALPHA {
 const MAX_BATCH_WORKERS: usize = 32;
 
 fn split_batch_work<T>(items: Vec<T>) -> Vec<Vec<T>> {
@@ -139,7 +146,6 @@ struct ParticipantPreparation {
     candidate: super::atomic::Candidate,
     payload_start: u64,
     payload_checksum: super::atomic::PayloadChecksumEligibility,
-    witness_capacity: usize,
 }
 
 type ParticipantSummary = (usize, Result<Option<ParticipantPreparation>, Error>);
@@ -220,7 +226,6 @@ fn prepare_batch_chunk(
                 candidate: prepared.candidate(),
                 payload_start: prepared.payload_start(),
                 payload_checksum: prepared.payload_checksum(),
-                witness_capacity: prepared.batch_witness_capacity(),
             })),
             Ok(None) => Ok(None),
             Err(error) => Err(error.clone()),
@@ -233,15 +238,18 @@ fn prepare_batch_chunk(
 
 fn stage_batch_chunk(
     mut states: Vec<BatchParticipantState>,
-    witness: Option<Arc<[u8]>>,
+    batch: Option<Arc<super::batch::EmbeddedBatch>>,
 ) -> (Vec<BatchParticipantState>, Vec<Error>) {
     let mut errors = Vec::new();
     for participant in &mut states {
         let Ok(Some(prepared)) = &mut participant.prepared else {
             continue;
         };
+        let witness = batch
+            .as_ref()
+            .and_then(|batch| batch.witness(participant.blob.partition(), participant.blob.name()));
         let result = if participant.removed {
-            witness.as_deref().map_or_else(
+            witness.map_or_else(
                 || {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -252,9 +260,7 @@ fn stage_batch_chunk(
                 |witness| participant.blob.stage_batch_delete(prepared, witness),
             )
         } else {
-            participant
-                .blob
-                .stage_batch_commit(prepared, witness.as_deref())
+            participant.blob.stage_batch_commit(prepared, witness)
         };
         if let Err(error) = result {
             errors.push(error);
@@ -270,6 +276,7 @@ fn stage_batch_chunk(
     }
     (states, errors)
 }
+});
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly
@@ -330,7 +337,7 @@ struct Namespace {
     carried_batch_decision: AtomicBool,
     generations: super::generation::Registry,
     #[cfg(unix)]
-    embedded_batch_decision: SyncMutex<Option<Arc<[u8]>>>,
+    embedded_batch_decision: SyncMutex<Option<Arc<super::batch::EmbeddedBatch>>>,
     #[cfg(unix)]
     v2_states: SyncMutex<BTreeMap<(String, Vec<u8>), V2StateEntry>>,
 }
@@ -372,17 +379,17 @@ impl Namespace {
     }
 
     #[cfg(unix)]
-    fn embedded_batch_decision(&self) -> Option<Arc<[u8]>> {
+    fn embedded_batch_decision(&self) -> Option<Arc<super::batch::EmbeddedBatch>> {
         self.embedded_batch_decision.lock().clone()
     }
 
     #[cfg(not(unix))]
-    const fn embedded_batch_decision(&self) -> Option<Arc<[u8]>> {
+    const fn embedded_batch_decision(&self) -> Option<Arc<super::batch::EmbeddedBatch>> {
         None
     }
 
     #[cfg(unix)]
-    fn set_embedded_batch_decision(&self, decision: Option<Arc<[u8]>>) {
+    fn set_embedded_batch_decision(&self, decision: Option<Arc<super::batch::EmbeddedBatch>>) {
         *self.embedded_batch_decision.lock() = decision;
     }
 
@@ -540,7 +547,17 @@ impl Storage {
 
     /// Lock the namespace while retaining a committed publication decision for direct replacement
     /// by the next batch.
-    async fn lock_batch(&self) -> Result<(OwnedMutexGuard<()>, bool, Option<Arc<[u8]>>), Error> {
+    #[commonware_macros::stability(ALPHA)]
+    async fn lock_batch(
+        &self,
+    ) -> Result<
+        (
+            OwnedMutexGuard<()>,
+            bool,
+            Option<Arc<super::batch::EmbeddedBatch>>,
+        ),
+        Error,
+    > {
         let guard = self.namespace.lock.clone().lock_owned().await;
         if self
             .namespace
@@ -559,6 +576,7 @@ impl Storage {
     }
 
     /// Commit a storage batch from a self-driving worker that owns the namespace guard.
+    #[commonware_macros::stability(ALPHA)]
     async fn start_apply_guarded<F, C, D>(
         &self,
         operations: Vec<BatchOperation<<Self as crate::AtomicStorage>::AtomicBlob>>,
@@ -721,7 +739,7 @@ impl Storage {
                 participants.push((blob.partition(), blob.name()));
             }
         }
-        super::batch::preflight_descriptor(&filesystem_operations, participants)?;
+        super::batch::preflight_embedded(&filesystem_operations, participants)?;
 
         self.namespace
             .recovery_required
@@ -878,40 +896,23 @@ impl Storage {
             let mut embedded_witness = None;
             if embedded_eligible {
                 match super::batch::prepare_embedded(&participants, &filesystem_operations) {
-                    Ok(descriptor)
-                        if summaries
-                            .iter()
-                            .filter_map(Option::as_ref)
-                            .filter_map(|summary| summary.as_ref().ok()?.as_ref())
-                            .all(|prepared| prepared.witness_capacity >= descriptor.len()) =>
-                    {
-                        embedded_witness = Some(Arc::<[u8]>::from(descriptor));
-                    }
-                    Ok(_) if staging_error.is_none() => {
-                        staging_error = Some(
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "storage batch descriptor exceeds a participant root slot",
-                            )
-                            .into(),
-                        );
-                    }
+                    Ok(batch) => embedded_witness = Some(Arc::new(batch)),
                     Err(error) if staging_error.is_none() => {
                         staging_error = Some(Error::from(error));
                     }
-                    Ok(_) | Err(_) => {}
+                    Err(_) => {}
                 }
             }
 
             let transition = if staging_error.is_none() {
-                embedded_decision.as_deref().map_or(Ok(None), |previous| {
+                embedded_decision.as_ref().map_or(Ok(None), |previous| {
                     embedded_witness
-                        .as_deref()
+                        .as_ref()
                         .map_or(Ok(false), |_| {
                             super::batch::can_supersede_embedded(previous, &participants)
                                 .map_err(Error::from)
                         })
-                        .map(|can_supersede| (!can_supersede).then(|| previous.to_vec()))
+                        .map(|can_supersede| (!can_supersede).then(|| previous.clone()))
                 })
             } else {
                 Ok(None)
@@ -1031,14 +1032,14 @@ impl Storage {
                     };
                     staging_error.map_or_else(
                         || {
-                            if let Some(witness) = embedded_witness {
+                            if let Some(batch) = embedded_witness {
                                 let has_removals = filesystem_operations.iter().any(|operation| {
                                     matches!(operation, super::batch::Operation::Remove(_))
                                 });
-                                namespace.set_embedded_batch_decision(Some(witness.clone()));
+                                namespace.set_embedded_batch_decision(Some(batch.clone()));
                                 notify_commit(&filesystem_operations);
                                 if has_removals {
-                                    super::batch::materialize_embedded(&root, &witness)?;
+                                    super::batch::materialize_embedded(&root, &batch)?;
                                     namespace.set_embedded_batch_decision(None);
                                 }
                                 for mut participant in prepared_states.drain(..) {
@@ -1684,6 +1685,7 @@ impl crate::Storage for Storage {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl crate::AtomicStorage for Storage {
     type AtomicBlob = Blob;
 
@@ -1762,6 +1764,7 @@ impl crate::AtomicStorage for Storage {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl crate::BatchStorage for Storage {
     async fn start_apply(
         &self,

@@ -4,14 +4,17 @@
 //! ordinary whole-partition invalidation, where a partition removal subsumes its blob removals.
 //! Identical operations are discarded, while different mutations of one blob conflict.
 //!
-//! The participant-replicated filesystem protocol is documented in the `coordinator` submodule;
+//! The participant-linked filesystem protocol is documented in the `coordinator` submodule;
 //! despite the historical module name, it creates no coordinator file.
 
-use crate::{BatchOperation, Error, RemoveTarget};
-use std::{
-    collections::{BTreeMap, btree_map::Entry},
-    io::{self, ErrorKind},
-};
+use crate::{Error, RemoveTarget};
+commonware_macros::stability_scope!(ALPHA {
+    use crate::BatchOperation;
+    use std::{
+        collections::{BTreeMap, btree_map::Entry},
+        io::{self, ErrorKind},
+    };
+});
 
 /// An exact namespace operation used for validation and canonicalization.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +24,10 @@ pub(crate) enum Operation {
     /// Publish the pending epoch of an exact atomic blob.
     Publish { partition: String, name: Vec<u8> },
     /// Rewind an exact blob to `len` bytes.
+    #[cfg_attr(
+        commonware_stability_BETA,
+        expect(dead_code, reason = "rewind requests are an ALPHA API")
+    )]
     Rewind {
         partition: String,
         name: Vec<u8>,
@@ -49,6 +56,7 @@ impl Operation {
     }
 }
 
+commonware_macros::stability_scope!(ALPHA {
 #[derive(Eq, PartialEq)]
 enum BlobOperation {
     Remove,
@@ -247,6 +255,7 @@ pub(crate) fn canonicalize_operations(operations: Vec<Operation>) -> Result<Vec<
     }
     Ok(canonical)
 }
+});
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn is_canonical_operations(operations: &[Operation]) -> Result<bool, Error> {
@@ -370,12 +379,15 @@ mod tests {
 mod coordinator;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use coordinator::{
-    Participant, can_supersede_embedded, materialize_embedded, preflight, preflight_descriptor,
-    prepare_embedded, recover, recover_embedded, recover_named_embedded, recover_notifying,
-    recover_partition_embedded, recover_removal_witnesses, resolve_partition_name,
-    supports_speculation,
-};
-
-#[cfg(not(target_arch = "wasm32"))]
 pub(in crate::storage) use coordinator::prepare_single_publish;
+#[cfg(not(target_arch = "wasm32"))]
+commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    pub(crate) use coordinator::preflight_embedded;
+    pub(crate) use coordinator::{Participant, preflight, prepare_embedded, supports_speculation};
+});
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use coordinator::{
+    EmbeddedBatch, can_supersede_embedded, materialize_embedded, recover, recover_embedded,
+    recover_named_embedded, recover_notifying, recover_partition_embedded,
+    recover_removal_witnesses, resolve_partition_name,
+};

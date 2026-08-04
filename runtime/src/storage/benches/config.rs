@@ -6,8 +6,6 @@ use std::{env, fmt, path::PathBuf, time::Duration};
 const DEFAULT_IO_SIZE: usize = 4 * 1024;
 const DEFAULT_MULTI_BLOB_IO_SIZE: usize = 1024 * 1024;
 const DEFAULT_BLOBS: usize = 4;
-/// Protocol participant bound; exact descriptor capacity can reject smaller groups.
-const MAX_BLOBS: usize = 32;
 
 /// Benchmark workload to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -334,9 +332,6 @@ impl Config {
         if !self.workload.is_multi_blob_append() && self.appends_per_batch.is_some() {
             return Err("--appends-per-batch is only valid for multi-blob append workloads".into());
         }
-        if self.blobs.is_some_and(|blobs| blobs > MAX_BLOBS) {
-            return Err(format!("--blobs must not exceed {MAX_BLOBS}"));
-        }
         if self.paired_baseline && self.blobs() != DEFAULT_BLOBS {
             return Err(format!(
                 "--paired-baseline requires exactly {DEFAULT_BLOBS} blobs"
@@ -538,13 +533,9 @@ mod tests {
     }
 
     #[test]
-    fn multi_blob_count_is_bounded_before_allocation() {
+    fn multi_blob_count_is_not_bounded_by_worker_fanout() {
         for workload in ["write_multi_blob_append", "write_atomic_batch_append"] {
-            assert!(multi_blob_config(workload, "32").validate().is_ok());
-            assert_eq!(
-                multi_blob_config(workload, "33").validate(),
-                Err("--blobs must not exceed 32".into())
-            );
+            assert!(multi_blob_config(workload, "64").validate().is_ok());
         }
     }
 
