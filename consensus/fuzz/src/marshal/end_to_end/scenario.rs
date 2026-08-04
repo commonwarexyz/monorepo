@@ -613,12 +613,19 @@ pub fn run_scenario<P: Simplex>(
         let mut budget = MAX_GENERATED_TIME;
         for (stage, (phase, script)) in stages.iter().enumerate() {
             wedge.set_phase(*phase);
-            for action in script {
+
+            let (dwell, setup) = script
+                .split_last()
+                .expect("scenario stage must have a dwell action");
+            assert!(matches!(dwell, PreGstAction::AdvanceTime(_)));
+
+            for action in setup {
                 apply_action(&context, &mut topology, &wedge, *action, None).await;
             }
             for action in &generated[stage] {
                 apply_action(&context, &mut topology, &wedge, *action, Some(&mut budget)).await;
             }
+            apply_action(&context, &mut topology, &wedge, *dwell, None).await;
         }
 
         gst(&mut topology, &wedge).await;
@@ -690,9 +697,11 @@ async fn apply_action<K: PublicKey, D: commonware_cryptography::Digest>(
 ) {
     match action {
         PreGstAction::AdvanceTime(millis) => {
-            let mut advance = Duration::from_millis(millis.min(MAX_ADVANCE_MILLIS).into());
+            let mut advance = Duration::from_millis(millis.into());
             if let Some(budget) = budget {
-                advance = advance.min(*budget);
+                advance = advance
+                    .min(Duration::from_millis(MAX_ADVANCE_MILLIS.into()))
+                    .min(*budget);
                 *budget -= advance;
             }
             if !advance.is_zero() {
