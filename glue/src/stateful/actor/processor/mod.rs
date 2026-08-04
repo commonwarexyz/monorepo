@@ -84,9 +84,21 @@ enum VerificationPhase<D> {
         owner: bool,
     },
     Verifying {
+        digest: D,
         parent: D,
         round: Round,
     },
+}
+
+/// How tracked verification work crosses an incoming finalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum VerificationDisposition {
+    /// Continue polling work proven to descend from the finalized block.
+    Retain,
+    /// Re-evaluate work whose branch is not yet known or is the finalized block itself.
+    Retry,
+    /// Return false for work already proven to use an incompatible parent.
+    Reject,
 }
 
 /// Progress needed to decide whether an active verification remains valid
@@ -110,8 +122,12 @@ impl<D: Copy> VerificationProgress<D> {
         };
     }
 
-    fn verifying(&self, parent: D, round: Round) {
-        *self.0.lock() = VerificationPhase::Verifying { parent, round };
+    fn verifying(&self, digest: D, parent: D, round: Round) {
+        *self.0.lock() = VerificationPhase::Verifying {
+            digest,
+            parent,
+            round,
+        };
     }
 
     fn phase(&self) -> VerificationPhase<D> {
@@ -124,24 +140,50 @@ impl<D: Copy> VerificationProgress<D> {
 pub(super) struct FinalizationBoundary<D> {
     digest: D,
     round: Round,
+    processed_digest: D,
+    processed_round: Round,
     compatible: HashSet<D>,
 }
 
 impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
-    pub(super) fn retains(&self, progress: &VerificationProgress<D>) -> bool {
+    pub(super) fn disposition(
+        &self,
+        progress: &VerificationProgress<D>,
+    ) -> VerificationDisposition {
         match progress.phase() {
-            VerificationPhase::Acquiring => false,
+            VerificationPhase::Acquiring => VerificationDisposition::Retry,
             VerificationPhase::Replaying {
                 digest,
                 parent,
                 round,
                 owner,
             } => {
-                (digest == self.digest && owner)
-                    || (round > self.round && self.compatible.contains(&parent))
+                if digest == self.processed_digest && round == self.processed_round {
+                    return VerificationDisposition::Retry;
+                }
+                match digest == self.digest {
+                    true if owner => VerificationDisposition::Retain,
+                    true => VerificationDisposition::Retry,
+                    false if round > self.round && self.compatible.contains(&parent) => {
+                        VerificationDisposition::Retain
+                    }
+                    false => VerificationDisposition::Reject,
+                }
             }
-            VerificationPhase::Verifying { parent, round } => {
-                round > self.round && self.compatible.contains(&parent)
+            VerificationPhase::Verifying {
+                digest,
+                parent,
+                round,
+            } => {
+                if digest == self.digest
+                    || (digest == self.processed_digest && round == self.processed_round)
+                {
+                    VerificationDisposition::Retry
+                } else if round > self.round && self.compatible.contains(&parent) {
+                    VerificationDisposition::Retain
+                } else {
+                    VerificationDisposition::Reject
+                }
             }
         }
     }
@@ -610,6 +652,8 @@ where
         FinalizationBoundary {
             digest,
             round,
+            processed_digest: state.last_processed.digest,
+            processed_round: state.last_processed.round,
             compatible: compatible_pending(&state, digest, round),
         }
     }
@@ -1057,7 +1101,7 @@ where
             }
         };
 
-        progress.verifying(parent_digest, round);
+        progress.verifying(block_digest, parent_digest, round);
         let ancestry = marshal_ancestry::with_prefix([block.clone(), parent], ancestry);
         let verified = match await_or_cancel(
             verification,
@@ -1206,6 +1250,19 @@ where
         if let Some(existing) = state.pending.get(&digest) {
             debug_assert_eq!(existing.parent, parent, "pending parent changed for digest");
             debug_assert_eq!(existing.round, round, "pending round changed for digest");
+            return true;
+        }
+
+        // A replay can finish after another copy supplied the batch consumed by finalization.
+        // Publishing that replay still succeeds, but the finalized batch must not be reinserted.
+        let batch_already_secured = state.finalizing.is_some_and(|finalizing| {
+            state.finalizing_batch_secured
+                && finalizing.digest == digest
+                && finalizing.round == round
+        });
+        if batch_already_secured
+            || (state.last_processed.digest == digest && state.last_processed.round == round)
+        {
             return true;
         }
 
@@ -1620,8 +1677,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Applied, PrepareBatchesError, Processor, Prune, Pruning, ReplayClaim, ReplayFlights,
-        ReplayTracking, VerificationProgress, fetch_ancestor,
+        Applied, FinalizationBoundary, PrepareBatchesError, Processor, Prune, Pruning, ReplayClaim,
+        ReplayFlights, ReplayTracking, VerificationDisposition, VerificationProgress,
+        fetch_ancestor,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -1655,7 +1713,7 @@ mod tests {
     };
     use futures::StreamExt;
     use std::{
-        collections::{BTreeMap, VecDeque},
+        collections::{BTreeMap, HashSet, VecDeque},
         future::Future,
         num::NonZeroUsize,
         sync::{
@@ -1676,6 +1734,70 @@ mod tests {
     type DbSet<E> = Shared<Qmdb<E>>;
     type TestMerkleized =
         <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized;
+
+    #[test]
+    fn finalization_dispositions_preserve_winner_and_descendant_work() {
+        let boundary = FinalizationBoundary {
+            digest: 10,
+            round: Round::new(Epoch::zero(), View::new(10)),
+            processed_digest: 9,
+            processed_round: Round::new(Epoch::zero(), View::new(9)),
+            compatible: HashSet::from([10, 11]),
+        };
+        let progress = VerificationProgress::default();
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Retry,
+        );
+
+        progress.replaying(9, 8, Round::new(Epoch::zero(), View::new(9)), true);
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Retry,
+        );
+
+        progress.replaying(10, 1, Round::new(Epoch::zero(), View::new(10)), true);
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Retain,
+        );
+        progress.replaying(10, 1, Round::new(Epoch::zero(), View::new(10)), false);
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Retry,
+        );
+        progress.replaying(12, 11, Round::new(Epoch::zero(), View::new(11)), false);
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Retain,
+        );
+        progress.replaying(20, 19, Round::new(Epoch::zero(), View::new(11)), true);
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Reject,
+        );
+
+        progress.verifying(9, 8, Round::new(Epoch::zero(), View::new(9)));
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Retry,
+        );
+        progress.verifying(10, 1, Round::new(Epoch::zero(), View::new(10)));
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Retry,
+        );
+        progress.verifying(12, 11, Round::new(Epoch::zero(), View::new(11)));
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Retain,
+        );
+        progress.verifying(20, 19, Round::new(Epoch::zero(), View::new(11)));
+        assert_eq!(
+            boundary.disposition(&progress),
+            VerificationDisposition::Reject,
+        );
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -2522,6 +2644,61 @@ mod tests {
     }
 
     #[test]
+    fn execution_late_winner_publication_is_a_noop() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let view = View::new(1);
+            let round = Round::new(Epoch::zero(), view);
+            let (winner, initial_batch) = harness.build_child(&genesis, view).await;
+            let (_, during_finalization_batch) = harness.build_child(&genesis, view).await;
+            let (_, after_finalization_batch) = harness.build_child(&genesis, view).await;
+            assert!(harness.processor.cache_pending(
+                winner.digest(),
+                genesis.digest(),
+                round,
+                initial_batch,
+            ));
+
+            let (gate, started, release) = apply_gate();
+            harness.processor.app.finalized_probe =
+                Some(ApplicationProbe::new(winner.digest(), [gate]));
+            let execution = harness.processor.execution.clone();
+            let mut finalize = Box::pin(
+                harness
+                    .processor
+                    .finalize(harness.context_cell.as_present(), &winner),
+            );
+            assert!(futures::poll!(&mut finalize).is_pending());
+            started.await.expect("finalized hook should start");
+
+            assert!(execution.cache_pending(
+                winner.digest(),
+                genesis.digest(),
+                round,
+                during_finalization_batch,
+            ));
+            assert!(!execution.pending_contains(&winner.digest()));
+
+            release
+                .send(())
+                .expect("finalized hook should remain active");
+            let Applied { barrier, .. } = finalize
+                .await
+                .expect("finalized block should be newly applied");
+            assert!(barrier.durable().await, "finalize flush must complete");
+
+            assert!(execution.cache_pending(
+                winner.digest(),
+                genesis.digest(),
+                round,
+                after_finalization_batch,
+            ));
+            assert!(!execution.pending_contains(&winner.digest()));
+        });
+    }
+
+    #[test]
     fn execution_descendant_replay_survives_finalized_parent_removal() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let mut harness = Harness::new(context).await;
@@ -2576,8 +2753,14 @@ mod tests {
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
             let boundary = harness.processor.finalization_boundary(&parent);
-            assert!(boundary.retains(&owner_progress));
-            assert!(boundary.retains(&waiter_progress));
+            assert_eq!(
+                boundary.disposition(&owner_progress),
+                VerificationDisposition::Retain,
+            );
+            assert_eq!(
+                boundary.disposition(&waiter_progress),
+                VerificationDisposition::Retain,
+            );
 
             let mut finalize = Box::pin(
                 harness
