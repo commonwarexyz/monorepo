@@ -68,35 +68,31 @@ impl F {
             u64::from_le_bytes(chunk)
         };
 
-        Self([
-            load8(0) & MASK_51,
-            (load8(6) >> 3) & MASK_51,
-            (load8(12) >> 6) & MASK_51,
-            (load8(19) >> 1) & MASK_51,
-            (load8(24) >> 12) & MASK_51,
-        ])
+        let mut limbs = [0; 5];
+        for (i, limb) in limbs.iter_mut().enumerate() {
+            let bit = i * 51;
+            let offset = (bit / 8).min(bytes.len() - 8);
+            *limb = (load8(offset) >> (bit - 8 * offset)) & MASK_51;
+        }
+        Self(limbs)
     }
 
     /// Restores the `< 2^52` limb bound without canonicalizing the field element.
     ///
     /// Inputs must have limbs below `2^63`.
     #[inline]
-    const fn reduce(mut l: [u64; 5]) -> Self {
-        l[1] += l[0] >> 51;
-        l[0] &= MASK_51;
-        l[2] += l[1] >> 51;
-        l[1] &= MASK_51;
-        l[3] += l[2] >> 51;
-        l[2] &= MASK_51;
-        l[4] += l[3] >> 51;
-        l[3] &= MASK_51;
+    fn reduce(mut l: [u64; 5]) -> Self {
+        for i in 0..l.len() - 1 {
+            l[i + 1] += l[i] >> 51;
+            l[i] &= MASK_51;
+        }
         l[0] += (l[4] >> 51) * 19;
         l[4] &= MASK_51;
         Self(l)
     }
 
     /// Carry-propagates the limbs for canonical serialization.
-    const fn carry(&self) -> Self {
+    fn carry(&self) -> Self {
         let mut l = Self::reduce(self.0).0;
         l[1] += l[0] >> 51;
         l[0] &= MASK_51;
@@ -104,60 +100,37 @@ impl F {
     }
 
     /// Serializes the canonical representative as 255 little-endian bits.
-    pub(crate) const fn to_bytes(self) -> [u8; 32] {
+    pub(crate) fn to_bytes(self) -> [u8; 32] {
         let mut l = self.carry().0;
 
         // Adding 19 overflows bit 255 exactly when l >= p.
-        let mut q = (l[0] + 19) >> 51;
-        q = (l[1] + q) >> 51;
-        q = (l[2] + q) >> 51;
-        q = (l[3] + q) >> 51;
-        q = (l[4] + q) >> 51;
+        let mut q = 19;
+        for &limb in &l {
+            q = (limb + q) >> 51;
+        }
 
         l[0] += 19 * q;
-        l[1] += l[0] >> 51;
-        l[0] &= MASK_51;
-        l[2] += l[1] >> 51;
-        l[1] &= MASK_51;
-        l[3] += l[2] >> 51;
-        l[2] &= MASK_51;
-        l[4] += l[3] >> 51;
-        l[3] &= MASK_51;
+        for i in 0..l.len() - 1 {
+            l[i + 1] += l[i] >> 51;
+            l[i] &= MASK_51;
+        }
         l[4] &= MASK_51;
 
+        let mut words = [0u64; 4];
+        for (i, limb) in l.into_iter().enumerate() {
+            let bit = i * 51;
+            let word = bit / 64;
+            let shift = bit % 64;
+            words[word] |= limb << shift;
+            if shift > 64 - 51 {
+                words[word + 1] |= limb >> (64 - shift);
+            }
+        }
+
         let mut out = [0u8; 32];
-        out[0] = l[0] as u8;
-        out[1] = (l[0] >> 8) as u8;
-        out[2] = (l[0] >> 16) as u8;
-        out[3] = (l[0] >> 24) as u8;
-        out[4] = (l[0] >> 32) as u8;
-        out[5] = (l[0] >> 40) as u8;
-        out[6] = ((l[0] >> 48) | (l[1] << 3)) as u8;
-        out[7] = (l[1] >> 5) as u8;
-        out[8] = (l[1] >> 13) as u8;
-        out[9] = (l[1] >> 21) as u8;
-        out[10] = (l[1] >> 29) as u8;
-        out[11] = (l[1] >> 37) as u8;
-        out[12] = ((l[1] >> 45) | (l[2] << 6)) as u8;
-        out[13] = (l[2] >> 2) as u8;
-        out[14] = (l[2] >> 10) as u8;
-        out[15] = (l[2] >> 18) as u8;
-        out[16] = (l[2] >> 26) as u8;
-        out[17] = (l[2] >> 34) as u8;
-        out[18] = (l[2] >> 42) as u8;
-        out[19] = ((l[2] >> 50) | (l[3] << 1)) as u8;
-        out[20] = (l[3] >> 7) as u8;
-        out[21] = (l[3] >> 15) as u8;
-        out[22] = (l[3] >> 23) as u8;
-        out[23] = (l[3] >> 31) as u8;
-        out[24] = (l[3] >> 39) as u8;
-        out[25] = ((l[3] >> 47) | (l[4] << 4)) as u8;
-        out[26] = (l[4] >> 4) as u8;
-        out[27] = (l[4] >> 12) as u8;
-        out[28] = (l[4] >> 20) as u8;
-        out[29] = (l[4] >> 28) as u8;
-        out[30] = (l[4] >> 36) as u8;
-        out[31] = (l[4] >> 44) as u8;
+        for (chunk, word) in out.chunks_exact_mut(8).zip(words) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
         out
     }
 
@@ -172,7 +145,7 @@ impl F {
     }
 
     /// Returns whether the canonical representative is odd.
-    pub(crate) const fn is_odd(&self) -> bool {
+    pub(crate) fn is_odd(&self) -> bool {
         self.to_bytes()[0] & 1 == 1
     }
 
@@ -198,14 +171,10 @@ impl F {
     #[inline]
     fn from_wide(mut c: [u128; 5]) -> Self {
         const MASK: u128 = MASK_51 as u128;
-        c[1] += c[0] >> 51;
-        c[0] &= MASK;
-        c[2] += c[1] >> 51;
-        c[1] &= MASK;
-        c[3] += c[2] >> 51;
-        c[2] &= MASK;
-        c[4] += c[3] >> 51;
-        c[3] &= MASK;
+        for i in 0..4 {
+            c[i + 1] += c[i] >> 51;
+            c[i] &= MASK;
+        }
         c[0] += 19 * (c[4] >> 51);
         c[4] &= MASK;
         c[1] += c[0] >> 51;
@@ -235,18 +204,26 @@ impl F {
     /// Returns `self * self` using one product for each pair of distinct limbs.
     #[inline]
     pub(crate) fn square(self) -> Self {
-        let a = self.0;
-        let a3_19 = a[3] * 19;
-        let a4_19 = a[4] * 19;
-        let m = |x: u64, y: u64| u128::from(x) * u128::from(y);
+        let limbs = self.0;
+        let mut limbs_19 = limbs;
+        for limb in &mut limbs_19[3..] {
+            *limb *= 19;
+        }
 
-        Self::from_wide([
-            m(a[0], a[0]) + 2 * (m(a[1], a4_19) + m(a[2], a3_19)),
-            m(a[3], a3_19) + 2 * (m(a[0], a[1]) + m(a[2], a4_19)),
-            m(a[1], a[1]) + 2 * (m(a[0], a[2]) + m(a[4], a3_19)),
-            m(a[4], a4_19) + 2 * (m(a[0], a[3]) + m(a[1], a[2])),
-            m(a[2], a[2]) + 2 * (m(a[0], a[4]) + m(a[1], a[3])),
-        ])
+        let mut c = [0u128; 5];
+        for i in 0..limbs.len() {
+            for j in i..limbs.len() {
+                let column = i + j;
+                let (column, rhs) = if column < limbs.len() {
+                    (column, limbs[j])
+                } else {
+                    (column - limbs.len(), limbs_19[j])
+                };
+                let product = u128::from(limbs[i]) * u128::from(rhs);
+                c[column] += if i == j { product } else { 2 * product };
+            }
+        }
+        Self::from_wide(c)
     }
 
     /// Squares `self` `k` times.
@@ -709,36 +686,24 @@ impl GVec {
         Self::splat(G::IDENTITY)
     }
 
-    /// Sums all eight lanes with a three-level vector addition tree.
-    pub(crate) fn sum_lanes<B: GBackend>(self, backend: B) -> G {
-        let lanes = self.untranspose();
+    #[inline(always)]
+    fn add_pairs<const COUNT: usize>(sums: [G; LANES], backend: impl GBackend) -> [G; LANES] {
         let mut left = [G::IDENTITY; LANES];
         let mut right = [G::IDENTITY; LANES];
-        for i in 0..4 {
-            left[i] = lanes[2 * i];
-            right[i] = lanes[2 * i + 1];
+        for i in 0..COUNT / 2 {
+            left[i] = sums[2 * i];
+            right[i] = sums[2 * i + 1];
         }
-        let pairs = backend
-            .g_add(Self::transpose(left), Self::transpose(right))
-            .untranspose();
-
-        left = [G::IDENTITY; LANES];
-        right = [G::IDENTITY; LANES];
-        left[0] = pairs[0];
-        right[0] = pairs[1];
-        left[1] = pairs[2];
-        right[1] = pairs[3];
-        let quarters = backend
-            .g_add(Self::transpose(left), Self::transpose(right))
-            .untranspose();
-
-        left = [G::IDENTITY; LANES];
-        right = [G::IDENTITY; LANES];
-        left[0] = quarters[0];
-        right[0] = quarters[1];
         backend
             .g_add(Self::transpose(left), Self::transpose(right))
-            .untranspose()[0]
+            .untranspose()
+    }
+
+    /// Sums all eight lanes with a vector addition tree.
+    pub(crate) fn sum_lanes<B: GBackend>(self, backend: B) -> G {
+        let sums = Self::add_pairs::<LANES>(self.untranspose(), backend);
+        let sums = Self::add_pairs::<{ LANES / 2 }>(sums, backend);
+        Self::add_pairs::<{ LANES / 4 }>(sums, backend)[0]
     }
 }
 
