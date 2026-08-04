@@ -179,6 +179,8 @@ struct SimState {
     rng: u64,
     /// Post-crash handle invalidation: handles remember the epoch they were opened in.
     epoch: u64,
+    /// Barriers left before every barrier fails (fault injection); None = never fail.
+    sync_fuse: Option<u64>,
     next_file: u64,
     files: BTreeMap<u64, SimFile>,
     dirs: BTreeMap<String, SimDir>,
@@ -187,6 +189,22 @@ struct SimState {
 }
 
 impl SimState {
+    /// Burns one barrier off the fuse; errors once it is spent. A failed barrier
+    /// makes nothing durable.
+    fn burn_fuse(&mut self) -> Result<(), Error> {
+        match &mut self.sync_fuse {
+            None => Ok(()),
+            Some(0) => Err(io_error(
+                std::io::ErrorKind::Other,
+                "simulated barrier failure",
+            )),
+            Some(n) => {
+                *n -= 1;
+                Ok(())
+            }
+        }
+    }
+
     /// SplitMix64: deterministic, dependency-free.
     const fn next_rand(&mut self) -> u64 {
         self.rng = self.rng.wrapping_add(0x9E3779B97F4A7C15);
@@ -204,6 +222,7 @@ impl Sim {
             state: Arc::new(Mutex::new(SimState {
                 rng: seed,
                 epoch: 0,
+                sync_fuse: None,
                 next_file: 0,
                 files: BTreeMap::new(),
                 dirs: BTreeMap::new(),
@@ -212,12 +231,20 @@ impl Sim {
         }
     }
 
+    /// After `n` more successful barriers, every barrier (file, directory, or root)
+    /// fails, making nothing durable: fault injection for crash-window tests.
+    pub fn fail_syncs_after(&self, n: u64) {
+        self.state.lock().sync_fuse = Some(n);
+    }
+
     /// Simulates a crash: every unsynced mutation independently survives, vanishes, or
     /// tears; unsynced namespace operations revert. Existing handles become unusable;
-    /// reopen everything, as recovery would.
+    /// reopen everything, as recovery would. Clears any barrier fuse (a fresh process
+    /// starts with a healthy device).
     pub fn crash(&self) {
         let mut state = self.state.lock();
         state.epoch += 1;
+        state.sync_fuse = None;
 
         // Settle each file: replay pending ops onto the durable image with a random
         // per-op fate. A torn write keeps a random subset of its bytes, in runs, which
@@ -358,6 +385,7 @@ impl File for SimFileHandle {
     async fn sync(&self) -> Result<(), Error> {
         let mut state = self.state.lock();
         self.check_epoch(&state)?;
+        state.burn_fuse()?;
         let file = state
             .files
             .get_mut(&self.id)
@@ -447,6 +475,7 @@ impl Medium for Sim {
 
     async fn sync_dir(&self, dir: &str) -> Result<(), Error> {
         let mut state = self.state.lock();
+        state.burn_fuse()?;
         let entry = state
             .dirs
             .get_mut(dir)
@@ -457,6 +486,7 @@ impl Medium for Sim {
 
     async fn sync_root(&self) -> Result<(), Error> {
         let mut state = self.state.lock();
+        state.burn_fuse()?;
         let names: Vec<String> = state.dirs.keys().cloned().collect();
         for name in names {
             state.root_durable.insert(name, ());
@@ -915,6 +945,26 @@ mod tests {
             assert_eq!(sim.durable_len("dir", "a"), Some(10));
             file.write_at(10, vec![2u8; 10]).await.unwrap();
             assert_eq!(sim.durable_len("dir", "a"), Some(10));
+        });
+    }
+
+    #[test]
+    fn sim_failed_barrier_makes_nothing_durable() {
+        block_on(async {
+            let sim = Sim::new(4);
+            let file = sim.create("dir", "a").await.unwrap();
+            file.sync().await.unwrap();
+            sim.sync_dir("dir").await.unwrap();
+            sim.sync_root().await.unwrap();
+
+            file.write_at(0, vec![7u8; 10]).await.unwrap();
+            sim.fail_syncs_after(0);
+            assert!(file.sync().await.is_err());
+            sim.crash();
+            // The failed barrier conferred nothing; the write may still have torn
+            // through, but the file must exist and never exceed the written range.
+            let file = sim.open("dir", "a").await.unwrap().unwrap();
+            assert!(file.size().await.unwrap() <= 10);
         });
     }
 

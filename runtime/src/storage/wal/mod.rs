@@ -14,7 +14,12 @@
 //! completed before the asserting record was written. The [medium::Checked] wrapper
 //! makes this machine-checkable in every test.
 //!
-//! Built bottom-up: [medium] is the I/O seam and crash model; the format, catalog,
-//! recovery, and committer land on top of it.
+//! Built bottom-up: [medium] is the I/O seam and crash model; [format] the on-disk
+//! layout; [catalog] the namespace as a fold over records; [journal] creation,
+//! recovery, and checkpoints. The committer and the `Storage` implementation land on
+//! top of these.
 
+mod catalog;
+mod format;
+mod journal;
 pub mod medium;
