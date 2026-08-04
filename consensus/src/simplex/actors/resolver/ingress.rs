@@ -6,7 +6,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, certificate::Scheme};
-use commonware_resolver::{Consumer, Delivery, p2p::Producer};
+use commonware_resolver::{Consumer, Delivery, Outcome, p2p::Producer};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
@@ -211,7 +211,7 @@ pub(crate) enum HandlerMessage {
         span: Span,
         view: View,
         data: Bytes,
-        response: oneshot::Sender<bool>,
+        response: oneshot::Sender<Outcome>,
     },
     Produce {
         view: View,
@@ -281,13 +281,13 @@ impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
     type Subscriber = ();
-    type Outcome = bool;
+    type Outcome = Outcome;
 
     fn deliver(
         &mut self,
         delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<Outcome> {
         let (response, receiver) = oneshot::channel();
         let (_, span) = delivery.subscribers.first().clone();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {

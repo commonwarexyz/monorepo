@@ -19,7 +19,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Sender, utils::StaticProvider};
 use commonware_parallel::Strategy;
-use commonware_resolver::{Fetch, Resolver, p2p};
+use commonware_resolver::{Fetch, Outcome, Resolver, p2p};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::traces::TracedExt as _,
@@ -32,6 +32,11 @@ use commonware_utils::{
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info_span};
+
+struct HeldResponse {
+    requested: View,
+    response: oneshot::Sender<Outcome>,
+}
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -57,18 +62,18 @@ pub struct Actor<
 
     /// Responses to notarization deliveries, keyed by notarization view and
     /// answered with the view's certification verdict (see [Self::certified])
-    /// or accepted when a floor raise makes them obsolete (see
+    /// or ignored when another certificate makes their request obsolete (see
     /// [Self::apply_effects]).
     ///
-    /// A view maps to multiple responses when copies of its notarization
-    /// answer several outstanding requests, which is common when lagging:
+    /// A notarization view maps to multiple responses when copies of it answer
+    /// several outstanding requests, which is common when lagging:
     /// peers serve their floor certificate for any request at or below it,
     /// so one verdict resolves every request that notarization answered.
     /// A single request can never hold two responses under one view: the
     /// engine delivers at most one response per key at a time, and a key is
     /// only redelivered after a failure verdict, which marks the view failed
     /// and makes [Self::validate] reject further copies of its notarization.
-    held: BTreeMap<View, Vec<oneshot::Sender<bool>>>,
+    held: BTreeMap<View, Vec<HeldResponse>>,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
@@ -201,8 +206,8 @@ impl<
         // eventually answered by that covering nullification (or by a
         // certificate at a higher view).
         if let Some(responses) = self.held.remove(&view) {
-            for response in responses {
-                response.send_lossy(success);
+            for held in responses {
+                held.response.send_lossy(success.into());
             }
         }
         let effects = self.state.handle_certified(view, success);
@@ -223,28 +228,39 @@ impl<
                     reason,
                 } => self.fetch(resolver, view, cause, reason),
                 Effect::RetainOutside { start, end } => {
+                    self.ignore_held(|view| view >= start && view <= end);
                     let start = U64::from(start);
                     let end = U64::from(end);
                     let _ =
                         resolver.retain(move |candidate, _| *candidate < start || *candidate > end);
                 }
                 Effect::RetainAbove(floor) => {
-                    // A certification at or below the floor may be aborted
-                    // rather than reported, so a response held for it would
-                    // wait forever. The requests it answered are obsolete
-                    // (retained out below): accept them so their fetches
-                    // complete without blocking the serving peers.
-                    let retained = self.held.split_off(&floor.next());
-                    for (_, responses) in std::mem::replace(&mut self.held, retained) {
-                        for response in responses {
-                            response.send_lossy(true);
-                        }
-                    }
+                    // A response held for a request at or below the floor may
+                    // otherwise wait forever if its certification is aborted.
+                    // Retire obsolete requests without attributing the
+                    // responses to their serving peers.
+                    self.ignore_held(|view| view <= floor);
                     let floor = U64::from(floor);
                     let _ = resolver.retain(move |candidate, _| *candidate > floor);
                 }
             }
         }
+    }
+
+    /// Release held deliveries whose requested views have become obsolete.
+    fn ignore_held(&mut self, mut obsolete: impl FnMut(View) -> bool) {
+        for responses in self.held.values_mut() {
+            let mut index = 0;
+            while index < responses.len() {
+                if obsolete(responses[index].requested) {
+                    let held = responses.swap_remove(index);
+                    held.response.send_lossy(Outcome::Ignored);
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        self.held.retain(|_, responses| !responses.is_empty());
     }
 
     /// Issues a resolver fetch for `view`, attaching a span that records why the
@@ -376,6 +392,15 @@ impl<
                 );
                 let _guard = span.entered();
 
+                // The requested view may have become covered while this
+                // response was in transit. Retire it without decoding or
+                // attributing uninspected bytes to the serving peer.
+                if self.state.get(view).is_some() {
+                    debug!(%view, "ignoring resolver response for covered view");
+                    response.send_lossy(Outcome::Ignored);
+                    return;
+                }
+
                 // Validate incoming message
                 let validate = info_span!(
                     "simplex.resolver.validate",
@@ -385,7 +410,7 @@ impl<
                 let Some(parsed) = validate.in_scope(|| self.validate(view, data)) else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return;
                 };
 
@@ -398,10 +423,13 @@ impl<
                         self.held
                             .entry(notarization.view())
                             .or_default()
-                            .push(response);
+                            .push(HeldResponse {
+                                requested: view,
+                                response,
+                            });
                     }
                     Certificate::Finalization(_) | Certificate::Nullification(_) => {
-                        response.send_lossy(true);
+                        response.send_lossy(Outcome::Complete);
                     }
                 }
 
@@ -624,7 +652,7 @@ mod tests {
             // blocks the serving peer and retries the request itself.
             actor.certified(&mut resolver, View::new(6), false);
             assert!(actor.held.is_empty());
-            assert!(!receiver.await.unwrap());
+            assert_eq!(receiver.await.unwrap(), Outcome::Invalid);
         });
     }
 
@@ -656,12 +684,12 @@ mod tests {
 
             actor.certified(&mut resolver, View::new(6), true);
             assert!(actor.held.is_empty());
-            assert!(receiver.await.unwrap());
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
         });
     }
 
     #[test_async]
-    async fn held_responses_accepted_when_floor_passes_them() {
+    async fn held_responses_ignored_when_floor_passes_them() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -688,13 +716,139 @@ mod tests {
             assert!(actor.held.contains_key(&View::new(6)));
 
             // A floor raise past the notarization may abort its certification
-            // without a report, so the held response is accepted (the request
+            // without a report, so the held response is ignored (the request
             // it answered is retained out in the same batch).
             let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(8));
             let effects = actor.state.handle(Certificate::Finalization(finalization));
             actor.apply_effects(&mut resolver, effects);
             assert!(actor.held.is_empty());
-            assert!(receiver.await.unwrap());
+            assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
+        });
+    }
+
+    #[test_async]
+    async fn held_response_is_ignored_when_nullification_covers_its_request() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+
+            // A higher notarization can answer an earlier key, so held
+            // responses must be retired by requested view rather than by the
+            // notarization view used for the certification verdict.
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(8));
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: View::new(6),
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
+                        .encode(),
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert!(actor.held.contains_key(&View::new(8)));
+
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
+            let effects = actor
+                .state
+                .handle(Certificate::Nullification(nullification));
+            actor.apply_effects(&mut resolver, effects);
+
+            assert!(actor.held.is_empty());
+            assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
+        });
+    }
+
+    #[test_async]
+    async fn covered_response_is_ignored_before_validation() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+
+            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(8));
+            // Leave the Retain effect unapplied to model Simplex state
+            // advancing before the generic resolver processes its cancellation.
+            let _ = actor
+                .state
+                .handle(Certificate::Finalization(finalization));
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: View::new(6),
+                    data: Bytes::from_static(b"not a certificate"),
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
+            assert!(actor.held.is_empty());
+        });
+    }
+
+    #[test_async]
+    async fn nullification_coverage_ignores_only_covered_responses() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+
+            // View 2 covers the rest of its term through view 5, but not the
+            // next term beginning at view 6.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
+            // Leave the Retain effect unapplied so the delivery channel stays
+            // open while the handler observes the updated local state.
+            let _ = actor
+                .state
+                .handle(Certificate::Nullification(nullification));
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: View::new(5),
+                    data: Bytes::from_static(b"not a certificate"),
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: View::new(6),
+                    data: Bytes::from_static(b"not a certificate"),
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Invalid);
         });
     }
 
