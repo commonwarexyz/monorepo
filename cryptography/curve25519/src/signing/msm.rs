@@ -403,7 +403,7 @@ pub(super) fn multiscalar_mul<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{signing::scalar::test_support::rand_scalar, simplified::GBackend};
+    use crate::signing::scalar::test_support::rand_scalar;
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use ed25519_consensus::SigningKey;
@@ -427,33 +427,28 @@ mod tests {
     }
 
     /// Returns `n` distinct affine points via [`valid_point_bytes`] and decompression.
-    fn rand_affine_points<B: Backend>(backend: B, n: usize) -> Vec<GAffine> {
+    fn rand_affine_points(n: usize) -> Vec<GAffine> {
         valid_point_bytes(n)
             .iter()
-            .map(|b| GAffine::decompress(backend, b).unwrap())
+            .map(|b| GAffine::decompress(b).unwrap())
             .collect()
     }
 
     /// Returns `n` [`Term`]s over random points and scalars, recoded at `width`.
-    fn rand_terms<B: Backend>(backend: B, n: usize, width: u32) -> Vec<Term> {
+    fn rand_terms(n: usize, width: u32) -> Vec<Term> {
         let mut rng = test_rng();
-        rand_affine_points(backend, n)
+        rand_affine_points(n)
             .iter()
             .map(|p| Term::new(*p, &rand_scalar(&mut rng), width))
             .collect()
     }
 
-    fn add_points<B: Backend>(backend: B, left: G, right: G) -> G {
-        backend
-            .g_add(GVec::splat(left), GVec::splat(right))
-            .to_lanes()[0]
+    fn add_points(left: G, right: G) -> G {
+        left.add(right)
     }
 
-    fn points_equal<B: Backend>(backend: B, actual: G, expected: G) -> bool {
-        backend
-            .g_add(GVec::splat(actual), GVec::splat(expected).negate(backend))
-            .to_lanes()[0]
-            .is_identity()
+    fn points_equal(actual: G, expected: G) -> bool {
+        actual.add(expected.negate()).is_identity()
     }
 
     /// Splits `terms` into owned chunks of the given (deliberately uneven, `LANES`-unaligned)
@@ -509,27 +504,18 @@ mod tests {
         let backend = crate::simplified::test_backend();
         let mut rng = test_rng();
         for n in [0, 1, 2, 5, 8, 9, 32, 64, 100] {
-            let points = rand_affine_points(backend, n);
+            let points = rand_affine_points(n);
             let scalars: Vec<Scalar> = (0..n).map(|_| rand_scalar(&mut rng)).collect();
 
             let expected = points
                 .iter()
                 .zip(&scalars)
-                .fold(GVec::identity(), |acc, (point, scalar)| {
-                    backend.g_add(
-                        acc,
-                        GAffineVec::splat(*point)
-                            .to_extended(backend)
-                            .scalar_mul(backend, scalar.bits_be()),
-                    )
-                })
-                .to_lanes()[0];
+                .fold(G::IDENTITY, |acc, (point, scalar)| {
+                    acc.add(point.to_extended().scalar_mul(scalar.bits_be()))
+                });
             for width in TEST_WIDTHS {
                 let actual = multiscalar_mul_points_serial(backend, &points, &scalars, width);
-                assert!(
-                    points_equal(backend, actual, expected),
-                    "n={n} width={width}"
-                );
+                assert!(points_equal(actual, expected), "n={n} width={width}");
             }
         }
     }
@@ -541,14 +527,14 @@ mod tests {
     fn chunked_matches_single_chunk() {
         let backend = crate::simplified::test_backend();
         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
-            let terms = rand_terms(backend, n, 7);
-            let single = split_terms(rand_terms(backend, n, 7), &[]);
+            let terms = rand_terms(n, 7);
+            let single = split_terms(rand_terms(n, 7), &[]);
             let mut chunks = split_terms(terms, &[1, 3, 7, 9, 24]);
             chunks.push(Vec::new());
 
             let expected = multiscalar_mul_terms_serial(backend, &refs(&single), 7);
             let actual = multiscalar_mul_terms_serial(backend, &refs(&chunks), 7);
-            assert!(points_equal(backend, actual, expected));
+            assert!(points_equal(actual, expected));
         }
     }
 
@@ -557,14 +543,11 @@ mod tests {
         let backend = crate::simplified::test_backend();
         for n in [0, 1, 2, 5, 32, 600] {
             for width in TEST_WIDTHS {
-                let chunks = split_terms(rand_terms(backend, n, width), &[64, 64, 64, 64]);
+                let chunks = split_terms(rand_terms(n, width), &[64, 64, 64, 64]);
                 let chunks = refs(&chunks);
                 let expected = multiscalar_mul_terms_serial(backend, &chunks, width);
                 let actual = multiscalar_mul(backend, &chunks, width, &Sequential);
-                assert!(
-                    points_equal(backend, actual, expected),
-                    "n={n} width={width}"
-                );
+                assert!(points_equal(actual, expected), "n={n} width={width}");
             }
         }
     }
@@ -580,17 +563,11 @@ mod tests {
 
         for n in [0, 1, 300, 600, 1000] {
             for width in [6, 8, 10] {
-                let chunks = split_terms(
-                    rand_terms(backend, n, width),
-                    &[128, 128, 128, 128, 128, 128],
-                );
+                let chunks = split_terms(rand_terms(n, width), &[128, 128, 128, 128, 128, 128]);
                 let chunks = refs(&chunks);
                 let expected = multiscalar_mul_terms_serial(backend, &chunks, width);
                 let actual = multiscalar_mul(backend, &chunks, width, &strategy);
-                assert!(
-                    points_equal(backend, actual, expected),
-                    "n={n} width={width}"
-                );
+                assert!(points_equal(actual, expected), "n={n} width={width}");
             }
         }
     }
@@ -605,7 +582,7 @@ mod tests {
         let backend = crate::simplified::test_backend();
         const WIDTH: u32 = 7;
         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
-            let chunks = split_terms(rand_terms(backend, n, WIDTH), &[n / 3, n / 3]);
+            let chunks = split_terms(rand_terms(n, WIDTH), &[n / 3, n / 3]);
             let chunks = refs(&chunks);
             let total = total_terms(&chunks);
             let mid = total / 2;
@@ -617,7 +594,6 @@ mod tests {
             let mut buckets = transposed::identity_buckets(num_buckets(WIDTH));
             for (window, partial) in transposed_windows.iter_mut().enumerate() {
                 *partial = add_points(
-                    backend,
                     transposed::window_partial(
                         backend,
                         &chunks,
@@ -640,7 +616,6 @@ mod tests {
             }
 
             assert!(points_equal(
-                backend,
                 fold_windows(backend, &transposed_windows, WIDTH),
                 expected,
             ));
@@ -651,8 +626,7 @@ mod tests {
     /// including cuts inside slices, across slice boundaries, and touching empty slices.
     #[test]
     fn pieces_covers_exact_global_ranges() {
-        let backend = crate::simplified::test_backend();
-        let chunks = split_terms(rand_terms(backend, 50, 7), &[1, 7, 0, 24]);
+        let chunks = split_terms(rand_terms(50, 7), &[1, 7, 0, 24]);
         let mut chunks = refs(&chunks);
         chunks.insert(2, &[]);
         let total = total_terms(&chunks);
