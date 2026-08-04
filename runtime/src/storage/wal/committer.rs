@@ -31,7 +31,7 @@ use commonware_utils::{
 };
 use futures::future::BoxFuture;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -64,6 +64,9 @@ struct State {
     /// snapshot: durable already, and journaling them again would replay as
     /// duplicates.
     subsumed: u64,
+    /// Names mid-creation: the owner may be replacing a stale predecessor file, so
+    /// concurrent creators of the same name wait rather than race it.
+    reserving: BTreeMap<Vec<u8>, Vec<oneshot::Sender<()>>>,
 }
 
 /// One staged record awaiting durability, or a rider (no record) that just awaits
@@ -99,6 +102,7 @@ impl Shared {
                 catalog,
                 staged: 0,
                 subsumed: 0,
+                reserving: BTreeMap::new(),
             }),
             poisoned: AtomicBool::new(false),
         }
@@ -112,6 +116,39 @@ impl Shared {
     /// Mints a blob id for a record about to be staged.
     pub fn mint_id(&self) -> u64 {
         self.state.lock().catalog.mint_id()
+    }
+
+    /// Claims `name` for creation, or returns a waiter to await before retrying.
+    /// Owning the claim excludes every other creator of the name until [Reservation]
+    /// drops, so pre-creation file surgery cannot race a peer's fresh writes.
+    pub fn reserve(self: &Arc<Self>, name: &[u8]) -> Result<Reservation, oneshot::Receiver<()>> {
+        let mut state = self.state.lock();
+        if let Some(waiters) = state.reserving.get_mut(name) {
+            let (tx, rx) = oneshot::channel();
+            waiters.push(tx);
+            return Err(rx);
+        }
+        state.reserving.insert(name.to_vec(), Vec::new());
+        Ok(Reservation {
+            shared: self.clone(),
+            name: name.to_vec(),
+        })
+    }
+}
+
+/// Exclusive right to create one name; releases and wakes waiters on drop (including
+/// a drop mid-operation, which sends waiters back to retry from scratch).
+pub(super) struct Reservation {
+    shared: Arc<Shared>,
+    name: Vec<u8>,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let waiters = self.shared.state.lock().reserving.remove(&self.name);
+        for waiter in waiters.into_iter().flatten() {
+            let _ = waiter.send(());
+        }
     }
 }
 

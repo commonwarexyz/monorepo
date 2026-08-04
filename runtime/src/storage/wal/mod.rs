@@ -234,17 +234,11 @@ impl<M: Medium> Storage<M> {
 
     /// Opens (creating if needed) the blob's file. A row may exist without a file
     /// (lazy creation, or a dentry lost before its first sync): it reopens empty,
-    /// exactly as a never-created blob would under the per-file backends. A file
-    /// under a *recreated* row is stale by catalog authority and is replaced.
-    async fn blob_file(
-        &self,
-        partition: &str,
-        name: &str,
-        fresh: bool,
-    ) -> Result<M::File, crate::Error> {
-        if fresh {
-            let _ = self.medium.remove(partition, name).await;
-        } else if let Some(file) = self.medium.open(partition, name).await? {
+    /// exactly as a never-created blob would under the per-file backends. Stale
+    /// predecessor files cannot reach here: acknowledged removes unlink durably, and
+    /// the mint path durably replaces any leftover before its record is staged.
+    async fn blob_file(&self, partition: &str, name: &str) -> Result<M::File, crate::Error> {
+        if let Some(file) = self.medium.open(partition, name).await? {
             return Ok(file);
         }
         self.medium.create(partition, name).await
@@ -288,24 +282,65 @@ impl<M: Medium> crate::Storage for Storage<M> {
             .await?
             .expect("creating family lookups always return a committer");
 
-        // Find or mint the row in one catalog transaction, so catalog order is
-        // journal order. A minted row stages its create; an existing row stages a
-        // rider, because its create (staged by a concurrent opener) may not be
+        // Find the row, or mint one under a name reservation. An existing row stages
+        // a rider, because its create (staged by a concurrent opener) may not be
         // durable yet and our Ok must prove it is.
-        let (ack, (version, minted)) = committer.transact(|catalog| {
-            if let Some(row) = catalog.get(partition, name) {
-                return (Stage::Rider, (row.version, false));
+        let filename = hex(name);
+        let (ack, version) = loop {
+            let existing = committer
+                .shared()
+                .read(|catalog| catalog.get(partition, name).map(|row| row.version));
+            if let Some(version) = existing {
+                let (ack, ()) = committer.transact(|catalog| {
+                    match catalog.get(partition, name) {
+                        Some(_) => (Stage::Rider, ()),
+                        // Deleted between the read and the transact; mint instead.
+                        None => (Stage::Nothing, ()),
+                    }
+                })?;
+                match ack {
+                    Some(ack) => break (ack, version),
+                    None => continue,
+                }
+            }
+
+            // Mint path, serialized per name: a file already under the name can only
+            // be an unacknowledged remove's leftover (acknowledged removes unlink
+            // durably), and it must be replaced durably BEFORE the create record is
+            // staged, or a crash could revive it under the durable new row.
+            let reservation = match committer.shared().reserve(name) {
+                Ok(reservation) => reservation,
+                Err(waiter) => {
+                    let _ = waiter.await;
+                    continue;
+                }
+            };
+            if self.medium.open(partition, &filename).await?.is_some() {
+                let _ = self.medium.remove(partition, &filename).await;
+                self.medium.create(partition, &filename).await?;
+                self.medium.sync_dir(partition).await?;
             }
             let version = *versions.end();
-            let record = Record::Create {
-                id: catalog.mint_id(),
-                kind: Kind::Ordinary,
-                version,
-                partition: partition.to_string(),
-                name: name.to_vec(),
-            };
-            (Stage::Record(record), (version, true))
-        })?;
+            let (ack, staged) = committer.transact(|catalog| {
+                if catalog.get(partition, name).is_some() {
+                    // Lost a race that slipped a row in; retry as existing.
+                    return (Stage::Nothing, false);
+                }
+                let record = Record::Create {
+                    id: catalog.mint_id(),
+                    kind: Kind::Ordinary,
+                    version,
+                    partition: partition.to_string(),
+                    name: name.to_vec(),
+                };
+                (Stage::Record(record), true)
+            })?;
+            drop(reservation);
+            match (ack, staged) {
+                (Some(ack), true) => break (ack, version),
+                _ => continue,
+            }
+        };
         if !versions.contains(&version) {
             return Err(crate::Error::BlobVersionMismatch {
                 expected: versions,
@@ -314,13 +349,9 @@ impl<M: Medium> crate::Storage for Storage<M> {
         }
         // "Ok means durably created": await the create record, or the rider proving
         // an earlier opener's create is durable.
-        ack.expect("open always stages")
-            .await
-            .map_err(|_| crate::Error::Closed)??;
+        ack.await.map_err(|_| crate::Error::Closed)??;
 
-        // A minted row replaces any file under its name: the catalog says the row is
-        // new, so surviving bytes belong to a removed predecessor.
-        let file = self.blob_file(partition, &hex(name), minted).await?;
+        let file = self.blob_file(partition, &filename).await?;
         let blob = Blob::new(self.medium.clone(), file, partition, name);
         let size = blob.size().await?;
         Ok((blob, size, version))
@@ -349,24 +380,34 @@ impl<M: Medium> crate::Storage for Storage<M> {
                 ack.expect("delete staged")
                     .await
                     .map_err(|_| crate::Error::Closed)??;
-                let _ = self.medium.remove(partition, &hex(name)).await;
+                // Durable unlink before Ok (the per-file backends' cost, honestly
+                // kept): once removal acknowledges, no crash can revive the file, so
+                // recreation freshness needs no content identity.
+                if self.medium.remove(partition, &hex(name)).await.is_ok() {
+                    self.medium.sync_dir(partition).await?;
+                }
                 Ok(())
             }
             None => {
-                // Removing the partition removes the family: take the slot, unlink
-                // the WAL durably, then sweep the blob files best-effort.
+                // Removing the partition removes the family. Sweep the blob files
+                // durably FIRST, then unlink the WAL: once the WAL is durably gone,
+                // the directory holds nothing revivable, so a future adoption pass
+                // can never resurrect removed blobs. A crash mid-sweep leaves the
+                // WAL governing (partial teardown, unacknowledged: the same shape a
+                // crash mid-unlink-loop produces today).
                 let names = committer.shared().read(|catalog| catalog.scan(partition));
                 {
                     let mut families = self.families.lock();
                     families.remove(partition);
                 }
+                for blob in names.unwrap_or_default() {
+                    let _ = self.medium.remove(partition, &hex(&blob)).await;
+                }
+                self.medium.sync_dir(partition).await?;
                 self.medium
                     .remove(WAL_DIR, &Self::wal_name(partition))
                     .await?;
                 self.medium.sync_dir(WAL_DIR).await?;
-                for blob in names.unwrap_or_default() {
-                    let _ = self.medium.remove(partition, &hex(&blob)).await;
-                }
                 Ok(())
             }
         }
@@ -450,6 +491,57 @@ mod tests {
             storage.scan("p").await,
             Err(crate::Error::PartitionMissing(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn recreation_after_crash_reverted_unlink_is_empty() {
+        // Remove's unlink is lazy (an unsynced dentry operation), so a crash can
+        // revive the file while the delete record stays durable. The recreated row
+        // must still open empty: the replacement happens before the create record is
+        // staged, so no crash window exposes the predecessor's bytes.
+        for seed in 0..16 {
+            let sim = Sim::new(seed);
+            let storage = wal_storage(&sim);
+            let (blob, _) = storage.open("p", b"a").await.unwrap();
+            blob.write_at(0, vec![0xAA; 32], crate::WriteOptions::SYNC)
+                .await
+                .unwrap();
+            storage.remove("p", Some(b"a")).await.unwrap();
+
+            sim.crash();
+            let storage = wal_storage(&sim);
+            assert!(storage.scan("p").await.unwrap().is_empty(), "seed {seed}");
+            let (blob, size) = storage.open("p", b"a").await.unwrap();
+            assert_eq!(size, 0, "seed {seed}: stale predecessor bytes exposed");
+            drop(blob);
+        }
+    }
+
+    #[tokio::test]
+    async fn recreation_replacement_survives_crash() {
+        // The dangerous window: the recreate's file replacement is itself an unsynced
+        // dentry operation. If a crash reverts it after the create record became
+        // durable, the revived predecessor file must still never be served under the
+        // new row.
+        for seed in 0..16 {
+            let sim = Sim::new(seed);
+            let storage = wal_storage(&sim);
+            let (blob, _) = storage.open("p", b"a").await.unwrap();
+            blob.write_at(0, vec![0xAA; 32], crate::WriteOptions::SYNC)
+                .await
+                .unwrap();
+            storage.remove("p", Some(b"a")).await.unwrap();
+            // Recreate: the create record is durable at Ok, the file ops are not.
+            let (fresh, size) = storage.open("p", b"a").await.unwrap();
+            assert_eq!(size, 0, "seed {seed}");
+            drop(fresh);
+
+            sim.crash();
+            let storage = wal_storage(&sim);
+            let (blob, size) = storage.open("p", b"a").await.unwrap();
+            assert_eq!(size, 0, "seed {seed}: revived predecessor served");
+            drop(blob);
+        }
     }
 
     #[tokio::test]
