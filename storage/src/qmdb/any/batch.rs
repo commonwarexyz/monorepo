@@ -38,6 +38,9 @@ use tracing::debug;
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
+/// Sorted locations at the retained batch chain's committed boundary.
+type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
+
 /// One contiguous chunk of floor-raise candidates paired with their resolved operations.
 type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
@@ -419,6 +422,11 @@ where
     /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
     /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
+
+    /// Locations at `bounds.db` for keys whose retained ancestor diffs cross a dropped prefix.
+    /// Only overlapping keys are retained, bounding this by the live speculative suffix rather
+    /// than the committed history.
+    ancestor_base_locs: AncestorBaseLocs<U::Key, F>,
 
     /// Position and floor bounds for this batch chain.
     pub(crate) bounds: batch_chain::Bounds<F, D>,
@@ -1314,6 +1322,24 @@ where
             diff = job.await;
         }
 
+        // A retained ancestor's `base_old_loc` traces back to the DB boundary at which its chain
+        // was originally created. If an older committed prefix has since dropped out of the Weak
+        // chain, resolve keys touched on both sides of that boundary to their location after the
+        // dropped prefix. Keeping only the intersection avoids retaining the prefix's value diffs.
+        let ancestor_base_locs = self.ancestors.last().map_or_else(Vec::new, |oldest| {
+            if oldest.ancestor_diffs.iter().all(|diff| diff.is_empty()) {
+                return Vec::new();
+            }
+            let mut dropped =
+                DiffCursors::new(oldest.ancestor_diffs.iter().map(|diff| diff.as_slice()));
+            DiffMerge::new(
+                self.ancestors
+                    .iter()
+                    .map(|ancestor| ancestor.diff.as_slice()),
+            )
+            .filter_map(|(key, _)| dropped.resolve(key).map(|entry| (key.clone(), entry.loc())))
+            .collect()
+        });
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestors: Vec<_> = self
             .ancestors
@@ -1331,6 +1357,7 @@ where
             parent: self.ancestors.first().map(Arc::downgrade),
             total_active_keys: total_active_keys as usize,
             ancestor_diffs,
+            ancestor_base_locs,
             bounds: batch_chain::Bounds {
                 base: self.base_state,
                 db: self.db_state,
@@ -2853,15 +2880,44 @@ where
                     }
                 }
                 let mut resolver = DiffCursors::new(applied);
-                let merge = DiffMerge::new(
-                    iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                );
-                for (key, entry) in merge {
-                    let old = resolver
-                        .resolve(key)
-                        .map(DiffEntry::loc)
-                        .unwrap_or_else(|| entry.base_old_loc());
-                    apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                if batch.ancestor_base_locs.is_empty() {
+                    let merge = DiffMerge::new(
+                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
+                    );
+                    for (key, entry) in merge {
+                        let old = resolver
+                            .resolve(key)
+                            .map(DiffEntry::loc)
+                            .unwrap_or_else(|| entry.base_old_loc());
+                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                    }
+                } else {
+                    let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
+                    let merge = DiffMerge::new(
+                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
+                    );
+                    for (key, entry) in merge {
+                        let old = resolver.resolve(key).map_or_else(
+                            || {
+                                while ancestor_base_locs
+                                    .peek()
+                                    .is_some_and(|(candidate, _)| candidate < key)
+                                {
+                                    ancestor_base_locs.next();
+                                }
+                                if ancestor_base_locs
+                                    .peek()
+                                    .is_some_and(|(candidate, _)| candidate == key)
+                                {
+                                    ancestor_base_locs.next().expect("peeked entry exists").1
+                                } else {
+                                    entry.base_old_loc()
+                                }
+                            },
+                            DiffEntry::loc,
+                        );
+                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                    }
                 }
             }
 
@@ -2919,6 +2975,7 @@ where
             parent: None,
             total_active_keys: self.active_keys,
             ancestor_diffs: Vec::new(),
+            ancestor_base_locs: Vec::new(),
             bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
