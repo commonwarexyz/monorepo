@@ -376,6 +376,73 @@
   \note{The barriers are issued concurrently. The full typed decision exists only in memory while the operation is live. On disk, each root stores one local witness and one successor link. If start_apply returns Ok, all required participant states are durably recoverable, even if the completion handle is dropped. Awaiting the handle waits for activation and namespace cleanup. A failed or cancelled start remains indeterminate because every barrier may in fact have reached disk.}
 \end{frame}
 
+\begin{frame}[t]{Overlapping atomic groups}
+  \vspace{0cm}
+  \eyebrow{Every ring sorts participant keys: \texttt{(partition, raw blob name)}}
+
+  \vspace{0.05cm}
+  \begin{center}
+    \begin{tikzpicture}[node distance=.42cm]
+      \node[box,text width=2.35cm,minimum height=.54cm,font=\small] (caller) {caller: $\{B,A\}$ or $\{A,B\}$};
+      \node[root,text width=3.55cm,minimum height=.54cm,right=of caller,font=\small] (ring) {$A_0 \rightarrow B_1 \rightarrow A_0$};
+      \node[panel,text width=4.35cm,minimum height=.54cm,right=of ring,font=\small] (why) {same ordinals, links, and lock order};
+      \draw[flow] (caller) -- (ring);
+      \draw[flow] (ring) -- (why);
+    \end{tikzpicture}
+  \end{center}
+
+  \vspace{0.07cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \eyebrow{Exact participant set repeats}
+
+      \vspace{0.05cm}
+      \begin{tikzpicture}[node distance=.52cm]
+        \node[root,text width=2.15cm,minimum height=.78cm,font=\small] (g1) {$G_1$\\\scriptsize $A_0 \to B_1 \to A_0$};
+        \node[root,text width=2.15cm,minimum height=.78cm,right=of g1,font=\small] (g2) {$G_2$\\\scriptsize $A_0 \to B_1 \to A_0$};
+        \draw[flow] (g1) -- (g2);
+      \end{tikzpicture}
+
+      \vspace{0.04cm}
+      \scriptsize Adjacent generations supersede directly; no P$\rightarrow$M rewrite.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \eyebrow{Participant set changes}
+
+      \vspace{0.05cm}
+      \begin{tikzpicture}[node distance=.24cm]
+        \node[root,text width=1.55cm,minimum height=.78cm,font=\small] (h1) {$G_1$\\\scriptsize $A \to B$};
+        \node[box,text width=1.75cm,minimum height=.78cm,right=of h1,font=\scriptsize] (wait) {wait for $B$\\materialize $G_1$};
+        \node[warn,text width=1.55cm,minimum height=.78cm,right=of wait,font=\small] (h2) {$G_2$\\\scriptsize $B \to C$};
+        \draw[flow] (h1) -- (wait);
+        \draw[flow] (wait) -- (h2);
+      \end{tikzpicture}
+
+      \vspace{0.04cm}
+      \scriptsize Shared-$B$ serialization is required; eager materialization is current policy.
+    \end{column}
+  \end{columns}
+
+  \vspace{0.11cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{tikzpicture}
+        \node[panel,text width=5.65cm,minimum height=.76cm,align=center] {\scriptsize \textbf{Protocol policy}\\disjoint rings need no common order.};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{tikzpicture}
+        \node[panel,text width=5.65cm,minimum height=.76cm,align=center] {\scriptsize \textbf{Prototype policy}\\\mbox{process-local namespace lock} + singleton carried decision.};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+
+  \vfill
+  \takeaway{Lexicographic links remove caller-order ambiguity and deadlock cycles; they do not create a global commit order.}
+
+  \note{The canonical key is the partition string followed by the raw blob-name bytes. Batch canonicalization, participant lock acquisition, ordinal assignment, successor links, and recovery validation all use this order. Therefore callers may provide A,B or B,A and still produce the same ring, and overlapping batches cannot acquire the same blob locks in opposite orders. A shared blob still serializes generations: G2 cannot derive B's next root until G1 is durably committed and active. Today the prototype is more conservative than the protocol requires: it retains only one namespace-wide carried decision, so a different overlapping or disjoint participant set materializes the prior ring before staging the next one. Keeping two slots bounds the format and recovery model; removing that extra serialization would require sharding the in-memory carried-decision and namespace-lock policy, not changing ring order.}
+\end{frame}
+
 \begin{frame}[t]{Dependent writes can be built, then published together}
   \vspace{0cm}
   \eyebrow{Variable journal append: sequential staging is allowed}
@@ -545,7 +612,7 @@
     \end{column}
     \begin{column}{0.42\textwidth}
       \begin{tikzpicture}
-        \node[warn,text width=5.15cm] {\textbf{No global order}\\\scriptsize no root WAL, durable global coordinator, LSN, or commit sequence\\[.1cm]\textbf{What this avoids}\\\scriptsize no global lock or volume-like filesystem layer; disjoint groups stay concurrent};
+        \node[warn,text width=5.15cm] {\textbf{No global order}\\\scriptsize no root WAL, durable global coordinator, LSN, or commit sequence\\[.1cm]\textbf{What the protocol avoids}\\\scriptsize no required persistent global lock or volume-like filesystem layer};
       \end{tikzpicture}
     \end{column}
   \end{columns}
@@ -577,7 +644,7 @@
   \vfill
   \takeaway{Atomic membership is local. Put a temporal dependency in one group, wait at its edge, or add a higher-level WAL only when a total order is required.}
 
-  \note{Removing the durable global coordinator is both the performance win and a semantic boundary. Two disjoint start_apply calls have no shared sequence number and may cross their durable frontiers in either order. That locality is what avoids a global lock and a volume-like transaction layer interposed on the filesystem. Opening one participant follows and repairs only its exact linked ring; recovery does not scan or order unrelated groups. If B semantically depends on A, either stage both pending mutations and publish them in one group, or do not begin B's separate group until A's durable decision is proven. start_apply returning Ok proves durability; awaiting its handle additionally waits for activation and namespace cleanup. A workload that needs one total order across arbitrary groups still needs a higher-level root WAL or coordination layer.}
+  \note{Removing the durable global coordinator is both the performance win and a semantic boundary. Two disjoint start_apply calls have no shared sequence number and may cross their durable frontiers in either order. The protocol therefore requires neither a persistent global lock nor a volume-like transaction layer interposed on the filesystem. The current prototype still conservatively serializes batch workers with one process-local namespace mutex and one carried decision; that implementation detail does not create a recoverable global order. Opening one participant follows and repairs only its exact linked ring; recovery does not scan or order unrelated groups. If B semantically depends on A, either stage both pending mutations and publish them in one group, or do not begin B's separate group until A's durable decision is proven. start_apply returning Ok proves durability; awaiting its handle additionally waits for activation and namespace cleanup. A workload that needs one total order across arbitrary groups still needs a higher-level root WAL or coordination layer.}
 \end{frame}
 
 \begin{frame}[t]{Adoption example: not every file needs V2}

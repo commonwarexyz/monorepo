@@ -89,6 +89,10 @@ pub trait AtomicStorage: Storage {
 /// after a restart discovers and repairs the complete group without scanning unrelated blobs. A
 /// deleted participant first becomes a durable tombstone and is unlinked only after every
 /// participant has an independently recoverable final root.
+///
+/// Before links are constructed, participants are ordered lexicographically by partition and then
+/// raw blob-name bytes. The same order determines ring ordinals and filesystem lock acquisition,
+/// so equivalent participant sets produce the same ring regardless of caller order.
 pub trait BatchStorage: AtomicStorage {
     /// Start publishing, deleting, and rewinding atomic blobs as one durable batch.
     ///

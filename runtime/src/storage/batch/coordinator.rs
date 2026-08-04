@@ -2,8 +2,10 @@
 //!
 //! There is no coordinator file. Every dirty V2 participant stores one checksummed local witness
 //! beside its prepared root. The witness identifies the batch, describes only this participant's
-//! exact candidate, and points to the next exact path incarnation. Canonical participant order
-//! forms one closed ring; deleted blobs participate with a local removal bit.
+//! exact candidate, and points to the next exact path incarnation. Participants are ordered
+//! lexicographically by partition and then raw blob-name bytes before ordinals and successor links
+//! are assigned. This canonical order forms one closed ring; deleted blobs participate with a
+//! local removal bit.
 //!
 //! ```text
 //!       blob A                    blob B                    blob C
@@ -25,11 +27,11 @@
 //!
 //! Opening one V2 participant follows exactly the ring's declared number of links. Recovery
 //! requires the same group ID and count, consecutive ordinals, unique path incarnations,
-//! canonical ordering, and closure back to the opener after exactly the declared count. The count
-//! is decoded before traversal, and recovery grows its state only after validating each exact
-//! successor. It never scans unrelated names or historical payload. A missing, torn, duplicated,
-//! or differently incarnated link leaves a prepared (`P`) root invisible, so ordinary root
-//! recovery selects the preceding slot.
+//! lexicographically increasing participant keys, and closure back to the opener after exactly the
+//! declared count. The count is decoded before traversal, and recovery grows its state only after
+//! validating each exact successor. It never scans unrelated names or historical payload. A
+//! missing, torn, duplicated, out-of-order, or differently incarnated link leaves a prepared (`P`)
+//! root invisible, so ordinary root recovery selects the preceding slot.
 //!
 //! A complete ring commits only when every candidate root and bounded pending-payload suffix
 //! validates. Once installation starts, a materialized (`M`) root or tombstone (`T`) proves that

@@ -160,6 +160,10 @@ pub(crate) fn canonicalize_descriptors<B>(
 }
 
 /// Validate and reduce a mixed batch to a deterministic exact operation set.
+///
+/// Operations are ordered lexicographically by partition and then raw blob-name bytes. Filesystem
+/// batch implementations retain this order when locking participants and assigning ring ordinals,
+/// so caller order cannot change a decision or create conflicting lock orders.
 pub(crate) fn canonicalize_operations(operations: Vec<Operation>) -> Result<Vec<Operation>, Error> {
     let mut partitions = BTreeMap::<String, PartitionOperations>::new();
     for operation in operations {
