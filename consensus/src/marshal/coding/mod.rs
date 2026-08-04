@@ -1900,7 +1900,11 @@ mod tests {
             let coded_boundary: TestCodedBlock =
                 CodedBlock::new(boundary_block, coding_config, &Sequential);
             let boundary_commitment = coded_boundary.commitment();
-            assert!(marshal.verified(boundary_round, coded_boundary.clone()).await);
+            assert!(
+                marshal
+                    .verified(boundary_round, coded_boundary.clone())
+                    .await
+            );
             shards.discovered(boundary_commitment, me.clone(), boundary_round);
             shards.proposed(boundary_round, coded_boundary.clone());
             context.sleep(Duration::from_millis(10)).await;
