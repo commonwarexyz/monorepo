@@ -5,13 +5,16 @@
 //! normal legacy recovery path and then replaces the recovered sections one at a time. Once init
 //! succeeds, the returned journal and every later reopen use only the native V2 implementation.
 //!
-//! The atomic root's application tag is split between journal authority and checked-page state:
+//! The atomic root's application tag carries only journal authority:
 //!
 //! ```text
-//! +---------------------+-------------------------+----------------------+
-//! | start + 1 (8 B, BE) | reserved zeroes (52 B) | partial CRC32C (4 B) |
-//! +---------------------+-------------------------+----------------------+
+//! +---------------------+------------------------------+
+//! | start + 1 (8 B, BE) | reserved zeroes (56 B)       |
+//! +---------------------+------------------------------+
 //! ```
+//!
+//! V2 owns checked-page integrity separately: completed pages have four-byte CRC32C footers, and
+//! dedicated root fields carry the start and rolling checksum of the one unfinished page.
 //!
 //! A zero start field means that section is not active. Exactly one section (or one matching
 //! data/offsets pair for a variable journal) carries a nonzero field. Its name identifies the
@@ -35,7 +38,7 @@
 //! Payload reaches storage as each append arrives. A rollover may durably stage a sealed section,
 //! but its unmarked root remains unreachable. Until publication, recovery selects the old roots
 //! and discards any surviving subset of unpublished writes. Publication makes the new length,
-//! partial-page checksum, and marker durable together. The decision includes only the previous
+//! unfinished-page state, and marker durable together. The decision includes only the previous
 //! authority and current tail, regardless of how many sections were crossed. Variable journals
 //! place their data and fixed-width offsets roots in the same group, so neither side can advance
 //! alone. Rewind and clear first publish a bounded marker move, then remove sections that the new
@@ -183,6 +186,29 @@ mod tag_tests {
             decode_migration_tag(zero_start),
             Err(Error::Corruption(_))
         ));
+    }
+
+    #[test]
+    fn start_marker_layout_is_canonical() {
+        assert_eq!(decode_start_marker(NO_START_MARKER).unwrap(), None);
+        for start in [0, u64::MAX - 1] {
+            let marker = encode_start_marker(start).unwrap();
+            assert_eq!(decode_start_marker(marker).unwrap(), Some(start));
+            assert!(marker[8..].iter().all(|byte| *byte == 0));
+        }
+        assert!(matches!(
+            encode_start_marker(u64::MAX),
+            Err(Error::SizeOverflow)
+        ));
+
+        for index in [8, ATOMIC_MARKER_LEN - 1] {
+            let mut marker = encode_start_marker(0).unwrap();
+            marker[index] = 1;
+            assert!(matches!(
+                decode_start_marker(marker),
+                Err(Error::Corruption(_))
+            ));
+        }
     }
 }
 

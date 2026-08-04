@@ -47,15 +47,17 @@ const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
 /// CRC32C hasher.
 ///
 /// Uses the iSCSI polynomial (0x1EDC6F41) as specified in RFC 3720.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Crc32 {
     inner: crc_fast::Digest,
+    amount: u64,
 }
 
 impl Default for Crc32 {
     fn default() -> Self {
         Self {
             inner: crc_fast::Digest::new(ALGORITHM),
+            amount: 0,
         }
     }
 }
@@ -67,6 +69,44 @@ impl Crc32 {
     #[inline]
     pub fn checksum(data: &[u8]) -> u32 {
         crc_fast::checksum(ALGORITHM, data) as u32
+    }
+
+    /// Resume a CRC32C stream from a previously finalized checksum.
+    ///
+    /// This is useful when a durable checkpoint stores only the four-byte checksum of an
+    /// append-only prefix. `amount` is the number of bytes covered by `checksum`; retaining it
+    /// keeps the resumed digest composable in either position. Updating the returned hasher with a
+    /// suffix produces the same checksum as hashing the prefix and suffix together.
+    #[inline]
+    pub fn resume(checksum: u32, amount: u64) -> Self {
+        // CRC32C finalization XORs the running state with all ones. Undo that transform before
+        // asking crc-fast to continue from the recovered state.
+        Self {
+            inner: crc_fast::Digest::new_with_init_state(ALGORITHM, u64::from(checksum ^ u32::MAX)),
+            amount,
+        }
+    }
+
+    /// Extend this checksum with bytes already accumulated by `other`.
+    ///
+    /// This is equivalent to updating this hasher with the bytes supplied to `other`, in the same
+    /// order, without reading those bytes again.
+    #[inline]
+    pub fn combine(&mut self, other: &Self) -> &mut Self {
+        let checksum = combine_checksums(self.value(), other.value(), other.amount);
+        self.amount = self
+            .amount
+            .checked_add(other.amount)
+            .expect("CRC32 input length exceeds u64");
+        self.inner =
+            crc_fast::Digest::new_with_init_state(ALGORITHM, u64::from(checksum ^ u32::MAX));
+        self
+    }
+
+    /// Return the checksum accumulated so far without resetting this hasher.
+    #[inline]
+    pub fn value(&self) -> u32 {
+        self.clone().finalize().1.as_u32()
     }
 }
 
@@ -87,13 +127,74 @@ impl Hasher for Crc32 {
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.inner.update(message);
+        self.amount = self
+            .amount
+            .checked_add(message.len() as u64)
+            .expect("CRC32 input length exceeds u64");
         self
     }
 
     fn finalize(mut self) -> (Self, Self::Digest) {
         let digest = Self::Digest::from(self.inner.finalize_reset() as u32);
+        self.amount = 0;
         (self, digest)
     }
+}
+
+const REVERSED_CASTAGNOLI_POLYNOMIAL: u32 = 0x82f6_3b78;
+
+fn matrix_times(matrix: &[u32; 32], mut vector: u32) -> u32 {
+    let mut sum = 0;
+    let mut index = 0;
+    while vector != 0 {
+        if vector & 1 != 0 {
+            sum ^= matrix[index];
+        }
+        vector >>= 1;
+        index += 1;
+    }
+    sum
+}
+
+fn matrix_square(matrix: &[u32; 32]) -> [u32; 32] {
+    std::array::from_fn(|index| matrix_times(matrix, matrix[index]))
+}
+
+/// Return `CRC32C(left || right)` from the two finalized checksums and `right`'s length.
+fn combine_checksums(mut left: u32, right: u32, mut right_len: u64) -> u32 {
+    if right_len == 0 {
+        return left;
+    }
+
+    let mut odd = [0; 32];
+    odd[0] = REVERSED_CASTAGNOLI_POLYNOMIAL;
+    let mut row = 1;
+    for entry in &mut odd[1..] {
+        *entry = row;
+        row <<= 1;
+    }
+    let mut even = matrix_square(&odd);
+    odd = matrix_square(&even);
+
+    loop {
+        even = matrix_square(&odd);
+        if right_len & 1 != 0 {
+            left = matrix_times(&even, left);
+        }
+        right_len >>= 1;
+        if right_len == 0 {
+            break;
+        }
+        odd = matrix_square(&even);
+        if right_len & 1 != 0 {
+            left = matrix_times(&odd, left);
+        }
+        right_len >>= 1;
+        if right_len == 0 {
+            break;
+        }
+    }
+    left ^ right
 }
 
 /// Digest of a CRC32 hashing operation (4 bytes).
@@ -343,6 +444,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn combined_checksums_match_concatenation() {
+        let data = sequential_data(1024);
+        let parts: [&[u8]; 4] = [b"", b"small", &data, b"tail"];
+        let expected = Crc32::hash(&parts).as_u32();
+
+        let mut combined = Crc32::default();
+        for part in parts {
+            let mut chunk = Crc32::default();
+            chunk.update(part);
+            combined.combine(&chunk);
+        }
+
+        assert_eq!(combined.value(), expected);
+        assert_eq!(
+            combined.value(),
+            expected,
+            "value must not reset the hasher"
+        );
+    }
+
     /// Test with unaligned data by processing at different offsets within a buffer.
     #[test]
     fn alignment_independence() {
@@ -439,5 +561,36 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Digest>,
         }
+    }
+
+    #[test]
+    fn resumed_checksum_matches_concatenation() {
+        let prefix = b"durable prefix";
+        let suffix = b" and appended suffix";
+        let mut resumed = Crc32::resume(Crc32::checksum(prefix), prefix.len() as u64);
+        resumed.update(suffix);
+
+        let mut concatenated = Vec::from(prefix.as_slice());
+        concatenated.extend_from_slice(suffix);
+        assert_eq!(resumed.value(), Crc32::checksum(&concatenated));
+    }
+
+    #[test]
+    fn resumed_checksum_remains_composable_on_the_right() {
+        let head = b"head";
+        let prefix = b"durable prefix";
+        let suffix = b" and suffix";
+
+        let mut resumed = Crc32::resume(Crc32::checksum(prefix), prefix.len() as u64);
+        let mut suffix_crc = Crc32::default();
+        suffix_crc.update(suffix);
+        resumed.combine(&suffix_crc);
+
+        let mut combined = Crc32::default();
+        combined.update(head).combine(&resumed);
+        let mut expected = Vec::from(head.as_slice());
+        expected.extend_from_slice(prefix);
+        expected.extend_from_slice(suffix);
+        assert_eq!(combined.value(), Crc32::checksum(&expected));
     }
 }

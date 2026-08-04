@@ -254,6 +254,36 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         self.inner.tag().await
     }
 
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+        self.auditor.event(b"integrity_scheme", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
+        self.inner.integrity_scheme().await
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+        self.auditor.event(b"integrity_snapshot", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
+        self.inner.integrity_snapshot().await
+    }
+
+    async fn compare_set_tag(
+        &self,
+        expected: crate::IntegrityToken,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.auditor.event(b"compare_set_tag", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(expected.0.to_be_bytes());
+            hasher.update(tag);
+        });
+        self.inner.compare_set_tag(expected, tag).await
+    }
+
     async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
         self.auditor.event(b"set_tag", |hasher| {
             hasher.update(self.partition.as_bytes());
@@ -288,6 +318,54 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         self.inner.append_tagged(data, tag).await
     }
 
+    async fn append_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        data: impl Into<IoBufs> + Send,
+        boundary: crate::IntegrityBoundary,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, Error> {
+        let data = data.into();
+        self.auditor.event(b"append_integrity", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(expected.0.to_be_bytes());
+            hasher.update_bufs(&data);
+            match boundary {
+                crate::IntegrityBoundary::Continue => hasher.update([0]),
+                crate::IntegrityBoundary::Complete => hasher.update([1]),
+                crate::IntegrityBoundary::Chunked(size) => {
+                    hasher.update([2]);
+                    hasher.update(size.get().to_be_bytes());
+                }
+            };
+            if let Some(tag) = tag {
+                hasher.update(tag);
+            }
+        });
+        self.inner
+            .append_integrity(expected, data, boundary, tag)
+            .await
+    }
+
+    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+        self.auditor.event(b"read_integrity_tail", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
+        self.inner.read_integrity_tail().await
+    }
+
+    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+        self.auditor.event(b"read_integrity", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(unit.offset.to_be_bytes());
+            hasher.update(unit.len.to_be_bytes());
+        });
+        self.inner.read_integrity(unit).await
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.auditor.event(b"rewind", |hasher| {
             hasher.update(self.partition.as_bytes());
@@ -309,6 +387,29 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
             hasher.update(tag);
         });
         self.inner.rewind_tagged(len, tag).await
+    }
+
+    async fn rewind_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.auditor.event(b"rewind_integrity", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(expected.0.to_be_bytes());
+            hasher.update(len.to_be_bytes());
+            if let Some(unit) = unit {
+                hasher.update(unit.offset.to_be_bytes());
+                hasher.update(unit.len.to_be_bytes());
+            }
+            if let Some(tag) = tag {
+                hasher.update(tag);
+            }
+        });
+        self.inner.rewind_integrity(expected, len, unit, tag).await
     }
 }
 
@@ -697,6 +798,28 @@ mod tests {
             Ok([0; crate::ATOMIC_BLOB_TAG_LEN])
         }
 
+        async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+            Ok(crate::IntegrityScheme::Unbound)
+        }
+
+        async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+            Ok(crate::IntegritySnapshot {
+                encoded_len: 0,
+                scheme: crate::IntegrityScheme::Unbound,
+                tag: [0; crate::ATOMIC_BLOB_TAG_LEN],
+                tail: None,
+                token: crate::IntegrityToken(0),
+            })
+        }
+
+        async fn compare_set_tag(
+            &self,
+            expected: crate::IntegrityToken,
+            _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+        ) -> Result<crate::IntegrityToken, Error> {
+            Ok(expected)
+        }
+
         async fn set_tag(&self, _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
             Ok(())
         }
@@ -715,6 +838,30 @@ mod tests {
             Ok(7)
         }
 
+        async fn append_integrity(
+            &self,
+            expected: crate::IntegrityToken,
+            data: impl Into<IoBufs> + Send,
+            _boundary: crate::IntegrityBoundary,
+            _tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+        ) -> Result<crate::IntegrityAppend, Error> {
+            self.appends.lock().push(data.into().chunk_count());
+            Ok(crate::IntegrityAppend {
+                offset: 7,
+                token: expected,
+            })
+        }
+
+        async fn read_integrity_tail(
+            &self,
+        ) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+            Ok(None)
+        }
+
+        async fn read_integrity(&self, _unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+            Ok(IoBufs::default())
+        }
+
         async fn rewind(&self, len: u64) -> Result<(), Error> {
             self.rewinds.lock().push(len);
             Ok(())
@@ -727,6 +874,17 @@ mod tests {
         ) -> Result<(), Error> {
             self.rewinds.lock().push(len);
             Ok(())
+        }
+
+        async fn rewind_integrity(
+            &self,
+            expected: crate::IntegrityToken,
+            len: u64,
+            _unit: Option<crate::IntegrityUnit>,
+            _tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+        ) -> Result<crate::IntegrityToken, Error> {
+            self.rewinds.lock().push(len);
+            Ok(expected)
         }
     }
 

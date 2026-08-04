@@ -170,7 +170,9 @@ fn prepare_batch_chunk(
             removed,
         };
         if let Some(len) = resize_lengths.get(&key).copied()
-            && let Err(error) = participant.blob.rewind_log(&mut participant.state, len)
+            && let Err(error) = participant
+                .blob
+                .rewind_log(&mut participant.state, len, None)
         {
             summaries.push((index, Err(error.clone())));
             participant.prepared = Err(error);

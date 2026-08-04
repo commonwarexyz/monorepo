@@ -86,7 +86,7 @@
 }
 
 \title{Atomic append-only storage,\\without writing payload twice}
-\subtitle{Participant-linked UNO / V2 and the contiguous journal simplification}
+\subtitle{Participant-linked UNO / V2 with caller-delimited payload integrity}
 \author{Commonware storage design walkthrough}
 \date{PR \#4368}
 
@@ -265,20 +265,20 @@
     \node[box,minimum width=2.45cm,minimum height=1.0cm] (hdr) {immutable header\\\scriptsize 4 KiB};
     \node[oldroot,minimum width=1.25cm,minimum height=1.0cm,right=.08cm of hdr] (r0) {slot 0\\\scriptsize 2 KiB};
     \node[root,minimum width=1.25cm,minimum height=1.0cm,right=0cm of r0] (r1) {slot 1\\\scriptsize 2 KiB};
-    \node[box,minimum width=6.75cm,minimum height=1.0cm,right=.08cm of r1] (payload) {append-only payload log\\\scriptsize physical and logical order agree};
+    \node[box,minimum width=6.75cm,minimum height=1.0cm,right=.08cm of r1] (payload) {append-only encoded payload log\\\scriptsize caller data + V2-owned integrity footers};
     \node[draw=Accent,dashed,rounded corners=.04cm,fit=(r0)(r1),inner sep=.05cm,label={[font=\tiny,text=Accent]above:one mutable 4 KiB root page split into two slots}] {};
     \draw[plainline] ($(payload.south west)+(0,-.14)$) -- ($(payload.south east)+(0,-.14)$);
     \node[below=.17cm of payload,font=\scriptsize,text=Muted] {payload begins at 8 KiB};
 
-    \node[panel,below=.82cm of hdr.south west,anchor=north west,text width=5.75cm,minimum height=1.24cm] (rootfields) {\textbf{92-byte root header}\\\scriptsize spelling \quad generation \quad logical length\\64-byte app tag \quad CRC32C};
-    \node[panel,right=.42cm of rootfields,text width=6.15cm,minimum height=1.24cm] (witness) {\textbf{One 2 KiB slot}\\\scriptsize 92 B root + 16 B witness envelope\\+ $\leq$1,940 B local link / unused space};
+    \node[panel,below=.82cm of hdr.south west,anchor=north west,text width=6.65cm,minimum height=1.3cm] (rootfields) {\textbf{R13: 112-byte root header}\\\tiny magic 8 \quad generation 8 \quad encoded length 8\\open unit start 8 \quad open CRC32C 4 \quad integrity scheme 4 \quad unit width 4\\caller application tag 64 \quad root CRC32C 4};
+    \node[panel,right=.32cm of rootfields,text width=5.25cm,minimum height=1.3cm] (witness) {\textbf{One 2 KiB slot}\\\scriptsize 112 B root + 16 B witness envelope\\+ $\leq$1,920 B local link / unused space};
   \end{tikzpicture}
 
   \vspace{0.3cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.32\textwidth}
       \eyebrow{Append}\par\smallskip
-      \small Write through immediately at the byte's final file offset.
+      \small Write data and V2-owned footers once at final encoded offsets.
     \end{column}
     \begin{column}{0.32\textwidth}
       \eyebrow{Publish}\par\smallskip
@@ -291,9 +291,9 @@
   \end{columns}
 
   \vfill
-  \takeaway{No extent map, hole punching, or compaction: a root selects a reachable payload prefix.}
+  \takeaway{No extent map, hole punching, or compaction: a root selects a reachable encoded prefix.}
 
-  \note{UNO is a development nickname, not a new public acronym: it reflects the one payload write and one hot-path barrier target. Both alternating 2 KiB slots share one 4 KiB mutable page after the immutable header. They are disjoint addressed ranges: generation parity writes one while preserving the other as fallback under the old/new/subset-of-addressed-write model. Collateral corruption of the containing physical block is a stronger media-failure model and is not made atomic by this layout. The application gets 64 tag bytes. The checked-page wrapper exposes 60 as its marker and reserves four for the partial-page checksum; contiguous currently uses the marker's first eight bytes for its start authority.}
+  \note{UNO is a development nickname, not a new public acronym: it reflects the one payload write and one hot-path barrier target. Both alternating 2 KiB slots share one 4 KiB mutable page after the immutable header. They are disjoint addressed ranges: generation parity writes one while preserving the other as fallback under the old/new/subset-of-addressed-write model. Collateral corruption of the containing physical block is a stronger media-failure model and is not made atomic by this layout. R13 keeps the complete 64-byte tag caller-owned. The start, rolling CRC32C, scheme, and unit-width encoding of the only unfinished integrity unit live in dedicated root fields. Root lengths and integrity offsets are relative to the encoded payload, including completed footers; the OS file offset is 8,192 plus that encoded offset. AtomicWriter and contiguous expose footer-free logical positions by mapping through their persisted page geometry.}
 \end{frame}
 
 \begin{frame}[t]{One blob: the durable decision fits in one barrier}
@@ -321,7 +321,7 @@
     \begin{column}{0.51\textwidth}
       \eyebrow{On restart}
       \begin{itemize}
-        \item If the prepared root, self link, and required suffix CRC all validate: expose new.
+        \item If the prepared root, self link, and publication-suffix CRC all validate: expose new.
         \item Otherwise: expose the preceding committed root.
         \item No follow-up P$\rightarrow$C marker and no second durability barrier.
       \end{itemize}
@@ -338,9 +338,9 @@
   \vspace{0.06cm}
   \begin{center}
     \begin{tikzpicture}[node distance=.52cm]
-      \node[root,text width=3.25cm,minimum height=1.14cm] (a) {blob A: \textbf{P} \quad {\tiny ordinal 0/3}\\\scriptsize local candidate + CRC\\next: exact B incarnation};
-      \node[root,text width=3.25cm,minimum height=1.14cm,right=of a] (b) {blob B: \textbf{P} \quad {\tiny ordinal 1/3}\\\scriptsize local candidate + CRC\\next: exact C incarnation};
-      \node[root,text width=3.25cm,minimum height=1.14cm,right=of b] (c) {blob C: \textbf{P} \quad {\tiny ordinal 2/3}\\\scriptsize local candidate + CRC\\next: exact A incarnation};
+      \node[root,text width=3.25cm,minimum height=1.14cm] (a) {blob A: \textbf{P} \quad {\tiny ordinal 0/3}\\\scriptsize candidate + publication CRC\\next: exact B incarnation};
+      \node[root,text width=3.25cm,minimum height=1.14cm,right=of a] (b) {blob B: \textbf{P} \quad {\tiny ordinal 1/3}\\\scriptsize candidate + publication CRC\\next: exact C incarnation};
+      \node[root,text width=3.25cm,minimum height=1.14cm,right=of b] (c) {blob C: \textbf{P} \quad {\tiny ordinal 2/3}\\\scriptsize candidate + publication CRC\\next: exact A incarnation};
       \draw[flow] (a) -- (b);
       \draw[flow] (b) -- (c);
       \draw[flow] (c.south) -- ++(0,-.46cm) -| node[pos=.25,below,font=\tiny,text=Muted]{same group ID + count; close after exactly three hops} (a.south);
@@ -359,7 +359,7 @@
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.48\textwidth}
       \eyebrow{What one local witness carries}\par\smallskip
-      \scriptsize Fresh 128-bit group ID, count + ordinal, local incarnation/candidate/removal bit, bounded suffix CRC32C, and only the successor's partition/name/incarnation.
+      \scriptsize Fresh 128-bit group ID, count + ordinal, local incarnation/candidate/removal bit, bounded publication-suffix CRC32C, and only the successor's partition/name/incarnation.
     \end{column}
     \begin{column}{0.48\textwidth}
       \eyebrow{What restart proves}\par\smallskip
@@ -451,8 +451,8 @@
   \noindent\hfill
     \begin{tikzpicture}[node distance=.40cm]
       \node[box,text width=2.0cm,minimum height=.72cm] (prepare) {encode frames\\\scriptsize starts $r_i$};
-      \node[box,text width=1.9cm,minimum height=.72cm,right=of prepare] (data) {append data\\\scriptsize base $B$};
-      \node[box,text width=1.95cm,minimum height=.72cm,right=of data] (derive) {derive index\\\scriptsize $o_i = B + r_i$};
+      \node[box,text width=1.9cm,minimum height=.72cm,right=of prepare] (data) {append data\\\scriptsize logical base $B$};
+      \node[box,text width=1.95cm,minimum height=.72cm,right=of data] (derive) {derive index\\\scriptsize logical $o_i = B + r_i$};
       \node[box,text width=1.9cm,minimum height=.72cm,right=of derive] (offsets) {append $u64$ offsets\\\scriptsize $o_i$};
       \node[root,text width=2.15cm,minimum height=.72cm,right=of offsets] (publish) {\texttt{start\_sync}\\\scriptsize publish both roots};
       \draw[flow] (prepare) -- (data);
@@ -470,7 +470,7 @@
 
       \vspace{0.08cm}
       \begin{tikzpicture}
-        \node[panel,text width=5.95cm,align=left] {\texttt{start = offsets[i]}\\\texttt{end = offsets[i + 1]}\\\texttt{decode data[start..end]}\\[-0.02cm]\scriptsize Active tail ends at committed data length;\\sealed sections store that length as a sentinel.};
+        \node[panel,text width=5.95cm,align=left] {\texttt{start = offsets[i]}\\\texttt{end = offsets[i + 1]}\\\texttt{decode data[start..end]}\\[-0.02cm]\scriptsize Footer-free checked-page coordinates; page geometry\\maps the root's encoded length to this logical size.};
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.45\textwidth}
@@ -493,7 +493,7 @@
   \vfill
   \takeaway{Stage dependency-aware writes first; one linked UNO group publishes the finished set.}
 
-  \note{The batch operation is a publication boundary, not a simultaneous-write scheduler. prepare_append encodes all frames and records each relative start before I/O. Appending the data slice returns its stable append-only base B; the journal adds B to each relative start and appends those u64 entries to the offsets blob. Those pending writes are immediately available to the current writer but remain outside the committed roots. start_sync then creates Publish operations for both blobs in every dirty pair and starts one UNO group. If staging fails, publication never begins and the consuming MutableV2 API prevents reuse of partially mutated state. On rollover the same pattern covers the prior and current data/offsets pairs, at most four roots.}
+  \note{The batch operation is a publication boundary, not a simultaneous-write scheduler. prepare_append encodes all frames and records each relative start before I/O. AtomicWriter appends the data slice and returns its stable footer-free logical base B; the journal adds B to each relative start and appends those u64 logical offsets to the offsets writer. AtomicWriter maps those logical positions to the AtomicBlob encoded stream, whose R13 length includes integrity footers. The pending writes are immediately available to the current writer but remain outside the committed roots. start_sync then creates Publish operations for both blobs in every dirty pair and starts one UNO group. If staging fails, publication never begins and the consuming MutableV2 API prevents reuse of partially mutated state. On rollover the same pattern covers the prior and current data/offsets pairs, at most four roots.}
 \end{frame}
 
 \begin{frame}[t]{Batch scale: fixed local metadata per participant}
@@ -503,9 +503,9 @@
   \vspace{0.07cm}
   \noindent\hfill
     \begin{tikzpicture}[node distance=.06cm]
-      \node[oldroot,text width=1.75cm,minimum height=.72cm] (roothead) {92 B\\\scriptsize candidate root};
+      \node[oldroot,text width=1.75cm,minimum height=.72cm] (roothead) {112 B\\\scriptsize candidate root};
       \node[box,text width=1.55cm,minimum height=.72cm,right=of roothead] (witness) {16 B\\\scriptsize witness header};
-      \node[root,text width=7.65cm,minimum height=.72cm,right=of witness] (link) {$\leq$ 1,940 B local link\\\scriptsize 296 B fixed fields + one successor partition/name};
+      \node[root,text width=7.65cm,minimum height=.72cm,right=of witness] (link) {$\leq$ 1,920 B local link\\\scriptsize 336 B fixed fields + one successor partition/name};
     \end{tikzpicture}
   \hfill\null
 
@@ -517,7 +517,7 @@
       \vspace{0.08cm}
       \begin{tikzpicture}[node distance=.14cm]
         \node[root,text width=2.35cm,minimum height=.78cm,align=center] (configured) {\Large\bfseries one link\\\scriptsize candidate + successor};
-        \node[panel,text width=2.40cm,minimum height=.78cm,right=of configured] (encoded) {\Large\bfseries 1,644 B\\\scriptsize maximum successor path};
+        \node[panel,text width=2.40cm,minimum height=.78cm,right=of configured] (encoded) {\Large\bfseries 1,584 B\\\scriptsize maximum successor path};
       \end{tikzpicture}
 
       \vspace{0.08cm}
@@ -532,17 +532,17 @@
       \end{tikzpicture}
 
       \vspace{0.08cm}
-      \scriptsize At most \textbf{64 MiB aggregate} remains for restart CRC work. Older immutable bytes preflush while appends continue.
+      \scriptsize At most \textbf{64 MiB aggregate} remains for publication recovery CRC work. Older immutable bytes preflush while appends continue.
     \end{column}
   \end{columns}
 
   \vfill
   \takeaway{Metadata grows one local link per participant; payload is streamed once rather than copied.}
 
-  \note{Every participant stores only its own candidate and one successor path. Every local link must fit its 1,940-byte witness body, leaving 1,644 bytes for the successor partition and blob name after fixed fields. The entire group name set is never encoded in one slot, so moderate names do not reduce group membership. Recovery grows state only after validating each exact successor, and installation can process a large ring in bounded chunks. An epoch may contain arbitrarily much payload within ordinary storage and offset limits. As appends arrive, completed durability operations turn older immutable bytes into a trusted prefix. Publication leaves at most 64 MiB across the group under CRC32C, so restart work stays bounded without rejecting or copying a large epoch. Fixed contiguous rollover publishes at most prior and current roots; variable publishes the data/offsets pair for each, at most four roots.}
+  \note{Every participant stores only its own candidate and one successor path. Every local link must fit its 1,920-byte witness body, leaving 1,584 bytes for the successor partition and blob name after 336 fixed bytes. The entire group name set is never encoded in one slot, so moderate names do not reduce group membership. Recovery grows state only after validating each exact successor, and installation can process a large ring in bounded chunks. An epoch may contain arbitrarily much payload within ordinary storage and offset limits. As appends arrive, completed durability operations turn older immutable bytes into a trusted prefix. Publication leaves at most 64 MiB across the group under CRC32C, so restart work stays bounded without rejecting or copying a large epoch. Fixed contiguous rollover publishes at most prior and current roots; variable publishes the data/offsets pair for each, at most four roots.}
 \end{frame}
 
-\begin{frame}[t]{Large epochs advance a trusted payload prefix}
+\begin{frame}[t]{Large epochs bound publication recovery work}
   \vspace{0cm}
   \eyebrow{While appending: payload is at final offsets; no candidate root exists yet}
 
@@ -551,7 +551,7 @@
     \begin{tikzpicture}[node distance=.07cm]
       \node[oldroot,text width=2.05cm,minimum height=.7cm] (old) {old root\\\scriptsize authoritative};
       \node[box,text width=4.15cm,minimum height=.7cm,right=.28cm of old] (prefix) {trusted prefix through $F$\\\scriptsize only completed durability counts};
-      \node[root,text width=3.35cm,minimum height=.7cm,right=of prefix] (tail) {tail $[F,E)$\\\scriptsize rolling CRC32C};
+      \node[root,text width=3.35cm,minimum height=.7cm,right=of prefix] (tail) {tail $[F,E)$\\\scriptsize publication CRC32C};
       \draw[flow] ([yshift=.18cm]prefix.north west) -- node[above,font=\scriptsize,text=Accent] {coalesced preflush moves $F$} ([yshift=.18cm]prefix.north east);
       \draw[flow,draw=Amber] ([yshift=-.16cm]tail.south east) -- node[below,font=\scriptsize,text=Amber] {pending rewind: drain preflush $\rightarrow$ reset $F$/CRC $\rightarrow$ reclaim + reuse tail} ([yshift=-.16cm]prefix.south west);
     \end{tikzpicture}
@@ -565,7 +565,7 @@
     \begin{tikzpicture}[node distance=.2cm]
       \node[box,text width=1.65cm,minimum height=.64cm] (freeze) {freeze $E$};
       \node[box,text width=1.85cm,minimum height=.64cm,right=of freeze] (wait) {preflush\\\scriptsize if needed};
-      \node[box,text width=1.9cm,minimum height=.64cm,right=of wait] (crc) {CRC $[F,E)$\\\scriptsize tail only};
+      \node[box,text width=1.9cm,minimum height=.64cm,right=of wait] (crc) {publish CRC\\\scriptsize $[F,E)$ only};
       \node[root,text width=1.9cm,minimum height=.64cm,right=of crc] (stage) {write P root\\+ local link};
       \node[root,text width=1.9cm,minimum height=.64cm,right=of stage] (barrier) {durability\\barrier};
       \draw[flow] (freeze) -- (wait);
@@ -590,7 +590,7 @@
   \vfill
   \takeaway{Repeat per participant: no payload-byte cap, at most 64 MiB aggregate restart tail, and concurrent final barriers.}
 
-  \note{Only a completed fdatasync-equivalent advances the trusted frontier F; sync_file_range or another writeback hint never does. Background preflush is coalesced while the producer continues, and it writes no root. At publication, each participant waits only for any durability frontier it must rely on. Its local witness names that trusted prefix and carries CRC32C for the remaining tail; tail budgets sum to at most 64 MiB across the group. The final participant barriers run concurrently. A very large append followed immediately by sync may still wait for a payload preflush and then the root barrier, but payload is never copied or written twice. Before root staging, a crash can expose only old. Once staging begins, the ordinary indeterminate window applies: old or complete new.}
+  \note{Only a completed fdatasync-equivalent advances the trusted frontier F; sync_file_range or another writeback hint never does. Background preflush is coalesced while the producer continues, and it writes no root. At publication, each participant waits only for any durability frontier it must rely on. Its local witness names that trusted prefix and carries CRC32C for the remaining tail; tail budgets sum to at most 64 MiB across the group. This publication checksum is independent of the long-lived integrity-unit footer or open-unit CRC. The final participant barriers run concurrently. A very large append followed immediately by sync may still wait for a payload preflush and then the root barrier, but payload is never copied or written twice. Before root staging, a crash can expose only old. Once staging begins, the ordinary indeterminate window applies: old or complete new.}
 \end{frame}
 
 \begin{frame}[t]{Intentional limitation: no global sync order}
@@ -715,8 +715,8 @@
     \toprule
     \textbf{What validates after restart} & \textbf{What recovery can prove} & \textbf{Exposed result} \\
     \midrule
-    No M/T proof; every exact P, local link, incarnation, candidate, and suffix validates & One group ID/count; unique consecutive ordinals close after exactly $N$ hops & New roots for the whole group \\
-    No M/T proof; any link, incarnation, candidate, or suffix is missing/mismatched & The linked group decision is incomplete & Old roots for the whole group \\
+    No M/T proof; every exact P, local link, incarnation, candidate, and publication suffix validates & One group ID/count; unique consecutive ordinals close after exactly $N$ hops & New roots for the whole group \\
+    No M/T proof; any link, incarnation, candidate, or publication suffix is missing/mismatched & The linked group decision is incomplete & Old roots for the whole group \\
     An exact materialized M or tombstone T validates & Installation began only after the P ring was durable & Finish peers; after unlink begins, resume the descending frontier from ordinal 0 \\
     \bottomrule
   \end{tabularx}
@@ -729,7 +729,7 @@
     \end{column}
     \begin{column}{0.32\textwidth}
       \eyebrow{Torn payload}\par\smallskip
-      \scriptsize A trusted prefix plus CRC32C over the remaining bounded suffix prevents partial visibility.
+      \scriptsize A trusted prefix plus publication CRC32C rejects partial visibility with probabilistic checksum assurance.
     \end{column}
     \begin{column}{0.32\textwidth}
       \eyebrow{Threat boundary}\par\smallskip
@@ -852,18 +852,16 @@
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.55\textwidth}
-      \eyebrow{With atomic V2 roots}
+      \eyebrow{Native V2 steady state}
 
       \vspace{0.12cm}
       \begin{tikzpicture}[node distance=.33cm]
-        \node[root,minimum width=5.25cm] (section) {section name + committed root length};
-        \node[root,minimum width=5.25cm,below=of section] (tag) {64-byte application tag};
+        \node[root,minimum width=5.25cm] (section) {section name + committed encoded length};
+        \node[root,minimum width=5.25cm,below=of section] (tag) {64-byte caller application tag};
         \node[box,minimum width=1.65cm,below=.34cm of tag.south west,anchor=north west] (start) {start + 1\\\scriptsize 8 bytes};
-        \node[panel,minimum width=2.2cm,right=0cm of start] (available) {reserved\\\scriptsize 52 zero bytes};
-        \node[box,minimum width=1.4cm,right=0cm of available] (crc) {tail CRC32C\\\scriptsize 4 bytes};
+        \node[panel,minimum width=3.6cm,right=0cm of start] (available) {reserved for caller evolution\\\scriptsize 56 zero bytes today};
         \draw[faintline] (tag) -- (start);
         \draw[faintline] (tag) -- (available);
-        \draw[faintline] (tag) -- (crc);
       \end{tikzpicture}
     \end{column}
   \end{columns}
@@ -872,118 +870,135 @@
   \small
   \begin{itemize}\setlength\itemsep{0.08cm}
     \item Variable V2 publishes matching data + offsets roots in the \textbf{same UNO group}; neither can advance alone.
-    \item One fixed section or variable pair holds the start; names + root lengths recover the remaining bounds.
+    \item One fixed section or variable pair holds the start; names + encoded lengths map through page geometry to recover logical bounds.
     \item \texttt{MutableV2}: consuming mutations, \texttt{start\_sync}, and \texttt{sync}---no legacy \texttt{commit} split.
   \end{itemize}
 
   \vfill
   \takeaway{Offsets remain as the variable index; the separate checkpoint object disappears.}
 
-  \note{This is the direct contiguous payoff. We do not encode more journal frames just to recover the start. We use the application-owned root tag. Contiguous's current marker encoding requires the remaining 52 bytes to be zero, leaving room for a deliberately versioned extension without making arbitrary trailing bytes authoritative. Consuming mutation methods prevent reuse after failed or cancelled storage operations, while snapshots remain available for concurrent readers.}
+  \note{This is the direct contiguous payoff. We do not encode more journal frames just to recover the start. We use the application-owned root tag. Contiguous's current marker encoding requires the remaining 56 bytes to be zero, leaving room for a deliberately versioned extension without making arbitrary trailing bytes authoritative. Integrity state no longer consumes any caller tag bytes; it lives in dedicated R13 root fields. Consuming mutation methods prevent reuse after failed or cancelled storage operations, while snapshots remain available for concurrent readers.}
 \end{frame}
 
-\begin{frame}[t]{Small writes: the root checks the unfinished page}
+\begin{frame}[t]{Integrity units: fixed pages or caller-delimited values}
+  \vspace{-0.03cm}
   \begin{columns}[T,onlytextwidth]
-    \begin{column}{0.56\textwidth}
-      \eyebrow{Two 10-byte writes, each synchronized}
+    \begin{column}{0.49\textwidth}
+      \eyebrow{Chunked scheme: page cache}
 
-      \vspace{0.07cm}
-      \begin{tikzpicture}[node distance=.14cm]
-        \node[root,text width=3.2cm,minimum height=.78cm] (r1) {
-          root $g$ in slot 0\\[-.04cm]
-          \scriptsize len $=10$ B\\[-.04cm]
-          \scriptsize \texttt{tag[60..64]} $=C(A)$
-        };
-        \node[box,text width=3.2cm,below=of r1,minimum height=.58cm] (p1) {
-          payload: \texttt{[A: 10 B]}
-        };
-
-        \node[root,text width=3.45cm,minimum height=.78cm,right=.55cm of r1] (r2) {
-          root $g+1$ in slot 1\\[-.04cm]
-          \scriptsize len $=20$ B\\[-.04cm]
-          \scriptsize \texttt{tag[60..64]} $=C(A \Vert B)$
-        };
-        \node[box,text width=3.45cm,below=of r2,minimum height=.58cm] (p2) {
-          payload: \texttt{[A][B]}
-        };
-
-        \draw[flow] (r1) -- node[fill=white,inner sep=.02cm,font=\tiny,text=Muted,align=center]{+10 B\\sync} (r2);
-        \draw[flow] (p1) -- (p2);
-
-        \coordinate (payloadbottom) at ($(p1.south)!0.5!(p2.south)$);
-        \node[anchor=north,text width=7.25cm,align=center,font=\scriptsize,text=Muted]
-          at ([yshift=-.1cm]payloadbottom)
-          {Torn root $g+1$ or B $\Rightarrow$ use fallback $g$; the surviving suffix is unreachable.};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.42\textwidth}
-      \eyebrow{When the page boundary arrives}
-
-      \vspace{0.03cm}
+      \vspace{0.02cm}
       \begin{tikzpicture}[node distance=0cm]
-        \node[box,text width=2.45cm,minimum height=.68cm] (page) {full page\\\scriptsize $P$ logical bytes};
-        \node[root,text width=1.12cm,minimum height=.68cm,right=of page] (footer) {CRC\\\scriptsize 4 B};
-        \node[box,text width=1.5cm,minimum height=.68cm,right=of footer] (tail) {next tail\\\scriptsize $<P$};
-        \node[warn,minimum width=1.55cm,minimum height=.68cm,inner sep=.04cm,below=.18cm of tail] (pendingcrc) {
-          \tiny in-progress\\[-.05cm]tail CRC\\[-.05cm]4 B
-        };
-        \node[box,minimum width=3.55cm,minimum height=.68cm,inner xsep=.06cm,inner ysep=.03cm,left=of pendingcrc] (pendingmarker) {
-          \small pending tag in RAM\\[-.05cm]\tiny application marker: 60 B
-        };
-        \draw[flow,draw=Amber] (tail.south) --
-          node[left,font=\tiny,text=Amber]{hash}
-          (pendingcrc.north);
+        \node[box,text width=3.65cm,minimum height=.62cm] (page) {page payload\\\scriptsize 4,092 bytes};
+        \node[root,text width=1.05cm,minimum height=.62cm,right=of page] (footer) {CRC\\\scriptsize 4 B};
+        \node[warn,text width=4.82cm,minimum height=.62cm,below=.42cm of page.south west,anchor=north west] (open) {small A + \texttt{sync} + small B + \texttt{sync}\\\scriptsize one open unit continues; no footer yet};
+        \draw[flow,draw=Amber] (footer.south |- open.north) -- node[midway,right=.04cm,font=\tiny,text=Amber]{seal at 4,092 B} (footer.south);
       \end{tikzpicture}
 
-      \vspace{0.05cm}
-      \scriptsize
-      \begin{itemize}\setlength\itemsep{0.01cm}
-        \item One footer per storage page, never per item.
-        \item At most one unfooted tail; the selected root covers all of it.
-        \item A completed page is immutable and cacheable.
-      \end{itemize}
+      \vspace{0.04cm}
+      \scriptsize \texttt{Chunked(4092)} binds the fixed payload width. Write calls and syncs do not close a short unit. One footer completes a 4,096-byte physical page, which is then immutable and cacheable.
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \eyebrow{Variable scheme: GLOB / long value}
+
+      \vspace{0.02cm}
+      \begin{tikzpicture}[node distance=0cm]
+        \node[box,text width=4.15cm,minimum height=.62cm] (value) {one value from many appends\\\scriptsize part 1 \quad part 2 \quad $\cdots$ \quad last bytes};
+        \node[root,text width=1.05cm,minimum height=.62cm,right=of value] (vfooter) {CRC\\\scriptsize 4 B};
+        \node[panel,text width=5.32cm,minimum height=.62cm,below=.14cm of value.south west,anchor=north west] (complete) {\texttt{Continue} while streaming; \texttt{Complete} once\\\scriptsize the caller chooses the semantic boundary};
+        \draw[flow] (vfooter.south |- complete.north) -- node[right,font=\tiny,text=Accent]{one footer} (vfooter.south);
+      \end{tikzpicture}
+
+      \vspace{0.04cm}
+      \scriptsize Many appends may form one integrity unit. \texttt{Complete} emits exactly one footer for the open unit. There is no fixed unit width; V2 owns checksum calculation and encoding.
     \end{column}
   \end{columns}
 
-  \vspace{0.03cm}
-  \eyebrow{92-byte root header inside the selected 2 KiB root/witness slot}
+  \vspace{-0.04cm}
+  \eyebrow{R13 selected root: exact 112-byte layout}
 
-  \vspace{0.03cm}
+  \vspace{0cm}
   \begin{center}
-    \begin{tikzpicture}[node distance=0cm]
-      \node[oldroot,minimum width=2.4cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm] (identity) {
-        \small magic + generation\\[-.04cm]\tiny 16 bytes
-      };
-      \node[box,minimum width=1.2cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of identity] (length) {
-        \scriptsize length\\[-.04cm]\tiny 8 bytes
-      };
-      \node[box,minimum width=9.0cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of length] (marker) {
-        \small application marker\\[-.04cm]\tiny 60 bytes
-      };
-      \node[warn,minimum width=.6cm,minimum height=1.05cm,inner xsep=.01cm,inner ysep=.02cm,right=of marker] (tailcrc) {
-        \tiny $C_t$\\[-.04cm]\tiny 4 B
-      };
-      \node[oldroot,minimum width=.6cm,minimum height=1.05cm,inner xsep=.01cm,inner ysep=.02cm,right=of tailcrc] (rootcrc) {
-        \tiny $C_r$\\[-.04cm]\tiny 4 B
-      };
-      \node[above=.04cm of tailcrc,font=\tiny,text=Amber] (persist) {wrapper stages before \texttt{sync}};
-      \draw[flow,draw=Amber] (persist.south) -- (tailcrc.north);
+    \begin{tikzpicture}
+      \node[panel,text width=12.95cm,align=center,inner ysep=.04cm] {\scriptsize
+        magic 8 $\mid$ generation 8 $\mid$ encoded length 8\\[-.02cm]
+        open unit start 8 $\mid$ open CRC32C 4 $\mid$ integrity scheme 4 $\mid$ unit width 4\\[-.02cm]
+        caller application tag 64 $\mid$ root CRC32C 4};
     \end{tikzpicture}
   \end{center}
 
   \vfill
-  \takeaway{\textbf{In progress:} CRC in RAM \quad \textbf{At sync:} root + local witness slot \quad \textbf{Never at sync:} rewrite payload.}
+  \takeaway{An unfinished integrity unit lives in dedicated root fields---never in the caller's 64-byte application tag.}
 
-  \note{This is the complete small-write story on one slide. A ten-byte append writes ten payload bytes at their final offset. AtomicWriter computes the CRC of the entire current partial page and passes it in the last four application-tag bytes to append-tagged; that method stages length and tag as one in-memory mutation. Sync writes the next root generation, witness envelope, and any local ring link into the alternate 2 KiB slot. The lower bar expands only the 92-byte root header, with widths proportional to bytes. No checksum bytes appear after A or B. The prior root remains the fallback, and each root header has its own CRC, so an arbitrary torn candidate is rejected. Once P logical bytes accumulate, AtomicWriter appends one four-byte footer. Any remainder becomes the next tail and its CRC moves into the selected root. The footer makes that completed payload page immutable and eligible for the planned page cache. This is storage-page integrity, not an application record checksum or item-boundary map.}
+  \note{Chunked mode is the page-cache layout. With a 4,092-byte payload width, V2 appends a four-byte footer at each fixed boundary, producing aligned 4,096-byte physical units. Small writes extend one open unit across any number of syncs; each selected root publishes its start and rolling checksum until it fills. Variable mode is for semantic units such as a GLOB or long value: Continue permits many appends, and Complete appends one footer for the whole nonempty unit. The scheme name describes checksum boundaries, not the journal kind: both fixed and variable contiguous journals currently use Chunked checked pages. In either mode, callers choose boundaries but never calculate or encode CRC32C. Encoded length includes completed footers. The dedicated open-unit fields let the complete 64-byte application tag remain caller-owned.}
+\end{frame}
+
+\begin{frame}[t]{CRC API: caller boundaries, V2 checksums}
+  \vspace{0cm}
+  \eyebrow{One coherent mutation chain; stale tokens fail before payload I/O}
+
+  \vspace{0.04cm}
+  \begin{center}
+    \begin{tikzpicture}[node distance=.32cm]
+      \node[box,text width=3.7cm,minimum height=.82cm] (snapshot) {\texttt{integrity\_snapshot()}\\\scriptsize encoded length + scheme + tag\\tail bytes + token};
+      \node[root,text width=4.65cm,minimum height=.82cm,right=of snapshot] (append) {\texttt{append\_integrity(token, bytes, boundary, tag?)}\\\scriptsize V2 calculates CRCs and inserts any footer};
+      \node[panel,text width=2.75cm,minimum height=.82cm,right=of append] (next) {encoded offset\\\scriptsize + next token};
+      \draw[flow] (snapshot) -- (append);
+      \draw[flow] (append) -- (next);
+    \end{tikzpicture}
+  \end{center}
+
+  \vspace{0.06cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.32\textwidth}
+      \begin{tikzpicture}
+        \node[panel,text width=3.75cm,minimum height=.72cm,align=left] {\textbf{\texttt{Continue}}\\\scriptsize Add no caller boundary; an existing scheme still applies.};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{tikzpicture}
+        \node[root,text width=3.75cm,minimum height=.72cm,align=left] {\textbf{\texttt{Complete}}\\\scriptsize Append one footer at a nonempty caller boundary.};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{tikzpicture}
+        \node[root,text width=3.75cm,minimum height=.72cm,align=left] {\textbf{\texttt{Chunked(n)}}\\\scriptsize Append one footer every $n$ data bytes.};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.24cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.49\textwidth}
+      \eyebrow{Read}
+
+      \vspace{0.03cm}
+      \scriptsize \texttt{read\_integrity(unit)} validates data + footer; snapshot / \texttt{read\_integrity\_tail()} validates the open unit. Raw blob reads expose unvalidated encoded bytes.
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \eyebrow{Rewind}
+
+      \vspace{0.03cm}
+      \scriptsize \texttt{rewind\_integrity(token, end, unit?, tag?)} validates at most the containing unit, then rebuilds the retained prefix's open-unit CRC.
+    \end{column}
+  \end{columns}
+
+  \vspace{0.08cm}
+  {\centering\scriptsize
+  \textbf{CRC scopes:} footer / open-unit field: reads \quad $\mid$ \quad witness suffix: crash publication \quad $\mid$ \quad root / link wrapper: metadata\par}
+
+  \vfill
+  \takeaway{Callers own boundaries and indexes; V2 owns CRCs and stale-writer fencing.}
+
+  \note{The API exposes encoded offsets because completed-unit footers occupy the payload stream. Higher-level wrappers such as AtomicWriter translate between their logical offsets and this encoded layout. Continue does not itself choose a durable scheme; Complete selects Variable, while Chunked selects and persists its fixed width. Once bound, the scheme cannot change. The compare token versions the immediately visible integrity state, so two cached writers cannot both append or retag from the same assumed tail. A sync or linked batch publishes encoded length, open-unit state, and the complete caller tag together. Integrity-unit CRCs remain useful for later reads; the separate witness checksum exists only to decide whether unsynchronized publication bytes survived a crash. CRC32C detects accidental local-disk corruption, not malicious tampering.}
 \end{frame}
 
 \begin{frame}[t]{V2 caching: immutable payload pages, mutable RAM}
-  \vspace{0.02cm}
+  \vspace{0cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.38\textwidth}
       \eyebrow{What rewrites today?}
 
-      \vspace{0.09cm}
+      \vspace{0.04cm}
       \begin{tikzpicture}
         \node[oldroot,text width=4.35cm,minimum height=.92cm] (legacy) {
           legacy partial physical tip\\[-.04cm]
@@ -994,10 +1009,10 @@
       \vspace{0.02cm}
       \scriptsize Append/rewind may rewrite that tip. The legacy tip's two length/CRC records retain the prior logical prefix; this is \textbf{not} arbitrary record overwrite.
 
-      \vspace{0.17cm}
+      \vspace{0.08cm}
       \eyebrow{Current V2 is different}
 
-      \vspace{0.09cm}
+      \vspace{0.04cm}
       \begin{tikzpicture}
         \node[root,text width=4.35cm,minimum height=.92cm] (v2) {
           \texttt{AtomicSnapshot} reads directly\\[-.04cm]
@@ -1008,7 +1023,7 @@
     \begin{column}{0.60\textwidth}
       \eyebrow{Planned V2 read path}
 
-      \vspace{0.12cm}
+      \vspace{0.02cm}
       \begin{tikzpicture}[node distance=.29cm]
         \node[box,minimum width=2.25cm] (read) {\texttt{AtomicSnapshot}\\read};
         \node[root,minimum width=3.2cm,right=of read] (lookup) {full-page cache\\\scriptsize (generation, page)};
@@ -1025,12 +1040,15 @@
         \node[below=.12cm of tail,font=\scriptsize,text=Muted,align=center] {never enters the\\shared page cache};
       \end{tikzpicture}
 
-      \vspace{0.14cm}
+      \vspace{0.01cm}
       \scriptsize One cache core still coalesces faults and evicts RAM pages; loaders decode legacy page $+12$ or atomic page $+4$.
     \end{column}
   \end{columns}
 
-  \vspace{0.16cm}
+  \vspace{0cm}
+  \eyebrow{Proposed cache invariants}
+
+  \vspace{0cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.32\textwidth}
       \eyebrow{Identity}\par\smallskip
@@ -1047,18 +1065,18 @@
   \end{columns}
 
   \vfill
-  \takeaway{The cache may replace RAM entries; V2 never overwrites a completed payload page.}
+  \takeaway{A future cache may replace RAM entries; V2 never overwrites completed payload pages.}
 
   \note{This slide separates current implementation from planned integration. Legacy contiguous is backed by the existing page cache and paged writer. Its only disk rewrite is the specially encoded partial physical tip, whose two length/checksum slots retain the previously committed prefix. V2 contiguous currently bypasses CacheRef: AtomicSnapshot validates page-plus-four reads directly, and its synchronous cache-only methods are not implemented. The integration is a cache refactor, not permission for V2 overwrites: keep the bounded logical-page store and fault coalescing, but select the legacy page-plus-twelve or atomic page-plus-four loader. Full atomic pages are immutable once their footer is appended, while the snapshot carries the raw partial tail. Fixed and variable V2 journals can then implement cache-only reads; variable data and offsets use distinct IDs. Newly completed pages can also seed the cache from already-owned bytes instead of rereading them.}
 \end{frame}
 
-\begin{frame}[t]{Rollover and reopen work stay bounded}
-  \vspace{0.02cm}
+\begin{frame}[t]{Rollover and root recovery stay bounded}
+  \vspace{0cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.6\textwidth}
       \eyebrow{Crossing many fixed sections in one epoch}
 
-      \vspace{0.14cm}
+      \vspace{0.04cm}
       \begin{tikzpicture}[node distance=.24cm,scale=.75,transform shape]
         \node[root,minimum width=2.0cm] (prior) {prior authority\\\scriptsize marker set};
         \node[box,minimum width=1.85cm,right=.45cm of prior] (s1) {sealed 1\\\scriptsize unmarked};
@@ -1074,44 +1092,44 @@
         \draw[plainline] (tail.south) |- (decision.east);
       \end{tikzpicture}
 
-      \vspace{0.24cm}
+      \vspace{0.12cm}
       \small Sealed intermediate sections may be durably staged while unreachable; their names fill the interval once the marker publishes.
 
-      \vspace{0.14cm}
+      \vspace{0.08cm}
       \begin{tikzpicture}
         \node[panel,text width=6.65cm,align=center] {\small fixed: \textbf{2 roots}\qquad variable: \textbf{4 roots}\\\scriptsize prior/current $\times$ data/offsets, all in one group};
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.38\textwidth}
-      \eyebrow{Open / restart work}
+      \eyebrow{Open / restart path}
 
-      \vspace{0.14cm}
-      \begin{tikzpicture}[node distance=.26cm]
+      \vspace{0.08cm}
+      \begin{tikzpicture}[node distance=.19cm]
         \node[box,minimum width=4.35cm] (names) {scan section names};
         \node[box,minimum width=4.35cm,below=of names] (roots) {read roots; if P, follow\\\scriptsize its one exact declared ring};
-        \node[box,minimum width=4.35cm,below=of roots] (tailcheck) {validate bounded tail state};
-        \node[root,minimum width=4.35cm,below=of tailcheck] (bounds) {reconstruct journal bounds};
+        \node[root,minimum width=4.35cm,below=of roots] (bounds) {raw \texttt{AtomicBlob}: bounds only\\\scriptsize no payload read};
+        \node[panel,minimum width=4.35cm,below=of bounds] (writers) {construct checked-page writers\\\scriptsize validate retained partial tails};
         \draw[flow] (names) -- (roots);
-        \draw[flow] (roots) -- (tailcheck);
-        \draw[flow] (tailcheck) -- (bounds);
+        \draw[flow] (roots) -- (bounds);
+        \draw[flow] (bounds) -- (writers);
       \end{tikzpicture}
 
-      \vspace{0.18cm}
-      \scriptsize Fixed journals may read the final partial checked page of each section. Sealed variable sections are page-complete, so only active data/offset tails need equivalent validation.
+      \vspace{0cm}
+      \scriptsize Fixed: $\leq 1$ tail per retained section. Variable: sealed pairs are complete; active data + offsets: $\leq 2$ tails. Full pages remain lazy.
     \end{column}
   \end{columns}
 
   \vfill
-  \takeaway{Opening scans names and roots---never every frame, historical page, or complete blob.}
+  \takeaway{No historical-page scan: raw blob open reads roots; contiguous init reads only retained partial tails.}
 
-  \note{The bounded final group is the important optimization for contiguous. Rollover can stage sealed sections ahead of publication. The one movable authority marker makes all names between the retained start and active tail reachable at once. Variable needs four roots because both data and offsets for the prior authority and current tail must move together.}
+  \note{The bounded final group is the important optimization for contiguous. Rollover can stage sealed sections ahead of publication. The one movable authority marker makes all names between the retained start and active tail reachable at once. The variable journal needs four roots because both data and offsets for the prior authority and current tail must move together; this journal name is unrelated to the IntegrityScheme::Variable checksum mode. Raw AtomicBlob recovery reads only the two fixed roots and any declared P ring, never payload. Current contiguous init goes one step further by constructing AtomicWriter instances: fixed may validate one bounded partial Chunked unit for every retained section, while sealed variable pairs are page-complete and only the active data and offsets writers may each validate a tail. Completed pages remain lazy and validate when read, so reopening still never walks complete blobs.}
 \end{frame}
 
-\begin{frame}[t]{Paired throughput: APFS 96.2\%; ext4 98.0\%}
+\begin{frame}[t]{Raw UNO median: APFS 96.2\%; ext4 98.0\%}
   \vspace{0.02cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.54\textwidth}
-      \eyebrow{Final linked-witness hot path vs ordinary blobs}
+      \eyebrow{Linked-witness raw append vs ordinary blobs}
 
       \vspace{0.12cm}
       \begin{tikzpicture}[x=.88cm,y=1cm]
@@ -1129,8 +1147,8 @@
 
       \vspace{0.08cm}
       \begin{tikzpicture}[node distance=.16cm]
-        \node[root,text width=2.8cm,minimum height=.7cm] (apfsresult) {\Large\bfseries 3.8\%\\[-.04cm]\tiny APFS overhead};
-        \node[warn,text width=2.8cm,minimum height=.7cm,right=of apfsresult] {\Large\bfseries 2.0\%\\[-.04cm]\tiny ext4 overhead};
+        \node[root,text width=2.8cm,minimum height=.7cm] (apfsresult) {\Large\bfseries 3.8\%\\[-.04cm]\tiny APFS median overhead};
+        \node[warn,text width=2.8cm,minimum height=.7cm,right=of apfsresult] {\Large\bfseries 2.0\%\\[-.04cm]\tiny ext4 median overhead};
       \end{tikzpicture}
 
       \vspace{0.1cm}
@@ -1140,12 +1158,13 @@
     \begin{column}{0.44\textwidth}
       \eyebrow{Workload}
       \small
-      \begin{itemize}\setlength\itemsep{0.04cm}
+      \begin{itemize}\setlength\itemsep{0.02cm}
         \item 4 blobs per group
         \item sixteen contiguous 64 KiB appends per blob
         \item 4 MiB logical payload per group
+        \item raw \texttt{append}: no integrity-unit footers
         \item 250 groups per side; 5 paired seeds
-        \item Tokio, 2 worker threads; sides interleaved
+        \item Tokio, 2 workers; inflight 1; sides interleaved
       \end{itemize}
 
       \vspace{0.08cm}
@@ -1156,54 +1175,9 @@
   \end{columns}
 
   \vfill
-  \takeaway{Payload is written once; the group has no coordinator file; variable data + offsets publish atomically.}
+  \takeaway{This isolates group publication; \texttt{Variable} and \texttt{Chunked(4092)} still need paired measurements.}
 
-  \note{These measurements use the final R14 linked-participant-witness worktree with the 64-byte application tag in optimized mode on 2026-08-04. Each trial alternates ordinary and UNO groups in one process and times full ordinary sync completion versus full UNO batch-handle completion. APFS is the native development filesystem. ext4 is a Docker-volume filesystem inside a Linux VM; its absolute latency and range reflect virtualization, so only the paired direction is claimed. Do not generalize these numbers to deletes, migration, incompatible participant changes, or every journal configuration. The result supports the architectural claim: group atomicity need not imply two payload writes or another coordinator-file barrier.}
-\end{frame}
-
-\begin{frame}[t]{Open question: can callers reuse V2's CRC work?}
-  \vspace{0.02cm}
-  \begin{tikzpicture}
-    \node[box,text width=3.0cm,minimum height=.76cm] (bytes) {the same payload\\bytes};
-    \node[root,text width=3.55cm,minimum height=.76cm,right=.42cm of bytes] (uno) {V2 rolling CRC32C\\\scriptsize pending suffix / sync epoch};
-    \node[panel,text width=3.6cm,minimum height=.76cm,right=.42cm of uno,align=center] (crash) {crash-publication evidence\\\scriptsize pending epoch only};
-    \draw[flow] (bytes) -- (uno);
-    \draw[flow] (uno) -- (crash);
-
-    \node[warn,text width=3.55cm,minimum height=.76cm,below=.42cm of uno] (caller) {journal CRC32C\\\scriptsize record / page boundary};
-    \node[panel,text width=3.6cm,minimum height=.76cm,right=.42cm of caller,align=center] (read) {long-lived read integrity\\\scriptsize record / page lifetime};
-    \coordinate (fork) at (bytes.south |- caller.west);
-    \draw[flow,draw=Amber] (bytes.south) -- (fork) -- (caller.west);
-    \draw[flow,draw=Amber] (caller) -- (read);
-    \node[font=\scriptsize,text=Fault,above,yshift=.02cm] at ($(fork)!0.55!(caller.west)$) {hash again};
-  \end{tikzpicture}
-
-  \vspace{0.18cm}
-  \begin{columns}[T,onlytextwidth]
-    \begin{column}{0.48\textwidth}
-      \eyebrow{A possible bridge}
-      \scriptsize
-      \begin{itemize}\setlength\itemsep{0.03cm}
-        \item Accept caller-supplied spans; return composable \texttt{(offset, len, CRC32C)} receipts.
-        \item Combine CRCs across write/preflush chunks without rereading bytes.
-        \item Caller maps receipts through its index and persists them in group-published data---not the local witness or 64-byte tag.
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \eyebrow{Why this is not automatic}
-      \scriptsize
-      \begin{itemize}\setlength\itemsep{0.03cm}
-        \item A write may contain many records; one record may cross writes or preflush ranges.
-        \item Byte offsets alone do not identify application items; variable journals need their offsets index.
-        \item Root tags cannot hold a checksum map; storage-owned boundaries would recreate metadata.
-      \end{itemize}
-    \end{column}
-  \end{columns}
-
-  \vfill
-  \takeaway{Promising direction: share checksum computation, while callers retain ownership of logical boundaries.}
-
-  \note{UNO currently needs only one CRC over the not-yet-proven-durable suffix. That checksum answers whether a candidate epoch is complete after a crash; it is not a permanent record index or a promise to validate every later read. CRC32C values can be combined when lengths and order are known, so a receipt API might avoid hashing the same bytes twice. The difficult part is boundary mapping: append calls, preflush ranges, pages, and logical records do not necessarily align. A useful experiment would let contiguous provide a boundary plan and consume receipts while keeping codecs and indexes out of the blob layer.}
+  \note{The headline and overhead boxes report the median of the five displayed paired ratios. These retained measurements exercise raw AtomicBlob append with integrity-mode none rather than append_integrity; they establish the linked-group publication baseline but do not measure the new integrity-unit API. Each trial alternates ordinary and UNO groups in one process and times full ordinary sync completion versus full UNO batch-handle completion. APFS is the native development filesystem. ext4 is a Docker-volume filesystem inside a Linux VM; its absolute latency and range reflect virtualization, so only the paired direction is claimed. The benchmark harness now accepts integrity-mode variable or chunked and records the chunk width. Those modes must be rerun before claiming CRC API overhead. Do not generalize these numbers to deletes, migration, incompatible participant changes, or every journal configuration.}
 \end{frame}
 
 \begin{frame}[t]{Open question: should every composite store adopt V2?}

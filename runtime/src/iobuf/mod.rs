@@ -1132,6 +1132,28 @@ impl IoBufs {
         };
     }
 
+    /// Append all chunks from `bufs` without coalescing them.
+    pub(crate) fn append_bufs(&mut self, bufs: Self) {
+        match bufs.inner {
+            IoBufsInner::Single(buf) => self.append(buf),
+            IoBufsInner::Pair(bufs) => {
+                for buf in bufs {
+                    self.append(buf);
+                }
+            }
+            IoBufsInner::Triple(bufs) => {
+                for buf in bufs {
+                    self.append(buf);
+                }
+            }
+            IoBufsInner::Chunked(bufs) => {
+                for buf in bufs {
+                    self.append(buf);
+                }
+            }
+        }
+    }
+
     /// Splits the buffer(s) into two at the given index.
     ///
     /// Afterwards `self` contains bytes `[at, len)`, and the returned

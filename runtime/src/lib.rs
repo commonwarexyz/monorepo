@@ -34,6 +34,8 @@ stability_mod!(ALPHA, mod atomic_api);
 stability_scope!(ALPHA {
     pub use atomic_api::{
         ATOMIC_BLOB_TAG_LEN, AtomicBlob, AtomicStorage, BatchOperation, BatchStorage,
+        IntegrityAppend, IntegrityBoundary, IntegrityScheme, IntegritySnapshot, IntegrityToken,
+        IntegrityUnit,
     };
 });
 

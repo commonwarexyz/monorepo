@@ -10,9 +10,10 @@ use crate::{
     },
     report::Report,
     runner::{
-        RunLimit, WritePolicy, random_blocks, run_atomic_append_loop, run_atomic_batch_append_loop,
-        run_multi_blob_append_loop, run_paired_atomic_batch_append_loop, run_read_loop,
-        run_sync_write_loop, run_write_loop, sequential_blocks, warm_read_loop,
+        IntegrityPolicy, RunLimit, WritePolicy, prepare_atomic_append_state, random_blocks,
+        run_atomic_append_loop, run_atomic_batch_append_loop, run_multi_blob_append_loop,
+        run_paired_atomic_batch_append_loop, run_read_loop, run_sync_write_loop, run_write_loop,
+        sequential_blocks, warm_read_loop,
     },
 };
 use commonware_runtime::{
@@ -46,6 +47,10 @@ fn write_policy(cfg: &Config) -> WritePolicy {
         WriteOptions::default()
     };
     WritePolicy::new(options, cfg.sync_mode)
+}
+
+fn integrity_policy(cfg: &Config) -> IntegrityPolicy {
+    IntegrityPolicy::new(cfg.integrity_mode, cfg.chunk_data_size())
 }
 
 fn run_limit(cfg: &Config, start: Instant) -> RunLimit {
@@ -325,11 +330,20 @@ async fn run_write_atomic_append(cfg: &Config, context: &Context) -> Result<Repo
     let blob = prepare_atomic_blob(context, PARTITION, BLOB_NAME).await?;
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size(), cfg.write_shape);
+    let append_state =
+        prepare_atomic_append_state(std::slice::from_ref(&blob), integrity_policy(cfg)).await?;
 
     let start = Instant::now();
     let limit = run_limit(cfg, start);
-    let stats =
-        run_atomic_append_loop(blob.clone(), limit, cfg.io_size(), payload, cfg.sync_mode).await?;
+    let stats = run_atomic_append_loop(
+        blob.clone(),
+        limit,
+        cfg.io_size(),
+        payload,
+        cfg.sync_mode,
+        append_state,
+    )
+    .await?;
     let final_file_size = stats.bytes;
 
     let hot_elapsed = start.elapsed();
@@ -411,6 +425,7 @@ async fn run_write_atomic_batch_append(cfg: &Config, context: &Context) -> Resul
 
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size(), cfg.write_shape);
+    let append_state = prepare_atomic_append_state(&atomic_blobs, integrity_policy(cfg)).await?;
     let start = Instant::now();
     let limit = run_limit(cfg, start);
     let mut report = if let Some(ordinary_blobs) = ordinary_blobs {
@@ -422,6 +437,7 @@ async fn run_write_atomic_batch_append(cfg: &Config, context: &Context) -> Resul
             cfg.io_size(),
             cfg.appends_per_batch(),
             payload,
+            append_state,
         )
         .await?;
         let hot_elapsed = start.elapsed();
@@ -446,6 +462,7 @@ async fn run_write_atomic_batch_append(cfg: &Config, context: &Context) -> Resul
             cfg.io_size(),
             cfg.appends_per_batch(),
             payload,
+            append_state,
         )
         .await?;
         let hot_elapsed = start.elapsed();

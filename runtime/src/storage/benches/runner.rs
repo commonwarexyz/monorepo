@@ -1,16 +1,20 @@
 //! Timed I/O loops and helpers.
 
 use crate::{
-    config::{SyncMethod, SyncMode},
+    config::{IntegrityMode, SyncMethod, SyncMode},
     error::{Error, Result},
     report::Stats,
 };
 use commonware_runtime::{
-    AtomicBlob, BatchOperation, BatchStorage, Blob, IoBufMut, IoBufs, WriteOptions,
+    AtomicBlob, BatchOperation, BatchStorage, Blob, IntegrityBoundary, IntegrityToken, IoBufMut,
+    IoBufs, WriteOptions,
 };
 use futures::{TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroU32,
+    time::{Duration, Instant},
+};
 
 /// Operations between deadline checks.
 ///
@@ -37,6 +41,18 @@ pub struct WritePolicy {
     sync_mode: SyncMode,
 }
 
+#[derive(Clone, Copy)]
+pub struct IntegrityPolicy {
+    mode: IntegrityMode,
+    chunk_data_size: NonZeroU32,
+}
+
+/// Per-blob compare tokens for integrity-aware atomic appends.
+pub struct AtomicAppendState {
+    policy: IntegrityPolicy,
+    tokens: Option<Vec<IntegrityToken>>,
+}
+
 /// Results for an in-process ordinary-versus-atomic append comparison.
 pub struct PairedAppendStats {
     pub ordinary: Stats,
@@ -51,12 +67,71 @@ impl WritePolicy {
     }
 }
 
+impl IntegrityPolicy {
+    pub fn new(mode: IntegrityMode, chunk_data_size: u32) -> Self {
+        Self {
+            mode,
+            chunk_data_size: NonZeroU32::new(chunk_data_size)
+                .expect("chunk data size is validated as non-zero"),
+        }
+    }
+
+    fn boundary(self, completes_value: bool) -> Option<IntegrityBoundary> {
+        match self.mode {
+            IntegrityMode::None => None,
+            IntegrityMode::Variable if completes_value => Some(IntegrityBoundary::Complete),
+            IntegrityMode::Variable => Some(IntegrityBoundary::Continue),
+            IntegrityMode::Chunked => Some(IntegrityBoundary::Chunked(self.chunk_data_size)),
+        }
+    }
+}
+
 impl RunLimit {
     pub const fn new(deadline: Instant, operations: Option<u64>) -> Self {
         Self {
             deadline,
             operations,
         }
+    }
+}
+
+/// Capture one coherent initial integrity snapshot per blob before timing begins.
+pub async fn prepare_atomic_append_state(
+    blobs: &[impl AtomicBlob],
+    policy: IntegrityPolicy,
+) -> Result<AtomicAppendState> {
+    let tokens = if policy.mode == IntegrityMode::None {
+        None
+    } else {
+        let mut indexed = blobs
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, blob)| async move {
+                let snapshot = blob.integrity_snapshot().await?;
+                Ok::<_, commonware_runtime::Error>((index, snapshot.token))
+            })
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<Vec<_>>()
+            .await?;
+        indexed.sort_unstable_by_key(|(index, _)| *index);
+        Some(indexed.into_iter().map(|(_, token)| token).collect())
+    };
+    Ok(AtomicAppendState { policy, tokens })
+}
+
+impl AtomicAppendState {
+    fn validate_blob_count(&self, blob_count: usize) -> Result<()> {
+        if self
+            .tokens
+            .as_ref()
+            .is_some_and(|tokens| tokens.len() != blob_count)
+        {
+            return Err(Error::Harness(
+                "integrity token count does not match atomic blob count".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -207,13 +282,33 @@ pub async fn run_atomic_append_loop(
     io_size: usize,
     payload: IoBufs,
     sync_mode: SyncMode,
+    mut append_state: AtomicAppendState,
 ) -> Result<Stats> {
+    append_state.validate_blob_count(1)?;
     let mut stats = Stats::default();
     let mut writes_since_sync = 0u64;
     let io_size = io_size as u64;
     while should_continue(limit, stats.ops) {
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.append(payload.clone()).await?;
+        match (
+            append_state.policy.boundary(true),
+            append_state.tokens.as_mut(),
+        ) {
+            (None, None) => {
+                blob.append(payload.clone()).await?;
+            }
+            (Some(boundary), Some(tokens)) => {
+                let appended = blob
+                    .append_integrity(tokens[0], payload.clone(), boundary, None)
+                    .await?;
+                tokens[0] = appended.token;
+            }
+            _ => {
+                return Err(Error::Harness(
+                    "atomic append integrity policy and token state disagree".into(),
+                ));
+            }
+        }
 
         // Record latency before sync so percentiles reflect pure append cost.
         stats.record(io_size, started.map(|s| s.elapsed()));
@@ -270,7 +365,9 @@ pub async fn run_atomic_batch_append_loop<S: BatchStorage>(
     io_size: usize,
     appends_per_batch: u64,
     payload: IoBufs,
+    mut append_state: AtomicAppendState,
 ) -> Result<Stats> {
+    append_state.validate_blob_count(blobs.len())?;
     let group = AppendGroup::new(blobs.len(), io_size, appends_per_batch)?;
     let publications = blobs
         .iter()
@@ -290,6 +387,7 @@ pub async fn run_atomic_batch_append_loop<S: BatchStorage>(
             group,
             &payload,
             &mut stats,
+            &mut append_state,
         )
         .await?;
         offset = next_offset;
@@ -309,12 +407,14 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
     io_size: usize,
     appends_per_batch: u64,
     payload: IoBufs,
+    mut append_state: AtomicAppendState,
 ) -> Result<PairedAppendStats> {
     if ordinary_blobs.len() != atomic_blobs.len() {
         return Err(Error::Harness(
             "paired append groups must contain the same number of blobs".into(),
         ));
     }
+    append_state.validate_blob_count(atomic_blobs.len())?;
     let ordinary_group = AppendGroup::new(ordinary_blobs.len(), io_size, appends_per_batch)?;
     let atomic_group = AppendGroup::new(atomic_blobs.len(), io_size, appends_per_batch)?;
     let publications = atomic_blobs
@@ -349,6 +449,7 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
                 atomic_group,
                 &payload,
                 &mut paired.atomic,
+                &mut append_state,
             )
             .await?;
         } else {
@@ -360,6 +461,7 @@ pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
                 atomic_group,
                 &payload,
                 &mut paired.atomic,
+                &mut append_state,
             )
             .await?;
             paired.ordinary_elapsed += run_ordinary_append_group(
@@ -441,10 +543,18 @@ async fn run_atomic_append_group<S: BatchStorage>(
     group: AppendGroup,
     payload: &IoBufs,
     stats: &mut Stats,
+    append_state: &mut AtomicAppendState,
 ) -> Result<Duration> {
     let started = Instant::now();
-    for _ in 0..group.appends {
-        append_atomic_blob_group(blobs, offset, payload).await?;
+    for append in 0..group.appends {
+        append_atomic_blob_group(
+            blobs,
+            offset,
+            payload,
+            append + 1 == group.appends,
+            append_state,
+        )
+        .await?;
         offset = offset
             .checked_add(group.append_size)
             .ok_or_else(|| Error::Harness("append offset exceeds u64".into()))?;
@@ -500,21 +610,66 @@ async fn append_atomic_blob_group(
     blobs: &[impl AtomicBlob],
     expected_offset: u64,
     payload: &IoBufs,
+    completes_value: bool,
+    append_state: &mut AtomicAppendState,
 ) -> Result<()> {
-    let offsets = blobs
-        .iter()
-        .cloned()
-        .map(|blob| {
-            let payload = payload.clone();
-            async move { blob.append(payload).await }
-        })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>()
-        .await?;
-    if offsets.iter().any(|&offset| offset != expected_offset) {
-        return Err(Error::Harness(
-            "atomic append group participants have different logical tails".into(),
-        ));
+    match (
+        append_state.policy.boundary(completes_value),
+        append_state.tokens.as_mut(),
+    ) {
+        (None, None) => {
+            let offsets = blobs
+                .iter()
+                .cloned()
+                .map(|blob| {
+                    let payload = payload.clone();
+                    async move { blob.append(payload).await }
+                })
+                .collect::<FuturesUnordered<_>>()
+                .try_collect::<Vec<_>>()
+                .await?;
+            if offsets.iter().any(|&offset| offset != expected_offset) {
+                return Err(Error::Harness(
+                    "atomic append group participants have different logical tails".into(),
+                ));
+            }
+        }
+        (Some(boundary), Some(tokens)) => {
+            let appends = blobs
+                .iter()
+                .cloned()
+                .zip(tokens.iter().copied())
+                .enumerate()
+                .map(|(index, (blob, token))| {
+                    let payload = payload.clone();
+                    async move {
+                        let appended = blob
+                            .append_integrity(token, payload, boundary, None)
+                            .await?;
+                        Ok::<_, commonware_runtime::Error>((index, appended.offset, appended.token))
+                    }
+                })
+                .collect::<FuturesUnordered<_>>()
+                .try_collect::<Vec<_>>()
+                .await?;
+            let first_offset = appends
+                .first()
+                .map(|(_, offset, _)| *offset)
+                .ok_or_else(|| Error::Harness("atomic append group cannot be empty".into()))?;
+            if appends.iter().any(|(_, offset, _)| *offset != first_offset) {
+                return Err(Error::Harness(
+                    "integrity append group participants have different encoded tails".into(),
+                ));
+            }
+            for (index, _, token) in appends {
+                tokens[index] = token;
+            }
+        }
+        _ => {
+            return Err(Error::Harness(
+                "atomic append integrity policy and token state disagree".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -552,4 +707,34 @@ fn should_continue(limit: RunLimit, completed_ops: u64) -> bool {
 #[inline(always)]
 const fn should_sample_latency(completed_ops: u64) -> bool {
     completed_ops.is_multiple_of(LATENCY_SAMPLE_STRIDE)
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variable_integrity_closes_only_the_last_append_in_a_value() {
+        let policy = IntegrityPolicy::new(IntegrityMode::Variable, 4092);
+
+        assert_eq!(policy.boundary(false), Some(IntegrityBoundary::Continue));
+        assert_eq!(policy.boundary(true), Some(IntegrityBoundary::Complete));
+    }
+
+    #[test]
+    fn chunked_integrity_applies_the_configured_size_to_every_append() {
+        let policy = IntegrityPolicy::new(IntegrityMode::Chunked, 8192);
+        let expected = Some(IntegrityBoundary::Chunked(NonZeroU32::new(8192).unwrap()));
+
+        assert_eq!(policy.boundary(false), expected);
+        assert_eq!(policy.boundary(true), expected);
+    }
+
+    #[test]
+    fn integrity_footers_do_not_change_logical_group_byte_accounting() {
+        let group = AppendGroup::new(4, 1024, 3).unwrap();
+
+        assert_eq!(group.bytes, 4 * 1024 * 3);
+    }
 }

@@ -62,8 +62,8 @@
 //! root slot is reused.
 //!
 //! Group membership has no UNO-specific limit and is not coupled to worker fanout; only the `u32`
-//! count encoded in each link bounds the format. Each root stores only its local link (296 fixed
-//! bytes plus at most 1,644 bytes for one successor path), with 1,940 bytes available in a 2 KiB
+//! count encoded in each link bounds the format. Each root stores only its local link (336 fixed
+//! bytes plus at most 1,584 bytes for one successor path), with 1,920 bytes available in a 2 KiB
 //! slot; there is no aggregate name-dependent metadata limit. Installation uses at most 32
 //! concurrent workers while
 //! processing larger rings in chunks. Total pending append bytes have no protocol batch limit. At
@@ -2021,9 +2021,9 @@ mod tests {
 
     #[test]
     fn local_link_path_budget_is_exact_and_preflighted() {
-        assert_eq!(LINK_FIXED_LEN, 296);
-        assert_eq!(atomic::MAX_BATCH_WITNESS_LEN, 1_940);
-        assert_eq!(atomic::MAX_BATCH_WITNESS_LEN - LINK_FIXED_LEN, 1_644);
+        assert_eq!(LINK_FIXED_LEN, 336);
+        assert_eq!(atomic::MAX_BATCH_WITNESS_LEN, 1_920);
+        assert_eq!(atomic::MAX_BATCH_WITNESS_LEN - LINK_FIXED_LEN, 1_584);
         let short = b"a".as_slice();
         let exact = vec![b'z'; atomic::MAX_BATCH_WITNESS_LEN - LINK_FIXED_LEN];
         assert_eq!(LINK_FIXED_LEN + exact.len(), atomic::MAX_BATCH_WITNESS_LEN);

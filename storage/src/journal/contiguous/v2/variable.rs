@@ -1806,6 +1806,52 @@ mod tests {
     }
 
     #[test]
+    fn offset_index_remains_logical_across_integrity_footers() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut cfg = config("v2_variable_small_integrity_pages");
+            cfg.items_per_section = NZU64!(8);
+            cfg.page_size = atomic_page_size(16);
+
+            let mut journal = Journal::<_, u64>::init(context.child("initial"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..6 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            let tail = journal.sections.get(&0).unwrap();
+            assert!(tail.data.physical_size() > tail.data.size());
+            assert!(tail.offsets.physical_size() > tail.offsets.size());
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let mut journal = Journal::<_, u64>::init(context.child("reopen"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..6);
+            assert_eq!(
+                journal.read_many(&[0, 1, 2, 3, 4, 5]).await.unwrap(),
+                vec![0, 1, 2, 3, 4, 5]
+            );
+
+            journal = journal.rewind(4).await.unwrap();
+            let (journal, position) = journal.append(&99).await.unwrap();
+            assert_eq!(position, 4);
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("reopen_after_rewind"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..5);
+            assert_eq!(
+                journal.read_many(&[0, 1, 2, 3, 4]).await.unwrap(),
+                vec![0, 1, 2, 3, 99]
+            );
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
     fn unpublished_data_offset_subsets_do_not_advance_reopen() {
         deterministic::Runner::default().start(|context| async move {
             for (case, stage_data, stage_offsets) in [

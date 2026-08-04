@@ -3,6 +3,7 @@ use crate::{
     ATOMIC_BLOB_TAG_LEN, BatchOperation, Buf, BufferPool, Handle, IoBufs, IoBufsMut, RemoveTarget,
     WriteOptions, deterministic::AuditHasher,
 };
+use commonware_cryptography::{Crc32, Hasher as _};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{
@@ -16,19 +17,39 @@ type BlobKey = (String, Vec<u8>);
 struct V2State {
     logical_len: u64,
     committed_len: u64,
+    integrity_start: u64,
+    integrity_checksum: u32,
+    integrity_scheme: crate::IntegrityScheme,
+    committed_integrity_start: u64,
+    committed_integrity_checksum: u32,
+    committed_integrity_scheme: crate::IntegrityScheme,
     tag: [u8; ATOMIC_BLOB_TAG_LEN],
     committed_tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    revision: u64,
     dirty: bool,
     poisoned: bool,
 }
 
 impl V2State {
-    const fn new(logical_len: u64, tag: [u8; ATOMIC_BLOB_TAG_LEN]) -> Self {
+    const fn new(
+        logical_len: u64,
+        integrity_start: u64,
+        integrity_checksum: u32,
+        integrity_scheme: crate::IntegrityScheme,
+        tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    ) -> Self {
         Self {
             logical_len,
             committed_len: logical_len,
+            integrity_start,
+            integrity_checksum,
+            integrity_scheme,
+            committed_integrity_start: integrity_start,
+            committed_integrity_checksum: integrity_checksum,
+            committed_integrity_scheme: integrity_scheme,
             tag,
             committed_tag: tag,
+            revision: 0,
             dirty: false,
             poisoned: false,
         }
@@ -40,6 +61,29 @@ impl V2State {
         }
         Ok(())
     }
+
+    const fn integrity_token(&self) -> crate::IntegrityToken {
+        crate::IntegrityToken(self.revision)
+    }
+
+    fn expect_integrity_token(&self, expected: crate::IntegrityToken) -> Result<(), crate::Error> {
+        if self.integrity_token() == expected {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic integrity state is stale",
+            )
+            .into())
+        }
+    }
+
+    fn advance_revision(&mut self) {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("atomic in-memory mutation revision exhausted");
+    }
 }
 
 struct V2Live {
@@ -48,10 +92,23 @@ struct V2Live {
 }
 
 impl V2Live {
-    fn new(content: Vec<u8>, logical_len: u64, tag: [u8; ATOMIC_BLOB_TAG_LEN]) -> Self {
+    fn new(
+        content: Vec<u8>,
+        logical_len: u64,
+        integrity_start: u64,
+        integrity_checksum: u32,
+        integrity_scheme: crate::IntegrityScheme,
+        tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    ) -> Self {
         Self {
             content: Arc::new(RwLock::new(content)),
-            state: Mutex::new(V2State::new(logical_len, tag)),
+            state: Mutex::new(V2State::new(
+                logical_len,
+                integrity_start,
+                integrity_checksum,
+                integrity_scheme,
+                tag,
+            )),
         }
     }
 }
@@ -60,6 +117,9 @@ struct V2Generation {
     generation: u64,
     live: Weak<V2Live>,
     committed_tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    committed_integrity_start: u64,
+    committed_integrity_checksum: u32,
+    committed_integrity_scheme: crate::IntegrityScheme,
 }
 
 fn atomic_layout_required(partition: &str, name: &[u8]) -> crate::Error {
@@ -194,15 +254,38 @@ impl Storage {
                 .get(&key)
                 .filter(|entry| entry.generation == generation)
                 .and_then(|entry| entry.live.upgrade());
-            let committed_tag = namespace
+            let (
+                committed_tag,
+                committed_integrity_start,
+                committed_integrity_checksum,
+                committed_integrity_scheme,
+            ) = namespace
                 .v2_generations
                 .get(&key)
                 .filter(|entry| entry.generation == generation)
-                .map_or([0; ATOMIC_BLOB_TAG_LEN], |entry| entry.committed_tag);
+                .map_or(
+                    (
+                        [0; ATOMIC_BLOB_TAG_LEN],
+                        logical_size,
+                        0,
+                        crate::IntegrityScheme::Unbound,
+                    ),
+                    |entry| {
+                        (
+                            entry.committed_tag,
+                            entry.committed_integrity_start,
+                            entry.committed_integrity_checksum,
+                            entry.committed_integrity_scheme,
+                        )
+                    },
+                );
             let live = live.unwrap_or_else(|| {
                 let live = Arc::new(V2Live::new(
                     durable_content.clone(),
                     logical_size,
+                    committed_integrity_start,
+                    committed_integrity_checksum,
+                    committed_integrity_scheme,
                     committed_tag,
                 ));
                 namespace.v2_generations.insert(
@@ -211,6 +294,9 @@ impl Storage {
                         generation,
                         live: Arc::downgrade(&live),
                         committed_tag,
+                        committed_integrity_start,
+                        committed_integrity_checksum,
+                        committed_integrity_scheme,
                     },
                 );
                 live
@@ -290,6 +376,18 @@ impl Storage {
             hasher.update(partition.as_bytes());
             hasher.update(name);
             hasher.update(generation.committed_tag);
+            hasher.update(generation.committed_integrity_start.to_be_bytes());
+            hasher.update(generation.committed_integrity_checksum.to_be_bytes());
+            hasher.update(match generation.committed_integrity_scheme {
+                crate::IntegrityScheme::Unbound => [0, 0, 0, 0, 0],
+                crate::IntegrityScheme::Variable => [1, 0, 0, 0, 0],
+                crate::IntegrityScheme::Chunked(size) => {
+                    let mut encoded = [0; 5];
+                    encoded[0] = 2;
+                    encoded[1..].copy_from_slice(&size.get().to_be_bytes());
+                    encoded
+                }
+            });
         }
 
         hasher.finalize()
@@ -406,6 +504,7 @@ impl crate::AtomicStorage for Storage {
             .try_reserve(payload.len())
             .map_err(|_| crate::Error::WriteFailed)?;
         replacement.extend_from_slice(payload);
+        let payload_checksum = Crc32::checksum(payload);
 
         *durable = replacement;
         namespace.remove(&key);
@@ -416,6 +515,9 @@ impl crate::AtomicStorage for Storage {
                 generation,
                 live: Weak::new(),
                 committed_tag: [0; ATOMIC_BLOB_TAG_LEN],
+                committed_integrity_start: 0,
+                committed_integrity_checksum: payload_checksum,
+                committed_integrity_scheme: crate::IntegrityScheme::Unbound,
             },
         );
         Ok(())
@@ -532,22 +634,71 @@ impl crate::BatchStorage for Storage {
             }
             let content = &mut contents[index];
             blob.validate_v2_content(state, content)?;
-            let logical_len = match operation {
-                super::batch::Operation::Publish { .. } => state.logical_len,
-                super::batch::Operation::Rewind { len, .. } => {
-                    if *len > state.logical_len {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "atomic rewind cannot extend a blob",
-                        )
-                        .into());
+            let (logical_len, integrity_start, integrity_checksum, integrity_scheme) =
+                match operation {
+                    super::batch::Operation::Publish { .. } => (
+                        state.logical_len,
+                        state.integrity_start,
+                        state.integrity_checksum,
+                        state.integrity_scheme,
+                    ),
+                    super::batch::Operation::Rewind { len, .. } => {
+                        if *len > state.logical_len {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "atomic rewind cannot extend a blob",
+                            )
+                            .into());
+                        }
+                        if *len == state.committed_len {
+                            (
+                                *len,
+                                state.committed_integrity_start,
+                                state.committed_integrity_checksum,
+                                state.committed_integrity_scheme,
+                            )
+                        } else if *len > state.integrity_start {
+                            let start = blob.physical_len(state.integrity_start)?;
+                            let current_end = blob.physical_len(state.logical_len)?;
+                            if Crc32::checksum(&content[start..current_end])
+                                != state.integrity_checksum
+                            {
+                                return Err(crate::Error::InvalidChecksum);
+                            }
+                            let end = blob.physical_len(*len)?;
+                            (
+                                *len,
+                                state.integrity_start,
+                                Crc32::checksum(&content[start..end]),
+                                state.integrity_scheme,
+                            )
+                        } else {
+                            let known_boundary = *len == 0
+                                || *len == state.integrity_start
+                                || match state.integrity_scheme {
+                                    crate::IntegrityScheme::Chunked(size) => {
+                                        let encoded_unit = u64::from(size.get())
+                                            .checked_add(std::mem::size_of::<u32>() as u64)
+                                            .ok_or(crate::Error::OffsetOverflow)?;
+                                        *len % encoded_unit == 0
+                                    }
+                                    crate::IntegrityScheme::Unbound
+                                    | crate::IntegrityScheme::Variable => false,
+                                };
+                            if !known_boundary {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "atomic rewind target is not a proven integrity-unit boundary",
+                                )
+                                .into());
+                            }
+                            (*len, *len, 0, state.integrity_scheme)
+                        }
                     }
-                    *len
-                }
-                super::batch::Operation::Remove(_) => {
-                    unreachable!("removals skip publication validation")
-                }
-            };
+                    super::batch::Operation::Remove(_) => {
+                        unreachable!("removals skip publication validation")
+                    }
+                };
             let physical_len = blob.physical_len(logical_len)?;
             Blob::reserve_v2(content, physical_len)?;
             let durable = partitions
@@ -557,18 +708,35 @@ impl crate::BatchStorage for Storage {
                     crate::Error::BlobMissing(blob.partition.clone(), hex(&blob.name))
                 })?;
             Blob::reserve_v2(durable, physical_len)?;
-            final_lengths.push(Some((logical_len, physical_len)));
+            final_lengths.push(Some((
+                logical_len,
+                physical_len,
+                integrity_start,
+                integrity_checksum,
+                integrity_scheme,
+            )));
         }
 
         // All fallible work is complete. The held blob, namespace, and partition locks make the
         // following publication and namespace changes one logical and durable memory transaction.
         for (index, (_, blobs)) in participants.iter().enumerate() {
-            let Some((logical_len, physical_len)) = final_lengths[index] else {
+            let Some((
+                logical_len,
+                physical_len,
+                integrity_start,
+                integrity_checksum,
+                integrity_scheme,
+            )) = final_lengths[index]
+            else {
                 continue;
             };
             let blob = &blobs[0];
             let state = &mut states[index];
             let content = &mut contents[index];
+            let visible_state_changed = state.logical_len != logical_len
+                || state.integrity_start != integrity_start
+                || state.integrity_checksum != integrity_checksum
+                || state.integrity_scheme != integrity_scheme;
             content.resize(physical_len, 0);
             let durable = partitions
                 .get_mut(&blob.partition)
@@ -578,12 +746,24 @@ impl crate::BatchStorage for Storage {
             durable.copy_from_slice(content);
             state.logical_len = logical_len;
             state.committed_len = logical_len;
+            state.integrity_start = integrity_start;
+            state.integrity_checksum = integrity_checksum;
+            state.integrity_scheme = integrity_scheme;
+            state.committed_integrity_start = integrity_start;
+            state.committed_integrity_checksum = integrity_checksum;
+            state.committed_integrity_scheme = integrity_scheme;
             state.committed_tag = state.tag;
-            namespace
+            if visible_state_changed {
+                state.advance_revision();
+            }
+            let generation = namespace
                 .v2_generations
                 .get_mut(&(blob.partition.clone(), blob.name.clone()))
-                .expect("validated atomic blob must have a generation")
-                .committed_tag = state.tag;
+                .expect("validated atomic blob must have a generation");
+            generation.committed_tag = state.tag;
+            generation.committed_integrity_start = integrity_start;
+            generation.committed_integrity_checksum = integrity_checksum;
+            generation.committed_integrity_scheme = integrity_scheme;
             state.dirty = false;
         }
 
@@ -667,55 +847,60 @@ impl Blob {
             .map_err(|_| crate::Error::WriteFailed)
     }
 
-    fn write_v2_payload(
-        content: &mut [u8],
-        offset: usize,
-        data: &IoBufs,
-    ) -> Result<(), crate::Error> {
-        let mut cursor = offset;
-        let mut result = Ok(());
-        data.for_each_chunk(|chunk| {
-            if result.is_err() {
-                return;
-            }
-            let Some(end) = cursor.checked_add(chunk.len()) else {
-                result = Err(crate::Error::OffsetOverflow);
-                return;
-            };
-            let Some(destination) = content.get_mut(cursor..end) else {
-                result = Err(crate::Error::WriteFailed);
-                return;
-            };
-            destination.copy_from_slice(chunk);
-            cursor = end;
-        });
-        result
-    }
-
     fn append_v2(
         &self,
         live: &V2Live,
+        expected: Option<crate::IntegrityToken>,
         data: IoBufs,
         expected_offset: Option<u64>,
+        boundary: crate::IntegrityBoundary,
         tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
-    ) -> Result<u64, crate::Error> {
+    ) -> Result<(u64, crate::IntegrityToken), crate::Error> {
         let mut state = live.state.lock();
         state.ensure_available()?;
-        let offset = state.logical_len;
-        if data.is_empty() {
-            if let Some(tag) = tag {
-                state.tag = tag;
-                state.dirty =
-                    state.logical_len != state.committed_len || state.tag != state.committed_tag;
-            }
-            return Ok(offset);
+        if let Some(expected) = expected {
+            state.expect_integrity_token(expected)?;
         }
+        let offset = state.logical_len;
+        let requested_scheme = match boundary {
+            crate::IntegrityBoundary::Continue => None,
+            crate::IntegrityBoundary::Complete => Some(crate::IntegrityScheme::Variable),
+            crate::IntegrityBoundary::Chunked(size) => Some(crate::IntegrityScheme::Chunked(size)),
+        };
+        let integrity_scheme = match (state.integrity_scheme, requested_scheme) {
+            (scheme, None) | (crate::IntegrityScheme::Unbound, Some(scheme)) => scheme,
+            (scheme, Some(requested)) if scheme == requested => scheme,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "atomic blob is already bound to a different integrity scheme",
+                )
+                .into());
+            }
+        };
         if expected_offset.is_some_and(|expected| expected != offset) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "atomic writes must append at the current logical tail",
             )
             .into());
+        }
+
+        let data = data.coalesce();
+        let data = data.as_ref();
+        if data.is_empty() && matches!(boundary, crate::IntegrityBoundary::Continue) {
+            if let Some(tag) = tag
+                && state.tag != tag
+            {
+                state.tag = tag;
+                state.advance_revision();
+                state.dirty = state.logical_len != state.committed_len
+                    || state.integrity_start != state.committed_integrity_start
+                    || state.integrity_checksum != state.committed_integrity_checksum
+                    || state.integrity_scheme != state.committed_integrity_scheme
+                    || state.tag != state.committed_tag;
+            }
+            return Ok((offset, state.integrity_token()));
         }
         if offset < state.committed_len {
             return Err(std::io::Error::new(
@@ -725,38 +910,148 @@ impl Blob {
             .into());
         }
 
+        let mut logical_cursor = state.logical_len;
+        let mut integrity_start = state.integrity_start;
+        let mut integrity_checksum = Crc32::resume(
+            state.integrity_checksum,
+            state.logical_len - state.integrity_start,
+        );
+        let mut result_offset = None;
+        let mut cursor = 0usize;
+        let mut encoded = Vec::new();
+        let chunk_size = match integrity_scheme {
+            crate::IntegrityScheme::Chunked(size) => Some(u64::from(size.get())),
+            crate::IntegrityScheme::Unbound | crate::IntegrityScheme::Variable => None,
+        };
+        if let Some(chunk_size) = chunk_size
+            && logical_cursor - integrity_start > chunk_size
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "current atomic integrity unit exceeds the requested chunk size",
+            )
+            .into());
+        }
+        let closes_existing = matches!(boundary, crate::IntegrityBoundary::Complete)
+            && integrity_start != logical_cursor
+            || chunk_size.is_some_and(|size| logical_cursor - integrity_start == size);
+        if data.is_empty() && !closes_existing {
+            let changed = state.integrity_scheme != integrity_scheme
+                || tag.is_some_and(|tag| state.tag != tag);
+            state.integrity_scheme = integrity_scheme;
+            if let Some(tag) = tag {
+                state.tag = tag;
+            }
+            state.dirty = state.logical_len != state.committed_len
+                || state.integrity_start != state.committed_integrity_start
+                || state.integrity_checksum != state.committed_integrity_checksum
+                || state.integrity_scheme != state.committed_integrity_scheme
+                || state.tag != state.committed_tag;
+            if changed {
+                state.advance_revision();
+            }
+            return Ok((offset, state.integrity_token()));
+        }
+        let seal = |encoded: &mut Vec<u8>,
+                    logical_cursor: &mut u64,
+                    integrity_start: &mut u64,
+                    integrity_checksum: &mut Crc32|
+         -> Result<(), crate::Error> {
+            if *integrity_start == *logical_cursor {
+                return Ok(());
+            }
+            encoded.extend_from_slice(&integrity_checksum.value().to_be_bytes());
+            *logical_cursor = logical_cursor
+                .checked_add(std::mem::size_of::<u32>() as u64)
+                .ok_or(crate::Error::OffsetOverflow)?;
+            *integrity_start = *logical_cursor;
+            *integrity_checksum = Crc32::default();
+            Ok(())
+        };
+        while cursor < data.len() {
+            if chunk_size.is_some_and(|size| logical_cursor - integrity_start == size) {
+                seal(
+                    &mut encoded,
+                    &mut logical_cursor,
+                    &mut integrity_start,
+                    &mut integrity_checksum,
+                )?;
+            }
+            let available = chunk_size
+                .map(|size| size - (logical_cursor - integrity_start))
+                .unwrap_or(u64::MAX);
+            let take = (data.len() - cursor).min(usize::try_from(available).unwrap_or(usize::MAX));
+            debug_assert_ne!(take, 0);
+            result_offset.get_or_insert(logical_cursor);
+            let part = &data[cursor..cursor + take];
+            encoded.extend_from_slice(part);
+            integrity_checksum.update(part);
+            logical_cursor = logical_cursor
+                .checked_add(take as u64)
+                .ok_or(crate::Error::OffsetOverflow)?;
+            cursor += take;
+            if chunk_size.is_some_and(|size| logical_cursor - integrity_start == size) {
+                seal(
+                    &mut encoded,
+                    &mut logical_cursor,
+                    &mut integrity_start,
+                    &mut integrity_checksum,
+                )?;
+            }
+        }
+        if matches!(boundary, crate::IntegrityBoundary::Complete) {
+            seal(
+                &mut encoded,
+                &mut logical_cursor,
+                &mut integrity_start,
+                &mut integrity_checksum,
+            )?;
+        }
+
         let mut content = live.content.write();
         self.validate_v2_content(&mut state, &content)?;
-        let data_len = u64::try_from(data.len()).map_err(|_| crate::Error::OffsetOverflow)?;
-        let logical_end = offset
-            .checked_add(data_len)
-            .ok_or(crate::Error::OffsetOverflow)?;
         let start = self.physical_len(offset)?;
-        let required = self.physical_len(logical_end)?;
+        let required = self.physical_len(logical_cursor)?;
         Self::reserve_v2(&mut content, required)?;
         content.resize(required, 0);
-        if let Err(error) = Self::write_v2_payload(&mut content, start, &data) {
-            state.poisoned = true;
-            return Err(error);
-        }
-        state.logical_len = logical_end;
+        content[start..required].copy_from_slice(&encoded);
+        state.logical_len = logical_cursor;
+        state.integrity_start = integrity_start;
+        state.integrity_checksum = if integrity_start == logical_cursor {
+            0
+        } else {
+            integrity_checksum.value()
+        };
+        state.integrity_scheme = integrity_scheme;
         if let Some(tag) = tag {
             state.tag = tag;
         }
-        state.dirty = state.logical_len != state.committed_len || state.tag != state.committed_tag;
-        Ok(offset)
+        state.advance_revision();
+        state.dirty = state.logical_len != state.committed_len
+            || state.integrity_start != state.committed_integrity_start
+            || state.integrity_checksum != state.committed_integrity_checksum
+            || state.integrity_scheme != state.committed_integrity_scheme
+            || state.tag != state.committed_tag;
+        Ok((result_offset.unwrap_or(offset), state.integrity_token()))
     }
 
     fn rewind_v2(
         &self,
         live: &V2Live,
+        expected: Option<crate::IntegrityToken>,
         len: u64,
+        unit: Option<crate::IntegrityUnit>,
         tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
-    ) -> Result<(), crate::Error> {
+    ) -> Result<crate::IntegrityToken, crate::Error> {
         let mut state = live.state.lock();
         state.ensure_available()?;
+        if let Some(expected) = expected {
+            state.expect_integrity_token(expected)?;
+        }
         let mut content = live.content.write();
         self.validate_v2_content(&mut state, &content)?;
+        let old_len = state.logical_len;
+        let old_tag = state.tag;
         if len > state.logical_len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -765,15 +1060,125 @@ impl Blob {
             .into());
         }
         if len != state.logical_len {
+            let current =
+                (state.integrity_start < state.logical_len).then_some(crate::IntegrityUnit {
+                    offset: state.integrity_start,
+                    len: state.logical_len - state.integrity_start,
+                });
+            let unit = unit.or_else(|| {
+                current.filter(|unit| unit.offset < len && len <= unit.offset + unit.len)
+            });
+            let (integrity_start, integrity_checksum, integrity_scheme) = if len
+                == state.committed_len
+            {
+                (
+                    state.committed_integrity_start,
+                    state.committed_integrity_checksum,
+                    state.committed_integrity_scheme,
+                )
+            } else if let Some(unit) = unit {
+                let data_end = unit
+                    .offset
+                    .checked_add(unit.len)
+                    .ok_or(crate::Error::OffsetOverflow)?;
+                let is_current = current == Some(unit);
+                let encoded_end = if is_current {
+                    data_end
+                } else {
+                    let encoded_end = data_end
+                        .checked_add(std::mem::size_of::<u32>() as u64)
+                        .ok_or(crate::Error::OffsetOverflow)?;
+                    if encoded_end > state.integrity_start {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "completed atomic integrity unit exceeds the completed payload prefix",
+                        )
+                        .into());
+                    }
+                    encoded_end
+                };
+                let retain_prefix = unit.offset < len && len <= data_end;
+                let boundary = len == unit.offset || (!is_current && len == encoded_end);
+                if !retain_prefix && !boundary {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "atomic rewind integrity unit does not contain or border the new end",
+                    )
+                    .into());
+                }
+                let start = self.physical_len(unit.offset)?;
+                let end = self.physical_len(data_end)?;
+                let data = &content[start..end];
+                if is_current {
+                    if Crc32::checksum(data) != state.integrity_checksum {
+                        return Err(crate::Error::InvalidChecksum);
+                    }
+                } else {
+                    let footer_end = end
+                        .checked_add(std::mem::size_of::<u32>())
+                        .ok_or(crate::Error::OffsetOverflow)?;
+                    let expected = u32::from_be_bytes(
+                        content
+                            .get(end..footer_end)
+                            .ok_or(crate::Error::BlobInsufficientLength)?
+                            .try_into()
+                            .expect("integrity checksum footer has a fixed length"),
+                    );
+                    if Crc32::checksum(data) != expected {
+                        return Err(crate::Error::InvalidChecksum);
+                    }
+                }
+                if boundary {
+                    (len, 0, state.integrity_scheme)
+                } else {
+                    let retained = usize::try_from(len - unit.offset)
+                        .map_err(|_| crate::Error::OffsetOverflow)?;
+                    (
+                        unit.offset,
+                        Crc32::checksum(&data[..retained]),
+                        state.integrity_scheme,
+                    )
+                }
+            } else {
+                let known_boundary = len == 0
+                    || current.is_some_and(|unit| len == unit.offset)
+                    || match state.integrity_scheme {
+                        crate::IntegrityScheme::Chunked(size) => {
+                            let encoded_unit = u64::from(size.get())
+                                .checked_add(std::mem::size_of::<u32>() as u64)
+                                .ok_or(crate::Error::OffsetOverflow)?;
+                            len % encoded_unit == 0
+                        }
+                        crate::IntegrityScheme::Unbound | crate::IntegrityScheme::Variable => false,
+                    };
+                if !known_boundary {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "atomic rewind target is not a proven integrity-unit boundary",
+                    )
+                    .into());
+                }
+                (len, 0, state.integrity_scheme)
+            };
             let required = self.physical_len(len)?;
             content.resize(required, 0);
             state.logical_len = len;
+            state.integrity_start = integrity_start;
+            state.integrity_checksum = integrity_checksum;
+            state.integrity_scheme = integrity_scheme;
         }
         if let Some(tag) = tag {
             state.tag = tag;
         }
-        state.dirty = len != state.committed_len || state.tag != state.committed_tag;
-        Ok(())
+        if state.logical_len != old_len || state.tag != old_tag {
+            state.advance_revision();
+        }
+        state.dirty = len != state.committed_len
+            || state.integrity_start != state.committed_integrity_start
+            || state.integrity_checksum != state.committed_integrity_checksum
+            || state.integrity_scheme != state.committed_integrity_scheme
+            || state.tag != state.committed_tag;
+        Ok(state.integrity_token())
     }
 
     fn sync_v2(&self, live: &V2Live) -> Result<(), crate::Error> {
@@ -799,12 +1204,18 @@ impl Blob {
             Self::reserve_v2(durable_content, live_content.len())?;
             durable_content.clone_from(&live_content);
             state.committed_len = state.logical_len;
+            state.committed_integrity_start = state.integrity_start;
+            state.committed_integrity_checksum = state.integrity_checksum;
+            state.committed_integrity_scheme = state.integrity_scheme;
             state.committed_tag = state.tag;
-            namespace
+            let generation = namespace
                 .v2_generations
                 .get_mut(&key)
-                .expect("live atomic blob must have a generation")
-                .committed_tag = state.tag;
+                .expect("live atomic blob must have a generation");
+            generation.committed_tag = state.tag;
+            generation.committed_integrity_start = state.integrity_start;
+            generation.committed_integrity_checksum = state.integrity_checksum;
+            generation.committed_integrity_scheme = state.integrity_scheme;
             state.dirty = false;
         }
         Ok(())
@@ -901,7 +1312,14 @@ impl crate::Blob for Blob {
             return Ok(());
         }
         if let Some(live) = &self.v2 {
-            self.append_v2(live, bufs, Some(offset), None)?;
+            self.append_v2(
+                live,
+                None,
+                bufs,
+                Some(offset),
+                crate::IntegrityBoundary::Continue,
+                None,
+            )?;
             return if sync { self.sync_v2(live) } else { Ok(()) };
         }
         let buf = bufs.coalesce();
@@ -926,7 +1344,7 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
         if let Some(live) = &self.v2 {
-            return self.rewind_v2(live, len, None);
+            return self.rewind_v2(live, None, len, None, None).map(|_| ());
         }
         let len = len
             .checked_add(self.data_offset)
@@ -964,17 +1382,97 @@ impl crate::AtomicBlob for Blob {
         state.ensure_available()?;
         if state.tag != tag {
             state.tag = tag;
-            state.dirty =
-                state.logical_len != state.committed_len || state.tag != state.committed_tag;
+            state.advance_revision();
+            state.dirty = state.logical_len != state.committed_len
+                || state.integrity_start != state.committed_integrity_start
+                || state.integrity_checksum != state.committed_integrity_checksum
+                || state.integrity_scheme != state.committed_integrity_scheme
+                || state.tag != state.committed_tag;
         }
         Ok(())
+    }
+
+    async fn compare_set_tag(
+        &self,
+        expected: crate::IntegrityToken,
+        tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        let mut state = live.state.lock();
+        state.ensure_available()?;
+        state.expect_integrity_token(expected)?;
+        if state.tag != tag {
+            state.tag = tag;
+            state.advance_revision();
+            state.dirty = state.logical_len != state.committed_len
+                || state.integrity_start != state.committed_integrity_start
+                || state.integrity_checksum != state.committed_integrity_checksum
+                || state.integrity_scheme != state.committed_integrity_scheme
+                || state.tag != state.committed_tag;
+        }
+        Ok(state.integrity_token())
+    }
+
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        let state = live.state.lock();
+        state.ensure_available()?;
+        Ok(state.integrity_scheme)
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        let mut state = live.state.lock();
+        state.ensure_available()?;
+        let encoded_len = state.logical_len;
+        let scheme = state.integrity_scheme;
+        let tag = state.tag;
+        let token = state.integrity_token();
+        let tail = if state.integrity_start == state.logical_len {
+            None
+        } else {
+            let unit = crate::IntegrityUnit {
+                offset: state.integrity_start,
+                len: state.logical_len - state.integrity_start,
+            };
+            let content = live.content.read();
+            self.validate_v2_content(&mut state, &content)?;
+            let start = self.physical_len(unit.offset)?;
+            let end = self.physical_len(state.logical_len)?;
+            let data = content[start..end].to_vec();
+            if Crc32::checksum(&data) != state.integrity_checksum {
+                return Err(crate::Error::InvalidChecksum);
+            }
+            Some((unit, IoBufs::from(data)))
+        };
+        Ok(crate::IntegritySnapshot {
+            encoded_len,
+            scheme,
+            tag,
+            tail,
+            token,
+        })
     }
 
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, crate::Error> {
         let Some(live) = &self.v2 else {
             return Err(atomic_layout_required(&self.partition, &self.name));
         };
-        self.append_v2(live, data.into(), None, None)
+        self.append_v2(
+            live,
+            None,
+            data.into(),
+            None,
+            crate::IntegrityBoundary::Continue,
+            None,
+        )
+        .map(|(offset, _)| offset)
     }
 
     async fn append_tagged(
@@ -985,14 +1483,84 @@ impl crate::AtomicBlob for Blob {
         let Some(live) = &self.v2 else {
             return Err(atomic_layout_required(&self.partition, &self.name));
         };
-        self.append_v2(live, data.into(), None, Some(tag))
+        self.append_v2(
+            live,
+            None,
+            data.into(),
+            None,
+            crate::IntegrityBoundary::Continue,
+            Some(tag),
+        )
+        .map(|(offset, _)| offset)
+    }
+
+    async fn append_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        data: impl Into<IoBufs> + Send,
+        boundary: crate::IntegrityBoundary,
+        tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        self.append_v2(live, Some(expected), data.into(), None, boundary, tag)
+            .map(|(offset, token)| crate::IntegrityAppend { offset, token })
+    }
+
+    async fn read_integrity_tail(
+        &self,
+    ) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, crate::Error> {
+        Ok(self.integrity_snapshot().await?.tail)
+    }
+
+    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        let mut state = live.state.lock();
+        state.ensure_available()?;
+        state.integrity_scheme.validate_completed_unit(unit)?;
+        let data_len = usize::try_from(unit.len).map_err(|_| crate::Error::OffsetOverflow)?;
+        let encoded_len = data_len
+            .checked_add(std::mem::size_of::<u32>())
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let encoded_end = unit
+            .offset
+            .checked_add(encoded_len as u64)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        if encoded_end > state.integrity_start {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "integrity unit is not within the completed payload prefix",
+            )
+            .into());
+        }
+        let content = live.content.read();
+        self.validate_v2_content(&mut state, &content)?;
+        let start = self.physical_len(unit.offset)?;
+        let end = start
+            .checked_add(encoded_len)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let encoded = content
+            .get(start..end)
+            .ok_or(crate::Error::BlobInsufficientLength)?;
+        let expected = u32::from_be_bytes(
+            encoded[data_len..]
+                .try_into()
+                .expect("integrity checksum footer has a fixed length"),
+        );
+        if Crc32::checksum(&encoded[..data_len]) != expected {
+            return Err(crate::Error::InvalidChecksum);
+        }
+        Ok(IoBufs::from(encoded[..data_len].to_vec()))
     }
 
     async fn rewind(&self, len: u64) -> Result<(), crate::Error> {
         let Some(live) = &self.v2 else {
             return Err(atomic_layout_required(&self.partition, &self.name));
         };
-        self.rewind_v2(live, len, None)
+        self.rewind_v2(live, None, len, None, None).map(|_| ())
     }
 
     async fn rewind_tagged(
@@ -1003,7 +1571,20 @@ impl crate::AtomicBlob for Blob {
         let Some(live) = &self.v2 else {
             return Err(atomic_layout_required(&self.partition, &self.name));
         };
-        self.rewind_v2(live, len, Some(tag))
+        self.rewind_v2(live, None, len, None, Some(tag)).map(|_| ())
+    }
+
+    async fn rewind_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+        tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, crate::Error> {
+        let Some(live) = &self.v2 else {
+            return Err(atomic_layout_required(&self.partition, &self.name));
+        };
+        self.rewind_v2(live, Some(expected), len, unit, tag)
     }
 }
 

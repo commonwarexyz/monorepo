@@ -1355,6 +1355,53 @@ mod tests {
     }
 
     #[test]
+    fn integrity_units_preserve_fixed_item_offsets_across_reopen_and_rewind() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut cfg = config("v2_fixed_small_integrity_pages");
+            cfg.items_per_blob = NZU64!(8);
+            cfg.page_size = atomic_page_size(16);
+
+            let mut journal = Journal::init(context.child("initial"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..6 {
+                (journal, _) = journal.append(&item(value)).await.unwrap();
+            }
+            let tail = journal.blobs.get(&0).unwrap();
+            assert_eq!(tail.size(), 6 * 8);
+            assert!(tail.physical_size() > tail.size());
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let mut journal = Journal::init(context.child("reopen"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..6);
+            assert_eq!(
+                journal.read_many(&[0, 1, 2, 3, 4, 5]).await.unwrap(),
+                (0..6).map(item).collect::<Vec<_>>()
+            );
+
+            journal = journal.rewind(4).await.unwrap();
+            let (journal, position) = journal.append(&item(99)).await.unwrap();
+            assert_eq!(position, 4);
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal =
+                Journal::<_, Item>::init(context.child("reopen_after_rewind"), cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 0..5);
+            assert_eq!(
+                journal.read_many(&[0, 1, 2, 3, 4]).await.unwrap(),
+                vec![item(0), item(1), item(2), item(3), item(99)]
+            );
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
     fn reopens_when_the_empty_tail_has_the_maximum_section_index() {
         deterministic::Runner::default().start(|context| async move {
             let mut cfg = config("v2_fixed_maximum_tail");

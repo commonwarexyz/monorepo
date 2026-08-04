@@ -377,6 +377,13 @@ impl Report {
             cfg.seed,
             cfg.output,
         );
+        if cfg.workload.is_atomic() {
+            println!(
+                "integrity_mode={} chunk_data_size={}",
+                cfg.integrity_mode,
+                cfg.chunk_data_size()
+            );
+        }
 
         if let Some(file_size) = cfg.file_size {
             println!("file_size={file_size}");
@@ -479,6 +486,8 @@ impl Report {
             "duration_seconds": cfg.operations.is_none().then(|| cfg.duration().as_secs()),
             "operations_per_worker": cfg.operations,
             "io_size": cfg.io_size(),
+            "integrity_mode": cfg.workload.is_atomic().then(|| cfg.integrity_mode.to_string()),
+            "chunk_data_size": cfg.workload.is_atomic().then(|| cfg.chunk_data_size()),
             "blobs": is_group.then(|| cfg.blobs()),
             "appends_per_batch": is_group.then(|| cfg.appends_per_batch()),
             "bytes_per_op": is_group.then(|| {

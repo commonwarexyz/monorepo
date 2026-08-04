@@ -6,6 +6,7 @@ use std::{env, fmt, path::PathBuf, time::Duration};
 const DEFAULT_IO_SIZE: usize = 4 * 1024;
 const DEFAULT_MULTI_BLOB_IO_SIZE: usize = 1024 * 1024;
 const DEFAULT_BLOBS: usize = 4;
+const DEFAULT_CHUNK_DATA_SIZE: u32 = 4092;
 
 /// Benchmark workload to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -102,6 +103,20 @@ pub enum WriteShape {
     Vectored,
 }
 
+/// Integrity handling for atomic append workloads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum IntegrityMode {
+    /// Use ordinary raw atomic appends without integrity footers.
+    #[value(name = "none")]
+    None,
+    /// Close one variable-size integrity unit per logical value.
+    #[value(name = "variable")]
+    Variable,
+    /// Close fixed-size integrity units as their data regions fill.
+    #[value(name = "chunked")]
+    Chunked,
+}
+
 /// Durable write implementation for the `write_sync` workload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum SyncMethod {
@@ -147,7 +162,14 @@ macro_rules! display_value_enum {
     )+};
 }
 
-display_value_enum!(Workload, CacheMode, WriteShape, SyncMethod, OutputFormat);
+display_value_enum!(
+    Workload,
+    CacheMode,
+    WriteShape,
+    IntegrityMode,
+    SyncMethod,
+    OutputFormat
+);
 
 impl fmt::Display for SyncMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -199,6 +221,18 @@ pub struct Config {
     /// Run an ordinary four-blob baseline alongside each atomic batch operation.
     #[arg(long, default_value_t = false)]
     pub paired_baseline: bool,
+
+    /// Integrity handling for atomic append workloads.
+    #[arg(long, value_enum, default_value = "none")]
+    pub integrity_mode: IntegrityMode,
+
+    /// Data bytes in each fixed-size integrity unit.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_CHUNK_DATA_SIZE,
+        value_parser = value_parser!(u32).range(1..)
+    )]
+    chunk_data_size: u32,
 
     /// Parallel worker count for steady-state workloads.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
@@ -307,6 +341,11 @@ impl Config {
         }
     }
 
+    /// Data bytes in each fixed-size integrity unit.
+    pub const fn chunk_data_size(&self) -> u32 {
+        self.chunk_data_size
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.inflight == 0 {
             return Err("--inflight must be greater than zero".into());
@@ -322,6 +361,12 @@ impl Config {
         }
         if self.paired_baseline && self.workload != Workload::WriteAtomicBatchAppend {
             return Err("--paired-baseline is only valid for write_atomic_batch_append".into());
+        }
+        if self.integrity_mode != IntegrityMode::None && !self.workload.is_atomic() {
+            return Err(
+                "--integrity-mode is only valid for write_atomic_append or write_atomic_batch_append"
+                    .into(),
+            );
         }
         if !self.workload.is_multi_blob_append() && self.blobs.is_some() {
             return Err(
@@ -595,6 +640,83 @@ mod tests {
         assert_eq!(
             single.validate(),
             Err("--appends-per-batch is only valid for multi-blob append workloads".into())
+        );
+    }
+
+    #[test]
+    fn integrity_configuration_defaults_to_raw_appends() {
+        let cfg = Config::try_parse_from([
+            "storage_bench",
+            "--workload",
+            "write_atomic_batch_append",
+            "--operations",
+            "1",
+        ])
+        .unwrap();
+
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.integrity_mode, IntegrityMode::None);
+        assert_eq!(cfg.chunk_data_size(), DEFAULT_CHUNK_DATA_SIZE);
+    }
+
+    #[test]
+    fn integrity_modes_and_chunk_size_parse_for_atomic_appends() {
+        for mode in ["none", "variable", "chunked"] {
+            let cfg = Config::try_parse_from([
+                "storage_bench",
+                "--workload",
+                "write_atomic_batch_append",
+                "--integrity-mode",
+                mode,
+                "--chunk-data-size",
+                "8192",
+                "--operations",
+                "1",
+            ])
+            .unwrap();
+
+            assert!(cfg.validate().is_ok());
+            assert_eq!(cfg.chunk_data_size(), 8192);
+        }
+    }
+
+    #[test]
+    fn integrity_modes_are_scoped_to_atomic_appends() {
+        let cfg = Config::try_parse_from([
+            "storage_bench",
+            "--workload",
+            "write_multi_blob_append",
+            "--integrity-mode",
+            "variable",
+            "--operations",
+            "1",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cfg.validate(),
+            Err(
+                "--integrity-mode is only valid for write_atomic_append or write_atomic_batch_append"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn chunk_data_size_must_be_nonzero() {
+        assert!(
+            Config::try_parse_from([
+                "storage_bench",
+                "--workload",
+                "write_atomic_append",
+                "--integrity-mode",
+                "chunked",
+                "--chunk-data-size",
+                "0",
+                "--operations",
+                "1",
+            ])
+            .is_err()
         );
     }
 }

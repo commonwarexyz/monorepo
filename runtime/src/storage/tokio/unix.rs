@@ -362,11 +362,17 @@ impl Blob {
         atomic.preflush().wait_blocking(target)
     }
 
-    pub(super) fn rewind_log(&self, state: &mut V2State, len: u64) -> Result<(), Error> {
+    pub(super) fn rewind_log(
+        &self,
+        state: &mut V2State,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+    ) -> Result<(), Error> {
         state.validate_rewind(len)?;
         if len == state.logical_len() {
             return state.rewind(len).map_err(Error::from);
         }
+        let source = state.rewind_integrity_source(len, unit)?;
         let target = state.raw_len()?;
         self.ensure_preflush_blocking(target)?;
         let preflush = self
@@ -375,27 +381,69 @@ impl Blob {
             .expect("atomic rewinds require V2 state")
             .preflush();
         preflush.wait_idle_blocking()?;
-        state.rewind_preflushed(len)?;
+        let source_data = if let Some(source) = source {
+            let data_len = usize::try_from(source.unit.len).map_err(|_| Error::OffsetOverflow)?;
+            let encoded_len = if source.current {
+                data_len
+            } else {
+                data_len
+                    .checked_add(size_of::<u32>())
+                    .ok_or(Error::OffsetOverflow)?
+            };
+            let span = state
+                .read_plan(source.unit.offset, encoded_len)?
+                .into_iter()
+                .next()
+                .expect("nonempty integrity sources have one file span");
+            let atomic::ReadSource::File(offset) = span.source;
+            let mut encoded = vec![0; encoded_len];
+            self.file.read_exact_at(&mut encoded, offset)?;
+            if source.current {
+                state.validate_integrity_tail(&encoded)?;
+            } else {
+                let expected = u32::from_be_bytes(
+                    encoded[data_len..]
+                        .try_into()
+                        .expect("integrity checksum footer has a fixed length"),
+                );
+                atomic::validate_integrity(&encoded[..data_len], expected)?;
+                encoded.truncate(data_len);
+            }
+            source.retain_prefix.then_some((source.unit, encoded))
+        } else {
+            None
+        };
+        state.rewind_preflushed(
+            len,
+            source_data
+                .as_ref()
+                .map(|(unit, data)| (*unit, data.as_slice())),
+        )?;
         preflush.reset_after_rewind(state.raw_len()?);
         Ok(())
     }
 
     async fn rewind_atomic(
         &self,
+        expected: Option<crate::IntegrityToken>,
         len: u64,
+        unit: Option<crate::IntegrityUnit>,
         tag: Option<[u8; super::super::ATOMIC_BLOB_TAG_LEN]>,
-    ) -> Result<(), Error> {
+    ) -> Result<crate::IntegrityToken, Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
         };
         let mut state = atomic.lock().await;
         self.ensure_healthy(&state)?;
+        if let Some(expected) = expected {
+            state.expect_integrity_token(expected)?;
+        }
         state.validate_rewind(len)?;
         let truncate = len < state.logical_len() && len >= state.committed_len();
         let blob = self.clone();
         task::spawn_blocking(move || {
             let result = (|| {
-                blob.rewind_log(&mut state, len)?;
+                blob.rewind_log(&mut state, len, unit)?;
                 if truncate {
                     blob.file.set_len(state.raw_len()?).map_err(|error| {
                         Error::BlobResizeFailed(
@@ -408,7 +456,7 @@ impl Blob {
                 if let Some(tag) = tag {
                     state.set_tag(tag)?;
                 }
-                Ok(())
+                Ok(state.integrity_token())
             })();
             if result.is_err() {
                 state.poison();
@@ -425,21 +473,27 @@ impl Blob {
     #[commonware_macros::stability(ALPHA)]
     async fn append_atomic(
         &self,
+        expected: Option<crate::IntegrityToken>,
         data: IoBufs,
+        boundary: crate::IntegrityBoundary,
         tag: Option<[u8; super::super::ATOMIC_BLOB_TAG_LEN]>,
-    ) -> Result<u64, Error> {
+    ) -> Result<(u64, crate::IntegrityToken), Error> {
         let Some(atomic) = &self.atomic else {
             return Err(Self::atomic_layout_required(&self.partition, &self.name));
         };
         let mut state = atomic.lock().await;
         self.ensure_healthy(&state)?;
+        if let Some(expected) = expected {
+            state.expect_integrity_token(expected)?;
+        }
         let offset = state.logical_len();
-        let Some(prepared) = state.prepare_append(data)? else {
+        let Some(prepared) = state.prepare_integrity_append(data, boundary)? else {
             if let Some(tag) = tag {
                 state.set_tag(tag)?;
             }
-            return Ok(offset);
+            return Ok((offset, state.integrity_token()));
         };
+        let result_offset = prepared.result_offset;
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
@@ -463,7 +517,7 @@ impl Blob {
                 if let Some(tag) = tag {
                     state.set_tag(tag)?;
                 }
-                Ok(offset)
+                Ok((result_offset, state.integrity_token()))
             })();
             if result.is_err() {
                 state.poison();
@@ -910,24 +964,21 @@ impl crate::Blob for Blob {
             return task::spawn_blocking(move || {
                 let _state = state;
                 let _generation = generation;
-                if let Some(buf) = bufs.as_single_mut() {
+                let fill = |out: &mut [u8]| -> Result<(), Error> {
                     for span in &plan {
-                        let destination =
-                            &mut buf.as_mut()[span.destination..span.destination + span.len];
-                        let atomic::ReadSource::File(offset) = span.source;
-                        file.read_exact_at(destination, offset)
+                        let destination = &mut out[span.destination..span.destination + span.len];
+                        let atomic::ReadSource::File(file_offset) = span.source;
+                        file.read_exact_at(destination, file_offset)
                             .map_err(|_| Error::ReadFailed)?;
                     }
+                    Ok(())
+                };
+                if let Some(buf) = bufs.as_single_mut() {
+                    fill(buf.as_mut())?;
                 } else {
                     // SAFETY: every byte is filled from the planned file span.
                     let mut temp = unsafe { pool.alloc_len(len) };
-                    for span in &plan {
-                        let destination =
-                            &mut temp.as_mut()[span.destination..span.destination + span.len];
-                        let atomic::ReadSource::File(offset) = span.source;
-                        file.read_exact_at(destination, offset)
-                            .map_err(|_| Error::ReadFailed)?;
-                    }
+                    fill(temp.as_mut())?;
                     bufs.copy_from_slice(temp.as_ref());
                 }
                 Ok(bufs)
@@ -1058,7 +1109,7 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         if self.atomic.is_some() {
-            return self.rewind_atomic(len, None).await;
+            return self.rewind_atomic(None, len, None, None).await.map(|_| ());
         }
         let file = self.file.clone();
         let len = len
@@ -1132,8 +1183,80 @@ impl crate::AtomicBlob for Blob {
         Ok(())
     }
 
+    async fn compare_set_tag(
+        &self,
+        expected: crate::IntegrityToken,
+        tag: [u8; super::super::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(Self::atomic_layout_required(&self.partition, &self.name));
+        };
+        let mut state = atomic.lock().await;
+        self.ensure_healthy(&state)?;
+        state.expect_integrity_token(expected)?;
+        state.set_tag(tag)?;
+        Ok(state.integrity_token())
+    }
+
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(Self::atomic_layout_required(&self.partition, &self.name));
+        };
+        let state = atomic.lock().await;
+        self.ensure_healthy(&state)?;
+        Ok(state.integrity_scheme())
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(Self::atomic_layout_required(&self.partition, &self.name));
+        };
+        let state = atomic.lock().await;
+        self.ensure_healthy(&state)?;
+        let encoded_len = state.logical_len();
+        let scheme = state.integrity_scheme();
+        let tag = state.tag();
+        let token = state.integrity_token();
+        let Some(unit) = state.integrity_tail() else {
+            return Ok(crate::IntegritySnapshot {
+                encoded_len,
+                scheme,
+                tag,
+                tail: None,
+                token,
+            });
+        };
+        let len = usize::try_from(unit.len).map_err(|_| Error::OffsetOverflow)?;
+        let span = state
+            .read_plan(unit.offset, len)?
+            .into_iter()
+            .next()
+            .expect("nonempty integrity tails have one file span");
+        let atomic::ReadSource::File(offset) = span.source;
+        let file = self.file.clone();
+        let generation = self.generation.clone();
+        task::spawn_blocking(move || {
+            let _generation = generation;
+            let mut data = vec![0; len];
+            file.read_exact_at(&mut data, offset)
+                .map_err(|_| Error::ReadFailed)?;
+            state.validate_integrity_tail(&data)?;
+            Ok(crate::IntegritySnapshot {
+                encoded_len,
+                scheme,
+                tag,
+                tail: Some((unit, IoBufs::from(data))),
+                token,
+            })
+        })
+        .await
+        .unwrap_or(Err(Error::ReadFailed))
+    }
+
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
-        self.append_atomic(data.into(), None).await
+        self.append_atomic(None, data.into(), crate::IntegrityBoundary::Continue, None)
+            .await
+            .map(|(offset, _)| offset)
     }
 
     async fn append_tagged(
@@ -1141,11 +1264,82 @@ impl crate::AtomicBlob for Blob {
         data: impl Into<IoBufs> + Send,
         tag: [u8; super::super::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<u64, Error> {
-        self.append_atomic(data.into(), Some(tag)).await
+        self.append_atomic(
+            None,
+            data.into(),
+            crate::IntegrityBoundary::Continue,
+            Some(tag),
+        )
+        .await
+        .map(|(offset, _)| offset)
+    }
+
+    async fn append_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        data: impl Into<IoBufs> + Send,
+        boundary: crate::IntegrityBoundary,
+        tag: Option<[u8; super::super::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, Error> {
+        self.append_atomic(Some(expected), data.into(), boundary, tag)
+            .await
+            .map(|(offset, token)| crate::IntegrityAppend { offset, token })
+    }
+
+    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+        Ok(self.integrity_snapshot().await?.tail)
+    }
+
+    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+        let Some(atomic) = &self.atomic else {
+            return Err(Self::atomic_layout_required(&self.partition, &self.name));
+        };
+        let state = atomic.lock().await;
+        self.ensure_healthy(&state)?;
+        state.integrity_scheme().validate_completed_unit(unit)?;
+        let data_len = usize::try_from(unit.len).map_err(|_| Error::OffsetOverflow)?;
+        let encoded_len = data_len
+            .checked_add(size_of::<u32>())
+            .ok_or(Error::OffsetOverflow)?;
+        let encoded_end = unit
+            .offset
+            .checked_add(encoded_len as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        if encoded_end > state.completed_integrity_len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "integrity unit is not within the completed payload prefix",
+            )
+            .into());
+        }
+        let span = state
+            .read_plan(unit.offset, encoded_len)?
+            .into_iter()
+            .next()
+            .expect("nonempty integrity units have one file span");
+        let atomic::ReadSource::File(offset) = span.source;
+        let file = self.file.clone();
+        let generation = self.generation.clone();
+        task::spawn_blocking(move || {
+            let _generation = generation;
+            let mut encoded = vec![0; encoded_len];
+            file.read_exact_at(&mut encoded, offset)
+                .map_err(|_| Error::ReadFailed)?;
+            let expected = u32::from_be_bytes(
+                encoded[data_len..]
+                    .try_into()
+                    .expect("integrity checksum footer has a fixed length"),
+            );
+            atomic::validate_integrity(&encoded[..data_len], expected)?;
+            encoded.truncate(data_len);
+            Ok(IoBufs::from(encoded))
+        })
+        .await
+        .unwrap_or(Err(Error::ReadFailed))
     }
 
     async fn rewind(&self, len: u64) -> Result<(), Error> {
-        self.rewind_atomic(len, None).await
+        self.rewind_atomic(None, len, None, None).await.map(|_| ())
     }
 
     async fn rewind_tagged(
@@ -1153,7 +1347,19 @@ impl crate::AtomicBlob for Blob {
         len: u64,
         tag: [u8; super::super::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<(), Error> {
-        self.rewind_atomic(len, Some(tag)).await
+        self.rewind_atomic(None, len, None, Some(tag))
+            .await
+            .map(|_| ())
+    }
+
+    async fn rewind_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+        tag: Option<[u8; super::super::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.rewind_atomic(Some(expected), len, unit, tag).await
     }
 }
 

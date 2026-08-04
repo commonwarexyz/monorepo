@@ -1,32 +1,28 @@
 //! Append-only checked pages over an [`AtomicBlob`].
 //!
 //! Unlike [`super::Writer`], this writer never rewrites a partial page. Full logical pages carry
-//! one trailing CRC32C checksum, while a final partial page remains raw and stores its checksum in
-//! the atomic blob's root tag:
+//! one trailing V2-owned CRC32C checksum, while a final partial page remains raw and stores its
+//! checksum in dedicated V2 root fields:
 //!
 //! ```text
 //! ([page bytes][CRC32C: u32 big-endian])* [partial page bytes]?
 //! ```
 //!
-//! The first 60 bytes of the root tag are an application-owned marker. This codec owns the final
-//! four bytes and updates them whenever the partial page changes. Full pages are validated when
-//! read; opening validates only the bounded partial tail.
+//! The complete 64-byte root tag remains application-owned. The writer chooses page boundaries;
+//! V2 computes, stores, resumes, and validates every checksum.
 
-use crate::{ATOMIC_BLOB_TAG_LEN, AtomicBlob, Buf, Error, Handle, IoBuf, IoBufs};
-use commonware_cryptography::{Crc32, Hasher as _};
-use futures::FutureExt as _;
+use crate::{
+    ATOMIC_BLOB_TAG_LEN, AtomicBlob, Buf, Error, Handle, IntegrityBoundary, IntegrityScheme,
+    IntegrityToken, IntegrityUnit, IoBuf, IoBufs,
+};
 use std::{
     collections::VecDeque,
-    future::Future,
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
 };
 
 const CRC_LEN: usize = size_of::<u32>();
 /// Number of application-owned marker bytes in an atomic checked-page tag.
-pub const ATOMIC_MARKER_LEN: usize = ATOMIC_BLOB_TAG_LEN - CRC_LEN;
-
-const CRC_OFFSET: usize = ATOMIC_MARKER_LEN;
-const _: () = assert!(ATOMIC_MARKER_LEN + CRC_LEN == ATOMIC_BLOB_TAG_LEN);
+pub const ATOMIC_MARKER_LEN: usize = ATOMIC_BLOB_TAG_LEN;
 
 /// Return the logical page size whose atomic physical page occupies `physical_page_size` bytes.
 ///
@@ -56,63 +52,6 @@ pub const fn atomic_page_size(physical_page_size: u32) -> NonZeroU16 {
         Some(size) => size,
         None => unreachable!(),
     }
-}
-
-fn checksum(parts: &[&[u8]]) -> u32 {
-    let mut hasher = Crc32::default();
-    for part in parts {
-        hasher.update(part);
-    }
-    hasher.finalize().1.as_u32()
-}
-
-fn tag(marker: [u8; ATOMIC_MARKER_LEN], tail: &[u8]) -> [u8; ATOMIC_BLOB_TAG_LEN] {
-    let mut tag = [0; ATOMIC_BLOB_TAG_LEN];
-    tag[..ATOMIC_MARKER_LEN].copy_from_slice(&marker);
-    if !tail.is_empty() {
-        tag[CRC_OFFSET..].copy_from_slice(&Crc32::checksum(tail).to_be_bytes());
-    }
-    tag
-}
-
-fn marker(tag: &[u8; ATOMIC_BLOB_TAG_LEN]) -> [u8; ATOMIC_MARKER_LEN] {
-    tag[..ATOMIC_MARKER_LEN]
-        .try_into()
-        .expect("marker length is fixed")
-}
-
-fn tagged_crc(tag: &[u8; ATOMIC_BLOB_TAG_LEN]) -> u32 {
-    u32::from_be_bytes(tag[CRC_OFFSET..].try_into().expect("CRC length is fixed"))
-}
-
-fn validate_full_page(page: &[u8], page_size: usize) -> Result<(), Error> {
-    let expected_len = page_size
-        .checked_add(CRC_LEN)
-        .ok_or(Error::OffsetOverflow)?;
-    if page.len() != expected_len {
-        return Err(Error::InvalidChecksum);
-    }
-    let expected = u32::from_be_bytes(
-        page[page_size..]
-            .try_into()
-            .expect("full page footer has a fixed length"),
-    );
-    if Crc32::checksum(&page[..page_size]) != expected {
-        return Err(Error::InvalidChecksum);
-    }
-    Ok(())
-}
-
-/// Adapt a backend read to the `Sync` future required by read-only journal interfaces.
-fn shared_read<B: AtomicBlob>(
-    blob: &B,
-    offset: u64,
-    len: usize,
-) -> impl Future<Output = Result<IoBuf, Error>> + Send + Sync + 'static {
-    let blob = blob.clone();
-    async move { Ok(blob.read_at(offset, len).await?.coalesce().freeze()) }
-        .boxed()
-        .shared()
 }
 
 /// Immutable point-in-time read view of an [`AtomicWriter`].
@@ -227,34 +166,23 @@ impl<B: AtomicBlob> AtomicView<'_, B> {
                 .checked_sub(first_page)
                 .and_then(|count| count.checked_add(1))
                 .ok_or(Error::OffsetOverflow)?;
-            let physical_offset = first_page
-                .checked_mul(physical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            let physical_len = page_count
-                .checked_mul(physical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            let physical_len = usize::try_from(physical_len).map_err(|_| Error::OffsetOverflow)?;
-            let pages = shared_read(self.blob, physical_offset, physical_len).await?;
-            let pages = pages.as_ref();
-            let physical_page_size =
-                usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
             let page_size = usize::from(self.page_size.get());
 
             for page_index in 0..usize::try_from(page_count).map_err(|_| Error::OffsetOverflow)? {
-                let physical_start = page_index
-                    .checked_mul(physical_page_size)
-                    .ok_or(Error::OffsetOverflow)?;
-                let physical_end = physical_start
-                    .checked_add(physical_page_size)
-                    .ok_or(Error::OffsetOverflow)?;
-                let page = pages
-                    .get(physical_start..physical_end)
-                    .ok_or(Error::InvalidChecksum)?;
-                validate_full_page(page, page_size)?;
-
                 let logical_page = first_page
                     .checked_add(page_index as u64)
                     .ok_or(Error::OffsetOverflow)?;
+                let physical_offset = logical_page
+                    .checked_mul(physical_page_size)
+                    .ok_or(Error::OffsetOverflow)?;
+                let page = self
+                    .blob
+                    .read_integrity(IntegrityUnit {
+                        offset: physical_offset,
+                        len: page_size as u64,
+                    })
+                    .await?
+                    .coalesce();
                 let logical_start = logical_page
                     .checked_mul(page_size as u64)
                     .ok_or(Error::OffsetOverflow)?;
@@ -267,7 +195,7 @@ impl<B: AtomicBlob> AtomicView<'_, B> {
                 let dst_start =
                     usize::try_from(copy_start - offset).map_err(|_| Error::OffsetOverflow)?;
                 out[dst_start..dst_start + copy_len]
-                    .copy_from_slice(&page[src_start..src_start + copy_len]);
+                    .copy_from_slice(&page.as_ref()[src_start..src_start + copy_len]);
             }
         }
 
@@ -419,6 +347,7 @@ pub struct AtomicWriter<B: AtomicBlob> {
     physical_size: u64,
     tail: IoBuf,
     marker: [u8; ATOMIC_MARKER_LEN],
+    token: IntegrityToken,
 }
 
 impl<B: AtomicBlob> AtomicWriter<B> {
@@ -427,8 +356,51 @@ impl<B: AtomicBlob> AtomicWriter<B> {
     /// This derives the logical length in constant time. If a partial page exists, it reads and
     /// validates only that tail against the root tag. Historical full pages are validated lazily
     /// when read.
-    pub async fn new(blob: B, physical_size: u64, page_size: NonZeroU16) -> Result<Self, Error> {
+    pub async fn new(
+        blob: B,
+        mut physical_size: u64,
+        page_size: NonZeroU16,
+    ) -> Result<Self, Error> {
         let page_size_u64 = u64::from(page_size.get());
+        let chunk_size = NonZeroU32::new(u32::from(page_size.get()))
+            .expect("nonzero u16 page sizes remain nonzero as u32");
+        let mut snapshot = blob.integrity_snapshot().await?;
+        if snapshot.encoded_len != physical_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic blob changed while its checked-page writer was opening",
+            )
+            .into());
+        }
+        match snapshot.scheme {
+            IntegrityScheme::Unbound => {
+                let mutation = blob
+                    .append_integrity(
+                        snapshot.token,
+                        IoBufs::default(),
+                        IntegrityBoundary::Chunked(chunk_size),
+                        None,
+                    )
+                    .await?;
+                snapshot = blob.integrity_snapshot().await?;
+                if snapshot.token != mutation.token {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "atomic blob changed while its integrity layout was being bound",
+                    )
+                    .into());
+                }
+                physical_size = snapshot.encoded_len;
+            }
+            IntegrityScheme::Chunked(size) if size == chunk_size => {}
+            IntegrityScheme::Variable | IntegrityScheme::Chunked(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "atomic blob uses a different integrity-unit layout",
+                )
+                .into());
+            }
+        }
         let physical_page_size = page_size_u64
             .checked_add(CRC_LEN as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -438,28 +410,24 @@ impl<B: AtomicBlob> AtomicWriter<B> {
             return Err(Error::InvalidChecksum);
         }
 
-        let root_tag = blob.tag().await?;
-        if partial_len == 0 && tagged_crc(&root_tag) != 0 {
-            return Err(Error::InvalidChecksum);
-        }
-        let tail = if partial_len == 0 {
-            IoBuf::default()
-        } else {
-            let tail_offset = full_pages
-                .checked_mul(physical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            let tail = blob
-                .read_at(
-                    tail_offset,
-                    usize::try_from(partial_len).map_err(|_| Error::OffsetOverflow)?,
-                )
-                .await?
-                .coalesce()
-                .freeze();
-            if Crc32::checksum(tail.as_ref()) != tagged_crc(&root_tag) {
-                return Err(Error::InvalidChecksum);
+        let root_tag = snapshot.tag;
+        let tail = match (partial_len, snapshot.tail) {
+            (0, None) => IoBuf::default(),
+            (0, Some(_)) | (_, None) => return Err(Error::InvalidChecksum),
+            (partial_len, Some((unit, tail))) => {
+                let tail_offset = full_pages
+                    .checked_mul(physical_page_size)
+                    .ok_or(Error::OffsetOverflow)?;
+                if unit
+                    != (IntegrityUnit {
+                        offset: tail_offset,
+                        len: partial_len,
+                    })
+                {
+                    return Err(Error::InvalidChecksum);
+                }
+                tail.coalesce()
             }
-            tail
         };
         let size = full_pages
             .checked_mul(page_size_u64)
@@ -472,7 +440,8 @@ impl<B: AtomicBlob> AtomicWriter<B> {
             size,
             physical_size,
             tail,
-            marker: marker(&root_tag),
+            marker: root_tag,
+            token: snapshot.token,
         })
     }
 
@@ -493,7 +462,7 @@ impl<B: AtomicBlob> AtomicWriter<B> {
 
     /// Return the complete root tag staged by this writer.
     pub fn tag(&self) -> [u8; ATOMIC_BLOB_TAG_LEN] {
-        tag(self.marker, self.tail.as_ref())
+        self.marker
     }
 
     /// Borrow the underlying atomic blob, for sync or batch publication.
@@ -522,7 +491,7 @@ impl<B: AtomicBlob> AtomicWriter<B> {
         if marker == self.marker {
             return Ok(self);
         }
-        self.blob.set_tag(tag(marker, self.tail.as_ref())).await?;
+        self.token = self.blob.compare_set_tag(self.token, marker).await?;
         self.marker = marker;
         Ok(self)
     }
@@ -581,65 +550,25 @@ impl<B: AtomicBlob> AtomicWriter<B> {
             IoBuf::copy_from_slice(&bytes.as_ref()[bytes.len() - new_tail_len..])
         };
 
-        // Keep all footer bytes in one allocation. Each footer is then exposed as a cheap IoBuf
-        // slice, preserving vectored zero-copy payload writes without allocating once per page.
-        let mut footer_bytes_buf = Vec::with_capacity(footer_bytes);
-        let mut cursor = 0;
-        if !self.tail.is_empty() {
-            let fill = page_size - self.tail.len();
-            let take = fill.min(bytes.len());
-            if take == fill {
-                let page_crc = checksum(&[self.tail.as_ref(), &bytes.as_ref()[..take]]);
-                footer_bytes_buf.extend_from_slice(&page_crc.to_be_bytes());
-            }
-            cursor = take;
-        }
-
-        while bytes.len() - cursor >= page_size {
-            let page_crc = Crc32::checksum(&bytes.as_ref()[cursor..cursor + page_size]);
-            footer_bytes_buf.extend_from_slice(&page_crc.to_be_bytes());
-            cursor += page_size;
-        }
-        debug_assert_eq!(footer_bytes_buf.len(), footer_bytes);
-
-        let footers = IoBuf::from(footer_bytes_buf);
-        let mut footer_cursor = 0;
-        let mut physical = Vec::with_capacity(completed_pages.saturating_mul(2) + 1);
-        let mut cursor = 0;
-        if !self.tail.is_empty() {
-            let fill = page_size - self.tail.len();
-            let take = fill.min(bytes.len());
-            if take != 0 {
-                physical.push(bytes.slice(..take));
-            }
-            if take == fill {
-                physical.push(footers.slice(footer_cursor..footer_cursor + CRC_LEN));
-                footer_cursor += CRC_LEN;
-            }
-            cursor = take;
-        }
-        while bytes.len() - cursor >= page_size {
-            physical.push(bytes.slice(cursor..cursor + page_size));
-            physical.push(footers.slice(footer_cursor..footer_cursor + CRC_LEN));
-            footer_cursor += CRC_LEN;
-            cursor += page_size;
-        }
-        if cursor != bytes.len() {
-            physical.push(bytes.slice(cursor..));
-        }
-        debug_assert_eq!(footer_cursor, footer_bytes);
-
-        let physical_offset = self
+        let mutation = self
             .blob
-            .append_tagged(IoBufs::from(physical), tag(self.marker, new_tail.as_ref()))
+            .append_integrity(
+                self.token,
+                bytes,
+                IntegrityBoundary::Chunked(
+                    NonZeroU32::new(page_size as u32).expect("u16 page sizes are nonzero"),
+                ),
+                Some(self.marker),
+            )
             .await?;
-        if physical_offset != self.physical_size {
+        if mutation.offset != self.physical_size {
             return Err(Error::InvalidChecksum);
         }
 
         self.size = new_size;
         self.physical_size = new_physical_size;
         self.tail = new_tail;
+        self.token = mutation.token;
         Ok((self, offset))
     }
 
@@ -662,35 +591,47 @@ impl<B: AtomicBlob> AtomicWriter<B> {
         let full_pages = size / page_size;
         let partial_len = size % page_size;
         let current_full_pages = (self.size - self.tail.len() as u64) / page_size;
-
-        let new_tail = if partial_len == 0 {
-            IoBuf::default()
-        } else if full_pages == current_full_pages {
-            self.tail
-                .slice(..usize::try_from(partial_len).map_err(|_| Error::OffsetOverflow)?)
-        } else {
-            let physical_offset = full_pages
-                .checked_mul(physical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            let page = self
-                .blob
-                .read_at(
-                    physical_offset,
-                    usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?,
-                )
-                .await?
-                .coalesce()
-                .freeze();
-            validate_full_page(page.as_ref(), self.page_size.get() as usize)?;
-            page.slice(..usize::try_from(partial_len).map_err(|_| Error::OffsetOverflow)?)
-        };
         let physical_size = full_pages
             .checked_mul(physical_page_size)
             .and_then(|size| size.checked_add(partial_len))
             .ok_or(Error::OffsetOverflow)?;
-        let new_tag = tag(self.marker, new_tail.as_ref());
+        let unit = if partial_len == 0 {
+            None
+        } else {
+            Some(IntegrityUnit {
+                offset: full_pages
+                    .checked_mul(physical_page_size)
+                    .ok_or(Error::OffsetOverflow)?,
+                len: if full_pages == current_full_pages {
+                    self.tail.len() as u64
+                } else {
+                    page_size
+                },
+            })
+        };
 
-        self.blob.rewind_tagged(physical_size, new_tag).await?;
+        self.token = self
+            .blob
+            .rewind_integrity(self.token, physical_size, unit, Some(self.marker))
+            .await?;
+        let snapshot = self.blob.integrity_snapshot().await?;
+        if snapshot.token != self.token {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic blob changed while its checked-page rewind was completing",
+            )
+            .into());
+        }
+        let new_tail = match (partial_len, snapshot.tail) {
+            (0, None) => IoBuf::default(),
+            (0, Some(_)) | (_, None) => return Err(Error::InvalidChecksum),
+            (partial_len, Some((unit, tail))) => {
+                if unit.offset + unit.len != physical_size || unit.len != partial_len {
+                    return Err(Error::InvalidChecksum);
+                }
+                tail.coalesce()
+            }
+        };
         self.size = size;
         self.physical_size = physical_size;
         self.tail = new_tail;
@@ -836,6 +777,24 @@ mod tests {
             self.inner.tag().await
         }
 
+        async fn integrity_scheme(&self) -> Result<IntegrityScheme, Error> {
+            self.inner.integrity_scheme().await
+        }
+
+        async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+            self.inner.integrity_snapshot().await
+        }
+
+        async fn compare_set_tag(
+            &self,
+            expected: IntegrityToken,
+            tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        ) -> Result<IntegrityToken, Error> {
+            let token = self.inner.compare_set_tag(expected, tag).await?;
+            self.gate.wait().await;
+            Ok(token)
+        }
+
         async fn set_tag(&self, tag: [u8; ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
             self.inner.set_tag(tag).await
         }
@@ -856,6 +815,29 @@ mod tests {
             Ok(offset)
         }
 
+        async fn append_integrity(
+            &self,
+            expected: IntegrityToken,
+            data: impl Into<IoBufs> + Send,
+            boundary: IntegrityBoundary,
+            tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
+        ) -> Result<crate::IntegrityAppend, Error> {
+            let result = self
+                .inner
+                .append_integrity(expected, data, boundary, tag)
+                .await?;
+            self.gate.wait().await;
+            Ok(result)
+        }
+
+        async fn read_integrity_tail(&self) -> Result<Option<(IntegrityUnit, IoBufs)>, Error> {
+            self.inner.read_integrity_tail().await
+        }
+
+        async fn read_integrity(&self, unit: IntegrityUnit) -> Result<IoBufs, Error> {
+            self.inner.read_integrity(unit).await
+        }
+
         async fn rewind(&self, len: u64) -> Result<(), Error> {
             self.inner.rewind(len).await?;
             self.gate.wait().await;
@@ -870,6 +852,21 @@ mod tests {
             self.inner.rewind_tagged(len, tag).await?;
             self.gate.wait().await;
             Ok(())
+        }
+
+        async fn rewind_integrity(
+            &self,
+            expected: IntegrityToken,
+            len: u64,
+            unit: Option<IntegrityUnit>,
+            tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
+        ) -> Result<IntegrityToken, Error> {
+            let token = self
+                .inner
+                .rewind_integrity(expected, len, unit, tag)
+                .await?;
+            self.gate.wait().await;
+            Ok(token)
         }
     }
 
@@ -972,7 +969,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn marker_change_preserves_partial_checksum() {
+    fn marker_uses_the_full_application_tag() {
         deterministic::Runner::default().start(|context| async move {
             let (blob, physical_size) = context
                 .open_atomic("atomic_paged_marker", b"blob")
@@ -983,13 +980,12 @@ mod tests {
                 .unwrap();
             (writer, _) = writer.append(b"partial").await.unwrap();
             let before_size = writer.physical_size();
-            let before_crc = writer.tag()[CRC_OFFSET..].to_vec();
 
             let marker =
                 std::array::from_fn(|index| (index as u8).wrapping_mul(13).wrapping_add(7));
             writer = writer.set_marker(marker).await.unwrap();
             assert_eq!(writer.physical_size(), before_size);
-            assert_eq!(&writer.tag()[CRC_OFFSET..], before_crc);
+            assert_eq!(writer.tag(), marker);
             assert_eq!(writer.marker(), marker);
             writer.sync().await.unwrap();
             drop(writer);
@@ -1007,7 +1003,64 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn rewind_maps_logical_tail_and_recomputes_crc() {
+    fn stale_writers_fail_before_mutating_the_blob() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "atomic_paged_stale_writer";
+            let (first_blob, first_size) = context.open_atomic(partition, b"blob").await.unwrap();
+            let (second_blob, second_size) = context.open_atomic(partition, b"blob").await.unwrap();
+            let (third_blob, third_size) = context.open_atomic(partition, b"blob").await.unwrap();
+            let mut first = AtomicWriter::new(first_blob, first_size, PAGE_SIZE)
+                .await
+                .unwrap();
+            let second = AtomicWriter::new(second_blob, second_size, PAGE_SIZE)
+                .await
+                .unwrap();
+            let third = AtomicWriter::new(third_blob, third_size, PAGE_SIZE)
+                .await
+                .unwrap();
+
+            let marker = [0xA5; ATOMIC_MARKER_LEN];
+            first = first.set_marker(marker).await.unwrap();
+            assert!(second.append(b"stale append").await.is_err());
+            assert!(third.set_marker([0x5A; ATOMIC_MARKER_LEN]).await.is_err());
+
+            (first, _) = first.append(b"winner").await.unwrap();
+            first.sync().await.unwrap();
+            drop(first);
+
+            let (blob, physical_size) = context.open_atomic(partition, b"blob").await.unwrap();
+            let reopened = AtomicWriter::new(blob, physical_size, PAGE_SIZE)
+                .await
+                .unwrap();
+            assert_eq!(reopened.marker(), marker);
+            assert_eq!(reopened.size(), 6);
+            assert_eq!(reopened.read_at(0, 6).await.unwrap().coalesce(), b"winner");
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn reopen_rejects_a_different_page_geometry() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "atomic_paged_geometry";
+            let (blob, physical_size) = context.open_atomic(partition, b"blob").await.unwrap();
+            let writer = AtomicWriter::new(blob, physical_size, PAGE_SIZE)
+                .await
+                .unwrap();
+            let (writer, _) = writer.append(b"payload").await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            let (blob, physical_size) = context.open_atomic(partition, b"blob").await.unwrap();
+            assert!(
+                AtomicWriter::new(blob, physical_size, NonZeroU16::new(8).unwrap())
+                    .await
+                    .is_err()
+            );
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn rewind_maps_logical_tail_and_rebuilds_integrity_state() {
         deterministic::Runner::default().start(|context| async move {
             let (blob, physical_size) = context
                 .open_atomic("atomic_paged_rewind", b"blob")
@@ -1027,7 +1080,6 @@ mod tests {
             writer = writer.rewind(19).await.unwrap();
             assert_eq!(writer.size(), 19);
             assert_eq!(writer.physical_size(), 16 + 4 + 3);
-            assert_eq!(tagged_crc(&writer.tag()), Crc32::checksum(&data[16..19]));
             writer.sync().await.unwrap();
             (writer, _) = writer.append(b"xyz").await.unwrap();
             let expected = [&data[..19], b"xyz"].concat();
@@ -1055,46 +1107,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn open_defers_historical_crc_validation_until_read() {
-        deterministic::Runner::default().start(|context| async move {
-            let (plain, _) = context.open("atomic_paged_corrupt", b"blob").await.unwrap();
-            let mut physical = vec![1; PAGE_SIZE.get() as usize];
-            physical.extend_from_slice(&0u32.to_be_bytes());
-            physical.extend_from_slice(b"tail");
-            plain
-                .write_at(0, physical, WriteOptions::default())
-                .await
-                .unwrap();
-            plain.sync().await.unwrap();
-            context.migrate_atomic(plain).await.unwrap();
-
-            let (blob, _physical_size) = context
-                .open_atomic("atomic_paged_corrupt", b"blob")
-                .await
-                .unwrap();
-            blob.set_tag(tag([0; ATOMIC_MARKER_LEN], b"tail"))
-                .await
-                .unwrap();
-            blob.sync().await.unwrap();
-            drop(blob);
-
-            let (blob, physical_size) = context
-                .open_atomic("atomic_paged_corrupt", b"blob")
-                .await
-                .unwrap();
-            let writer = AtomicWriter::new(blob, physical_size, PAGE_SIZE)
-                .await
-                .unwrap();
-            assert_eq!(writer.read_at(16, 4).await.unwrap().coalesce(), b"tail");
-            assert!(matches!(
-                writer.read_at(0, 1).await,
-                Err(Error::InvalidChecksum)
-            ));
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn open_rejects_invalid_remainder_and_partial_crc() {
+    fn open_rejects_invalid_remainder_and_accepts_migrated_tail() {
         deterministic::Runner::default().start(|context| async move {
             let (plain, _) = context
                 .open("atomic_paged_bad_remainder", b"blob")
@@ -1133,22 +1146,21 @@ mod tests {
                 .open_atomic("atomic_paged_bad_tail", b"blob")
                 .await
                 .unwrap();
-            assert!(matches!(
-                AtomicWriter::new(blob, physical_size, PAGE_SIZE).await,
-                Err(Error::InvalidChecksum)
-            ));
+            let writer = AtomicWriter::new(blob, physical_size, PAGE_SIZE)
+                .await
+                .unwrap();
+            assert_eq!(writer.read_at(0, 7).await.unwrap().coalesce(), b"partial");
 
             let (blob, physical_size) = context
                 .open_atomic("atomic_paged_bad_empty_crc", b"blob")
                 .await
                 .unwrap();
-            let mut invalid_tag = [0; ATOMIC_BLOB_TAG_LEN];
-            invalid_tag[CRC_OFFSET..].copy_from_slice(&1u32.to_be_bytes());
-            blob.set_tag(invalid_tag).await.unwrap();
-            assert!(matches!(
-                AtomicWriter::new(blob, physical_size, PAGE_SIZE).await,
-                Err(Error::InvalidChecksum)
-            ));
+            let marker = [0xA5; ATOMIC_MARKER_LEN];
+            blob.set_tag(marker).await.unwrap();
+            let writer = AtomicWriter::new(blob, physical_size, PAGE_SIZE)
+                .await
+                .unwrap();
+            assert_eq!(writer.marker(), marker);
         });
     }
 

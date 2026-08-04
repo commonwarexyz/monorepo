@@ -59,7 +59,6 @@ stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouri
 stability_scope!(BETA {
     /// Number of application-owned bytes encoded in a V2 root.
     pub(crate) const ATOMIC_BLOB_TAG_LEN: usize = 64;
-
     pub mod metered;
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -92,9 +91,11 @@ stability_scope!(BETA {
 pub(crate) mod tests {
     use crate::{
         ATOMIC_BLOB_TAG_LEN, AtomicBlob, AtomicStorage, BatchOperation, BatchStorage, Blob, Buf,
-        IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage, WriteOptions,
+        IntegrityBoundary, IntegrityScheme, IntegrityUnit, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+        Storage, WriteOptions,
     };
     use futures::FutureExt;
+    use std::num::NonZeroU32;
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(storage: S)
@@ -169,6 +170,228 @@ pub(crate) mod tests {
         test_migrate_atomic_preserves_contents_and_version(&storage).await;
         test_migrate_atomic_rejects_stale_handle(&storage).await;
         test_atomic_tag_persistence(&storage).await;
+        test_atomic_variable_integrity(&storage).await;
+        test_atomic_chunked_integrity_and_stale_writers(&storage).await;
+    }
+
+    async fn test_atomic_variable_integrity<S>(storage: &S)
+    where
+        S: AtomicStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let (blob, len) = storage
+            .open_atomic("atomic_integrity_variable", b"blob")
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+        let initial = blob.integrity_snapshot().await.unwrap();
+        assert_eq!(initial.scheme, IntegrityScheme::Unbound);
+        assert!(initial.tail.is_none());
+
+        let first = blob
+            .append_integrity(
+                initial.token,
+                vec![IoBuf::from(b"abc"), IoBuf::from(b"def")],
+                IntegrityBoundary::Complete,
+                Some([0xA5; ATOMIC_BLOB_TAG_LEN]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.offset, 0);
+        let closed = blob.integrity_snapshot().await.unwrap();
+        assert_eq!(closed.encoded_len, 10);
+        assert_eq!(closed.scheme, IntegrityScheme::Variable);
+        assert_eq!(closed.tag, [0xA5; ATOMIC_BLOB_TAG_LEN]);
+        assert!(closed.tail.is_none());
+        assert_eq!(
+            blob.read_integrity(IntegrityUnit { offset: 0, len: 6 })
+                .await
+                .unwrap()
+                .coalesce(),
+            b"abcdef"
+        );
+
+        let open = blob
+            .append_integrity(closed.token, b"tail", IntegrityBoundary::Continue, None)
+            .await
+            .unwrap();
+        assert_eq!(open.offset, 10);
+        let snapshot = blob.integrity_snapshot().await.unwrap();
+        let (unit, tail) = snapshot.tail.unwrap();
+        assert_eq!(unit, IntegrityUnit { offset: 10, len: 4 });
+        assert_eq!(tail.coalesce(), b"tail");
+        assert!(
+            blob.read_integrity(IntegrityUnit { offset: 10, len: 4 })
+                .await
+                .is_err()
+        );
+
+        blob.sync().await.unwrap();
+        let snapshot = blob.integrity_snapshot().await.unwrap();
+        let sealed = blob
+            .append_integrity(
+                snapshot.token,
+                IoBufs::default(),
+                IntegrityBoundary::Complete,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sealed.offset, 14);
+        assert_eq!(
+            blob.read_integrity(IntegrityUnit { offset: 10, len: 4 })
+                .await
+                .unwrap()
+                .coalesce(),
+            b"tail"
+        );
+
+        let before_mismatch = blob.integrity_snapshot().await.unwrap();
+        assert!(
+            blob.append_integrity(
+                before_mismatch.token,
+                b"wrong scheme",
+                IntegrityBoundary::Chunked(NonZeroU32::new(4).unwrap()),
+                None,
+            )
+            .await
+            .is_err()
+        );
+        let after_mismatch = blob.integrity_snapshot().await.unwrap();
+        assert_eq!(after_mismatch.encoded_len, before_mismatch.encoded_len);
+        assert_eq!(after_mismatch.token, before_mismatch.token);
+
+        blob.sync().await.unwrap();
+        let snapshot = blob.integrity_snapshot().await.unwrap();
+        let token = blob
+            .rewind_integrity(
+                snapshot.token,
+                12,
+                Some(IntegrityUnit { offset: 10, len: 4 }),
+                Some([0x5A; ATOMIC_BLOB_TAG_LEN]),
+            )
+            .await
+            .unwrap();
+        let rewound = blob.integrity_snapshot().await.unwrap();
+        assert_eq!(rewound.token, token);
+        assert_eq!(rewound.encoded_len, 12);
+        let (unit, tail) = rewound.tail.unwrap();
+        assert_eq!(unit, IntegrityUnit { offset: 10, len: 2 });
+        assert_eq!(tail.coalesce(), b"ta");
+        assert!(
+            blob.append_integrity(token, b"x", IntegrityBoundary::Complete, None)
+                .await
+                .is_err()
+        );
+        blob.sync().await.unwrap();
+        let snapshot = blob.integrity_snapshot().await.unwrap();
+        blob.append_integrity(snapshot.token, b"x", IntegrityBoundary::Complete, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            blob.read_integrity(IntegrityUnit { offset: 10, len: 3 })
+                .await
+                .unwrap()
+                .coalesce(),
+            b"tax"
+        );
+    }
+
+    async fn test_atomic_chunked_integrity_and_stale_writers<S>(storage: &S)
+    where
+        S: AtomicStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let (first, _) = storage
+            .open_atomic("atomic_integrity_chunked", b"blob")
+            .await
+            .unwrap();
+        let (stale, _) = storage
+            .open_atomic("atomic_integrity_chunked", b"blob")
+            .await
+            .unwrap();
+        let first_snapshot = first.integrity_snapshot().await.unwrap();
+        let stale_snapshot = stale.integrity_snapshot().await.unwrap();
+        assert_eq!(first_snapshot.token, stale_snapshot.token);
+
+        let appended = first
+            .append_integrity(
+                first_snapshot.token,
+                b"abcdefghijk",
+                IntegrityBoundary::Chunked(NonZeroU32::new(4).unwrap()),
+                Some([0x3C; ATOMIC_BLOB_TAG_LEN]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(appended.offset, 0);
+        assert!(
+            stale
+                .append_integrity(
+                    stale_snapshot.token,
+                    b"stale",
+                    IntegrityBoundary::Chunked(NonZeroU32::new(4).unwrap()),
+                    None,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            stale
+                .compare_set_tag(stale_snapshot.token, [0xFF; ATOMIC_BLOB_TAG_LEN])
+                .await
+                .is_err()
+        );
+
+        let snapshot = first.integrity_snapshot().await.unwrap();
+        assert_eq!(snapshot.encoded_len, 19);
+        assert_eq!(
+            snapshot.scheme,
+            IntegrityScheme::Chunked(NonZeroU32::new(4).unwrap())
+        );
+        assert_eq!(snapshot.tag, [0x3C; ATOMIC_BLOB_TAG_LEN]);
+        let (tail_unit, tail) = snapshot.tail.unwrap();
+        assert_eq!(tail_unit, IntegrityUnit { offset: 16, len: 3 });
+        assert_eq!(tail.coalesce(), b"ijk");
+        assert_eq!(
+            first
+                .read_integrity(IntegrityUnit { offset: 0, len: 4 })
+                .await
+                .unwrap()
+                .coalesce(),
+            b"abcd"
+        );
+        assert_eq!(
+            first
+                .read_integrity(IntegrityUnit { offset: 8, len: 4 })
+                .await
+                .unwrap()
+                .coalesce(),
+            b"efgh"
+        );
+
+        first
+            .append_integrity(snapshot.token, b"lmnop", IntegrityBoundary::Continue, None)
+            .await
+            .unwrap();
+        let closed = first.integrity_snapshot().await.unwrap();
+        assert_eq!(closed.encoded_len, 32);
+        assert!(closed.tail.is_none());
+        assert_eq!(
+            first
+                .read_integrity(IntegrityUnit { offset: 16, len: 4 })
+                .await
+                .unwrap()
+                .coalesce(),
+            b"ijkl"
+        );
+        assert_eq!(
+            first
+                .read_integrity(IntegrityUnit { offset: 24, len: 4 })
+                .await
+                .unwrap()
+                .coalesce(),
+            b"mnop"
+        );
     }
 
     /// Migration replaces one exact name generation while preserving logical bytes and version.

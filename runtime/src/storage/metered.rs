@@ -317,6 +317,22 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         self.inner.tag().await
     }
 
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+        self.inner.integrity_scheme().await
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+        self.inner.integrity_snapshot().await
+    }
+
+    async fn compare_set_tag(
+        &self,
+        expected: crate::IntegrityToken,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.inner.compare_set_tag(expected, tag).await
+    }
+
     async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
         self.inner.set_tag(tag).await
     }
@@ -356,6 +372,37 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
     }
 
     #[tracing::instrument(
+        name = "runtime.storage.blob.append_integrity",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, bytes = Empty)
+    )]
+    async fn append_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        data: impl Into<IoBufs> + Send,
+        boundary: crate::IntegrityBoundary,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, Error> {
+        let data = data.into();
+        let data_len = data.remaining();
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(data_len as u64);
+        Span::current().record("bytes", data_len as u64);
+        self.inner
+            .append_integrity(expected, data, boundary, tag)
+            .await
+    }
+
+    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+        self.inner.read_integrity_tail().await
+    }
+
+    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+        self.inner.read_integrity(unit).await
+    }
+
+    #[tracing::instrument(
         name = "runtime.storage.blob.rewind",
         level = "info",
         skip_all,
@@ -379,6 +426,23 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
     ) -> Result<(), Error> {
         self.metrics.storage_resizes.inc();
         self.inner.rewind_tagged(len, tag).await
+    }
+
+    #[tracing::instrument(
+        name = "runtime.storage.blob.rewind_integrity",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, len = len)
+    )]
+    async fn rewind_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.metrics.storage_resizes.inc();
+        self.inner.rewind_integrity(expected, len, unit, tag).await
     }
 }
 

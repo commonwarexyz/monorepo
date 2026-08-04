@@ -700,6 +700,22 @@ impl<B: AtomicBlob> AtomicBlob for DelayedSyncBlob<B> {
         self.inner.tag().await
     }
 
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+        self.inner.integrity_scheme().await
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+        self.inner.integrity_snapshot().await
+    }
+
+    async fn compare_set_tag(
+        &self,
+        expected: crate::IntegrityToken,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.inner.compare_set_tag(expected, tag).await
+    }
+
     async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
         self.inner.set_tag(tag).await
     }
@@ -716,6 +732,26 @@ impl<B: AtomicBlob> AtomicBlob for DelayedSyncBlob<B> {
         self.inner.append_tagged(data, tag).await
     }
 
+    async fn append_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        data: impl Into<IoBufs> + Send,
+        boundary: crate::IntegrityBoundary,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, Error> {
+        self.inner
+            .append_integrity(expected, data, boundary, tag)
+            .await
+    }
+
+    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+        self.inner.read_integrity_tail().await
+    }
+
+    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+        self.inner.read_integrity(unit).await
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.inner.rewind(len).await
     }
@@ -726,6 +762,16 @@ impl<B: AtomicBlob> AtomicBlob for DelayedSyncBlob<B> {
         tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<(), Error> {
         self.inner.rewind_tagged(len, tag).await
+    }
+
+    async fn rewind_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.inner.rewind_integrity(expected, len, unit, tag).await
     }
 }
 
@@ -1062,6 +1108,25 @@ impl<B: AtomicBlob> AtomicBlob for WriteFaultBlob<B> {
         self.inner.tag().await
     }
 
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+        self.inner.integrity_scheme().await
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+        self.inner.integrity_snapshot().await
+    }
+
+    async fn compare_set_tag(
+        &self,
+        expected: crate::IntegrityToken,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.faults.check()?;
+        let token = self.inner.compare_set_tag(expected, tag).await?;
+        self.faults.note();
+        Ok(token)
+    }
+
     async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
         self.faults.check()?;
         self.inner.set_tag(tag).await?;
@@ -1087,6 +1152,30 @@ impl<B: AtomicBlob> AtomicBlob for WriteFaultBlob<B> {
         Ok(offset)
     }
 
+    async fn append_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        data: impl Into<IoBufs> + Send,
+        boundary: crate::IntegrityBoundary,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, Error> {
+        self.faults.check()?;
+        let result = self
+            .inner
+            .append_integrity(expected, data, boundary, tag)
+            .await?;
+        self.faults.note();
+        Ok(result)
+    }
+
+    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+        self.inner.read_integrity_tail().await
+    }
+
+    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+        self.inner.read_integrity(unit).await
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.inner.rewind(len).await
     }
@@ -1097,6 +1186,16 @@ impl<B: AtomicBlob> AtomicBlob for WriteFaultBlob<B> {
         tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<(), Error> {
         self.inner.rewind_tagged(len, tag).await
+    }
+
+    async fn rewind_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.inner.rewind_integrity(expected, len, unit, tag).await
     }
 }
 
@@ -1232,6 +1331,22 @@ impl<B: AtomicBlob> AtomicBlob for SyncFaultBlob<B> {
         self.inner.tag().await
     }
 
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+        self.inner.integrity_scheme().await
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+        self.inner.integrity_snapshot().await
+    }
+
+    async fn compare_set_tag(
+        &self,
+        expected: crate::IntegrityToken,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.inner.compare_set_tag(expected, tag).await
+    }
+
     async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
         self.inner.set_tag(tag).await
     }
@@ -1248,6 +1363,26 @@ impl<B: AtomicBlob> AtomicBlob for SyncFaultBlob<B> {
         self.inner.append_tagged(data, tag).await
     }
 
+    async fn append_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        data: impl Into<IoBufs> + Send,
+        boundary: crate::IntegrityBoundary,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, Error> {
+        self.inner
+            .append_integrity(expected, data, boundary, tag)
+            .await
+    }
+
+    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+        self.inner.read_integrity_tail().await
+    }
+
+    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+        self.inner.read_integrity(unit).await
+    }
+
     async fn rewind(&self, len: u64) -> Result<(), Error> {
         self.inner.rewind(len).await
     }
@@ -1258,6 +1393,16 @@ impl<B: AtomicBlob> AtomicBlob for SyncFaultBlob<B> {
         tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<(), Error> {
         self.inner.rewind_tagged(len, tag).await
+    }
+
+    async fn rewind_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.inner.rewind_integrity(expected, len, unit, tag).await
     }
 }
 

@@ -1,10 +1,12 @@
 //! Append-only storage for epoch-atomic blobs.
 //!
-//! Payload bytes occupy their final logical offsets and are never copied. Appends may accumulate
-//! until a sync publishes a new logical length. Rewinding unpublished appends may reuse their tail
-//! immediately. Rewinding committed bytes fences further appends until the shorter length is
-//! durably published, after which the file is truncated in place. This keeps physical and logical
-//! offsets identical without an extent map, hole punching, or compaction.
+//! Payload bytes are written once into caller-delimited integrity units. Every completed unit is
+//! followed by one CRC32C footer; the selected root carries the start and rolling CRC32C of the
+//! only unfinished unit. Page caches can close fixed-size units while record stores close one unit
+//! per value. Appends may accumulate until a sync publishes a new encoded length. Rewinding
+//! unpublished appends may reuse their tail immediately. Rewinding committed bytes fences further
+//! appends until the shorter length is durably published, after which the file is truncated in
+//! place.
 //!
 //! Recovery reads two fixed, self-contained roots. An unresolved speculative batch may
 //! additionally checksum a bounded appended suffix, but never scans historical payload.
@@ -35,8 +37,9 @@
 //! bytes from the writes requested for either slot. It does not claim recovery from unrelated
 //! device corruption that overwrites bytes outside those requested ranges.
 //!
-//! An ordinary root slot contains a self-contained 92-byte root header: its spelling, generation,
-//! logical length, 64 application-owned tag bytes, and a CRC32C over all preceding fields. A
+//! An ordinary root slot contains a self-contained 112-byte root header: its spelling, generation,
+//! encoded payload length, unfinished-unit start and CRC32C, durable integrity scheme, 64
+//! application-owned tag bytes, and a CRC32C over all preceding fields. A
 //! batch-prepared slot also stores a 16-byte wrapper and the participant's local group link
 //! immediately after the root. The wrapper contains magic, link length, and a domain-separated
 //! CRC32C.
@@ -45,15 +48,18 @@
 //! +-------------+---------------+----------------------+--------------------+
 //! | root header | magic/len/CRC | local linked witness |       unused       |
 //! +-------------+---------------+----------------------+--------------------+
-//! 0            92             108                                      2048
+//! 0           112            128                                      2048
 //! ```
 //!
 //! The batch-prepared root spelling is deliberately invisible to ordinary recovery. Once the group
-//! decision is known, materialization durably rewrites only the 92-byte header to an independently
+//! decision is known, materialization durably rewrites only the 112-byte header to an independently
 //! recoverable spelling and leaves the linked witness available to repair peers. The batch
 //! recovery protocol and its crash outcomes are documented in `storage::batch::coordinator`.
 
-use crate::{IoBufs, storage::ATOMIC_BLOB_TAG_LEN};
+use crate::{
+    IntegrityBoundary, IntegrityScheme, IntegrityToken, IntegrityUnit, IoBuf, IoBufs,
+    storage::ATOMIC_BLOB_TAG_LEN,
+};
 commonware_macros::stability_scope!(ALPHA {
     use crate::storage::{Header, Layout};
     use std::os::unix::fs::MetadataExt as _;
@@ -135,10 +141,43 @@ mod tests {
         state.finish_commit(prepared);
     }
 
+    fn rewind_state(file: &File, state: &mut State, len: u64) {
+        let source = state.rewind_integrity_source(len, None).unwrap();
+        let source_data = source.map(|source| {
+            let data_len = source.unit.len as usize;
+            let encoded_len = data_len + usize::from(!source.current) * INTEGRITY_CHECKSUM_LEN;
+            let mut encoded = vec![0; encoded_len];
+            file.read_exact_at(&mut encoded, DATA_OFFSET + source.unit.offset)
+                .unwrap();
+            if source.current {
+                state.validate_integrity_tail(&encoded).unwrap();
+            } else {
+                let expected = u32::from_be_bytes(encoded[data_len..].try_into().unwrap());
+                validate_integrity(&encoded[..data_len], expected).unwrap();
+                encoded.truncate(data_len);
+            }
+            (source, encoded)
+        });
+        state
+            .apply_rewind(
+                len,
+                false,
+                source_data.as_ref().and_then(|(source, data)| {
+                    source.retain_prefix.then_some((source.unit, &data[..]))
+                }),
+            )
+            .unwrap();
+    }
+
     fn read(file: &File, state: &State) -> Vec<u8> {
         let mut data = vec![0; state.logical_len() as usize];
-        if !data.is_empty() {
-            file.read_exact_at(&mut data, DATA_OFFSET).unwrap();
+        for span in state.read_plan(0, data.len()).unwrap() {
+            let destination = &mut data[span.destination..span.destination + span.len];
+            match span.source {
+                ReadSource::File(file_offset) => {
+                    file.read_exact_at(destination, file_offset).unwrap()
+                }
+            }
         }
         data
     }
@@ -199,7 +238,7 @@ mod tests {
         commit(&file, &mut state);
 
         append(&file, &mut state, b"abcdef");
-        state.rewind(7).unwrap();
+        rewind_state(&file, &mut state, 7);
         assert_eq!(append(&file, &mut state, b"XYZ"), 7);
         assert_eq!(read(&file, &state), b"baseabcXYZ");
         assert_eq!(file.metadata().unwrap().len(), DATA_OFFSET + 10);
@@ -217,7 +256,7 @@ mod tests {
         append(&file, &mut state, b"abcdef");
         commit(&file, &mut state);
 
-        state.rewind(3).unwrap();
+        rewind_state(&file, &mut state, 3);
         assert!(state.prepare_append(IoBufs::from(b"x".to_vec())).is_err());
         commit(&file, &mut state);
         assert_eq!(file.metadata().unwrap().len(), DATA_OFFSET + 3);
@@ -233,7 +272,7 @@ mod tests {
         append(&file, &mut state, b"abcdef");
         commit(&file, &mut state);
 
-        state.rewind(3).unwrap();
+        rewind_state(&file, &mut state, 3);
         let prepared = state.prepare_commit().unwrap().unwrap();
         file.write_all_at(&prepared.prepared_root, prepared.root_offset)
             .unwrap();
@@ -328,6 +367,144 @@ mod tests {
     }
 
     #[test]
+    fn integrity_publication_is_atomic_for_arbitrary_unsynced_write_subsets() {
+        const PAYLOAD_FIRST: u8 = 1;
+        const PAYLOAD_SECOND: u8 = 2;
+        const PREPARED_ROOT: u8 = 4;
+
+        let write_prepared = |file: &File, prepared: &PreparedMutation| {
+            let mut physical = prepared.file_offset;
+            prepared.data.for_each_chunk(|chunk| {
+                file.write_all_at(chunk, physical).unwrap();
+                physical += chunk.len() as u64;
+            });
+        };
+
+        for retained in 0..=(PAYLOAD_FIRST | PAYLOAD_SECOND | PREPARED_ROOT) {
+            let (path, file) = test_file();
+            let mut state = State::empty(DATA_OFFSET);
+            state.set_tag([0x11; ATOMIC_BLOB_TAG_LEN]).unwrap();
+            let old = state
+                .prepare_integrity_append(
+                    IoBufs::from(b"old".to_vec()),
+                    IntegrityBoundary::Complete,
+                )
+                .unwrap()
+                .unwrap();
+            write_prepared(&file, &old);
+            state.finish_mutation(old.mutation, true);
+            commit(&file, &mut state);
+            let old_len = state.logical_len();
+            assert_eq!(old_len, 7);
+            state.set_tag([0x22; ATOMIC_BLOB_TAG_LEN]).unwrap();
+
+            for (bit, data, boundary) in [
+                (
+                    PAYLOAD_FIRST,
+                    b"new-".as_slice(),
+                    IntegrityBoundary::Continue,
+                ),
+                (
+                    PAYLOAD_SECOND,
+                    b"tail".as_slice(),
+                    IntegrityBoundary::Complete,
+                ),
+            ] {
+                let prepared = state
+                    .prepare_integrity_append(IoBufs::from(data.to_vec()), boundary)
+                    .unwrap()
+                    .unwrap();
+                if retained & bit != 0 {
+                    write_prepared(&file, &prepared);
+                }
+                state.finish_mutation(prepared.mutation, true);
+            }
+            let prepared = state.prepare_commit().unwrap().unwrap();
+            if retained & PREPARED_ROOT != 0 {
+                file.write_all_at(&prepared.prepared_root, prepared.root_offset)
+                    .unwrap();
+            }
+            file.sync_all().unwrap();
+
+            let recovered = State::recover(&file, DATA_OFFSET).unwrap();
+            assert_eq!(recovered.logical_len(), old_len, "retained mask {retained}");
+            assert_eq!(recovered.integrity_scheme(), IntegrityScheme::Variable);
+            assert!(recovered.integrity_tail().is_none());
+            assert_eq!(recovered.tag(), [0x11; ATOMIC_BLOB_TAG_LEN]);
+            let raw = read(&file, &recovered);
+            assert_eq!(&raw[..3], b"old");
+            validate_integrity(&raw[..3], u32::from_be_bytes(raw[3..7].try_into().unwrap()))
+                .unwrap();
+            fs::remove_file(path).unwrap();
+        }
+
+        for committed_root_retained in [false, true] {
+            let (path, file) = test_file();
+            let mut state = State::empty(DATA_OFFSET);
+            state.set_tag([0x11; ATOMIC_BLOB_TAG_LEN]).unwrap();
+            let old = state
+                .prepare_integrity_append(
+                    IoBufs::from(b"old".to_vec()),
+                    IntegrityBoundary::Complete,
+                )
+                .unwrap()
+                .unwrap();
+            write_prepared(&file, &old);
+            state.finish_mutation(old.mutation, true);
+            commit(&file, &mut state);
+            state.set_tag([0x22; ATOMIC_BLOB_TAG_LEN]).unwrap();
+
+            let new = state
+                .prepare_integrity_append(
+                    IoBufs::from(b"new-tail".to_vec()),
+                    IntegrityBoundary::Complete,
+                )
+                .unwrap()
+                .unwrap();
+            write_prepared(&file, &new);
+            state.finish_mutation(new.mutation, true);
+            let new_len = state.logical_len();
+            let prepared = state.prepare_commit().unwrap().unwrap();
+            file.write_all_at(&prepared.prepared_root, prepared.root_offset)
+                .unwrap();
+            file.sync_all().unwrap();
+            if committed_root_retained {
+                write_durable_at(&file, prepared.root_offset, &prepared.committed_root).unwrap();
+            }
+
+            let recovered = State::recover(&file, DATA_OFFSET).unwrap();
+            assert_eq!(
+                recovered.logical_len(),
+                if committed_root_retained { new_len } else { 7 }
+            );
+            assert_eq!(recovered.integrity_scheme(), IntegrityScheme::Variable);
+            assert!(recovered.integrity_tail().is_none());
+            assert_eq!(
+                recovered.tag(),
+                if committed_root_retained {
+                    [0x22; ATOMIC_BLOB_TAG_LEN]
+                } else {
+                    [0x11; ATOMIC_BLOB_TAG_LEN]
+                }
+            );
+            let raw = read(&file, &recovered);
+            let (offset, value): (usize, &[u8]) = if committed_root_retained {
+                (7, b"new-tail")
+            } else {
+                (0, b"old")
+            };
+            let footer = offset + value.len();
+            assert_eq!(&raw[offset..footer], value);
+            validate_integrity(
+                value,
+                u32::from_be_bytes(raw[footer..footer + 4].try_into().unwrap()),
+            )
+            .unwrap();
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn direct_recovery_rejects_arbitrary_torn_publication_roots() {
         let mut masks = (0..=ROOT_LEN)
             .map(|prefix| {
@@ -358,7 +535,7 @@ mod tests {
                 state.set_tag([0x22; ATOMIC_BLOB_TAG_LEN]).unwrap();
 
                 if rewind {
-                    state.rewind(3).unwrap();
+                    rewind_state(&file, &mut state, 3);
                 } else {
                     append(&file, &mut state, b"XYZ");
                 }
@@ -630,7 +807,13 @@ mod tests {
         assert!(!prepared.requires_truncate());
         state.finish_commit(prepared);
 
-        state.rewind(2).unwrap();
+        state
+            .apply_rewind(
+                2,
+                false,
+                Some((IntegrityUnit { offset: 0, len: 3 }, b"abc")),
+            )
+            .unwrap();
         let prepared = state.prepare_commit().unwrap().unwrap();
         assert!(prepared.requires_truncate());
     }
@@ -651,7 +834,7 @@ mod tests {
             .unwrap()
             .unwrap();
         state.finish_mutation(tail.mutation, true);
-        state.rewind_preflushed(4).unwrap();
+        state.rewind_preflushed(4, None).unwrap();
 
         assert!(!state.is_dirty());
         assert!(state.prepare_commit().unwrap().is_none());
@@ -674,23 +857,41 @@ mod tests {
     #[test]
     fn root_layout_carries_a_nonuniform_64_byte_tag() {
         let tag = std::array::from_fn(|index| (index as u8).wrapping_mul(17).wrapping_add(3));
-        let encoded = encode_root(ROOT_MAGIC, 7, 11, tag);
+        let integrity_start = 5;
+        let integrity_checksum = 0x1020_3040;
+        let integrity_scheme = IntegrityScheme::Chunked(std::num::NonZeroU32::new(4092).unwrap());
+        let encoded = encode_root(
+            ROOT_MAGIC,
+            7,
+            11,
+            integrity_start,
+            integrity_checksum,
+            integrity_scheme,
+            tag,
+        );
 
-        assert_eq!(ROOT_LEN, 92);
+        assert_eq!(ROOT_LEN, 112);
         assert_eq!(&encoded[..8], ROOT_MAGIC);
         assert_eq!(&encoded[8..16], &7u64.to_be_bytes());
         assert_eq!(&encoded[16..24], &11u64.to_be_bytes());
-        assert_eq!(&encoded[24..88], &tag);
+        assert_eq!(&encoded[24..32], &integrity_start.to_be_bytes());
+        assert_eq!(&encoded[32..36], &integrity_checksum.to_be_bytes());
+        assert_eq!(&encoded[36..40], &2u32.to_be_bytes());
+        assert_eq!(&encoded[40..44], &4092u32.to_be_bytes());
+        assert_eq!(&encoded[44..108], &tag);
         assert_eq!(
-            &encoded[88..92],
-            &checksum(&[ROOT_DOMAIN, &encoded[..88]]).to_be_bytes()
+            &encoded[108..112],
+            &checksum(&[ROOT_DOMAIN, &encoded[..108]]).to_be_bytes()
         );
         let decoded = decode_committed_root(&encoded).unwrap();
         assert_eq!(decoded.generation, 7);
         assert_eq!(decoded.logical_len, 11);
+        assert_eq!(decoded.integrity_start, integrity_start);
+        assert_eq!(decoded.integrity_checksum, integrity_checksum);
+        assert_eq!(decoded.integrity_scheme, integrity_scheme);
         assert_eq!(decoded.tag, tag);
 
-        for index in [0, 8, 16, 24, 87, 88, 91] {
+        for index in [0, 8, 16, 24, 32, 36, 40, 44, 107, 108, 111] {
             let mut corrupt = encoded;
             corrupt[index] ^= 1;
             assert!(
@@ -698,6 +899,83 @@ mod tests {
                 "corruption at byte {index} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn recovery_rejects_noncanonical_integrity_roots() {
+        let (path, file) = test_file();
+        let valid = Root {
+            generation: 1,
+            logical_len: 11,
+            integrity_start: 8,
+            integrity_checksum: 0x1020_3040,
+            integrity_scheme: IntegrityScheme::Chunked(std::num::NonZeroU32::new(4).unwrap()),
+            tag: [0; ATOMIC_BLOB_TAG_LEN],
+        };
+        assert!(
+            recover_root(
+                &file,
+                DATA_OFFSET,
+                DATA_OFFSET + valid.logical_len,
+                ROOT_OFFSETS[1],
+                valid,
+            )
+            .is_ok()
+        );
+
+        for invalid in [
+            Root {
+                integrity_start: 12,
+                ..valid
+            },
+            Root {
+                logical_len: 8,
+                integrity_start: 8,
+                integrity_checksum: 1,
+                ..valid
+            },
+            Root {
+                integrity_start: 4,
+                ..valid
+            },
+            Root {
+                logical_len: 12,
+                ..valid
+            },
+            Root {
+                logical_len: 2,
+                integrity_start: 1,
+                integrity_scheme: IntegrityScheme::Unbound,
+                ..valid
+            },
+        ] {
+            assert!(
+                recover_root(
+                    &file,
+                    DATA_OFFSET,
+                    DATA_OFFSET + invalid.logical_len,
+                    ROOT_OFFSETS[1],
+                    invalid,
+                )
+                .is_err(),
+                "accepted invalid root: {invalid:?}"
+            );
+        }
+
+        let mut invalid_scheme = encode_root(
+            ROOT_MAGIC,
+            1,
+            0,
+            0,
+            0,
+            IntegrityScheme::Unbound,
+            [0; ATOMIC_BLOB_TAG_LEN],
+        );
+        invalid_scheme[36..40].copy_from_slice(&3u32.to_be_bytes());
+        let root_checksum = checksum(&[ROOT_DOMAIN, &invalid_scheme[..ROOT_BODY_LEN]]);
+        invalid_scheme[ROOT_BODY_LEN..].copy_from_slice(&root_checksum.to_be_bytes());
+        assert!(decode_committed_root(&invalid_scheme).is_none());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -719,7 +997,7 @@ mod tests {
         file.sync_all().unwrap();
 
         let before = fs::read(&path).unwrap();
-        let error = State::recover(&file, DATA_OFFSET).expect_err("R11 must not open as empty R12");
+        let error = State::recover(&file, DATA_OFFSET).expect_err("R11 must not open as empty R13");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read(&path).unwrap(), before);
         fs::remove_file(path).unwrap();
@@ -874,6 +1152,9 @@ mod tests {
                             ROOT_MAGIC,
                             1,
                             PAYLOAD.len() as u64,
+                            0,
+                            Crc32::checksum(PAYLOAD),
+                            IntegrityScheme::Unbound,
                             [0; ATOMIC_BLOB_TAG_LEN],
                         ),
                         ROOT_OFFSETS[1],
@@ -915,23 +1196,28 @@ mod tests {
     }
 }
 
-const ROOT_MAGIC: &[u8; 8] = b"CWUNOR12";
-const PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOP12";
-const BATCH_PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOB12";
-const MATERIALIZED_ROOT_MAGIC: &[u8; 8] = b"CWUNOM12";
-const TOMBSTONE_ROOT_MAGIC: &[u8; 8] = b"CWUNOT12";
-const BATCH_WITNESS_MAGIC: &[u8; 8] = b"CWUNOW12";
-const LEGACY_ROOT_MAGICS: [[u8; 8]; 5] = [
+const ROOT_MAGIC: &[u8; 8] = b"CWUNOR13";
+const PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOP13";
+const BATCH_PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOB13";
+const MATERIALIZED_ROOT_MAGIC: &[u8; 8] = b"CWUNOM13";
+const TOMBSTONE_ROOT_MAGIC: &[u8; 8] = b"CWUNOT13";
+const BATCH_WITNESS_MAGIC: &[u8; 8] = b"CWUNOW13";
+const LEGACY_ROOT_MAGICS: [[u8; 8]; 10] = [
     *b"CWUNOR11",
     *b"CWUNOP11",
     *b"CWUNOB11",
     *b"CWUNOM11",
     *b"CWUNOT11",
+    *b"CWUNOR12",
+    *b"CWUNOP12",
+    *b"CWUNOB12",
+    *b"CWUNOM12",
+    *b"CWUNOT12",
 ];
 const CREATION_PREFIX: &str = ".commonware-uno-create-";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_LOG_ROOT";
 const BATCH_WITNESS_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_BATCH_WITNESS";
-const ROOT_PREFIX_LEN: usize = 24;
+const ROOT_PREFIX_LEN: usize = 44;
 const ROOT_CHECKSUM_LEN: usize = std::mem::size_of::<u32>();
 const ROOT_BODY_LEN: usize = ROOT_PREFIX_LEN + ATOMIC_BLOB_TAG_LEN;
 pub(super) const ROOT_LEN: usize = ROOT_BODY_LEN + ROOT_CHECKSUM_LEN;
@@ -947,6 +1233,7 @@ const TARGET_PREFLUSH_PARTICIPANTS: u64 = 4;
 pub(super) const BACKGROUND_PREFLUSH_INTERVAL: u64 =
     MAX_VALIDATED_PAYLOAD_LEN / TARGET_PREFLUSH_PARTICIPANTS;
 const PAYLOAD_CHECKSUM_READ_LEN: usize = 64 * 1024;
+const INTEGRITY_CHECKSUM_LEN: usize = std::mem::size_of::<u32>();
 #[commonware_macros::stability(ALPHA)]
 const MIGRATION_COPY_LEN: usize = 1024 * 1024;
 #[cfg(target_os = "linux")]
@@ -985,7 +1272,7 @@ impl PayloadChecksumTracker {
         }
     }
 
-    fn update(&mut self, physical: u64, data_len: u64, data: &IoBufs) {
+    fn update(&mut self, physical: u64, data_len: u64, checksum: &Crc32) {
         if !self.eligible {
             return;
         }
@@ -1001,9 +1288,7 @@ impl PayloadChecksumTracker {
             self.eligible = false;
             return;
         }
-        data.for_each_chunk(|chunk| {
-            self.hasher.update(chunk);
-        });
+        self.hasher.combine(checksum);
         self.len = next_len;
     }
 }
@@ -1026,6 +1311,17 @@ fn checked_end(offset: u64, len: u64) -> io::Result<u64> {
     offset
         .checked_add(len)
         .ok_or_else(|| invalid_input("atomic log offset overflow"))
+}
+
+fn physical_payload_len(logical_len: u64) -> io::Result<u64> {
+    Ok(logical_len)
+}
+
+pub(super) fn validate_integrity(data: &[u8], expected: u32) -> io::Result<()> {
+    if Crc32::checksum(data) != expected {
+        return Err(invalid_data("atomic integrity checksum mismatch"));
+    }
+    Ok(())
 }
 
 fn checksum(parts: &[&[u8]]) -> u32 {
@@ -1137,12 +1433,23 @@ pub(super) struct Mutation {
     logical_start: u64,
     logical_end: u64,
     physical: u64,
+    integrity_start: u64,
+    integrity_checksum: Crc32,
+    integrity_scheme: IntegrityScheme,
 }
 
 pub(super) struct PreparedMutation {
+    pub(super) result_offset: u64,
     pub(super) file_offset: u64,
     pub(super) data: IoBufs,
     pub(super) mutation: Mutation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RewindIntegritySource {
+    pub(super) unit: IntegrityUnit,
+    pub(super) current: bool,
+    pub(super) retain_prefix: bool,
 }
 
 #[derive(Debug)]
@@ -1307,8 +1614,15 @@ pub(super) struct State {
     logical_len: u64,
     committed_len: u64,
     generation: u64,
+    integrity_start: u64,
+    integrity_checksum: Crc32,
+    integrity_scheme: IntegrityScheme,
+    committed_integrity_start: u64,
+    committed_integrity_checksum: u32,
+    committed_integrity_scheme: IntegrityScheme,
     tag: [u8; ATOMIC_BLOB_TAG_LEN],
     committed_tag: [u8; ATOMIC_BLOB_TAG_LEN],
+    revision: u64,
     /// Prefix that must be durable before a root may omit its bytes from payload validation.
     preflush_target: u64,
     payload_checksum: PayloadChecksumTracker,
@@ -1324,8 +1638,15 @@ impl State {
             logical_len: 0,
             committed_len: 0,
             generation: 0,
+            integrity_start: 0,
+            integrity_checksum: Crc32::default(),
+            integrity_scheme: IntegrityScheme::Unbound,
+            committed_integrity_start: 0,
+            committed_integrity_checksum: 0,
+            committed_integrity_scheme: IntegrityScheme::Unbound,
             tag: [0; ATOMIC_BLOB_TAG_LEN],
             committed_tag: [0; ATOMIC_BLOB_TAG_LEN],
+            revision: 0,
             preflush_target: data_offset,
             payload_checksum: PayloadChecksumTracker::new(data_offset),
             deferred_batch_root: None,
@@ -1411,7 +1732,7 @@ impl State {
     }
 
     pub(super) fn raw_len(&self) -> io::Result<u64> {
-        checked_end(self.data_offset, self.logical_len)
+        checked_end(self.data_offset, physical_payload_len(self.logical_len)?)
     }
 
     pub(super) const fn logical_len(&self) -> u64 {
@@ -1420,6 +1741,64 @@ impl State {
 
     pub(super) const fn committed_len(&self) -> u64 {
         self.committed_len
+    }
+
+    fn integrity_checksum(&self) -> u32 {
+        if self.integrity_start == self.logical_len {
+            0
+        } else {
+            self.integrity_checksum.value()
+        }
+    }
+
+    pub(super) fn integrity_tail(&self) -> Option<IntegrityUnit> {
+        (self.integrity_start < self.logical_len).then_some(IntegrityUnit {
+            offset: self.integrity_start,
+            len: self.logical_len - self.integrity_start,
+        })
+    }
+
+    pub(super) const fn integrity_scheme(&self) -> IntegrityScheme {
+        self.integrity_scheme
+    }
+
+    pub(super) const fn completed_integrity_len(&self) -> u64 {
+        self.integrity_start
+    }
+
+    pub(super) const fn integrity_token(&self) -> IntegrityToken {
+        IntegrityToken(self.revision)
+    }
+
+    pub(super) fn expect_integrity_token(&self, expected: IntegrityToken) -> io::Result<()> {
+        if self.integrity_token() == expected {
+            Ok(())
+        } else {
+            Err(invalid_input("atomic integrity state is stale"))
+        }
+    }
+
+    fn advance_revision(&mut self) {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("atomic in-memory mutation revision exhausted");
+    }
+
+    pub(super) fn validate_integrity_tail(&self, data: &[u8]) -> io::Result<()> {
+        let Some(unit) = self.integrity_tail() else {
+            return if data.is_empty() {
+                Ok(())
+            } else {
+                Err(invalid_input(
+                    "closed atomic integrity state has tail bytes",
+                ))
+            };
+        };
+        if usize::try_from(unit.len).ok() != Some(data.len()) {
+            return Err(invalid_input("atomic integrity tail has an invalid length"));
+        }
+        validate_integrity(data, self.integrity_checksum())
     }
 
     #[commonware_macros::stability(ALPHA)]
@@ -1435,7 +1814,12 @@ impl State {
             return Ok(());
         }
         self.tag = tag;
-        self.dirty = self.logical_len != self.committed_len || self.tag != self.committed_tag;
+        self.advance_revision();
+        self.dirty = self.logical_len != self.committed_len
+            || self.integrity_start != self.committed_integrity_start
+            || self.integrity_checksum() != self.committed_integrity_checksum
+            || self.integrity_scheme != self.committed_integrity_scheme
+            || self.tag != self.committed_tag;
         Ok(())
     }
 
@@ -1475,7 +1859,7 @@ impl State {
         let committed_payload_start = if self.logical_len < self.committed_len {
             payload_end
         } else {
-            checked_end(self.data_offset, self.committed_len)?
+            checked_end(self.data_offset, physical_payload_len(self.committed_len)?)?
         };
         let payload_start = committed_payload_start.max(self.preflush_target);
         let payload_len = payload_end
@@ -1497,7 +1881,8 @@ impl State {
 
     /// Return whether an unpublished payload preflush must be drained before reusing offsets.
     pub(super) fn preflush_requested(&self) -> io::Result<bool> {
-        Ok(self.preflush_target > checked_end(self.data_offset, self.committed_len)?)
+        Ok(self.preflush_target
+            > checked_end(self.data_offset, physical_payload_len(self.committed_len)?)?)
     }
 
     /// Discard speculative checksum state after reusing an unpublished tail.
@@ -1538,14 +1923,21 @@ impl State {
         self.poisoned = true;
     }
 
-    /// Reserve the current tail for one append.
+    /// Reserve the current tail for one unchecked append.
     pub(super) fn prepare_append(&mut self, data: IoBufs) -> io::Result<Option<PreparedMutation>> {
+        self.prepare_integrity_append(data, IntegrityBoundary::Continue)
+    }
+
+    /// Reserve the current tail while extending and optionally completing integrity units.
+    pub(super) fn prepare_integrity_append(
+        &mut self,
+        mut data: IoBufs,
+        boundary: IntegrityBoundary,
+    ) -> io::Result<Option<PreparedMutation>> {
         if self.poisoned {
             return Err(invalid_data("atomic blob generation is poisoned"));
         }
-        let data_len = u64::try_from(data.len())
-            .map_err(|_| invalid_input("atomic append length does not fit in u64"))?;
-        if data_len == 0 {
+        if data.is_empty() && matches!(boundary, IntegrityBoundary::Continue) {
             return Ok(None);
         }
         if self.logical_len < self.committed_len {
@@ -1553,17 +1945,164 @@ impl State {
                 "atomic append requires syncing the committed rewind first",
             ));
         }
+        let requested_scheme = match boundary {
+            IntegrityBoundary::Continue => None,
+            IntegrityBoundary::Complete => Some(IntegrityScheme::Variable),
+            IntegrityBoundary::Chunked(size) => Some(IntegrityScheme::Chunked(size)),
+        };
+        let integrity_scheme = match (self.integrity_scheme, requested_scheme) {
+            (scheme, None) | (IntegrityScheme::Unbound, Some(scheme)) => scheme,
+            (scheme, Some(requested)) if scheme == requested => scheme,
+            _ => {
+                return Err(invalid_input(
+                    "atomic blob is already bound to a different integrity scheme",
+                ));
+            }
+        };
         let logical_start = self.logical_len;
-        let logical_end = checked_end(logical_start, data_len)?;
-        let physical = checked_end(self.data_offset, logical_start)?;
-        self.payload_checksum.update(physical, data_len, &data);
+        let physical = self.raw_len()?;
+        let mut physical_cursor = physical;
+        let mut logical_cursor = logical_start;
+        let mut integrity_start = self.integrity_start;
+        let mut integrity_checksum = self.integrity_checksum.clone();
+        let mut result_offset = None;
+        let mut parts = Vec::new();
+        let mut footer_bytes = Vec::new();
+
+        let chunk_size = match integrity_scheme {
+            IntegrityScheme::Chunked(size) => Some(u64::from(size.get())),
+            IntegrityScheme::Unbound | IntegrityScheme::Variable => None,
+        };
+        if let Some(chunk_size) = chunk_size
+            && logical_cursor - integrity_start > chunk_size
+        {
+            return Err(invalid_input(
+                "current atomic integrity unit exceeds the requested chunk size",
+            ));
+        }
+        let closes_existing = matches!(boundary, IntegrityBoundary::Complete)
+            && self.integrity_start != self.logical_len
+            || chunk_size.is_some_and(|size| self.logical_len - self.integrity_start == size);
+        if data.is_empty() && !closes_existing {
+            if self.integrity_scheme != integrity_scheme {
+                self.integrity_scheme = integrity_scheme;
+                self.advance_revision();
+                self.dirty = self.logical_len != self.committed_len
+                    || self.integrity_scheme != self.committed_integrity_scheme
+                    || self.tag != self.committed_tag;
+            }
+            return Ok(None);
+        }
+
+        let seal = |parts: &mut Vec<(IoBufs, Option<usize>)>,
+                    footer_bytes: &mut Vec<u8>,
+                    integrity_start: &mut u64,
+                    integrity_checksum: &mut Crc32,
+                    logical_cursor: &mut u64,
+                    physical_cursor: &mut u64,
+                    payload_checksum: &mut PayloadChecksumTracker|
+         -> io::Result<()> {
+            if *integrity_start == *logical_cursor {
+                return Ok(());
+            }
+            let footer = integrity_checksum.value().to_be_bytes();
+            let footer_offset = footer_bytes.len();
+            footer_bytes.extend_from_slice(&footer);
+            let mut footer_checksum = Crc32::default();
+            footer_checksum.update(&footer);
+            payload_checksum.update(
+                *physical_cursor,
+                INTEGRITY_CHECKSUM_LEN as u64,
+                &footer_checksum,
+            );
+            *physical_cursor = checked_end(*physical_cursor, INTEGRITY_CHECKSUM_LEN as u64)?;
+            *logical_cursor = checked_end(*logical_cursor, INTEGRITY_CHECKSUM_LEN as u64)?;
+            *integrity_start = *logical_cursor;
+            *integrity_checksum = Crc32::default();
+            parts.push((IoBufs::default(), Some(footer_offset)));
+            Ok(())
+        };
+
+        while !data.is_empty() {
+            if chunk_size.is_some_and(|size| logical_cursor - integrity_start == size) {
+                seal(
+                    &mut parts,
+                    &mut footer_bytes,
+                    &mut integrity_start,
+                    &mut integrity_checksum,
+                    &mut logical_cursor,
+                    &mut physical_cursor,
+                    &mut self.payload_checksum,
+                )?;
+            }
+            let available = chunk_size
+                .map(|size| size - (logical_cursor - integrity_start))
+                .unwrap_or(u64::MAX);
+            let take = data
+                .len()
+                .min(usize::try_from(available).unwrap_or(usize::MAX));
+            debug_assert_ne!(take, 0);
+            let part = data.split_to(take);
+            let mut part_checksum = Crc32::default();
+            part.for_each_chunk(|chunk| {
+                part_checksum.update(chunk);
+            });
+            integrity_checksum.combine(&part_checksum);
+            result_offset.get_or_insert(logical_cursor);
+            self.payload_checksum
+                .update(physical_cursor, take as u64, &part_checksum);
+            physical_cursor = checked_end(physical_cursor, take as u64)?;
+            logical_cursor = checked_end(logical_cursor, take as u64)?;
+            parts.push((part, None));
+
+            if chunk_size.is_some_and(|size| logical_cursor - integrity_start == size) {
+                seal(
+                    &mut parts,
+                    &mut footer_bytes,
+                    &mut integrity_start,
+                    &mut integrity_checksum,
+                    &mut logical_cursor,
+                    &mut physical_cursor,
+                    &mut self.payload_checksum,
+                )?;
+            }
+        }
+
+        if matches!(boundary, IntegrityBoundary::Complete) {
+            seal(
+                &mut parts,
+                &mut footer_bytes,
+                &mut integrity_start,
+                &mut integrity_checksum,
+                &mut logical_cursor,
+                &mut physical_cursor,
+                &mut self.payload_checksum,
+            )?;
+        }
+
+        let footers = IoBuf::from(footer_bytes);
+        let mut physical_data = IoBufs::default();
+        for (part, footer_offset) in parts {
+            physical_data.append_bufs(part);
+            if let Some(offset) = footer_offset {
+                physical_data.append(footers.slice(offset..offset + INTEGRITY_CHECKSUM_LEN));
+            }
+        }
+        debug_assert_eq!(
+            checked_end(self.data_offset, logical_cursor)?,
+            physical_cursor
+        );
         Ok(Some(PreparedMutation {
+            result_offset: result_offset.unwrap_or(logical_start),
             file_offset: physical,
-            data,
+            data: physical_data,
             mutation: Mutation {
                 logical_start,
-                logical_end,
+                logical_end: logical_cursor,
                 physical,
+                integrity_start,
+                integrity_checksum,
+                integrity_scheme,
             },
         }))
     }
@@ -1575,15 +2114,18 @@ impl State {
         schedule_preflush: bool,
     ) -> Option<Range<u64>> {
         debug_assert_eq!(mutation.logical_start, self.logical_len);
-        debug_assert_eq!(mutation.physical, self.data_offset + mutation.logical_start);
+        debug_assert_eq!(self.raw_len().ok(), Some(mutation.physical));
         self.logical_len = mutation.logical_end;
+        self.integrity_start = mutation.integrity_start;
+        self.integrity_checksum = mutation.integrity_checksum;
+        self.integrity_scheme = mutation.integrity_scheme;
+        self.advance_revision();
         self.dirty = true;
         if !schedule_preflush {
             return None;
         }
         let raw_end = self
-            .data_offset
-            .checked_add(self.logical_len)
+            .raw_len()
             .expect("prepared atomic appends have representable physical ends");
         if raw_end - self.preflush_target < BACKGROUND_PREFLUSH_INTERVAL {
             return None;
@@ -1607,14 +2149,123 @@ impl State {
         Ok(())
     }
 
-    fn apply_rewind(&mut self, len: u64, payload_preflushed: bool) -> io::Result<()> {
+    /// Resolve the integrity unit that must be validated before a rewind retains its prefix.
+    pub(super) fn rewind_integrity_source(
+        &self,
+        len: u64,
+        unit: Option<IntegrityUnit>,
+    ) -> io::Result<Option<RewindIntegritySource>> {
+        self.validate_rewind(len)?;
+        if len == self.logical_len || len == self.committed_len {
+            return Ok(None);
+        }
+
+        let current = self.integrity_tail();
+        let unit = unit.or_else(|| {
+            current.filter(|unit| {
+                unit.offset < len
+                    && unit
+                        .offset
+                        .checked_add(unit.len)
+                        .is_some_and(|end| len <= end)
+            })
+        });
+        let Some(unit) = unit else {
+            let known_boundary = len == 0
+                || current.is_some_and(|unit| len == unit.offset)
+                || match self.integrity_scheme {
+                    IntegrityScheme::Chunked(size) => {
+                        let encoded_unit = u64::from(size.get())
+                            .checked_add(INTEGRITY_CHECKSUM_LEN as u64)
+                            .ok_or_else(|| invalid_input("atomic integrity unit overflows u64"))?;
+                        len % encoded_unit == 0
+                    }
+                    IntegrityScheme::Unbound | IntegrityScheme::Variable => false,
+                };
+            return if known_boundary {
+                Ok(None)
+            } else {
+                Err(invalid_input(
+                    "atomic rewind target is not a proven integrity-unit boundary",
+                ))
+            };
+        };
+        let data_end = checked_end(unit.offset, unit.len)?;
+        let is_current = current == Some(unit);
+        let encoded_end = if is_current {
+            data_end
+        } else {
+            let encoded_end = checked_end(data_end, INTEGRITY_CHECKSUM_LEN as u64)?;
+            if encoded_end > self.integrity_start {
+                return Err(invalid_input(
+                    "completed atomic integrity unit exceeds the completed payload prefix",
+                ));
+            }
+            encoded_end
+        };
+        let retain_prefix = unit.offset < len && len <= data_end;
+        let boundary = len == unit.offset || (!is_current && len == encoded_end);
+        if !retain_prefix && !boundary {
+            return Err(invalid_input(
+                "atomic rewind integrity unit does not contain or border the new end",
+            ));
+        }
+        if is_current && boundary {
+            return Ok(None);
+        }
+        Ok(Some(RewindIntegritySource {
+            unit,
+            current: is_current,
+            retain_prefix,
+        }))
+    }
+
+    fn apply_rewind(
+        &mut self,
+        len: u64,
+        payload_preflushed: bool,
+        source: Option<(IntegrityUnit, &[u8])>,
+    ) -> io::Result<()> {
         self.validate_rewind(len)?;
         if len == self.logical_len {
             return Ok(());
         }
+
+        let integrity_scheme = if len == self.committed_len {
+            self.committed_integrity_scheme
+        } else {
+            self.integrity_scheme
+        };
+        let (integrity_start, integrity_checksum) = if len == self.committed_len {
+            (
+                self.committed_integrity_start,
+                Crc32::resume(
+                    self.committed_integrity_checksum,
+                    self.committed_len - self.committed_integrity_start,
+                ),
+            )
+        } else if let Some((unit, data)) = source {
+            if usize::try_from(unit.len).ok() != Some(data.len()) {
+                return Err(invalid_input(
+                    "atomic rewind integrity source has an invalid length",
+                ));
+            }
+            let retained = usize::try_from(len - unit.offset)
+                .map_err(|_| invalid_input("atomic rewind prefix length overflows usize"))?;
+            let mut checksum = Crc32::default();
+            checksum.update(&data[..retained]);
+            (unit.offset, checksum)
+        } else {
+            (len, Crc32::default())
+        };
+
         self.logical_len = len;
+        self.integrity_start = integrity_start;
+        self.integrity_checksum = integrity_checksum;
+        self.integrity_scheme = integrity_scheme;
+        self.advance_revision();
         let raw_end = self.raw_len()?;
-        let frontier = checked_end(self.data_offset, self.committed_len)?;
+        let frontier = checked_end(self.data_offset, physical_payload_len(self.committed_len)?)?;
         if len == self.committed_len {
             self.preflush_target = frontier;
             self.payload_checksum = PayloadChecksumTracker::new(frontier);
@@ -1634,12 +2285,21 @@ impl State {
     }
 
     pub(super) fn rewind(&mut self, len: u64) -> io::Result<()> {
-        self.apply_rewind(len, false)
+        if self.rewind_integrity_source(len, None)?.is_some() {
+            return Err(invalid_input(
+                "atomic rewind requires validating its integrity unit",
+            ));
+        }
+        self.apply_rewind(len, false, None)
     }
 
     /// Rewind after the backend made the complete current payload durable.
-    pub(super) fn rewind_preflushed(&mut self, len: u64) -> io::Result<()> {
-        self.apply_rewind(len, true)
+    pub(super) fn rewind_preflushed(
+        &mut self,
+        len: u64,
+        source: Option<(IntegrityUnit, &[u8])>,
+    ) -> io::Result<()> {
+        self.apply_rewind(len, true, source)
     }
 
     pub(super) fn read_plan(&self, offset: u64, len: usize) -> io::Result<Vec<ReadSpan>> {
@@ -1677,14 +2337,31 @@ impl State {
             .ok_or_else(|| invalid_data("atomic generation overflow"))?;
         let payload_end = self.raw_len()?;
         let root_offset = ROOT_OFFSETS[(generation as usize) & 1];
-        let committed_root = encode_root(ROOT_MAGIC, generation, self.logical_len, self.tag);
-        let prepared_root =
-            encode_root(PREPARED_ROOT_MAGIC, generation, self.logical_len, self.tag).to_vec();
+        let integrity_checksum = self.integrity_checksum();
+        let committed_root = encode_root(
+            ROOT_MAGIC,
+            generation,
+            self.logical_len,
+            self.integrity_start,
+            integrity_checksum,
+            self.integrity_scheme,
+            self.tag,
+        );
+        let prepared_root = encode_root(
+            PREPARED_ROOT_MAGIC,
+            generation,
+            self.logical_len,
+            self.integrity_start,
+            integrity_checksum,
+            self.integrity_scheme,
+            self.tag,
+        )
+        .to_vec();
 
         let committed_payload_start = if self.logical_len < self.committed_len {
             payload_end
         } else {
-            checked_end(self.data_offset, self.committed_len)?
+            checked_end(self.data_offset, physical_payload_len(self.committed_len)?)?
         };
         let payload_start = committed_payload_start.max(self.preflush_target);
         if payload_start > payload_end {
@@ -1722,7 +2399,7 @@ impl State {
             .generation
             .checked_add(1)
             .ok_or_else(|| invalid_data("atomic generation overflow"))?;
-        let payload_end = checked_end(self.data_offset, self.committed_len)?;
+        let payload_end = checked_end(self.data_offset, physical_payload_len(self.committed_len)?)?;
         let root_offset = ROOT_OFFSETS[(generation as usize) & 1];
         Ok(PreparedCommit {
             payload_start: payload_end,
@@ -1731,6 +2408,9 @@ impl State {
                 PREPARED_ROOT_MAGIC,
                 generation,
                 self.committed_len,
+                self.committed_integrity_start,
+                self.committed_integrity_checksum,
+                self.committed_integrity_scheme,
                 self.committed_tag,
             )
             .to_vec(),
@@ -1738,6 +2418,9 @@ impl State {
                 ROOT_MAGIC,
                 generation,
                 self.committed_len,
+                self.committed_integrity_start,
+                self.committed_integrity_checksum,
+                self.committed_integrity_scheme,
                 self.committed_tag,
             ),
             payload_checksum: PayloadChecksumEligibility::Eligible(None),
@@ -1752,6 +2435,9 @@ impl State {
     fn apply_commit(&mut self, prepared: PreparedCommit) {
         self.generation = prepared.commit.generation;
         self.committed_len = self.logical_len;
+        self.committed_integrity_start = self.integrity_start;
+        self.committed_integrity_checksum = self.integrity_checksum();
+        self.committed_integrity_scheme = self.integrity_scheme;
         self.committed_tag = self.tag;
         self.preflush_target = prepared.commit.append_offset;
         self.payload_checksum = PayloadChecksumTracker::new(prepared.commit.append_offset);
@@ -1775,12 +2461,24 @@ fn encode_root(
     magic: &[u8; 8],
     generation: u64,
     logical_len: u64,
+    integrity_start: u64,
+    integrity_checksum: u32,
+    integrity_scheme: IntegrityScheme,
     tag: [u8; ATOMIC_BLOB_TAG_LEN],
 ) -> [u8; ROOT_LEN] {
     let mut root = [0u8; ROOT_LEN];
     root[..8].copy_from_slice(magic);
     root[8..16].copy_from_slice(&generation.to_be_bytes());
     root[16..24].copy_from_slice(&logical_len.to_be_bytes());
+    root[24..32].copy_from_slice(&integrity_start.to_be_bytes());
+    root[32..36].copy_from_slice(&integrity_checksum.to_be_bytes());
+    let (scheme, chunk_size) = match integrity_scheme {
+        IntegrityScheme::Unbound => (0u32, 0u32),
+        IntegrityScheme::Variable => (1, 0),
+        IntegrityScheme::Chunked(size) => (2, size.get()),
+    };
+    root[36..40].copy_from_slice(&scheme.to_be_bytes());
+    root[40..44].copy_from_slice(&chunk_size.to_be_bytes());
     root[ROOT_PREFIX_LEN..ROOT_BODY_LEN].copy_from_slice(&tag);
     let root_checksum = checksum(&[ROOT_DOMAIN, &root[..ROOT_BODY_LEN]]);
     root[ROOT_BODY_LEN..ROOT_LEN].copy_from_slice(&root_checksum.to_be_bytes());
@@ -1791,6 +2489,9 @@ fn encode_root(
 struct Root {
     generation: u64,
     logical_len: u64,
+    integrity_start: u64,
+    integrity_checksum: u32,
+    integrity_scheme: IntegrityScheme,
     tag: [u8; ATOMIC_BLOB_TAG_LEN],
 }
 
@@ -1808,10 +2509,23 @@ fn decode_root_with_magic(encoded: &[u8; ROOT_LEN], magic: &[u8; 8]) -> Option<R
 fn decode_root_fields(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
     let generation = u64::from_be_bytes(encoded[8..16].try_into().unwrap());
     let logical_len = u64::from_be_bytes(encoded[16..24].try_into().unwrap());
+    let integrity_start = u64::from_be_bytes(encoded[24..32].try_into().unwrap());
+    let integrity_checksum = u32::from_be_bytes(encoded[32..36].try_into().unwrap());
+    let scheme = u32::from_be_bytes(encoded[36..40].try_into().unwrap());
+    let chunk_size = u32::from_be_bytes(encoded[40..44].try_into().unwrap());
+    let integrity_scheme = match (scheme, chunk_size) {
+        (0, 0) => IntegrityScheme::Unbound,
+        (1, 0) => IntegrityScheme::Variable,
+        (2, size) => IntegrityScheme::Chunked(std::num::NonZeroU32::new(size)?),
+        _ => return None,
+    };
     let tag = encoded[ROOT_PREFIX_LEN..ROOT_BODY_LEN].try_into().unwrap();
     (generation != 0).then_some(Root {
         generation,
         logical_len,
+        integrity_start,
+        integrity_checksum,
+        integrity_scheme,
         tag,
     })
 }
@@ -1869,6 +2583,9 @@ fn candidate_roots_match(candidate: &Candidate, prepared: Root, committed: Root)
     candidate.base_generation.checked_add(1) == Some(committed.generation)
         && committed.generation == prepared.generation
         && committed.logical_len == prepared.logical_len
+        && committed.integrity_start == prepared.integrity_start
+        && committed.integrity_checksum == prepared.integrity_checksum
+        && committed.integrity_scheme == prepared.integrity_scheme
         && committed.tag == prepared.tag
         && ROOT_OFFSETS[(committed.generation as usize) & 1] == candidate.root_offset
 }
@@ -1883,6 +2600,9 @@ fn candidate_materialized_root(candidate: &Candidate) -> Option<[u8; ROOT_LEN]> 
         MATERIALIZED_ROOT_MAGIC,
         committed.generation,
         committed.logical_len,
+        committed.integrity_start,
+        committed.integrity_checksum,
+        committed.integrity_scheme,
         committed.tag,
     ))
 }
@@ -1897,6 +2617,9 @@ fn candidate_tombstone_root(candidate: &Candidate) -> Option<[u8; ROOT_LEN]> {
         TOMBSTONE_ROOT_MAGIC,
         committed.generation,
         committed.logical_len,
+        committed.integrity_start,
+        committed.integrity_checksum,
+        committed.integrity_scheme,
         committed.tag,
     ))
 }
@@ -1994,9 +2717,20 @@ fn embedded_batch_candidates_with_materialized(
             BATCH_PREPARED_ROOT_MAGIC,
             root.generation,
             root.logical_len,
+            root.integrity_start,
+            root.integrity_checksum,
+            root.integrity_scheme,
             root.tag,
         );
-        let committed_root = encode_root(ROOT_MAGIC, root.generation, root.logical_len, root.tag);
+        let committed_root = encode_root(
+            ROOT_MAGIC,
+            root.generation,
+            root.logical_len,
+            root.integrity_start,
+            root.integrity_checksum,
+            root.integrity_scheme,
+            root.tag,
+        );
         let candidate = Candidate {
             base_generation: root.generation - 1,
             root_offset,
@@ -2021,7 +2755,8 @@ fn embedded_batch_candidates_with_materialized(
         if witness_offset < ROOT_LEN {
             continue;
         }
-        if checked_end(data_offset, root.logical_len)
+        if physical_payload_len(root.logical_len)
+            .and_then(|len| checked_end(data_offset, len))
             .ok()
             .is_none_or(|end| end > raw_len)
         {
@@ -2222,7 +2957,7 @@ pub(crate) fn materialize_tombstone_candidate(
         .ok_or_else(|| invalid_data("transaction candidate cannot become a tombstone"))?;
     let committed = decode_committed_root(&candidate.committed_root)
         .ok_or_else(|| invalid_data("transaction candidate has an invalid committed root"))?;
-    let payload_end = checked_end(data_offset, committed.logical_len)?;
+    let payload_end = checked_end(data_offset, physical_payload_len(committed.logical_len)?)?;
     if payload_end > file.metadata()?.len() {
         return Err(invalid_data("transaction tombstone payload end is invalid"));
     }
@@ -2247,15 +2982,56 @@ fn recover_root(
         return Err(invalid_data("atomic root generation is in the wrong slot"));
     }
     let payload_end = checked_end(data_offset, root.logical_len)
-        .map_err(|_| invalid_data("atomic logical length overflows its data offset"))?;
+        .map_err(|_| invalid_data("atomic encoded length overflows its data offset"))?;
     if payload_end > raw_len {
         return Err(invalid_data("atomic payload end is invalid"));
+    }
+    if root.integrity_start > root.logical_len {
+        return Err(invalid_data(
+            "atomic unfinished integrity unit starts after the payload end",
+        ));
+    }
+    if root.integrity_start == root.logical_len && root.integrity_checksum != 0 {
+        return Err(invalid_data(
+            "closed atomic integrity state has a nonzero checksum",
+        ));
+    }
+    match root.integrity_scheme {
+        IntegrityScheme::Unbound if root.integrity_start != 0 => {
+            return Err(invalid_data(
+                "unbound atomic integrity state must cover the complete payload",
+            ));
+        }
+        IntegrityScheme::Chunked(size) => {
+            let data_len = u64::from(size.get());
+            let encoded_len = data_len + INTEGRITY_CHECKSUM_LEN as u64;
+            if root.integrity_start % encoded_len != 0 {
+                return Err(invalid_data(
+                    "atomic fixed integrity prefix is not unit-aligned",
+                ));
+            }
+            if root.logical_len - root.integrity_start >= data_len {
+                return Err(invalid_data(
+                    "atomic fixed integrity tail is not shorter than its unit size",
+                ));
+            }
+        }
+        IntegrityScheme::Unbound | IntegrityScheme::Variable => {}
     }
 
     let mut state = State::empty(data_offset);
     state.logical_len = root.logical_len;
     state.committed_len = root.logical_len;
     state.generation = root.generation;
+    state.integrity_start = root.integrity_start;
+    state.integrity_checksum = Crc32::resume(
+        root.integrity_checksum,
+        root.logical_len - root.integrity_start,
+    );
+    state.integrity_scheme = root.integrity_scheme;
+    state.committed_integrity_start = root.integrity_start;
+    state.committed_integrity_checksum = root.integrity_checksum;
+    state.committed_integrity_scheme = root.integrity_scheme;
     state.tag = root.tag;
     state.committed_tag = root.tag;
     state.preflush_target = payload_end;
@@ -2339,16 +3115,7 @@ fn validate_candidate_transition(
         .ok_or_else(|| invalid_data("transaction candidate has an invalid committed root"))?;
     let prepared = decode_prepared_root(&candidate.prepared_root)
         .ok_or_else(|| invalid_data("transaction candidate has an invalid prepared root"))?;
-    if committed.generation
-        != candidate
-            .base_generation
-            .checked_add(1)
-            .ok_or_else(|| invalid_data("transaction candidate generation overflow"))?
-        || committed.generation != prepared.generation
-        || committed.logical_len != prepared.logical_len
-        || committed.tag != prepared.tag
-        || ROOT_OFFSETS[(committed.generation as usize) & 1] != candidate.root_offset
-    {
+    if !candidate_roots_match(candidate, prepared, committed) {
         return Err(invalid_data("transaction candidate roots do not match"));
     }
 
@@ -2557,24 +3324,44 @@ pub(super) fn migrate_live(
         .write(true)
         .create_new(true)
         .open(&creation_path)?;
-    let mut region = Header::create_atomic(&(blob_version..=blob_version)).0;
-    let initial_root = encode_root(ROOT_MAGIC, 1, logical_len, [0; ATOMIC_BLOB_TAG_LEN]);
-    let root_offset = ROOT_OFFSETS[1] as usize;
-    region[root_offset..root_offset + ROOT_LEN].copy_from_slice(&initial_root);
+    let region = Header::create_atomic(&(blob_version..=blob_version)).0;
     replacement.write_all(&region)?;
 
     let buffer_len = usize::try_from(logical_len.min(MIGRATION_COPY_LEN as u64))
         .expect("migration chunks fit in usize");
     let mut buffer = vec![0u8; buffer_len];
+    let mut state = State::empty(Layout::V2.data_offset());
     let mut copied = 0u64;
     while copied < logical_len {
         let remaining = logical_len - copied;
         let len = usize::try_from(remaining.min(MIGRATION_COPY_LEN as u64))
             .expect("migration chunks fit in usize");
         read_exact_at(source, data_offset + copied, &mut buffer[..len])?;
-        replacement.write_all_at(&buffer[..len], Layout::V2.data_offset() + copied)?;
+        let prepared = state
+            .prepare_append(IoBufs::from(buffer[..len].to_vec()))?
+            .expect("migration chunks are nonempty");
+        let mut physical = prepared.file_offset;
+        let mut write_result = Ok(());
+        prepared.data.for_each_chunk(|chunk| {
+            if write_result.is_ok() {
+                write_result = replacement.write_all_at(chunk, physical);
+                physical += chunk.len() as u64;
+            }
+        });
+        write_result?;
+        state.finish_mutation(prepared.mutation, false);
         copied += len as u64;
     }
+    let initial_root = encode_root(
+        ROOT_MAGIC,
+        1,
+        logical_len,
+        state.integrity_start,
+        state.integrity_checksum(),
+        state.integrity_scheme,
+        [0; ATOMIC_BLOB_TAG_LEN],
+    );
+    replacement.write_all_at(&initial_root, ROOT_OFFSETS[1])?;
     replacement.sync_all()?;
 
     // Detect stale handles and accidental concurrent resize before replacing the live name. The

@@ -558,6 +558,30 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         self.inner.tag().await
     }
 
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+        self.inner.integrity_scheme().await
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Read) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.integrity_snapshot().await
+    }
+
+    async fn compare_set_tag(
+        &self,
+        expected: crate::IntegrityToken,
+        tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Write) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.compare_set_tag(expected, tag).await
+    }
+
     async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
         if self.ctx.should_fail(Op::Write) {
@@ -573,8 +597,19 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         }
         let data = data.into();
         let data_len = u64::try_from(data.remaining()).map_err(|_| Error::OffsetOverflow)?;
+        let chunked = matches!(
+            self.inner.integrity_scheme().await?,
+            crate::IntegrityScheme::Chunked(_)
+        );
         let offset = self.inner.append(data).await?;
-        let len = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+        let len = if chunked {
+            self.inner.integrity_snapshot().await?.encoded_len
+        } else {
+            self.size
+                .load(Ordering::Relaxed)
+                .checked_add(data_len)
+                .ok_or(Error::OffsetOverflow)?
+        };
         self.size.store(len, Ordering::Relaxed);
         Ok(offset)
     }
@@ -590,10 +625,72 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         }
         let data = data.into();
         let data_len = u64::try_from(data.remaining()).map_err(|_| Error::OffsetOverflow)?;
+        let chunked = matches!(
+            self.inner.integrity_scheme().await?,
+            crate::IntegrityScheme::Chunked(_)
+        );
         let offset = self.inner.append_tagged(data, tag).await?;
-        let len = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+        let len = if chunked {
+            self.inner.integrity_snapshot().await?.encoded_len
+        } else {
+            self.size
+                .load(Ordering::Relaxed)
+                .checked_add(data_len)
+                .ok_or(Error::OffsetOverflow)?
+        };
         self.size.store(len, Ordering::Relaxed);
         Ok(offset)
+    }
+
+    async fn append_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        data: impl Into<IoBufs> + Send,
+        boundary: crate::IntegrityBoundary,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Write) {
+            return Err(injected_io_error().into());
+        }
+        let data = data.into();
+        let data_len = u64::try_from(data.remaining()).map_err(|_| Error::OffsetOverflow)?;
+        let current_scheme = self.inner.integrity_scheme().await?;
+        let result = self
+            .inner
+            .append_integrity(expected, data, boundary, tag)
+            .await?;
+        let maintains_chunked_units = matches!(
+            (current_scheme, boundary),
+            (crate::IntegrityScheme::Chunked(_), _) | (_, crate::IntegrityBoundary::Chunked(_))
+        );
+        let len =
+            if maintains_chunked_units || matches!(boundary, crate::IntegrityBoundary::Complete) {
+                self.inner.integrity_snapshot().await?.encoded_len
+            } else {
+                self.size
+                    .load(Ordering::Relaxed)
+                    .checked_add(data_len)
+                    .ok_or(Error::OffsetOverflow)?
+            };
+        self.size.store(len, Ordering::Relaxed);
+        Ok(result)
+    }
+
+    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Read) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.read_integrity_tail().await
+    }
+
+    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Read) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.read_integrity(unit).await
     }
 
     async fn rewind(&self, len: u64) -> Result<(), Error> {
@@ -618,6 +715,25 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
         self.inner.rewind_tagged(len, tag).await?;
         self.size.store(len, Ordering::Relaxed);
         Ok(())
+    }
+
+    async fn rewind_integrity(
+        &self,
+        expected: crate::IntegrityToken,
+        len: u64,
+        unit: Option<crate::IntegrityUnit>,
+        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, Error> {
+        self.ensure_not_poisoned()?;
+        if self.ctx.should_fail(Op::Resize) {
+            return Err(injected_io_error().into());
+        }
+        let token = self
+            .inner
+            .rewind_integrity(expected, len, unit, tag)
+            .await?;
+        self.size.store(len, Ordering::Relaxed);
+        Ok(token)
     }
 }
 
