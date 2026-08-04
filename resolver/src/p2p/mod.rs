@@ -74,9 +74,8 @@
 //!
 //! # Performance Considerations
 //!
-//! The resolver accepts arbitrarily many concurrent fetches. It relies on the underlying P2P
-//! channel's per-peer rate limits to pace outbound wire requests. These limits do not bound local
-//! pending demand.
+//! The peer supports arbitrarily many concurrent fetches, but resource usage generally
+//! depends on the rate-limiting configuration of the underlying P2P network.
 
 use bytes::Bytes;
 use commonware_utils::{Span, channel::oneshot};
