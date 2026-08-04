@@ -304,7 +304,12 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(delivery(key.clone()), peer, Duration::ZERO, Bytes::from("v"));
+            inflight.deliver(
+                delivery(key.clone()),
+                peer,
+                Duration::ZERO,
+                Bytes::from("v"),
+            );
 
             // Drop the entry (and its aborter) before the delivery future is ever polled.
             assert!(inflight.cancel(&key));
@@ -325,7 +330,12 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(delivery(key.clone()), peer, Duration::ZERO, Bytes::from("v"));
+            inflight.deliver(
+                delivery(key.clone()),
+                peer,
+                Duration::ZERO,
+                Bytes::from("v"),
+            );
 
             let (_, _, delivered, outcome) =
                 inflight.next_delivery().await.expect("delivery completed");
@@ -349,7 +359,12 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(delivery(key.clone()), peer, Duration::ZERO, Bytes::from("v"));
+            inflight.deliver(
+                delivery(key.clone()),
+                peer,
+                Duration::ZERO,
+                Bytes::from("v"),
+            );
 
             // Cancel before any poll of the pool: drops the Aborter, removes the entry.
             assert!(inflight.cancel(&key));

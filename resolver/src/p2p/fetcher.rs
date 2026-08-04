@@ -1084,9 +1084,7 @@ mod tests {
             assert_eq!(fetcher.len_active(), 1);
 
             fetcher.context.sleep(Duration::from_millis(20)).await;
-            let (key, elapsed) = fetcher
-                .pop_response(100, &peer)
-                .expect("matching response");
+            let (key, elapsed) = fetcher.pop_response(100, &peer).expect("matching response");
             assert_eq!(key, MockKey(10));
             assert_eq!(elapsed, Duration::from_millis(20));
             assert_eq!(fetcher.len_active(), 0);

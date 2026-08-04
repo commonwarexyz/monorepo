@@ -782,9 +782,7 @@ mod tests {
             let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(8));
             // Leave the Retain effect unapplied to model Simplex state
             // advancing before the generic resolver processes its cancellation.
-            let _ = actor
-                .state
-                .handle(Certificate::Finalization(finalization));
+            let _ = actor.state.handle(Certificate::Finalization(finalization));
 
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(

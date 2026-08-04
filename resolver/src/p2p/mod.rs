@@ -1105,7 +1105,10 @@ mod tests {
 
             // A new request for the same key starts cleanly after the ignored fetch is retired.
             mailbox.fetch(key.clone());
-            assert_eq!(started.recv().await.expect("fresh delivery did not start"), key);
+            assert_eq!(
+                started.recv().await.expect("fresh delivery did not start"),
+                key
+            );
             assert_eq!(
                 deliveries.recv().await.expect("consumer channel closed"),
                 (key.clone(), second)
