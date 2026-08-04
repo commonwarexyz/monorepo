@@ -753,6 +753,176 @@
   \note{This is the direct contiguous payoff. We do not encode more journal frames just to recover the start. We use the application-owned root tag. Consuming mutation methods prevent reuse after failed or cancelled storage operations, while snapshots remain available for concurrent readers.}
 \end{frame}
 
+\begin{frame}[t]{Small writes: the root checks the unfinished page}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.56\textwidth}
+      \eyebrow{Two 10-byte writes, each synchronized}
+
+      \vspace{0.07cm}
+      \begin{tikzpicture}[node distance=.14cm]
+        \node[root,text width=3.2cm,minimum height=.78cm] (r1) {
+          root $g$ in slot 0\\[-.04cm]
+          \scriptsize len $=10$ B\\[-.04cm]
+          \scriptsize \texttt{tag[8..12]} $=C(A)$
+        };
+        \node[box,text width=3.2cm,below=of r1,minimum height=.58cm] (p1) {
+          payload: \texttt{[A: 10 B]}
+        };
+
+        \node[root,text width=3.45cm,minimum height=.78cm,right=.55cm of r1] (r2) {
+          root $g+1$ in slot 1\\[-.04cm]
+          \scriptsize len $=20$ B\\[-.04cm]
+          \scriptsize \texttt{tag[8..12]} $=C(A \Vert B)$
+        };
+        \node[box,text width=3.45cm,below=of r2,minimum height=.58cm] (p2) {
+          payload: \texttt{[A][B]}
+        };
+
+        \draw[flow] (r1) -- node[fill=white,inner sep=.02cm,font=\tiny,text=Muted,align=center]{+10 B\\sync} (r2);
+        \draw[flow] (p1) -- (p2);
+
+        \coordinate (payloadbottom) at ($(p1.south)!0.5!(p2.south)$);
+        \node[anchor=north,text width=7.25cm,align=center,font=\scriptsize,text=Muted]
+          at ([yshift=-.1cm]payloadbottom)
+          {Torn root $g+1$ or B $\Rightarrow$ use fallback $g$; the surviving suffix is unreachable.};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \eyebrow{When the page boundary arrives}
+
+      \vspace{0.07cm}
+      \begin{tikzpicture}[node distance=0cm]
+        \node[box,text width=2.45cm,minimum height=.68cm] (page) {full page\\\scriptsize $P$ logical bytes};
+        \node[root,text width=1.12cm,minimum height=.68cm,right=of page] (footer) {CRC\\\scriptsize 4 B};
+        \node[box,text width=1.5cm,minimum height=.68cm,right=of footer] (tail) {next tail\\\scriptsize $<P$};
+        \node[warn,minimum width=1.55cm,minimum height=.68cm,inner sep=.04cm,below=.18cm of tail] (pendingcrc) {
+          \tiny in-progress\\[-.05cm]tail CRC\\[-.05cm]4 B
+        };
+        \node[box,minimum width=3.55cm,minimum height=.68cm,inner xsep=.06cm,inner ysep=.03cm,left=of pendingcrc] (pendingmarker) {
+          \small pending tag in RAM\\[-.05cm]\tiny application marker: 8 B
+        };
+        \draw[flow,draw=Amber] (tail.south) --
+          node[left,font=\tiny,text=Amber]{hash}
+          (pendingcrc.north);
+      \end{tikzpicture}
+
+      \vspace{0.05cm}
+      \scriptsize
+      \begin{itemize}\setlength\itemsep{0.01cm}
+        \item One footer per storage page, never per item.
+        \item At most one unfooted tail; the selected root covers all of it.
+        \item A completed page is immutable and cacheable.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.08cm}
+  \eyebrow{Underlying V2 blob: 40-byte root in alternating 4 KiB slots}
+
+  \vspace{0.03cm}
+  \begin{center}
+    \begin{tikzpicture}[node distance=0cm]
+      \node[oldroot,minimum width=5.6cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm] (identity) {
+        \small magic + generation\\[-.04cm]\tiny 16 bytes
+      };
+      \node[box,minimum width=2.8cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of identity] (length) {
+        \small encoded length\\[-.04cm]\tiny 8 bytes
+      };
+      \node[box,minimum width=2.8cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of length] (marker) {
+        \small application marker\\[-.04cm]\tiny 8 bytes
+      };
+      \node[warn,minimum width=1.4cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of marker] (tailcrc) {
+        \scriptsize tail\\[-.06cm]\tiny CRC32C\\[-.06cm]\tiny 4 bytes
+      };
+      \node[oldroot,minimum width=1.4cm,minimum height=1.05cm,inner xsep=.04cm,inner ysep=.02cm,right=of tailcrc] (rootcrc) {
+        \scriptsize root\\[-.06cm]\tiny CRC32C\\[-.06cm]\tiny 4 bytes
+      };
+      \node[above=.04cm of tailcrc,font=\tiny,text=Amber] (persist) {\texttt{sync} writes here};
+      \draw[flow,draw=Amber] (persist.south) -- (tailcrc.north);
+    \end{tikzpicture}
+  \end{center}
+
+  \vfill
+  \takeaway{\textbf{In progress:} pending tag in RAM \quad \textbf{At sync:} alternate root slot \quad \textbf{Never:} payload.}
+
+  \note{This is the complete small-write story on one slide. A ten-byte append writes ten payload bytes at their final offset. AtomicWriter computes the CRC of the entire current partial page and passes it in the last four application-tag bytes to append-tagged; that method stages length and tag as one in-memory mutation. Sync writes the next root generation into the alternate fixed slot. No checksum bytes appear after A or B. The prior root remains the fallback, and each root header has its own CRC, so an arbitrary torn candidate is rejected. Once P logical bytes accumulate, AtomicWriter appends one four-byte footer. Any remainder becomes the next tail and its CRC moves into the selected root. The footer makes that completed payload page immutable and eligible for the planned page cache. This is storage-page integrity, not an application record checksum or item-boundary map.}
+\end{frame}
+
+\begin{frame}[t]{V2 caching: immutable payload pages, mutable RAM}
+  \vspace{0.02cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.38\textwidth}
+      \eyebrow{What rewrites today?}
+
+      \vspace{0.09cm}
+      \begin{tikzpicture}
+        \node[oldroot,text width=4.35cm,minimum height=.92cm] (legacy) {
+          legacy partial physical tip\\[-.04cm]
+          \scriptsize tail bytes \quad len/CRC A \quad len/CRC B
+        };
+      \end{tikzpicture}
+
+      \vspace{0.08cm}
+      \scriptsize Append/rewind may rewrite that tip. Two slots retain the prior logical prefix; this is \textbf{not} arbitrary record overwrite.
+
+      \vspace{0.17cm}
+      \eyebrow{Current V2 is different}
+
+      \vspace{0.09cm}
+      \begin{tikzpicture}
+        \node[root,text width=4.35cm,minimum height=.92cm] (v2) {
+          \texttt{AtomicSnapshot} reads directly\\[-.04cm]
+          \scriptsize no \texttt{CacheRef}; cache-only reads miss
+        };
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.60\textwidth}
+      \eyebrow{Planned V2 read path}
+
+      \vspace{0.12cm}
+      \begin{tikzpicture}[node distance=.29cm]
+        \node[box,minimum width=2.25cm] (read) {\texttt{AtomicSnapshot}\\read};
+        \node[root,minimum width=3.2cm,right=of read] (lookup) {full-page cache\\\scriptsize (generation, page)};
+        \draw[flow] (read) -- (lookup);
+
+        \node[panel,minimum width=2.25cm,below=.52cm of read,align=center] (tail) {partial tail\\\scriptsize retained \texttt{IoBuf}};
+        \draw[plainline] (read.south) -- (tail.north);
+
+        \node[box,minimum width=3.2cm,below=.52cm of lookup] (miss) {miss: read page + 4\\\scriptsize validate CRC32C};
+        \draw[flow] (lookup) -- node[right,font=\scriptsize,text=Muted]{miss} (miss);
+        \node[root,minimum width=2.05cm,right=.18cm of miss] (fill) {cache logical\\page bytes};
+        \draw[flow] (miss) -- (fill);
+
+        \node[below=.12cm of tail,font=\scriptsize,text=Muted,align=center] {never enters the\\shared page cache};
+      \end{tikzpicture}
+
+      \vspace{0.14cm}
+      \scriptsize One cache core still coalesces faults and evicts RAM pages; loaders decode legacy page $+12$ or atomic page $+4$.
+    \end{column}
+  \end{columns}
+
+  \vspace{0.16cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.32\textwidth}
+      \eyebrow{Identity}\par\smallskip
+      \scriptsize One cache ID per opened blob generation; snapshots share it. A recreated name gets a new ID.
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \eyebrow{Append}\par\smallskip
+      \scriptsize A completed page is immutable and cacheable. The growing tail stays private and is written only by append.
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \eyebrow{Rewind}\par\smallskip
+      \scriptsize Invalidate from the shortened page; publish the shorter root before physical offsets may be reused.
+    \end{column}
+  \end{columns}
+
+  \vfill
+  \takeaway{The cache may replace RAM entries; V2 never overwrites a completed payload page.}
+
+  \note{This slide separates current implementation from planned integration. Legacy contiguous is backed by the existing page cache and paged writer. Its only disk rewrite is the specially encoded partial physical tip, whose two length/checksum slots retain the previously committed prefix. V2 contiguous currently bypasses CacheRef: AtomicSnapshot validates page-plus-four reads directly, and its synchronous cache-only methods are not implemented. The integration is a cache refactor, not permission for V2 overwrites: keep the bounded logical-page store and fault coalescing, but select the legacy page-plus-twelve or atomic page-plus-four loader. Full atomic pages are immutable once their footer is appended, while the snapshot carries the raw partial tail. Fixed and variable V2 journals can then implement cache-only reads; variable data and offsets use distinct IDs. Newly completed pages can also seed the cache from already-owned bytes instead of rereading them.}
+\end{frame}
+
 \begin{frame}[t]{Rollover and reopen work stay bounded}
   \vspace{0.02cm}
   \begin{columns}[T,onlytextwidth]
