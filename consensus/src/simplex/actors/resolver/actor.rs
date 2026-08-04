@@ -392,15 +392,6 @@ impl<
                 );
                 let _guard = span.entered();
 
-                // The requested view may have become covered while this
-                // response was in transit. Retire it without decoding or
-                // attributing uninspected bytes to the serving peer.
-                if self.state.get(view).is_some() {
-                    debug!(%view, "ignoring resolver response for covered view");
-                    response.send_lossy(Outcome::Ignored);
-                    return;
-                }
-
                 // Validate incoming message
                 let validate = info_span!(
                     "simplex.resolver.validate",
@@ -768,7 +759,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn covered_response_is_ignored_before_validation() {
+    async fn covered_request_still_processes_stronger_certificate() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -779,74 +770,30 @@ mod tests {
             let mut actor = build_actor(context, verifier.clone());
             let mut resolver = RecordingResolver::default();
 
-            let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(8));
-            // Leave the Retain effect unapplied to model Simplex state
-            // advancing before the generic resolver processes its cancellation.
-            let _ = actor.state.handle(Certificate::Finalization(finalization));
+            let floor = build_finalization(&schemes, &verifier, EPOCH, View::new(8));
+            // Leave the Retain effect unapplied to model a response already queued
+            // for delivery when the requested view becomes covered.
+            let _ = actor.state.handle(Certificate::Finalization(floor));
 
+            let stronger = build_finalization(&schemes, &verifier, EPOCH, View::new(10));
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
                 HandlerMessage::Deliver {
                     span: tracing::Span::none(),
                     view: View::new(6),
-                    data: Bytes::from_static(b"not a certificate"),
+                    data: Certificate::<TestScheme, Sha256Digest>::Finalization(stronger).encode(),
                     response,
                 },
                 &mut voter,
                 &mut resolver,
             );
 
-            assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
-            assert!(actor.held.is_empty());
-        });
-    }
-
-    #[test_async]
-    async fn nullification_coverage_ignores_only_covered_responses() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
-            let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context, verifier.clone());
-            let mut resolver = RecordingResolver::default();
-
-            // View 2 covers the rest of its term through view 5, but not the
-            // next term beginning at view 6.
-            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
-            // Leave the Retain effect unapplied so the delivery channel stays
-            // open while the handler observes the updated local state.
-            let _ = actor
-                .state
-                .handle(Certificate::Nullification(nullification));
-
-            let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: View::new(5),
-                    data: Bytes::from_static(b"not a certificate"),
-                    response,
-                },
-                &mut voter,
-                &mut resolver,
-            );
-            assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
-
-            let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: View::new(6),
-                    data: Bytes::from_static(b"not a certificate"),
-                    response,
-                },
-                &mut voter,
-                &mut resolver,
-            );
-            assert_eq!(receiver.await.unwrap(), Outcome::Invalid);
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert!(matches!(
+                actor.state.get(View::new(10)),
+                Some(Certificate::Finalization(finalization))
+                    if finalization.view() == View::new(10)
+            ));
         });
     }
 
