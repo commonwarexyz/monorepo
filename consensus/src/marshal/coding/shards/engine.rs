@@ -1494,6 +1494,14 @@ where
     /// Re-proposals reuse commitments, and application acknowledgments can lag consensus.
     /// Retaining the latest observed round prevents an older acknowledgment from retiring
     /// reconstruction still needed by a later proposal.
+    ///
+    /// The refreshed round also governs shard classification, which resolves the
+    /// participant set from `round`'s epoch. That is unambiguous only because every
+    /// observation path binds the commitment to a single epoch: proposals bind it in
+    /// the context digest, re-proposals are validated as the last block of the
+    /// announced round's own epoch, and notarizations imply such a proposal. An
+    /// epocher that allowed a block to close more than one epoch would break this
+    /// invariant.
     fn observe(&mut self, round: Round) {
         let common = self.common_mut();
         common.round = common.round.max(round);

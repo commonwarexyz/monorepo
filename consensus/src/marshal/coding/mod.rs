@@ -1833,6 +1833,131 @@ mod tests {
         })
     }
 
+    /// Exact commitment retirement (durable application progress) can race an
+    /// in-flight re-proposal of the same commitment. The re-proposal must still
+    /// verify: the block remains available through core marshal's verified cache,
+    /// and the post-verification `discovered` announcement must recreate shard
+    /// reconstruction state so the re-proposer can deliver assigned shards.
+    #[test_traced("WARN")]
+    fn test_coding_reproposal_survives_exact_commitment_retirement() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+            let reproposer_control = oracle.control(participants[1].clone());
+            let (mut reproposer_sender, _reproposer_receiver) =
+                reproposer_control.register(2, TEST_QUOTA).await.unwrap();
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // Build the epoch boundary block, store it in core marshal (the durable
+            // backstop), and cache it in the shard engine.
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_round = Round::new(Epoch::new(0), View::new(boundary_height.get()));
+            let boundary_context = CodingCtx {
+                round: boundary_round,
+                leader: me.clone(),
+                parent: (View::new(boundary_height.get() - 1), genesis_commitment()),
+            };
+            let boundary_block = make_coding_block(
+                boundary_context.clone(),
+                Sha256::hash(&[b"parent"]),
+                boundary_height,
+                1900,
+            );
+            let coded_boundary: TestCodedBlock =
+                CodedBlock::new(boundary_block, coding_config, &Sequential);
+            let boundary_commitment = coded_boundary.commitment();
+            assert!(marshal.verified(boundary_round, coded_boundary.clone()).await);
+            shards.discovered(boundary_commitment, me.clone(), boundary_round);
+            shards.proposed(boundary_round, coded_boundary.clone());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(shards.get(boundary_commitment).await.is_some());
+
+            // Exact retirement with a round floor below the commitment's observed
+            // round: only the exact commitment list can retire it.
+            shards.prune(
+                Round::new(Epoch::zero(), View::new(1)),
+                vec![boundary_commitment],
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(shards.get(boundary_commitment).await.is_none());
+
+            // Re-propose the boundary block in the same epoch. Verification must
+            // fetch the block from the core backstop and re-announce discovery.
+            let reproposal_round = Round::new(Epoch::new(0), View::new(20));
+            let reproposal_context = CodingCtx {
+                round: reproposal_round,
+                leader: participants[1].clone(),
+                parent: (View::new(boundary_height.get()), boundary_commitment),
+            };
+            let verdict = marshaled
+                .verify(reproposal_context, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                verdict.expect("re-proposal verdict missing"),
+                "re-proposal should verify from the core backstop after exact retirement"
+            );
+
+            // The recreated reconstruction state must accept this node's assigned
+            // shard from the re-proposer (not the original leader).
+            let assigned = shards.subscribe_assigned_shard_verified(boundary_commitment);
+            let assigned_shard = coded_boundary
+                .shard(0)
+                .expect("missing assigned shard")
+                .encode();
+            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+            select! {
+                result = assigned => result.expect("assigned shard sender dropped"),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("assigned shard was not accepted after state recreation");
+                },
+            }
+
+            let certify = marshaled
+                .certify(reproposal_round, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                certify.expect("certify result missing"),
+                "re-proposal should certify after exact retirement"
+            );
+        })
+    }
+
     #[test_traced("WARN")]
     fn test_marshaled_rejects_mismatched_context_digest() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
