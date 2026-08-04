@@ -35,6 +35,8 @@ stability_scope!(ALPHA {
     pub mod conformance;
     pub mod deterministic;
     pub mod mocks;
+    /// The write-ahead-log storage backend (see [crate::AtomicStorage]).
+    pub use storage::wal;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
@@ -810,6 +812,93 @@ stability_scope!(BETA {
 
         /// Returns the storage [BufferPool].
         fn storage_buffer_pool(&self) -> &BufferPool;
+    }
+});
+stability_scope!(ALPHA {
+    /// A blob with append-only mutation and all-or-nothing publication.
+    ///
+    /// Mutations stage in memory, visible to this handle's reads immediately, and
+    /// become durable only when a publication acknowledges: after Ok, recovery
+    /// reproduces every staged operation the publication contained; a crash before
+    /// that reproduces none of them. Rewinds lower the committed length without
+    /// destroying it early, so rewind-then-append publishes as one atomic step.
+    pub trait AtomicBlob: Clone + Send + Sync + 'static {
+        /// The blob's logical length, including staged (unpublished) operations.
+        fn size(&self) -> u64;
+
+        /// Stages `data` at the end of the blob.
+        fn append(&self, data: impl Into<bytes::Bytes>) -> Result<(), Error>;
+
+        /// Stages a rewind to `len`. Fails if `len` exceeds [Self::size].
+        fn rewind(&self, len: u64) -> Result<(), Error>;
+
+        /// Reads `len` bytes at `offset`, observing staged operations.
+        fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// Publishes every staged operation atomically, returning at durability.
+        fn publish(&self) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Like [Self::publish], but returns a handle resolving at durability, so
+        /// the caller can overlap the wait with other work.
+        fn start_publish(&self) -> impl Future<Output = Handle<()>> + Send;
+    }
+
+    /// A [Storage] additionally offering atomic blobs and multi-blob publication.
+    pub trait AtomicStorage: Storage {
+        /// The atomic blob this storage opens.
+        type AtomicBlob: AtomicBlob;
+
+        /// Opens an existing atomic blob or creates a new one, returning the blob,
+        /// its committed length, and its version. An Ok result indicates the blob
+        /// is durably created. Opening an ordinary blob this way fails (promote it
+        /// first); opening an atomic blob with [Storage::open_versioned] fails
+        /// symmetrically.
+        fn open_atomic_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> impl Future<Output = Result<(Self::AtomicBlob, u64, u16), Error>> + Send;
+
+        /// [Self::open_atomic_versioned] with [DEFAULT_BLOB_VERSION].
+        fn open_atomic(
+            &self,
+            partition: &str,
+            name: &[u8],
+        ) -> impl Future<Output = Result<(Self::AtomicBlob, u64), Error>> + Send {
+            async move {
+                let (blob, len, _) = self
+                    .open_atomic_versioned(
+                        partition,
+                        name,
+                        DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
+                    )
+                    .await?;
+                Ok((blob, len))
+            }
+        }
+
+        /// Publishes several atomic blobs' staged operations all-or-nothing: after
+        /// Ok, recovery reproduces every blob's operations; a crash before that
+        /// reproduces none of them. All blobs must live in `partition`.
+        fn publish_all(
+            &self,
+            partition: &str,
+            blobs: &[&Self::AtomicBlob],
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Promotes an ordinary blob to atomic, adopting its current synced content
+        /// as the committed state. Ordinary handles opened before promotion must not
+        /// mutate the blob afterwards.
+        fn promote(
+            &self,
+            partition: &str,
+            name: &[u8],
+        ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 });
 stability_scope!(BETA, cfg(feature = "external") {

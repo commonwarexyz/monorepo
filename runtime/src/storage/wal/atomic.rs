@@ -1,7 +1,7 @@
 //! The atomic blob handle: append-only, WAL-owned length, all-or-nothing publication.
 //!
 //! Mutations stage in memory (visible to this handle's reads immediately) and become
-//! durable only at [AtomicBlob::publish]. An epoch of staged operations folds to a
+//! durable only at [crate::AtomicBlob::publish]. An epoch of staged operations folds to a
 //! canonical pair: at most one rewind (to the lowest cut) followed by one contiguous
 //! run of appended bytes. Two publication routes:
 //!
@@ -164,13 +164,13 @@ impl<M: Medium> AtomicBlob<M> {
     }
 
     /// The blob's logical length, including staged (unpublished) operations.
-    pub fn size(&self) -> u64 {
+    fn size_inner(&self) -> u64 {
         self.core.lock().visible
     }
 
     /// Stages `data` at the end of the blob: visible to this handle's reads
     /// immediately, durable once a publication containing it acknowledges.
-    pub fn append(&self, data: impl Into<Bytes>) -> Result<(), Error> {
+    fn append_inner(&self, data: impl Into<Bytes>) -> Result<(), Error> {
         let data = data.into();
         let mut core = self.core.lock();
         core.visible = core
@@ -182,7 +182,7 @@ impl<M: Medium> AtomicBlob<M> {
     }
 
     /// Stages a rewind to `len`. Fails if `len` exceeds the visible length.
-    pub fn rewind(&self, len: u64) -> Result<(), Error> {
+    fn rewind_inner(&self, len: u64) -> Result<(), Error> {
         let mut core = self.core.lock();
         if len > core.visible {
             return Err(Error::BlobInsufficientLength);
@@ -217,7 +217,7 @@ impl<M: Medium> AtomicBlob<M> {
     /// Reads `len` bytes at `offset`. Sources resolve under locks (committed state,
     /// staged fold); file I/O happens with the locks released. Assembly order is
     /// file, then overlay, then the staged fold, so later state shadows earlier.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+    async fn read_at_inner(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
         let end = offset
             .checked_add(len as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -252,28 +252,9 @@ impl<M: Medium> AtomicBlob<M> {
         Ok(bufs)
     }
 
-    /// Publishes every staged operation atomically: after Ok, recovery reproduces
-    /// all of them; a crash before the frame survives reproduces none of them.
-    pub async fn publish(&self) -> Result<(), Error> {
-        match self.start_publish().await? {
-            Some(ack) => ack.await.map_err(|_| Error::Closed)?,
-            None => Ok(()),
-        }
-    }
-
-    /// Like [Self::publish], but returns a handle resolving at durability, so the
-    /// caller can overlap the barrier wait with other work.
-    pub async fn start_publish_handle(&self) -> Handle<()> {
-        match self.start_publish().await {
-            Ok(Some(ack)) => Handle::from_receiver(ack),
-            Ok(None) => Handle::ready(Ok(())),
-            Err(error) => Handle::ready(Err(error)),
-        }
-    }
-
     /// Runs the publication protocol up to staging, returning the acknowledgment to
     /// await (None when nothing was staged). Used directly by multi-blob batches.
-    pub(super) async fn start_publish(&self) -> Result<Option<Ack>, Error> {
+    pub(super) async fn stage_publish(&self) -> Result<Option<Ack>, Error> {
         let Some(ops) = self.freeze()? else {
             return Ok(None);
         };
@@ -446,6 +427,39 @@ impl<M: Medium> AtomicBlob<M> {
                 }),
                 "CommitAtomic asserts an uncovered dentry"
             );
+        }
+    }
+}
+
+impl<M: Medium> crate::AtomicBlob for AtomicBlob<M> {
+    fn size(&self) -> u64 {
+        self.size_inner()
+    }
+
+    fn append(&self, data: impl Into<Bytes>) -> Result<(), Error> {
+        self.append_inner(data)
+    }
+
+    fn rewind(&self, len: u64) -> Result<(), Error> {
+        self.rewind_inner(len)
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_at_inner(offset, len).await
+    }
+
+    async fn publish(&self) -> Result<(), Error> {
+        match self.stage_publish().await? {
+            Some(ack) => ack.await.map_err(|_| Error::Closed)?,
+            None => Ok(()),
+        }
+    }
+
+    async fn start_publish(&self) -> Handle<()> {
+        match self.stage_publish().await {
+            Ok(Some(ack)) => Handle::from_receiver(ack),
+            Ok(None) => Handle::ready(Ok(())),
+            Err(error) => Handle::ready(Err(error)),
         }
     }
 }

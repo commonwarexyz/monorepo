@@ -40,10 +40,11 @@
 //! directory and the root, so acknowledged *content* is never orphaned by a missing
 //! dentry.
 //!
-//! Built bottom-up: [medium] is the I/O seam and crash model; [mod@format] the on-disk
-//! layout; [catalog] the namespace as a fold over records; [journal] creation,
-//! recovery, and checkpoints; [committer] group commit; [blob] the handles; this
-//! module the family registry and the [crate::Storage] implementation.
+//! Built bottom-up: [medium] is the I/O seam and crash model; `format` the on-disk
+//! layout; `catalog` the namespace as a fold over records; `journal` creation,
+//! recovery, and checkpoints; `committer` group commit; `blob` and `atomic` the
+//! handles; this module the family registry and the [crate::Storage] and
+//! [crate::AtomicStorage] implementations.
 
 mod atomic;
 mod blob;
@@ -822,7 +823,7 @@ impl<M: Medium> crate::Storage for Storage<M> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, Storage as _,
+        AtomicBlob as _, AtomicStorage as _, Blob as _, Storage as _,
         storage::{tests::run_storage_tests, wal::medium::Sim},
     };
 
