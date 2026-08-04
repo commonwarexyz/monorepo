@@ -121,7 +121,6 @@ impl<
                 strategy: cfg.strategy,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
                 term_length,
             },

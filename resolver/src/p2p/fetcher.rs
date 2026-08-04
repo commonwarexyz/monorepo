@@ -114,9 +114,10 @@ where
     /// Manages pending requests. When a request is registered (for both the first time and after
     /// a retry), it is added to this set.
     ///
-    /// The value is a tuple of the next time to try the request and a boolean indicating if the request
-    /// is a retry (in which case the request should be made to a random peer).
-    pending: PrioritySet<Key, (SystemTime, bool)>,
+    /// Fresh requests precede retries. Within each class, requests are ordered
+    /// by the next time they should be attempted. Retried requests use a random
+    /// peer rather than the best-performing peer.
+    pending: PrioritySet<Key, (bool, SystemTime)>,
 
     /// If no peers are ready to handle a request (all filtered out or send failed), the waiter is set
     /// to the next time to try the request.
@@ -256,7 +257,7 @@ where
         let pending_keys: Vec<(Key, bool)> = self
             .pending
             .iter()
-            .map(|(k, (_, retry))| (k.clone(), *retry))
+            .map(|(k, (retry, _))| (k.clone(), *retry))
             .collect();
 
         // Try each pending key until one succeeds
@@ -363,7 +364,21 @@ where
         // because no eligible peer could serve it. A new ready key can still be
         // fetchable, so wake pending processing immediately.
         self.waiter = None;
-        self.pending.put(key, (self.context.current(), false));
+        self.pending.put(key, (false, self.context.current()));
+    }
+
+    /// Promotes a pending retry to a fresh request.
+    ///
+    /// Returns `true` if the key was waiting as a retry. Active requests and
+    /// keys already classified as fresh are unchanged.
+    pub fn promote(&mut self, key: &Key) -> bool {
+        let Some((true, _)) = self.pending.get(key) else {
+            return false;
+        };
+        self.waiter = None;
+        self.pending
+            .put(key.clone(), (false, self.context.current()));
+        true
     }
 
     /// Adds a key to the pending queue.
@@ -376,7 +391,7 @@ where
         // so this retry can drive pending processing again.
         self.waiter = None;
         let deadline = self.context.current() + self.retry_timeout;
-        self.pending.put(key, (deadline, true));
+        self.pending.put(key, (true, deadline));
     }
 
     /// Returns the deadline for the next pending retry.
@@ -387,7 +402,7 @@ where
         }
 
         // Return the greater of the waiter and the next pending deadline
-        let pending_deadline = self.pending.peek().map(|(_, (deadline, _))| *deadline);
+        let pending_deadline = self.pending.peek().map(|(_, (_, deadline))| *deadline);
         pending_deadline.max(self.waiter)
     }
 
@@ -1227,6 +1242,38 @@ mod tests {
             // Pop key
             let (key, _) = fetcher.pending.pop().unwrap();
             assert_eq!(key, MockKey(1));
+        });
+    }
+
+    #[test]
+    fn test_ready_requests_precede_all_retries() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context.child("fetcher"));
+
+            fetcher.add_retry(MockKey(1));
+            context.sleep(Duration::from_millis(50)).await;
+            fetcher.add_retry(MockKey(2));
+            context.sleep(Duration::from_millis(200)).await;
+            fetcher.add_ready(MockKey(4));
+            fetcher.add_ready(MockKey(3));
+
+            let keys: Vec<_> =
+                std::iter::from_fn(|| fetcher.pending.pop().map(|(key, _)| key)).collect();
+            assert_eq!(keys, vec![MockKey(3), MockKey(4), MockKey(1), MockKey(2)]);
+        });
+    }
+
+    #[test]
+    fn test_new_demand_promotes_pending_retry() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context.child("fetcher"));
+
+            fetcher.add_retry(MockKey(1));
+            assert!(fetcher.promote(&MockKey(1)));
+            assert!(!fetcher.promote(&MockKey(1)));
+            assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
         });
     }
 

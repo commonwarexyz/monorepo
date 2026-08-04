@@ -22,7 +22,8 @@
 //!
 //! Requests stay pending in the resolver until answered or retained out, so the cursor never
 //! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
-//! pending, which the resolver engine deduplicates).
+//! pending, which the resolver engine deduplicates). A scan submits every missing anchor; the P2P
+//! channel's rate limits control how quickly those requests are sent.
 //!
 //! # Mid-Term Floor Raises
 //!
@@ -83,7 +84,6 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
 
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
-    pub fetch_concurrent: NonZeroUsize,
     pub fetch_timeout: Duration,
     pub term_length: TermLength,
 }

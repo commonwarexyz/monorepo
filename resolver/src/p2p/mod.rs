@@ -56,6 +56,14 @@
 //! consumer should return an ambiguous outcome if the delivered response does not satisfy every
 //! subscriber, allowing the resolver to try another response.
 //!
+//! # Scheduling
+//!
+//! Fresh keys are attempted before retries, including retries whose deadlines have already
+//! elapsed. New subscribers promote a pending retry, and a subscriber that arrives while a
+//! response is being validated makes any resulting retry fresh. This keeps new demand responsive
+//! while allowing retries to consume capacity whenever no fresh request can be sent. A sustained
+//! stream of fresh work can postpone retries.
+//!
 //! # Peer Selection
 //!
 //! Outbound fetches are only sent to peers in `latest.primary` (see [commonware_p2p::Provider]) but inbound
@@ -2530,7 +2538,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_late_targeted_subscriber_joins_retry_after_ambiguous_delivery() {
+    fn test_new_subscribers_promote_ambiguous_retries() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2550,16 +2558,21 @@ mod tests {
 
             let valid_response = Bytes::from("valid data for key 5");
             let mut prod3 = SequencedProducer::default();
-            prod3.insert(key.clone(), [valid_response.clone()]);
+            prod3.insert(
+                key.clone(),
+                [valid_response.clone(), valid_response.clone()],
+            );
             let prod3_observer = prod3.clone();
 
             let (first_gate_sender, first_gate_receiver) = oneshot::channel();
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (third_gate_sender, third_gate_receiver) = oneshot::channel();
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
                 vec![
                     (first_gate_receiver, Outcome::Ambiguous),
-                    (second_gate_receiver, Outcome::Complete),
+                    (second_gate_receiver, Outcome::Ambiguous),
+                    (third_gate_receiver, Outcome::Complete),
                 ],
             );
 
@@ -2598,6 +2611,7 @@ mod tests {
 
             let first_subscriber = SubscriberTag(49);
             let second_subscriber = SubscriberTag(50);
+            let third_subscriber = SubscriberTag(51);
 
             // Start unrestricted repair and park its first response in validation.
             mailbox1.fetch(Fetch {
@@ -2615,24 +2629,17 @@ mod tests {
                 }
             );
 
-            // A targeted objection for the same key attaches to the parked fetch
-            // without issuing another network request.
+            // The parked validation does not issue another network request.
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            mailbox1.fetch_targeted(
-                Fetch {
-                    key: key.clone(),
-                    subscriber: second_subscriber.clone(),
-                    span: tracing::Span::none(),
-                },
-                non_empty_vec![peers[2].clone()],
-            );
-
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
                 prod2_observer.remaining(&key),
                 vec![unexpected_refetch.clone()]
             );
-            assert_eq!(prod3_observer.remaining(&key), vec![valid_response.clone()]);
+            assert_eq!(
+                prod3_observer.remaining(&key),
+                vec![valid_response.clone(), valid_response.clone()]
+            );
 
             oracle
                 .remove_link(peers[0].clone(), peers[1].clone())
@@ -2643,18 +2650,28 @@ mod tests {
                 .await
                 .unwrap();
 
-            // An ambiguous response retries unrestricted repair with both
-            // subscribers and does not penalize the serving peer.
+            // Move the unrestricted repair to retry-pending, then attach a new
+            // targeted subscriber. The new demand promotes the retry rather
+            // than waiting for its original retry deadline.
             first_gate_sender.send(()).unwrap();
             oracle.manager().track(
                 1,
                 Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
             );
+            context.sleep(Duration::from_millis(1)).await;
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key.clone(),
+                    subscriber: second_subscriber.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[2].clone()],
+            );
 
             let delivery = select! {
                 delivery = started.recv() => delivery.expect("retry delivery did not start"),
-                _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("ambiguous response was not retried with the late subscriber");
+                _ = context.sleep(Duration::from_millis(80)) => {
+                    panic!("new subscriber did not promote the pending retry");
                 },
             };
             assert_eq!(
@@ -2668,7 +2685,40 @@ mod tests {
                 }
             );
 
+            // A subscriber that arrives while this response is being validated
+            // also makes the resulting retry fresh: it never received the
+            // response that produced the ambiguous outcome.
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key.clone(),
+                    subscriber: third_subscriber.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[2].clone()],
+            );
+            context.sleep(Duration::from_millis(1)).await;
+            assert_eq!(prod3_observer.remaining(&key), vec![valid_response.clone()]);
+
             second_gate_sender.send(()).unwrap();
+            let delivery = select! {
+                delivery = started.recv() => delivery.expect("second retry delivery did not start"),
+                _ = context.sleep(Duration::from_millis(80)) => {
+                    panic!("subscriber added during delivery did not promote the retry");
+                },
+            };
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![
+                        (first_subscriber.clone(), tracing::Span::none()),
+                        (second_subscriber.clone(), tracing::Span::none()),
+                        (third_subscriber.clone(), tracing::Span::none())
+                    ],
+                }
+            );
+
+            third_gate_sender.send(()).unwrap();
             let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
             assert_eq!(
                 delivery,
@@ -2676,7 +2726,8 @@ mod tests {
                     key: key.clone(),
                     subscribers: non_empty_vec![
                         (first_subscriber, tracing::Span::none()),
-                        (second_subscriber, tracing::Span::none())
+                        (second_subscriber, tracing::Span::none()),
+                        (third_subscriber, tracing::Span::none())
                     ],
                 }
             );
@@ -2684,6 +2735,67 @@ mod tests {
             assert_eq!(prod2_observer.remaining(&key), vec![unexpected_refetch]);
             assert!(prod3_observer.remaining(&key).is_empty());
             assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_fresh_mailbox_request_precedes_overdue_retry() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let retry_key = Key(60);
+            let fresh_key = Key(61);
+            let retry_value = Bytes::from("retry");
+            let fresh_value = Bytes::from("fresh");
+
+            let (requester_consumer, mut deliveries) = consumer();
+            let requester = schemes.remove(0);
+            let requester_key = requester.public_key();
+            let (mut requester_engine, mut requester_mailbox) = Engine::new(
+                context.child("requester"),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(requester_key.clone()),
+                    consumer: requester_consumer,
+                    producer: Producer::<Key, Bytes>::default(),
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(requester_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            requester_engine.seed_retry(retry_key.clone(), ());
+            requester_mailbox.fetch(fresh_key.clone());
+
+            let mut producer = Producer::default();
+            producer.insert(retry_key, retry_value);
+            producer.insert(fresh_key.clone(), fresh_value.clone());
+            let responder = schemes.remove(0);
+            let _responder_mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(responder.public_key()),
+                responder,
+                connections.remove(1),
+                dummy_consumer(),
+                producer,
+            );
+
+            context
+                .sleep(FETCH_RETRY_TIMEOUT + Duration::from_millis(1))
+                .await;
+            requester_engine.start(connections.remove(0));
+
+            let (delivered_key, delivered_value) =
+                deliveries.recv().await.expect("requester consumer closed");
+            assert_eq!(delivered_key, fresh_key);
+            assert_eq!(delivered_value, fresh_value);
         });
     }
 
