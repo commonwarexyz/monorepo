@@ -399,10 +399,17 @@ impl<F: Family, D: Digest> Mem<F, D> {
             });
         };
 
+        if self.size() < batch.ancestor_base_size {
+            return Err(Error::AncestorDropped {
+                expected: batch.ancestor_base_size,
+                actual: self.size(),
+            });
+        }
+
         // Apply ancestor batches in root-to-tip order. Already-committed
         // batches (whose appended nodes are already in the Mem) are skipped
-        // by tracking a running position through the ancestor chain.
-        let mut batch_pos = *batch.base_size;
+        // by tracking a running position through the retained ancestor suffix.
+        let mut batch_pos = *batch.ancestor_base_size;
         for (appended, overwrites) in batch
             .ancestor_appended
             .iter()
@@ -1132,6 +1139,44 @@ mod tests {
         );
     }
 
+    /// Dropping a committed ancestor before merkleizing a descendant must not
+    /// shift the retained uncommitted suffix back to the original fork point.
+    fn apply_batch_after_committed_ancestor_dropped<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = Mem::<F, D>::new();
+
+        let a = {
+            let mut batch = mem.new_batch();
+            for i in 0u64..8 {
+                batch = batch.add(&hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mem, &hasher)
+        };
+        let b = a
+            .new_batch()
+            .add(&hasher, &8u64.to_be_bytes())
+            .merkleize(&mem, &hasher);
+
+        mem.apply_batch(&a).unwrap();
+        drop(a);
+
+        let c = b
+            .new_batch()
+            .add(&hasher, &9u64.to_be_bytes())
+            .merkleize(&mem, &hasher);
+
+        // Only the live, uncommitted suffix is retained, and its position starts
+        // immediately after the committed ancestor.
+        assert_eq!(c.ancestor_appended.len(), 1);
+        assert_eq!(c.ancestor_base_size, mem.size());
+
+        drop(b);
+        mem.apply_batch(&c).unwrap();
+
+        let reference = build_raw::<F>(&hasher, 10);
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+    }
+
     /// Overwrite-only ancestor B must not be skipped when applying C after A.
     fn apply_batch_overwrite_only_ancestor<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
@@ -1287,6 +1332,10 @@ mod tests {
         apply_batch_detects_dropped_ancestor::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_apply_batch_after_committed_ancestor_dropped() {
+        apply_batch_after_committed_ancestor_dropped::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
     }
@@ -1384,6 +1433,10 @@ mod tests {
     #[test]
     fn mmb_apply_batch_detects_dropped_ancestor() {
         apply_batch_detects_dropped_ancestor::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_after_committed_ancestor_dropped() {
+        apply_batch_after_committed_ancestor_dropped::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_apply_batch_overwrite_only_ancestor() {

@@ -83,23 +83,26 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     /// Collect ancestor items from the parent chain before downgrading.
     fn collect_ancestor_items(
         parent: &Option<MerkleizedParent<F, H, Item, S>>,
-    ) -> Vec<Arc<Vec<Item>>> {
+        base_leaves: u64,
+    ) -> (u64, Vec<Arc<Vec<Item>>>) {
         let Some(parent) = parent else {
-            return Vec::new();
+            return (base_leaves, Vec::new());
         };
         let mut items = Vec::new();
+        let mut base_leaves = parent.as_ref().size() - parent.items.len() as u64;
         if !parent.items.is_empty() {
             items.push(Arc::clone(&parent.items));
         }
         let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
         while let Some(batch) = current {
+            base_leaves = batch.as_ref().size() - batch.items.len() as u64;
             if !batch.items.is_empty() {
                 items.push(Arc::clone(&batch.items));
             }
             current = batch.parent.as_ref().and_then(Weak::upgrade);
         }
         items.reverse();
-        items
+        (base_leaves, items)
     }
 
     /// Merkleize the batch.
@@ -112,14 +115,17 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             parent,
         } = self;
 
+        let base_leaves = *inner.leaves() - items.len() as u64;
+        let (ancestor_base_leaves, ancestor_items) =
+            Self::collect_ancestor_items(&parent, base_leaves);
         let items = Arc::new(items);
         let merkle = inner.merkleize(base, &hasher);
-        let ancestor_items = Self::collect_ancestor_items(&parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
             bagging: hasher.root_bagging(),
             items,
             parent: parent.as_ref().map(Arc::downgrade),
+            ancestor_base_leaves,
             ancestor_items,
         })
     }
@@ -152,6 +158,8 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync, S: Strategy>
     items: Arc<Vec<Item>>,
     /// This batch's parent, or None if the parent is the journal itself.
     parent: Option<Weak<Self>>,
+    /// Number of leaves before the oldest retained ancestor batch.
+    pub(crate) ancestor_base_leaves: u64,
     /// Ancestor item batches collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
 }
@@ -362,6 +370,7 @@ where
             bagging: self.hasher.root_bagging(),
             items: Arc::new(Vec::new()),
             parent: None,
+            ancestor_base_leaves: *self.size(),
             ancestor_items: Vec::new(),
         })
     }
@@ -546,8 +555,15 @@ where
         // Batches are collected into a single append_many call to acquire the
         // journal's write lock once instead of per-batch.
         let committed_leaves = self.journal.bounds().end;
-        let base_leaves = *Location::<F>::try_from(base_size)?;
-        let mut batch_leaf_end = base_leaves;
+        if committed_leaves < batch.ancestor_base_leaves {
+            return Err(merkle::Error::AncestorDropped {
+                expected: Position::<F>::try_from(Location::new(batch.ancestor_base_leaves))?,
+                actual: merkle_size,
+            }
+            .into());
+        }
+
+        let mut batch_leaf_end = batch.ancestor_base_leaves;
         let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
         for ancestor in &batch.ancestor_items {
             batch_leaf_end += ancestor.len() as u64;
@@ -3435,5 +3451,56 @@ mod tests {
     fn test_apply_batch_skips_only_committed_ancestor_items_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_apply_batch_skips_only_committed_ancestor_items_inner::<mmb::Family>);
+    }
+
+    /// A dropped committed prefix must not shift the remaining uncommitted
+    /// ancestor items back to the original fork point.
+    async fn test_apply_batch_after_committed_ancestor_dropped_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal =
+            create_empty_journal::<F>(context.child("storage"), "dropped-committed").await;
+
+        let mut a_batch = journal.new_batch();
+        for i in 0..8u8 {
+            a_batch = a_batch.add(create_operation::<F>(i));
+        }
+        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(8));
+        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+
+        journal = journal.apply_batch(&a).await.unwrap();
+        drop(a);
+
+        let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(9));
+        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+
+        // Only B remains in the retained ancestor suffix.
+        assert_eq!(c.ancestor_items.len(), 1);
+        assert_eq!(c.ancestor_base_leaves, *journal.size());
+        assert_eq!(c.inner.ancestor_base_size, journal.merkle.size());
+
+        drop(b);
+        journal = journal.apply_batch(&c).await.unwrap();
+        assert_eq!(*journal.size(), 10);
+
+        let mut reference =
+            create_empty_journal::<F>(context.child("reference"), "dropped-committed-ref").await;
+        for i in 0..10u8 {
+            (reference, _) = reference.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        assert_eq!(journal_root(&journal), journal_root(&reference));
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_after_committed_ancestor_dropped_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_after_committed_ancestor_dropped_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_after_committed_ancestor_dropped_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_after_committed_ancestor_dropped_inner::<mmb::Family>);
     }
 }
