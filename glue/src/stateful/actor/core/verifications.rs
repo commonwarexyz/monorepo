@@ -5,12 +5,9 @@ use crate::stateful::{
         processor::{PendingDigest, VerificationDisposition, VerificationProgress, Verifier},
     },
 };
-use commonware_consensus::{
-    Block, Roundable,
-    marshal::{
-        ancestry::{BlockProvider, BoxedAncestry},
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+use commonware_consensus::marshal::{
+    ancestry::{BlockProvider, BoxedAncestry},
+    core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
@@ -21,11 +18,15 @@ use rand_core::Rng;
 use std::{collections::BTreeMap, future::Future};
 use tracing::{Instrument as _, Span, info_span};
 
-/// Verification work retained across actor state transitions.
-pub(super) struct Request<C, B: Block> {
+/// A verification request retained across actor state transitions.
+pub(super) struct Request<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
     pub(super) span: Span,
-    pub(super) context: C,
-    pub(super) ancestry: BoxedAncestry<B>,
+    pub(super) context: (E, A::Context),
+    pub(super) ancestry: BoxedAncestry<A::Block>,
     pub(super) verification: Verification,
 }
 
@@ -34,13 +35,8 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    Finished {
-        id: u64,
-    },
-    Invalidated {
-        id: u64,
-        request: Request<A::Context, A::Block>,
-    },
+    Finished { id: u64 },
+    Invalidated { id: u64, request: Request<E, A> },
 }
 
 impl<E, A> JobResult<E, A>
@@ -60,7 +56,7 @@ struct JobControl<D: Copy> {
     progress: VerificationProgress<D>,
 }
 
-/// Owns independently-polled certification requests and their cancellation handles.
+/// Owns independently-polled verification requests and their cancellation handles.
 pub(super) struct Handler<E, A, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -92,12 +88,7 @@ where
         }
     }
 
-    pub(super) fn schedule(
-        &mut self,
-        actor_context: E,
-        mut verifier: Verifier<E, A>,
-        mut request: Request<A::Context, A::Block>,
-    ) {
+    pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -119,16 +110,15 @@ where
 
         let marshal = self.marshal.clone();
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
-        let actor_context = actor_context.with_attribute("round", request.context.round());
         self.jobs.push(
             async move {
                 let ancestry = request.ancestry.clone();
                 let result = select! {
                     _ = invalidated => None,
                     result = verifier.verify(
-                        &actor_context,
+                        &request.context.0,
                         marshal,
-                        request.context.clone(),
+                        request.context.1.clone(),
                         ancestry,
                         &progress,
                         &mut request.verification,
@@ -174,7 +164,7 @@ where
     /// verification-owned replays cannot race those mutations. Requests whose
     /// callers still need a verdict are returned for rescheduling after the
     /// mutation completes.
-    pub(super) async fn quiesce(&mut self) -> Vec<Request<A::Context, A::Block>> {
+    pub(super) async fn quiesce(&mut self) -> Vec<Request<E, A>> {
         let (retry, reject) = self.quiesce_where(|_| VerificationDisposition::Retry).await;
         assert!(reject.is_empty());
         retry
@@ -183,7 +173,7 @@ where
     pub(super) async fn quiesce_where(
         &mut self,
         disposition: impl Fn(&VerificationProgress<PendingDigest<A, E>>) -> VerificationDisposition,
-    ) -> (Vec<Request<A::Context, A::Block>>, Vec<Verification>) {
+    ) -> (Vec<Request<E, A>>, Vec<Verification>) {
         let mut pending = BTreeMap::new();
         for (&id, control) in &mut self.controls {
             let disposition = disposition(&control.progress);

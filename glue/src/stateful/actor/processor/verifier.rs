@@ -189,7 +189,7 @@ where
                     "verification request waiting on incomplete processed-block ancestry"
                 );
                 // Incomplete ancestry is not an invalid verdict. Keep the job
-                // parked until its caller leaves or newer actor work supersedes it.
+                // parked until its caller leaves.
                 verification.cancelled().await;
                 ProcessedBlock::Cancelled
             }

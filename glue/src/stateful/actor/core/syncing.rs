@@ -75,7 +75,7 @@ where
     pub(super) syncer: syncer::Mailbox<E, A>,
 
     /// Verify requests held while syncing.
-    pub(super) held_verify_requests: Vec<VerificationRequest<A::Context, A::Block>>,
+    pub(super) held_verify_requests: Vec<VerificationRequest<E, A>>,
 
     /// Open subscriptions to the synced databases.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
