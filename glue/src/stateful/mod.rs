@@ -143,13 +143,13 @@ pub struct Input<Upstream, Provider> {
 /// the block tree and applying changesets to the underlying databases on
 /// finalization.
 ///
-/// Calls are not serialized through one instance. Multiple
-/// [`verify`](Self::verify) and [`apply`](Self::apply) calls may overlap each
-/// other and may overlap [`propose`](Self::propose) or
-/// [`finalized`](Self::finalized). Equivalent execution results may be reused
-/// across requests, so correctness must not depend on every clone observing
-/// every call. State whose visibility affects correctness across calls must be
-/// shared explicitly.
+/// Stateful runs each verification, including any lazy [`apply`](Self::apply)
+/// calls it requires, on a disposable clone of the application. Multiple
+/// [`verify`](Self::verify) and `apply` calls may overlap each other and may
+/// overlap [`propose`](Self::propose) or [`finalized`](Self::finalized).
+/// Equivalent execution results may be reused across requests, so correctness
+/// must not depend on every clone observing every call. State whose visibility
+/// affects correctness across calls must be shared explicitly.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,

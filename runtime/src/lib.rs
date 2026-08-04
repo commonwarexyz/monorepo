@@ -255,6 +255,13 @@ stability_scope!(BETA {
         /// `consensus_engine_votes_total{epoch="$latest_epoch"}`.
         #[must_use]
         fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self;
+
+        /// Copy all attributes from `source` to this context.
+        ///
+        /// Existing attributes with the same key are replaced. The context's
+        /// label and supervision-tree position remain unchanged.
+        #[must_use]
+        fn with_attributes_from(self, source: &Self) -> Self;
     }
 
     /// Interface that any task scheduler must implement to spawn tasks.
@@ -2505,6 +2512,37 @@ mod tests {
                 buffer.contains("engine_requests_total{instance=\"i1\",region=\"us\"} 1"),
                 "Expected metric with sorted attributes, got: {}",
                 buffer
+            );
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_supervisor_with_attributes_from<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let source = context
+                .child("source")
+                .with_attribute("round", 7)
+                .with_attribute("shard", "west");
+            let destination = context
+                .child("destination")
+                .with_attribute("round", 3)
+                .with_attribute("worker", "verify")
+                .with_attributes_from(&source);
+
+            let name = destination.name();
+            assert_eq!(name.label, "destination");
+            assert_eq!(
+                name.attributes,
+                vec![
+                    ("round".to_string(), "7".to_string()),
+                    ("shard".to_string(), "west".to_string()),
+                    ("worker".to_string(), "verify".to_string()),
+                ]
             );
         });
     }
