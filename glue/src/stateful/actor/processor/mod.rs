@@ -15,8 +15,8 @@
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
 //!   databases and start flushing them (durability is reported via
-//!   [`Barrier`]), then prune all pending entries at or below the
-//!   finalized round.
+//!   [`Barrier`]), retaining only pending descendants of the finalized
+//!   winner.
 //!
 //! Verification jobs are polled independently. Verification-owned lazy
 //! recovery shares [`Application::apply`] by block digest. Proposal recovery
@@ -52,11 +52,12 @@ use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
+    hash::Hash,
     sync::Arc,
 };
 use tracing::{debug, info_span, warn};
 
-type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
+pub(super) type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 pub(super) type PendingSyncTargets<A, E> =
@@ -71,6 +72,79 @@ struct ReplayGeneration;
 struct ReplayFlight {
     generation: Arc<ReplayGeneration>,
     waiters: ReplayWaiterSlots,
+}
+
+#[derive(Clone, Copy)]
+enum VerificationPhase<D> {
+    Acquiring,
+    Replaying {
+        digest: D,
+        parent: D,
+        round: Round,
+        owner: bool,
+    },
+    Verifying {
+        parent: D,
+        round: Round,
+    },
+}
+
+/// Progress needed to decide whether an active verification remains valid
+/// across an incoming finalization.
+#[derive(Clone)]
+pub(super) struct VerificationProgress<D: Copy>(Arc<Mutex<VerificationPhase<D>>>);
+
+impl<D: Copy> Default for VerificationProgress<D> {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(VerificationPhase::Acquiring)))
+    }
+}
+
+impl<D: Copy> VerificationProgress<D> {
+    fn replaying(&self, digest: D, parent: D, round: Round, owner: bool) {
+        *self.0.lock() = VerificationPhase::Replaying {
+            digest,
+            parent,
+            round,
+            owner,
+        };
+    }
+
+    fn verifying(&self, parent: D, round: Round) {
+        *self.0.lock() = VerificationPhase::Verifying { parent, round };
+    }
+
+    fn phase(&self) -> VerificationPhase<D> {
+        *self.0.lock()
+    }
+}
+
+/// Pending parents whose branch-scoped batches remain valid after one
+/// finalized block is applied.
+pub(super) struct FinalizationBoundary<D> {
+    digest: D,
+    round: Round,
+    compatible: HashSet<D>,
+}
+
+impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
+    pub(super) fn retains(&self, progress: &VerificationProgress<D>) -> bool {
+        match progress.phase() {
+            VerificationPhase::Acquiring => false,
+            VerificationPhase::Replaying {
+                digest,
+                parent,
+                round,
+                owner,
+            } => {
+                (digest == self.digest && owner)
+                    || (round > self.round && self.compatible.contains(&parent))
+            }
+            VerificationPhase::Verifying { parent, round } => {
+                round > self.round && self.compatible.contains(&parent)
+            }
+        }
+    }
 }
 
 /// Cached speculative state for a block digest.
@@ -92,6 +166,46 @@ where
 {
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
+    finalizing: Option<Anchor<PendingDigest<A, E>>>,
+    finalizing_compatible: HashSet<PendingDigest<A, E>>,
+}
+
+fn compatible_pending<A, E>(
+    state: &ExecutionState<A, E>,
+    finalized_digest: PendingDigest<A, E>,
+    finalized_round: Round,
+) -> HashSet<PendingDigest<A, E>>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    let mut children_by_parent = BTreeMap::new();
+    for (candidate_digest, entry) in &state.pending {
+        if entry.round <= finalized_round {
+            continue;
+        }
+        children_by_parent
+            .entry(entry.parent)
+            .or_insert_with(Vec::new)
+            .push(*candidate_digest);
+    }
+
+    let mut compatible = HashSet::new();
+    compatible.insert(finalized_digest);
+
+    let mut to_visit = VecDeque::new();
+    to_visit.push_back(finalized_digest);
+    while let Some(parent) = to_visit.pop_front() {
+        let Some(children) = children_by_parent.get(&parent) else {
+            continue;
+        };
+        for &child in children {
+            if compatible.insert(child) {
+                to_visit.push_back(child);
+            }
+        }
+    }
+    compatible
 }
 
 /// Shared execution inputs and actor-owned speculative state.
@@ -127,6 +241,12 @@ struct ReplayFlights<D: Copy + Ord> {
     entries: ReplayRegistry<D>,
 }
 
+#[derive(Clone, Copy)]
+struct ReplayTracking<'a, D: Copy + Ord> {
+    flights: &'a ReplayFlights<D>,
+    progress: Option<&'a VerificationProgress<D>>,
+}
+
 impl<D: Copy + Ord> Default for ReplayFlights<D> {
     fn default() -> Self {
         Self {
@@ -139,12 +259,42 @@ impl<D: Copy + Ord> ReplayFlights<D> {
     fn is_empty(&self) -> bool {
         self.entries.lock().is_empty()
     }
+
+    fn waiter(&self, digest: D, flight: &mut ReplayFlight) -> ReplayWaiter<D> {
+        let (sender, completion) = oneshot::channel();
+        let waiters = &mut flight.waiters;
+        let slot = if let Some(slot) = waiters.iter().position(Option::is_none) {
+            waiters[slot] = Some(sender);
+            slot
+        } else {
+            let slot = waiters.len();
+            waiters.push(Some(sender));
+            slot
+        };
+        ReplayWaiter {
+            flights: self.clone(),
+            digest,
+            generation: Arc::clone(&flight.generation),
+            slot,
+            completion,
+        }
+    }
 }
 
 enum ReplayClaim<D: Copy + Ord> {
     Ready,
     Owner(ReplayOwner<D>),
     Wait(ReplayWaiter<D>),
+}
+
+enum FinalizationBatch<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    Ready(PendingBatches<A, E>),
+    Wait(ReplayWaiter<PendingDigest<A, E>>),
+    Missing,
 }
 
 struct ReplayWaiter<D: Copy + Ord> {
@@ -422,6 +572,8 @@ where
                 state: Arc::new(Mutex::new(ExecutionState {
                     pending: BTreeMap::new(),
                     last_processed,
+                    finalizing: None,
+                    finalizing_compatible: HashSet::new(),
                 })),
                 metrics,
             },
@@ -442,6 +594,22 @@ where
     /// Returns whether every verification-owned replay has released its owner.
     pub(super) fn replays_idle(&self) -> bool {
         self.replays.is_empty()
+    }
+
+    /// Snapshot the pending bases that remain branch-valid after `block` is
+    /// finalized.
+    pub(super) fn finalization_boundary(
+        &self,
+        block: &A::Block,
+    ) -> FinalizationBoundary<PendingDigest<A, E>> {
+        let digest = block.digest();
+        let round = block.context().round();
+        let state = self.execution.state.lock();
+        FinalizationBoundary {
+            digest,
+            round,
+            compatible: compatible_pending(&state, digest, round),
+        }
     }
 
     /// Returns a reference to the database set.
@@ -556,10 +724,179 @@ where
             A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
             "proposed state must match block commitments",
         );
-        self.cache_pending(block.digest(), parent_digest, round, merkleized);
+        assert!(
+            self.cache_pending(block.digest(), parent_digest, round, merkleized),
+            "proposal parent must remain compatible until the proposal completes",
+        );
         self.execution.update_pending_metric();
         timer.observe(context);
         response.send_lossy(Some(block));
+    }
+
+    /// Ensure parent state exists, then prepare unmerkleized batches for execution.
+    #[tracing::instrument(
+        name = "stateful.processor.prepare_batches",
+        level = "info",
+        skip_all,
+        fields(parent = %parent.digest())
+    )]
+    pub(super) async fn prepare_batches<S, V, C>(
+        &mut self,
+        context: &E,
+        marshal: MarshalMailbox<S, V>,
+        parent: Arc<A::Block>,
+        cancellation: &mut C,
+    ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
+    where
+        S: Scheme,
+        V: MarshalVariant<ApplicationBlock = A::Block>,
+        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+        C: Cancellation,
+    {
+        self.execution
+            .prepare_batches(&mut self.app, context, marshal, parent, cancellation, None)
+            .await
+    }
+
+    /// Fork unmerkleized batches from known parent state.
+    #[cfg(test)]
+    pub(super) async fn fork_batches(
+        &self,
+        parent: &<A::Block as Digestible>::Digest,
+    ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError> {
+        self.execution.fork_batches(parent).await
+    }
+
+    /// Rebuild missing pending ancestry up to `target` lazily from a block provider.
+    #[cfg(test)]
+    pub(super) async fn rebuild_pending<P, C>(
+        &mut self,
+        context: &E,
+        provider: P,
+        target: Arc<A::Block>,
+        cancellation: &mut C,
+    ) -> Result<(), PrepareBatchesError>
+    where
+        P: BlockProvider<Block = A::Block> + Clone,
+        C: Cancellation,
+    {
+        self.execution
+            .rebuild_pending(&mut self.app, context, provider, target, cancellation, None)
+            .await
+    }
+
+    /// Apply finalized state, start persisting it, and prune dead in-memory forks.
+    ///
+    /// Returns [`None`] when the block was already processed (a duplicate
+    /// report).
+    pub(super) async fn finalize(
+        &mut self,
+        context: &E,
+        block: &A::Block,
+    ) -> Option<Applied<PendingSyncTargets<A, E>>> {
+        let finalized = Anchor::from(block);
+        let (height, digest) = (finalized.height, finalized.digest);
+        let last_processed = self.execution.last_processed();
+        if height < last_processed.height {
+            panic!(
+                "received finalized block below processed height: finalized={} processed={}",
+                height.get(),
+                last_processed.height.get(),
+            );
+        }
+        if height == last_processed.height {
+            assert_eq!(
+                digest, last_processed.digest,
+                "received conflicting finalized block at processed height",
+            );
+            return None;
+        }
+
+        let timer = self.execution.metrics.finalize_duration.timer(context);
+        let block_context = block.context();
+        let sync_targets = A::sync_targets(block);
+        self.execution.begin_finalization(finalized);
+
+        // Marshal finalization is ordered. A pending miss means we can replay
+        // this block on top of finalized state.
+        //
+        // Safety contract: replayed `Application::apply` output must match the
+        // block commitments previously enforced by `Application::verify`.
+        let pending = loop {
+            match self
+                .execution
+                .take_finalization_batch(&self.replays, digest)
+            {
+                FinalizationBatch::Ready(batch) => break Some(batch),
+                FinalizationBatch::Missing => break None,
+                FinalizationBatch::Wait(mut waiter) => match (&mut waiter.completion).await {
+                    Ok(Ok(())) | Err(_) => continue,
+                    Ok(Err(error)) => {
+                        warn!(
+                            ?digest,
+                            ?error,
+                            "finalization could not reuse active verification replay"
+                        );
+                        break None;
+                    }
+                },
+            }
+        };
+        let batch = match pending {
+            Some(batch) => batch,
+            None => {
+                let batches = self.execution.databases.new_batches().await;
+                let batch = self
+                    .app
+                    .apply(
+                        (context.child("finalize_replay"), block_context),
+                        block,
+                        batches,
+                    )
+                    .await;
+                assert!(
+                    A::Databases::matches_sync_targets(&batch, &sync_targets),
+                    "finalize replay state root must match block commitments",
+                );
+                batch
+            }
+        };
+
+        self.execution.prune_pending_for_finalization();
+        let barrier = self.execution.databases.finalize(batch).await;
+        self.notify_finalized(context, block).await;
+        let prune = self
+            .pruning
+            .as_mut()
+            .and_then(|pruning| pruning.observe_finalized(height, sync_targets));
+        self.execution.finish_finalization(finalized);
+        timer.observe(context);
+
+        Some(Applied { barrier, prune })
+    }
+
+    /// Notify the application that marshal delivered a finalized block already
+    /// reflected in the database set.
+    pub(super) async fn notify_finalized(&mut self, context: &E, block: &A::Block) {
+        self.app
+            .finalized(
+                (context.child("finalized"), block.context()),
+                block,
+                &self.execution.databases,
+            )
+            .await;
+    }
+
+    /// Cache merkleized pending state for a block digest.
+    fn cache_pending(
+        &self,
+        digest: PendingDigest<A, E>,
+        parent: PendingDigest<A, E>,
+        round: Round,
+        merkleized: PendingBatches<A, E>,
+    ) -> bool {
+        self.execution
+            .cache_pending(digest, parent, round, merkleized)
     }
 }
 
@@ -575,6 +912,7 @@ where
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
         ancestry: impl Ancestry<A::Block>,
+        progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
     ) -> Option<bool>
     where
@@ -680,7 +1018,10 @@ where
                 marshal.clone(),
                 parent.clone(),
                 verification,
-                Some(&self.replays),
+                Some(ReplayTracking {
+                    flights: &self.replays,
+                    progress: Some(progress),
+                }),
             )
             .await
         {
@@ -714,6 +1055,7 @@ where
             }
         };
 
+        progress.verifying(parent_digest, round);
         let ancestry = marshal_ancestry::with_prefix([block.clone(), parent], ancestry);
         let verified = match await_or_cancel(
             verification,
@@ -760,221 +1102,22 @@ where
             );
             return Some(false);
         }
-        self.execution
-            .cache_pending(block_digest, parent_digest, round, merkleized);
+        if !self
+            .execution
+            .cache_pending(block_digest, parent_digest, round, merkleized)
+        {
+            warn!(
+                ?parent_digest,
+                ?block_digest,
+                "verification result became incompatible before publication"
+            );
+            return Some(false);
+        }
         self.execution.update_pending_metric();
         drop(block);
         drop(tail);
         timer.observe(context);
         Some(true)
-    }
-}
-
-impl<E, A> Processor<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    /// Ensure parent state exists, then prepare unmerkleized batches for execution.
-    #[tracing::instrument(
-        name = "stateful.processor.prepare_batches",
-        level = "info",
-        skip_all,
-        fields(parent = %parent.digest())
-    )]
-    pub(super) async fn prepare_batches<S, V, C>(
-        &mut self,
-        context: &E,
-        marshal: MarshalMailbox<S, V>,
-        parent: Arc<A::Block>,
-        cancellation: &mut C,
-    ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
-    where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-        C: Cancellation,
-    {
-        self.execution
-            .prepare_batches(&mut self.app, context, marshal, parent, cancellation, None)
-            .await
-    }
-
-    /// Fork unmerkleized batches from known parent state.
-    #[cfg(test)]
-    pub(super) async fn fork_batches(
-        &self,
-        parent: &<A::Block as Digestible>::Digest,
-    ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError> {
-        self.execution.fork_batches(parent).await
-    }
-
-    /// Rebuild missing pending ancestry up to `target` lazily from a block provider.
-    #[cfg(test)]
-    pub(super) async fn rebuild_pending<P, C>(
-        &mut self,
-        context: &E,
-        provider: P,
-        target: Arc<A::Block>,
-        cancellation: &mut C,
-    ) -> Result<(), PrepareBatchesError>
-    where
-        P: BlockProvider<Block = A::Block> + Clone,
-        C: Cancellation,
-    {
-        self.execution
-            .rebuild_pending(&mut self.app, context, provider, target, cancellation, None)
-            .await
-    }
-
-    /// Apply finalized state, start persisting it, and prune dead in-memory forks.
-    ///
-    /// Returns [`None`] when the block was already processed (a duplicate
-    /// report).
-    pub(super) async fn finalize(
-        &mut self,
-        context: &E,
-        block: &A::Block,
-    ) -> Option<Applied<PendingSyncTargets<A, E>>> {
-        let (height, digest) = (block.height(), block.digest());
-        let last_processed = self.execution.last_processed();
-        if height < last_processed.height {
-            panic!(
-                "received finalized block below processed height: finalized={} processed={}",
-                height.get(),
-                last_processed.height.get(),
-            );
-        }
-        if height == last_processed.height {
-            assert_eq!(
-                digest, last_processed.digest,
-                "received conflicting finalized block at processed height",
-            );
-            return None;
-        }
-
-        let timer = self.execution.metrics.finalize_duration.timer(context);
-        let block_context = block.context();
-        let round = block_context.round();
-        let sync_targets = A::sync_targets(block);
-
-        // Marshal finalization is ordered. A pending miss means we can replay
-        // this block on top of finalized state.
-        //
-        // Safety contract: replayed `Application::apply` output must match the
-        // block commitments previously enforced by `Application::verify`.
-        let pending = self.execution.state.lock().pending.remove(&digest);
-        let batch = match pending {
-            Some(entry) => entry.merkleized,
-            None => {
-                let batches = self.execution.databases.new_batches().await;
-                let batch = self
-                    .app
-                    .apply(
-                        (context.child("finalize_replay"), block_context),
-                        block,
-                        batches,
-                    )
-                    .await;
-                assert!(
-                    A::Databases::matches_sync_targets(&batch, &sync_targets),
-                    "finalize replay state root must match block commitments",
-                );
-                batch
-            }
-        };
-
-        let barrier = self.execution.databases.finalize(batch).await;
-        self.notify_finalized(context, block).await;
-        let prune = self
-            .pruning
-            .as_mut()
-            .and_then(|pruning| pruning.observe_finalized(height, sync_targets));
-        self.prune_pending_after_finalize(
-            &digest,
-            round,
-            Anchor {
-                height,
-                round,
-                digest,
-            },
-        );
-        timer.observe(context);
-
-        Some(Applied { barrier, prune })
-    }
-
-    /// Notify the application that marshal delivered a finalized block already
-    /// reflected in the database set.
-    pub(super) async fn notify_finalized(&mut self, context: &E, block: &A::Block) {
-        self.app
-            .finalized(
-                (context.child("finalized"), block.context()),
-                block,
-                &self.execution.databases,
-            )
-            .await;
-    }
-
-    /// Remove pending state that is not compatible with the finalized winner.
-    ///
-    /// A pending block is kept only when:
-    /// - it is a descendant of `finalized_digest`, and
-    /// - it was created after `finalized_round`.
-    fn prune_pending_after_finalize(
-        &mut self,
-        finalized_digest: &<A::Block as Digestible>::Digest,
-        finalized_round: Round,
-        last_processed: Anchor<PendingDigest<A, E>>,
-    ) {
-        let mut state = self.execution.state.lock();
-        let mut children_by_parent = BTreeMap::new();
-        for (candidate_digest, entry) in &state.pending {
-            children_by_parent
-                .entry(entry.parent)
-                .or_insert_with(Vec::new)
-                .push(*candidate_digest);
-        }
-
-        let mut compatible = HashSet::new();
-        compatible.insert(*finalized_digest);
-
-        let mut to_visit = VecDeque::new();
-        to_visit.push_back(*finalized_digest);
-        while let Some(parent) = to_visit.pop_front() {
-            let Some(children) = children_by_parent.get(&parent) else {
-                continue;
-            };
-
-            for &child in children {
-                if compatible.insert(child) {
-                    to_visit.push_back(child);
-                }
-            }
-        }
-
-        let before = state.pending.len();
-        state.pending.retain(|candidate_digest, entry| {
-            entry.round > finalized_round && compatible.contains(candidate_digest)
-        });
-        let pruned = before - state.pending.len();
-        state.last_processed = last_processed;
-        let pending = state.pending.len();
-        drop(state);
-        self.execution.metrics.pruned_forks.inc_by(pruned as u64);
-        let _ = self.execution.metrics.pending_blocks.try_set(pending);
-    }
-
-    /// Cache merkleized pending state for a block digest.
-    fn cache_pending(
-        &self,
-        digest: PendingDigest<A, E>,
-        parent: PendingDigest<A, E>,
-        round: Round,
-        merkleized: PendingBatches<A, E>,
-    ) {
-        self.execution
-            .cache_pending(digest, parent, round, merkleized);
     }
 }
 
@@ -985,6 +1128,47 @@ where
 {
     fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
         self.state.lock().last_processed
+    }
+
+    fn begin_finalization(&self, anchor: Anchor<PendingDigest<A, E>>) {
+        let mut state = self.state.lock();
+        let compatible = compatible_pending(&state, anchor.digest, anchor.round);
+        assert!(
+            state.finalizing.replace(anchor).is_none(),
+            "finalization must be serialized",
+        );
+        assert!(state.finalizing_compatible.is_empty());
+        state.finalizing_compatible = compatible;
+    }
+
+    /// Release batches that cannot descend from the finalizing winner.
+    ///
+    /// The winner's batch has already been secured, so exact-block replay no longer needs its
+    /// pending ancestry. The compatibility set remains live until finalization completes so
+    /// retained descendants can continue publishing.
+    fn prune_pending_for_finalization(&self) {
+        let mut state = self.state.lock();
+        assert!(state.finalizing.is_some(), "finalization must be active");
+        let ExecutionState {
+            pending,
+            finalizing_compatible,
+            ..
+        } = &mut *state;
+        let before = pending.len();
+        pending.retain(|candidate_digest, _| finalizing_compatible.contains(candidate_digest));
+        let pruned = before - pending.len();
+        let pending = pending.len();
+        drop(state);
+        self.metrics.pruned_forks.inc_by(pruned as u64);
+        let _ = self.metrics.pending_blocks.try_set(pending);
+    }
+
+    /// Publish the finalized anchor after its application hook completes.
+    fn finish_finalization(&self, finalized: Anchor<PendingDigest<A, E>>) {
+        let mut state = self.state.lock();
+        assert_eq!(state.finalizing.take(), Some(finalized));
+        state.finalizing_compatible.clear();
+        state.last_processed = finalized;
     }
 
     fn summary(&self) -> (Anchor<PendingDigest<A, E>>, usize) {
@@ -1010,12 +1194,32 @@ where
         parent: PendingDigest<A, E>,
         round: Round,
         merkleized: PendingBatches<A, E>,
-    ) {
+    ) -> bool {
         let mut state = self.state.lock();
         if let Some(existing) = state.pending.get(&digest) {
             debug_assert_eq!(existing.parent, parent, "pending parent changed for digest");
             debug_assert_eq!(existing.round, round, "pending round changed for digest");
-            return;
+            return true;
+        }
+
+        // The processed anchor is not advanced until the application hook returns. Retained
+        // descendants may publish during that interval, but new work on the old anchor may not.
+        let compatible = state.finalizing.map_or_else(
+            || {
+                round > state.last_processed.round
+                    && (parent == state.last_processed.digest
+                        || state.pending.contains_key(&parent))
+            },
+            |finalizing| {
+                (digest == finalizing.digest
+                    && round == finalizing.round
+                    && (parent == state.last_processed.digest
+                        || state.pending.contains_key(&parent)))
+                    || (round > finalizing.round && state.finalizing_compatible.contains(&parent))
+            },
+        );
+        if !compatible {
+            return false;
         }
         state.pending.insert(
             digest,
@@ -1025,6 +1229,27 @@ where
                 merkleized,
             },
         );
+        if state.finalizing.is_some() {
+            state.finalizing_compatible.insert(digest);
+        }
+        true
+    }
+
+    fn take_finalization_batch(
+        &self,
+        replays: &ReplayFlights<PendingDigest<A, E>>,
+        digest: PendingDigest<A, E>,
+    ) -> FinalizationBatch<E, A> {
+        let mut state = self.state.lock();
+        if let Some(entry) = state.pending.remove(&digest) {
+            return FinalizationBatch::Ready(entry.merkleized);
+        }
+
+        let mut entries = replays.entries.lock();
+        let Some(flight) = entries.get_mut(&digest) else {
+            return FinalizationBatch::Missing;
+        };
+        FinalizationBatch::Wait(replays.waiter(digest, flight))
     }
 
     fn claim_replay(
@@ -1039,23 +1264,7 @@ where
 
         let mut entries = replays.entries.lock();
         if let Some(flight) = entries.get_mut(&digest) {
-            let (sender, receiver) = oneshot::channel();
-            let waiters = &mut flight.waiters;
-            let slot = if let Some(slot) = waiters.iter().position(Option::is_none) {
-                waiters[slot] = Some(sender);
-                slot
-            } else {
-                let slot = waiters.len();
-                waiters.push(Some(sender));
-                slot
-            };
-            return ReplayClaim::Wait(ReplayWaiter {
-                flights: replays.clone(),
-                digest,
-                generation: Arc::clone(&flight.generation),
-                slot,
-                completion: receiver,
-            });
+            return ReplayClaim::Wait(replays.waiter(digest, flight));
         }
 
         let generation = Arc::new(ReplayGeneration);
@@ -1139,8 +1348,9 @@ where
             return Err(PrepareBatchesError::Invalid);
         }
 
-        self.cache_pending(digest, parent_digest, round, merkleized);
-        Ok(())
+        self.cache_pending(digest, parent_digest, round, merkleized)
+            .then_some(())
+            .ok_or(PrepareBatchesError::Invalid)
     }
 
     async fn replay_block_shared<C>(
@@ -1150,15 +1360,19 @@ where
         target_digest: PendingDigest<A, E>,
         block: Arc<A::Block>,
         cancellation: &mut C,
-        replays: &ReplayFlights<PendingDigest<A, E>>,
+        replay: ReplayTracking<'_, PendingDigest<A, E>>,
     ) -> ReplayResult
     where
         C: Cancellation,
     {
+        let (digest, parent, round) = (block.digest(), block.parent(), block.context().round());
         loop {
-            match self.claim_replay(replays, block.digest()) {
+            match self.claim_replay(replay.flights, digest) {
                 ReplayClaim::Ready => return Ok(()),
                 ReplayClaim::Owner(owner) => {
+                    if let Some(progress) = replay.progress {
+                        progress.replaying(digest, parent, round, true);
+                    }
                     let result = self
                         .replay_block(
                             app,
@@ -1174,6 +1388,9 @@ where
                     return result;
                 }
                 ReplayClaim::Wait(mut waiter) => {
+                    if let Some(progress) = replay.progress {
+                        progress.replaying(digest, parent, round, false);
+                    }
                     let Some(completion) =
                         await_or_cancel(cancellation, &mut waiter.completion).await
                     else {
@@ -1195,7 +1412,7 @@ where
         marshal: MarshalMailbox<S, V>,
         parent: Arc<A::Block>,
         cancellation: &mut C,
-        replays: Option<&ReplayFlights<PendingDigest<A, E>>>,
+        replay: Option<ReplayTracking<'_, PendingDigest<A, E>>>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
         S: Scheme,
@@ -1210,7 +1427,7 @@ where
                 || state.pending.contains_key(&parent_digest)
         };
         if !known {
-            self.rebuild_pending(app, context, marshal, parent, cancellation, replays)
+            self.rebuild_pending(app, context, marshal, parent, cancellation, replay)
                 .await?;
         }
 
@@ -1227,7 +1444,7 @@ where
         provider: P,
         target: Arc<A::Block>,
         cancellation: &mut C,
-        replays: Option<&ReplayFlights<PendingDigest<A, E>>>,
+        replay: Option<ReplayTracking<'_, PendingDigest<A, E>>>,
     ) -> Result<(), PrepareBatchesError>
     where
         P: BlockProvider<Block = A::Block> + Clone,
@@ -1298,8 +1515,8 @@ where
 
         let depth = replay_path.len();
         for block in replay_path.into_iter().rev() {
-            if let Some(replays) = replays {
-                self.replay_block_shared(app, context, target_digest, block, cancellation, replays)
+            if let Some(replay) = replay {
+                self.replay_block_shared(app, context, target_digest, block, cancellation, replay)
                     .await?;
             } else {
                 self.replay_block(app, context, target_digest, block, cancellation)
@@ -1390,7 +1607,7 @@ where
 mod tests {
     use super::{
         Applied, PrepareBatchesError, Processor, Prune, Pruning, ReplayClaim, ReplayFlights,
-        fetch_ancestor,
+        ReplayTracking, fetch_ancestor,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -1442,6 +1659,8 @@ mod tests {
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
     type DbSet<E> = Shared<Qmdb<E>>;
+    type TestMerkleized =
+        <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1573,13 +1792,13 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct ApplyProbe {
+    struct ApplicationProbe {
         target: Digest,
         calls: Arc<AtomicUsize>,
         gates: Arc<Mutex<VecDeque<ApplyGate>>>,
     }
 
-    impl ApplyProbe {
+    impl ApplicationProbe {
         fn new(target: Digest, gates: impl IntoIterator<Item = ApplyGate>) -> Self {
             Self {
                 target,
@@ -1588,7 +1807,7 @@ mod tests {
             }
         }
 
-        async fn apply(&self, digest: Digest) {
+        async fn call(&self, digest: Digest) {
             if digest != self.target {
                 return;
             }
@@ -1622,7 +1841,8 @@ mod tests {
     struct ExecutionApp {
         genesis: Block,
         finalized_observer: Option<Arc<Mutex<Vec<u64>>>>,
-        apply_probe: Option<ApplyProbe>,
+        apply_probe: Option<ApplicationProbe>,
+        finalized_probe: Option<ApplicationProbe>,
     }
 
     impl ExecutionApp {
@@ -1631,6 +1851,7 @@ mod tests {
                 genesis: Block::genesis(),
                 finalized_observer: None,
                 apply_probe: None,
+                finalized_probe: None,
             }
         }
 
@@ -1641,6 +1862,7 @@ mod tests {
                     genesis: Block::genesis(),
                     finalized_observer: Some(finalized_values.clone()),
                     apply_probe: None,
+                    finalized_probe: None,
                 },
                 finalized_values,
             )
@@ -1724,7 +1946,7 @@ mod tests {
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
             if let Some(probe) = &self.apply_probe {
-                probe.apply(block.digest()).await;
+                probe.call(block.digest()).await;
             }
             Self::execute(block.height(), block.context.round.view(), batches).await
         }
@@ -1735,6 +1957,9 @@ mod tests {
             block: &Self::Block,
             databases: &Self::Databases,
         ) {
+            if let Some(probe) = &self.finalized_probe {
+                probe.call(block.digest()).await;
+            }
             let Some(observer) = self.finalized_observer.clone() else {
                 return;
             };
@@ -1883,7 +2108,7 @@ mod tests {
             }
         }
 
-        async fn stage_pending_child(&mut self, parent: &Block, view: View) -> Block {
+        async fn build_child(&self, parent: &Block, view: View) -> (Block, TestMerkleized) {
             let context = consensus_context(parent.digest(), view);
             let height = Height::new(parent.height().get() + 1);
             let batches = self
@@ -1902,9 +2127,18 @@ mod tests {
                     merkleized.bounds().tip.size
                 ),
             };
+            (block, merkleized)
+        }
+
+        async fn stage_pending_child(&mut self, parent: &Block, view: View) -> Block {
+            let (block, merkleized) = self.build_child(parent, view).await;
             let round = Round::new(Epoch::zero(), view);
-            self.processor
-                .cache_pending(block.digest(), parent.digest(), round, merkleized);
+            assert!(self.processor.cache_pending(
+                block.digest(),
+                parent.digest(),
+                round,
+                merkleized
+            ));
             self.provider.insert(block.clone());
             block
         }
@@ -2237,6 +2471,67 @@ mod tests {
     }
 
     #[test]
+    fn execution_finalization_prunes_before_finalized_hook_completes() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let loser = harness.stage_pending_child(&block1, View::new(2)).await;
+            let winner = harness.stage_pending_child(&block1, View::new(3)).await;
+            let winner_child = harness.stage_pending_child(&winner, View::new(4)).await;
+            let (gate, started, release) = apply_gate();
+            harness.processor.app.finalized_probe =
+                Some(ApplicationProbe::new(winner.digest(), [gate]));
+            let execution = harness.processor.execution.clone();
+
+            let mut finalize = Box::pin(
+                harness
+                    .processor
+                    .finalize(harness.context_cell.as_present(), &winner),
+            );
+            assert!(futures::poll!(&mut finalize).is_pending());
+            started.await.expect("finalized hook should start");
+
+            assert!(execution.pending_contains(&winner_child.digest()));
+            assert!(!execution.pending_contains(&block1.digest()));
+            assert!(!execution.pending_contains(&loser.digest()));
+
+            release
+                .send(())
+                .expect("finalized hook should remain active");
+            let Applied { barrier, .. } = finalize
+                .await
+                .expect("finalized block should be newly applied");
+            assert!(barrier.durable().await, "finalize flush must complete");
+        });
+    }
+
+    #[test]
+    fn execution_rejects_late_losing_fork_publication() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let loser = harness.stage_pending_child(&block1, View::new(2)).await;
+            let winner = harness.stage_pending_child(&block1, View::new(3)).await;
+            let late_view = View::new(4);
+            let (late_child, merkleized) = harness.build_child(&loser, late_view).await;
+
+            assert!(harness.finalize(winner).await);
+            assert!(
+                !harness.processor.cache_pending(
+                    late_child.digest(),
+                    loser.digest(),
+                    Round::new(Epoch::zero(), late_view),
+                    merkleized,
+                ),
+                "completed work on a losing fork must not publish after finalization",
+            );
+            assert!(!harness.processor.pending_contains(&late_child.digest()));
+        });
+    }
+
+    #[test]
     fn execution_rebuild_pending_restores_missing_chain() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context).await;
@@ -2405,8 +2700,10 @@ mod tests {
                 let (first_gate, first_started, mut first_release) = apply_gate();
                 let (retry_gate, retry_started, retry_release) = apply_gate();
                 let (duplicate_gate, mut duplicate_started, _duplicate_release) = apply_gate();
-                let probe =
-                    ApplyProbe::new(block1.digest(), [first_gate, retry_gate, duplicate_gate]);
+                let probe = ApplicationProbe::new(
+                    block1.digest(),
+                    [first_gate, retry_gate, duplicate_gate],
+                );
                 harness.processor.app.apply_probe = Some(probe.clone());
 
                 let first_execution = harness.processor.execution.clone();
@@ -2436,7 +2733,10 @@ mod tests {
                     first_provider,
                     Arc::new(block2.clone()),
                     &mut first_cancellation,
-                    Some(&first_replays),
+                    Some(ReplayTracking {
+                        flights: &first_replays,
+                        progress: None,
+                    }),
                 ));
                 select! {
                     result = &mut first => panic!("first rebuild completed before replay gate: {result:?}"),
@@ -2449,7 +2749,10 @@ mod tests {
                     second_provider,
                     Arc::new(block2.clone()),
                     &mut second_cancellation,
-                    Some(&second_replays),
+                    Some(ReplayTracking {
+                        flights: &second_replays,
+                        progress: None,
+                    }),
                 ));
                 let mut third = Box::pin(third_execution.rebuild_pending(
                     &mut third_app,
@@ -2457,7 +2760,10 @@ mod tests {
                     third_provider,
                     Arc::new(block3),
                     &mut third_cancellation,
-                    Some(&third_replays),
+                    Some(ReplayTracking {
+                        flights: &third_replays,
+                        progress: None,
+                    }),
                 ));
                 let mut fourth = Box::pin(fourth_execution.rebuild_pending(
                     &mut fourth_app,
@@ -2465,7 +2771,10 @@ mod tests {
                     fourth_provider,
                     Arc::new(block2),
                     &mut fourth_cancellation,
-                    Some(&fourth_replays),
+                    Some(ReplayTracking {
+                        flights: &fourth_replays,
+                        progress: None,
+                    }),
                 ));
                 let mut waiters_registered = false;
                 for _ in 0..100 {

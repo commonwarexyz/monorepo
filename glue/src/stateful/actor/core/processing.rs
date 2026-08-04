@@ -2,7 +2,7 @@ use crate::stateful::{
     Application, Input,
     actor::{
         core::mailbox::{Message, Verification},
-        processor::{Applied, Processor, Verifier},
+        processor::{Applied, PendingDigest, Processor, VerificationProgress, Verifier},
     },
 };
 use commonware_actor::mailbox as actor_mailbox;
@@ -66,6 +66,11 @@ where
         id: u64,
         request: VerificationRequest<E, A>,
     },
+}
+
+struct VerificationControl<D: Copy> {
+    invalidation: Option<oneshot::Sender<()>>,
+    progress: VerificationProgress<D>,
 }
 
 impl<E, A> VerificationResult<E, A>
@@ -310,15 +315,14 @@ where
                     block,
                     acknowledgement,
                 }) => {
-                    let retry = Self::quiesce_verifications(
+                    let boundary = self.processor.finalization_boundary(block.as_ref());
+                    let retry = Self::quiesce_verifications_where(
                         &mut verifications,
                         &mut invalidations,
+                        |progress| boundary.retains(progress),
                     )
                     .await;
-                    assert!(
-                        self.processor.replays_idle(),
-                        "verification replay remained active after quiescence"
-                    );
+                    drop(boundary);
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
@@ -328,9 +332,17 @@ where
                             acknowledgement.acknowledge();
                             return;
                         }
-                        let Some(Applied { barrier, prune }) =
-                            self.processor.finalize(&self.context, block.as_ref()).await
-                        else {
+                        let finalized = self.processor.finalize(&self.context, block.as_ref());
+                        futures::pin_mut!(finalized);
+                        let applied = loop {
+                            select! {
+                                applied = &mut finalized => break applied,
+                                result = verifications.next_completed() => {
+                                    Self::handle_verification_result(&mut invalidations, result);
+                                },
+                            }
+                        };
+                        let Some(Applied { barrier, prune }) = applied else {
                             // Duplicate report: marshal redelivers a processed
                             // height only after a restart, where startup aligned
                             // the databases to durable state.
@@ -428,7 +440,7 @@ where
     fn schedule_verification(
         &self,
         verifications: &mut Pool<VerificationResult<E, A>>,
-        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
         next_id: &mut u64,
         request: VerificationRequest<E, A>,
     ) {
@@ -448,7 +460,7 @@ where
         actor_context: E,
         marshal: MarshalMailbox<S, V>,
         verifications: &mut Pool<VerificationResult<E, A>>,
-        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
         next_id: &mut u64,
         mut request: VerificationRequest<E, A>,
     ) {
@@ -457,7 +469,18 @@ where
             .checked_add(1)
             .expect("verification request ID overflowed");
         let (invalidate, invalidated) = oneshot::channel();
-        assert!(invalidations.insert(id, invalidate).is_none());
+        let progress = VerificationProgress::default();
+        assert!(
+            invalidations
+                .insert(
+                    id,
+                    VerificationControl {
+                        invalidation: Some(invalidate),
+                        progress: progress.clone(),
+                    },
+                )
+                .is_none()
+        );
 
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
         verifications.push(
@@ -474,6 +497,7 @@ where
                         marshal,
                         attempt_context,
                         ancestry,
+                        &progress,
                         &mut request.verification,
                     ) => Some(result),
                 };
@@ -491,13 +515,13 @@ where
     }
 
     fn handle_verification_result(
-        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
         result: VerificationResult<E, A>,
     ) {
-        assert!(
-            invalidations.remove(&result.id()).is_some(),
-            "completed verification must have an invalidation handle",
-        );
+        let control = invalidations
+            .remove(&result.id())
+            .expect("completed verification must have an invalidation handle");
+        assert!(control.invalidation.is_some());
         assert!(
             matches!(result, VerificationResult::Finished { .. }),
             "verification cannot finish through the actor loop after invalidation",
@@ -506,16 +530,41 @@ where
 
     async fn quiesce_verifications(
         verifications: &mut Pool<VerificationResult<E, A>>,
-        invalidations: &mut BTreeMap<u64, oneshot::Sender<()>>,
+        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
     ) -> Vec<VerificationRequest<E, A>> {
-        invalidations.clear();
-        let mut retry = Vec::with_capacity(verifications.len());
-        while !verifications.is_empty() {
-            if let VerificationResult::Invalidated { request, .. } =
-                verifications.next_completed().await
-                && !request.verification.is_cancelled()
-            {
-                retry.push(request);
+        Self::quiesce_verifications_where(verifications, invalidations, |_| false).await
+    }
+
+    async fn quiesce_verifications_where(
+        verifications: &mut Pool<VerificationResult<E, A>>,
+        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
+        retain: impl Fn(&VerificationProgress<PendingDigest<A, E>>) -> bool,
+    ) -> Vec<VerificationRequest<E, A>> {
+        let mut pending = BTreeSet::new();
+        for (&id, control) in invalidations.iter_mut() {
+            if !retain(&control.progress) {
+                assert!(control.invalidation.take().is_some());
+                pending.insert(id);
+            }
+        }
+
+        let mut retry = Vec::with_capacity(pending.len());
+        while !pending.is_empty() {
+            let result = verifications.next_completed().await;
+            let id = result.id();
+            let was_invalidated = pending.remove(&id);
+            let control = invalidations
+                .remove(&id)
+                .expect("completed verification must have an invalidation handle");
+            match result {
+                VerificationResult::Finished { .. } => {}
+                VerificationResult::Invalidated { request, .. } => {
+                    assert!(was_invalidated);
+                    assert!(control.invalidation.is_none());
+                    if !request.verification.is_cancelled() {
+                        retry.push(request);
+                    }
+                }
             }
         }
         retry
@@ -660,6 +709,8 @@ mod tests {
     #[derive(Clone)]
     struct ReplayGatedApp {
         gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
+        verify_gate: Arc<Mutex<Option<ApplicationGate>>>,
+        finalized_gate: Arc<Mutex<Option<ApplicationGate>>>,
         gate_height: Height,
         apply_calls: Arc<AtomicUsize>,
         verify_calls: Arc<AtomicUsize>,
@@ -698,6 +749,11 @@ mod tests {
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             self.verify_calls.fetch_add(1, Ordering::SeqCst);
+            let gate = self.verify_gate.lock().take();
+            if let Some(mut gate) = gate {
+                let _ = gate.started.send(());
+                let _ = (&mut gate.release).await;
+            }
             Some(TestMerkleized)
         }
 
@@ -716,6 +772,19 @@ mod tests {
                 let _ = (&mut gate.release).await;
             }
             TestMerkleized
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _databases: &Self::Databases,
+        ) {
+            let gate = self.finalized_gate.lock().take();
+            if let Some(mut gate) = gate {
+                let _ = gate.started.send(());
+                let _ = (&mut gate.release).await;
+            }
         }
     }
 
@@ -1144,11 +1213,138 @@ mod tests {
     }
 
     #[test]
-    fn finalization_quiesces_replay_and_retries_from_processed_tip() {
+    fn finalization_keeps_compatible_verification_active() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (parent_gate, parent_started, parent_release) = application_gate();
+            let (child_gate, child_started, child_release) = application_gate();
+            let (retry_gate, _retry_started, _retry_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([
+                    parent_gate,
+                    child_gate,
+                    retry_gate,
+                ]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "finalize-compatible", app).await;
+
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
             let child = TestBlock::child(&parent, 2);
+            let mut parent_verifier = mailbox.clone();
+            let parent_genesis = genesis.clone();
+            let parent_context = parent.context();
+            let mut verify_parent = Box::pin(parent_verifier.verify(
+                (context.child("verify_parent"), parent_context),
+                ancestry::from_iter([Arc::new(parent.clone()), Arc::new(parent_genesis)]),
+            ));
+            assert!(poll!(&mut verify_parent).is_pending());
+            parent_started
+                .await
+                .expect("parent verification should start");
+            parent_release
+                .send(())
+                .expect("parent verification should remain active");
+            assert!(verify_parent.await);
+
+            let child_context = child.context();
+            let mut child_verifier = mailbox.clone();
+            let mut verify_child = Box::pin(child_verifier.verify(
+                (context.child("verify_child"), child_context),
+                ancestry::from_iter([Arc::new(child), Arc::new(parent.clone())]),
+            ));
+            assert!(poll!(&mut verify_child).is_pending());
+            child_started
+                .await
+                .expect("child verification should start");
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(parent), acknowledgement));
+            waiter
+                .await
+                .expect("finalized parent should be acknowledged");
+            child_release
+                .send(())
+                .expect("compatible verification should remain active");
+            assert!(verify_child.await);
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn finalization_invalidates_incompatible_verification() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (fork_gate, fork_started, fork_release) = application_gate();
+            let (child_gate, child_started, mut child_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([fork_gate, child_gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "finalize-incompatible", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let winner = TestBlock::child(&genesis, 1);
+            let losing_parent = TestBlock::child(&genesis, 2);
+            let losing_child = TestBlock::child(&losing_parent, 3);
+            let mut fork_verifier = mailbox.clone();
+            let fork_genesis = genesis.clone();
+            let fork_context = losing_parent.context();
+            let mut verify_fork = Box::pin(fork_verifier.verify(
+                (context.child("verify_fork"), fork_context),
+                ancestry::from_iter([Arc::new(losing_parent.clone()), Arc::new(fork_genesis)]),
+            ));
+            assert!(poll!(&mut verify_fork).is_pending());
+            fork_started.await.expect("fork verification should start");
+            fork_release
+                .send(())
+                .expect("fork verification should remain active");
+            assert!(verify_fork.await);
+
+            let child_context = losing_child.context();
+            let mut child_verifier = mailbox.clone();
+            let mut verify_child = Box::pin(child_verifier.verify(
+                (context.child("verify_child"), child_context),
+                ancestry::from_iter([Arc::new(losing_child), Arc::new(losing_parent)]),
+            ));
+            assert!(poll!(&mut verify_child).is_pending());
+            child_started
+                .await
+                .expect("losing child verification should start");
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            select! {
+                _ = child_release.closed() => {},
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("incompatible verification was not cancelled");
+                },
+            }
+            let mut waiter = Box::pin(waiter);
+            select! {
+                result = &mut waiter => {
+                    result.expect("winning block should be acknowledged");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("winning block was not acknowledged");
+                },
+            }
+            assert!(poll!(&mut verify_child).is_pending());
+            drop(verify_child);
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn finalization_reuses_active_replay() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let first_child = TestBlock::child(&parent, 2);
+            let second_child = TestBlock::child(&parent, 3);
             let mut signing = context.child("signing");
             let scheme =
                 scheme_mocks::fixture(&mut signing, b"finalize-replay", 1).schemes[0].clone();
@@ -1161,11 +1357,15 @@ mod tests {
                 true,
             )
             .await;
-            let (gate, apply_started, mut apply_release) = application_gate();
+            let (gate, apply_started, apply_release) = application_gate();
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let (finalized_gate, finalized_started, finalized_release) = application_gate();
             let apply_calls = Arc::new(AtomicUsize::new(0));
             let verify_calls = Arc::new(AtomicUsize::new(0));
             let app = ReplayGatedApp {
                 gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
+                finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: parent.height(),
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
@@ -1190,30 +1390,49 @@ mod tests {
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
-            let mut verifier = mailbox.clone();
-            let verify_parent = parent.clone();
-            let verify = context.child("verify").spawn(move |task_context| {
-                let consensus_context = child.context();
-                async move {
-                    verifier
-                        .verify(
-                            (task_context, consensus_context),
-                            ancestry::from_iter([Arc::new(child), Arc::new(verify_parent)]),
-                        )
-                        .await
-                }
-            });
+            let consensus_context = first_child.context();
+            let mut first_verifier = mailbox.clone();
+            let mut first = Box::pin(first_verifier.verify(
+                (context.child("first_verify"), consensus_context.clone()),
+                ancestry::from_iter([Arc::new(first_child), Arc::new(parent.clone())]),
+            ));
+            let mut second_verifier = mailbox.clone();
+            let mut second = Box::pin(second_verifier.verify(
+                (context.child("second_verify"), consensus_context),
+                ancestry::from_iter([Arc::new(second_child), Arc::new(parent.clone())]),
+            ));
+            assert!(poll!(&mut first).is_pending());
+            assert!(poll!(&mut second).is_pending());
             apply_started.await.expect("replay should start");
+            context.sleep(Duration::from_millis(10)).await;
 
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(parent), acknowledgement));
-            apply_release.closed().await;
+            context.sleep(Duration::from_millis(10)).await;
+            apply_release
+                .send(())
+                .expect("finalization should keep the replay active");
+            verify_started
+                .await
+                .expect("compatible verification should start");
+            finalized_started
+                .await
+                .expect("finalization hook should start");
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            verify_release
+                .send(())
+                .expect("compatible verification should remain active");
+            assert!(first.await);
+            finalized_release
+                .send(())
+                .expect("finalization hook should remain active");
             waiter
                 .await
                 .expect("finalized parent should be acknowledged");
-            assert!(verify.await.expect("live verification should be retried"));
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+            assert!(second.await);
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
             actor.abort();
             drop(marshal.guards);
         });
@@ -1244,6 +1463,8 @@ mod tests {
             let verify_calls = Arc::new(AtomicUsize::new(0));
             let app = ReplayGatedApp {
                 gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                verify_gate: Arc::new(Mutex::new(None)),
+                finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: parent.height(),
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),

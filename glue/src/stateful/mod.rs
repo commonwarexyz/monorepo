@@ -143,7 +143,7 @@ pub struct Input<Upstream, Provider> {
 /// the block tree and applying changesets to the underlying databases on
 /// finalization.
 ///
-/// Verification may overlap other verification and proposal calls.
+/// Verification may overlap other verification, proposal, apply, and finalized calls.
 /// Implementations must remain correct under this interleaving.
 pub trait Application<E>: Clone + Send + 'static
 where
@@ -303,6 +303,9 @@ where
     /// acknowledged without invoking this hook. Blocks still pending when sync completes are
     /// reported or applied during handoff. Applications must derive synchronized state from the
     /// database set rather than rely on receiving every peer-state-sync finalization here.
+    ///
+    /// This hook may overlap verification of blocks built on the newly finalized block or one of
+    /// its retained descendants.
     ///
     /// For blocks that are reported, this is an at-least-once notification inherited from
     /// marshal's reporter stream: a crash after this hook runs but before the block's flush and
