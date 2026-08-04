@@ -12,6 +12,13 @@
 //! every honest marshal delivers a target number of ordered finalized blocks
 //! (sampled within a single-epoch bound).
 //!
+//! The certificate-poison target adds one byzantine backfill answer: the
+//! covering nullification one honest node fetches is replaced by a valid
+//! notarization whose block no node holds. Marshal cannot certify that
+//! proposal, so the node must re-fetch the view it is still missing or it can
+//! never vote again.
+
+//!
 //! # Layout
 //!
 //! - `app` is the block-building automaton bridging the engine to marshal.
@@ -31,7 +38,10 @@ mod runner;
 pub(crate) mod twins;
 
 pub use input::{MarshalDisrupterInput, MarshalTwinsInput};
-pub use runner::{fuzz_marshal_coding_disrupter, fuzz_marshal_standard_disrupter};
+pub use runner::{
+    fuzz_marshal_coding_disrupter, fuzz_marshal_standard_certificate_poison,
+    fuzz_marshal_standard_disrupter,
+};
 pub use twins::{
     fuzz_marshal_standard_deferred_id_twins_split_header,
     fuzz_marshal_standard_inline_id_twins_split_header, fuzz_marshal_standard_twins,

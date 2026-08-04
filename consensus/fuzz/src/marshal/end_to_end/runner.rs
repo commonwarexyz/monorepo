@@ -62,9 +62,10 @@ use super::{
 };
 use crate::{
     BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW, SimplexCertificateMock,
+    network::{CertificatePoison, CertificatePoisonReceiver},
     simplex::Simplex,
     start_disrupter_with_epoch,
-    utils::{SetPartition, apply_partition},
+    utils::{Partition, SetPartition, apply_partition},
 };
 use commonware_consensus::{
     Block,
@@ -74,7 +75,10 @@ use commonware_consensus::{
     },
     types::{Epoch, TermLength, View},
 };
-use commonware_cryptography::{Committable as _, Digestible as _, certificate::ConstantProvider};
+use commonware_cryptography::{
+    Committable as _, Digestible as _, certificate::ConstantProvider,
+    sha256::Digest as Sha256Digest,
+};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize};
@@ -86,6 +90,19 @@ const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 
 /// Poll interval for observing marshal delivery progress.
 const POLL: Duration = Duration::from_millis(50);
+
+/// Reports a post-GST stall: the honest nodes that missed their target, and the
+/// per-node progress diagnostic.
+type StallReport<'a> = &'a dyn Fn(&[usize], &str);
+
+/// Honest validator whose certificate backfill the poison target attacks. The
+/// degraded-network path degrades the last participant's links, so this is the
+/// node that falls behind and backfills.
+const POISON_IDX: usize = NUM_VALIDATORS as usize - 1;
+
+/// Payload of the notarization the poisoned response serves. No node proposes
+/// it, so no node can supply the block behind it.
+const UNAVAILABLE_PAYLOAD: Sha256Digest = Sha256Digest([0xEE; 32]);
 
 async fn apply_degraded_network<P: Simplex>(
     oracle: &mut commonware_p2p::simulated::Oracle<PublicKeyOf<P>, deterministic::Context>,
@@ -160,6 +177,7 @@ async fn run_liveness_phases<BL, KEY>(
     participants: &[KEY],
     honest_apps: &[(usize, Application<BL>)],
     required: u64,
+    on_stall: Option<StallReport<'_>>,
 ) where
     BL: Block,
     KEY: commonware_cryptography::PublicKey,
@@ -211,15 +229,22 @@ async fn run_liveness_phases<BL, KEY>(
 
         if !phase2_complete {
             let mut diag = String::new();
+            let mut missed = Vec::new();
             for &(idx, baseline, target) in &watch_targets {
                 let current = honest_apps
                     .iter()
                     .find(|(i, _)| *i == idx)
                     .map_or(0, |(_, app)| highest_delivered(app));
+                if current < target {
+                    missed.push(idx);
+                }
                 let _ = write!(
                     diag,
                     " node{idx}={{baseline={baseline} target={target} current={current}}}"
                 );
+            }
+            if let Some(on_stall) = on_stall {
+                on_stall(&missed, &diag);
             }
             panic!("marshal: no post-GST progress within {POST_GST_WINDOW:?};{diag}");
         }
@@ -230,6 +255,31 @@ async fn run_liveness_phases<BL, KEY>(
 /// deferred. Cluster: `N4F1C3`, disrupter only (no Twins). Liveness: checked.
 /// App: fixed always-accept.
 pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput) {
+    run_standard_disrupter::<P>(input, None);
+}
+
+/// The cluster of [`fuzz_marshal_standard_disrupter`] with one honest node's
+/// certificate backfill poisoned once.
+///
+/// The covering nullification that node fetches is replaced by a valid
+/// notarization whose block no node holds, so its certification can never
+/// complete. Marshal is the automaton here, so that stall is the real one: it
+/// asks for a block nobody can serve. The node must still obtain the
+/// certificate it is missing (by re-fetching the view) or it can never vote
+/// again, and the cluster loses the quorum it needs to finalize.
+pub fn fuzz_marshal_standard_certificate_poison<P: Simplex>(mut input: MarshalDisrupterInput) {
+    // A backfill fetch needs a certificate gap at one node while the others
+    // move on. With n=4 every topology partition also breaks the quorum that
+    // would move on, so lossy links are the only fault that produces one.
+    input.partition = Partition::Connected;
+    input.degraded_network = true;
+    run_standard_disrupter::<P>(input, Some(CertificatePoison::new()));
+}
+
+fn run_standard_disrupter<P: Simplex>(
+    input: MarshalDisrupterInput,
+    poison: Option<CertificatePoison<PublicKeyOf<P>>>,
+) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -295,6 +345,26 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
             }
 
             // Honest validator: end-to-end marshal stack plus Simplex engine.
+            let (resolver_sender, resolver_receiver) = resolver;
+            let resolver = (
+                resolver_sender,
+                if idx == POISON_IDX {
+                    CertificatePoisonReceiver::<SchemeOf<P>, Sha256Digest, _>::new(
+                        resolver_receiver,
+                        schemes.clone(),
+                        Epoch::zero(),
+                        UNAVAILABLE_PAYLOAD,
+                        poison.clone(),
+                    )
+                } else {
+                    CertificatePoisonReceiver::<SchemeOf<P>, Sha256Digest, _>::observer(
+                        resolver_receiver,
+                        validator.clone(),
+                        participants[POISON_IDX].clone(),
+                        poison.clone(),
+                    )
+                },
+            );
             let validator_ctx = context
                 .child("validator")
                 .with_attribute("public_key", validator);
@@ -349,7 +419,20 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
             );
         }
 
-        run_liveness_phases(&context, &oracle, &participants, &honest_apps, required).await;
+        let on_stall = |missed: &[usize], diag: &str| {
+            if let Some(poison) = poison.as_ref().filter(|_| missed.contains(&POISON_IDX)) {
+                invariants::check_certificate_backfill_retry(poison, diag);
+            }
+        };
+        run_liveness_phases(
+            &context,
+            &oracle,
+            &participants,
+            &honest_apps,
+            required,
+            Some(&on_stall),
+        )
+        .await;
 
         invariants::check_all_blocks(&honest_apps, None);
     });
@@ -440,7 +523,15 @@ pub fn fuzz_marshal_coding_disrupter(input: MarshalDisrupterInput) {
             .await;
         }
 
-        run_liveness_phases(&context, &oracle, &participants, &honest_apps, required).await;
+        run_liveness_phases(
+            &context,
+            &oracle,
+            &participants,
+            &honest_apps,
+            required,
+            None,
+        )
+        .await;
 
         invariants::check_all_blocks(&honest_apps, None);
     });

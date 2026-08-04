@@ -421,6 +421,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_poison"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_poison.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "marshal_e2e_standard_app_cert_mock_twins"
 path = "fuzz_targets/marshal_e2e_standard_app_cert_mock_twins.rs"
 test = false

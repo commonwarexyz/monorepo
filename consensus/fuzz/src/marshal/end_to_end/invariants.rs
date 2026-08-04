@@ -11,7 +11,7 @@
 //! would silently overwrite them).
 
 use super::app::{ApplicationChoice, BlockContextRegistry};
-use crate::simplex::Simplex;
+use crate::{network::CertificatePoison, simplex::Simplex};
 use commonware_consensus::{
     Block,
     marshal::mocks::application::Application,
@@ -177,6 +177,30 @@ impl<P: Simplex, C: Copy> HeaderMismatchInvariant<P, C> {
             self.stack,
         );
     }
+}
+
+/// Invariant: a certificate backfill answer the requester cannot act on must
+/// not retire the fetch.
+///
+/// A node that accepts a notarization whose block never arrives still needs a
+/// certificate for that view: until it has one it can neither vote on nor build
+/// a later proposal, so the view must be fetched again. Called once that node
+/// has stopped delivering blocks, so the absence of any answer matched to a
+/// fresh request for the view is evidence that the fetch was retired by an
+/// answer which resolved nothing.
+pub(super) fn check_certificate_backfill_retry<P: commonware_cryptography::PublicKey>(
+    poison: &CertificatePoison<P>,
+    progress: &str,
+) {
+    let Some(view) = poison.view() else {
+        return;
+    };
+    assert!(
+        poison.retries_answered() > 0,
+        "marshal certificate backfill starved: a response for view {view} carried a notarization \
+         that can never certify, no later request for that view was ever answered, and the node \
+         stopped delivering blocks;{progress}"
+    );
 }
 
 /// Run block-ordering and agreement invariants.

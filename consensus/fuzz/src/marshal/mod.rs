@@ -8,7 +8,10 @@
 //!   consensus. The liveness targets use a Byzantine `Disrupter`; the standard
 //!   Twins mutator splits one compromised identity between a full engine and a
 //!   `Disrupter`.
+//!   The poison target additionally answers one certificate backfill request of
+//!   one honest node with a notarization whose block no node holds.
 //!   Targets: `marshal_e2e_standard_deferred_cert_mock_disrupter`,
+//!   `marshal_e2e_standard_deferred_cert_mock_poison`,
 //!   `marshal_e2e_coding_cert_mock_disrupter`,
 //!   `marshal_e2e_standard_app_cert_mock_twins`,
 //!   `marshal_e2e_standard_deferred_id_twins_split_header`,
@@ -33,8 +36,9 @@ pub mod store;
 
 pub use end_to_end::{
     MarshalDisrupterInput, MarshalTwinsInput, fuzz_marshal_coding_disrupter,
-    fuzz_marshal_standard_deferred_id_twins_split_header, fuzz_marshal_standard_disrupter,
-    fuzz_marshal_standard_inline_id_twins_split_header, fuzz_marshal_standard_twins,
+    fuzz_marshal_standard_certificate_poison, fuzz_marshal_standard_deferred_id_twins_split_header,
+    fuzz_marshal_standard_disrupter, fuzz_marshal_standard_inline_id_twins_split_header,
+    fuzz_marshal_standard_twins,
 };
 pub use runner::{
     MarshalActorStandardInput, fuzz_marshal_actor_deferred, fuzz_marshal_actor_inline,
