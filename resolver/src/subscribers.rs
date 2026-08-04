@@ -37,28 +37,6 @@ where
         self.entries.contains_key(key)
     }
 
-    /// Returns true if `subscriber` is already retained for `key`.
-    pub fn contains_subscriber(&self, key: &K, subscriber: &S) -> bool {
-        self.entries
-            .get(key)
-            .is_some_and(|subscribers| subscribers.contains_key(subscriber))
-    }
-
-    /// Returns true if `key` retains a subscriber absent from `delivered`.
-    pub fn has_subscriber_not_in(
-        &self,
-        key: &K,
-        delivered: &NonEmptyVec<(S, tracing::Span)>,
-    ) -> bool {
-        self.entries.get(key).is_some_and(|subscribers| {
-            subscribers.keys().any(|subscriber| {
-                !delivered
-                    .iter()
-                    .any(|(candidate, _)| candidate == subscriber)
-            })
-        })
-    }
-
     /// Add subscribers for a key, each paired with the span of its fetch.
     ///
     /// A subscriber's span is retained only when the subscriber is first seen.
@@ -183,16 +161,6 @@ mod tests {
         assert!(tracker.insert(1, none(non_empty_vec![10, 11])));
         assert!(!tracker.insert(1, none(non_empty_vec![11, 12])));
 
-        assert!(tracker.contains_subscriber(&1, &10));
-        assert!(tracker.contains_subscriber(&1, &12));
-        assert!(!tracker.contains_subscriber(&1, &13));
-        assert!(!tracker.contains_subscriber(&2, &10));
-
-        let partial = none(non_empty_vec![10, 11]);
-        let complete = none(non_empty_vec![10, 11, 12]);
-        assert!(tracker.has_subscriber_not_in(&1, &partial));
-        assert!(!tracker.has_subscriber_not_in(&1, &complete));
-        assert!(!tracker.has_subscriber_not_in(&2, &partial));
         assert_eq!(subscribers(tracker.pending(&1)), Some(vec![10, 11, 12]));
     }
 

@@ -145,8 +145,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             }
 
             // Re-scan for missing nullifications: a floor raise landing
-            // mid-term pulls the fetch cursor back (see [Self::prune]), and a
-            // previously truncated scan can resume.
+            // mid-term pulls the fetch cursor back (see [Self::prune]).
             effects.extend(self.fetch_missing(view));
         } else {
             self.notarizations.remove(&view);
@@ -223,8 +222,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// eventually receive a nullification at the anchor or a
     /// notarization/finalization at a higher view). See the
     /// [module docs](super) for the full strategy, including how mid-term
-    /// floor raises pull the cursor back. The P2P resolver's rate limits govern
-    /// how quickly the resulting requests are sent.
+    /// floor raises pull the cursor back.
     fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut cursor = self.fetch_floor.max(self.floor_view().next());

@@ -152,21 +152,6 @@ where
         spawn_cell!(self.context, self.run(network))
     }
 
-    #[cfg(test)]
-    /// Seeds a logical fetch directly into retry-pending state.
-    pub(super) fn seed_retry(&mut self, key: Key, subscriber: Con::Subscriber) {
-        assert!(!self.inflight.contains(&key));
-        self.subscribers.insert(
-            key.clone(),
-            commonware_utils::vec::NonEmptyVec::new((subscriber, tracing::Span::none())),
-        );
-        self.inflight.insert(
-            key.clone(),
-            self.metrics.fetch_duration.timer(self.context.as_ref()),
-        );
-        self.fetcher.add_retry(key);
-    }
-
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
         // Wrap channel
@@ -259,9 +244,6 @@ where
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
-                            let adds_subscriber = subscribers.iter().any(|(subscriber, _)| {
-                                !self.subscribers.contains_subscriber(&key, subscriber)
-                            });
                             self.subscribers.insert(key.clone(), subscribers);
 
                             // Update targets
@@ -284,8 +266,6 @@ where
                                     self.metrics.fetch_duration.timer(self.context.as_ref()),
                                 );
                                 self.fetcher.add_ready(key);
-                            } else if adds_subscriber && self.fetcher.promote(&key) {
-                                trace!(?key, "promoted retry for new subscriber");
                             } else {
                                 trace!(?key, "updated targets for existing fetch");
                             }
@@ -492,17 +472,10 @@ where
             Outcome::Ambiguous => {
                 // The peer served valid data for the wire key, but local
                 // subscribers still need different evidence. Do not cache the
-                // response or penalize the peer. A subscriber that joined
-                // during validation never saw this response, so its next
-                // attempt is fresh rather than a retry.
-                let has_fresh_subscriber = self.subscribers.has_subscriber_not_in(&key, &delivered);
+                // response or penalize the peer; retry the same key.
                 self.metrics.fetch.inc(Status::Ambiguous);
                 self.inflight.discard_response(&key);
-                if has_fresh_subscriber {
-                    self.fetcher.add_ready(key);
-                } else {
-                    self.fetcher.add_retry(key);
-                }
+                self.fetcher.add_retry(key);
             }
             Outcome::Invalid => {
                 // A previously accepted response is only redelivered locally to subscribers that
@@ -522,18 +495,12 @@ where
                 }
 
                 // If the data is invalid, block the peer and try again. Blocking the
-                // peer also removes any targets associated with it. Preserve fresh
-                // priority for subscribers that joined during validation.
-                let has_fresh_subscriber = self.subscribers.has_subscriber_not_in(&key, &delivered);
+                // peer also removes any targets associated with it.
                 commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
                 self.fetcher.block(peer);
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
-                if has_fresh_subscriber {
-                    self.fetcher.add_ready(key);
-                } else {
-                    self.fetcher.add_retry(key);
-                }
+                self.fetcher.add_retry(key);
             }
         }
     }
