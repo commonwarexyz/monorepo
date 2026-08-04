@@ -33,6 +33,7 @@ pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Me
     max_frame_size: u32,
 
     channels: Channels<C::PublicKey>,
+    router_staging: Option<router::Staging<C::PublicKey>>,
     tracker: tracker::Actor<E, C>,
     tracker_mailbox: tracker::Mailbox<C::PublicKey>,
     listener: listener::Updates,
@@ -75,7 +76,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let (messenger, router_staging) = router::Messenger::unbound(
+            context.network_buffer_pool().clone(),
+            context.child("router_staging"),
+            cfg.mailbox_size,
+        );
         let channels = Channels::new(messenger, cfg.max_message_size);
 
         (
@@ -85,6 +90,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 max_frame_size,
 
                 channels,
+                router_staging: Some(router_staging),
                 tracker,
                 tracker_mailbox,
                 listener,
@@ -117,10 +123,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// account for expected receiver stalls and ensure its drain rate can sustain aggregate ingress.
     /// No finite backlog can absorb sustained ingress above the drain rate.
     ///
-    /// Outbound send invocations from all channels share one router mailbox. When the network
-    /// starts, its capacity is [`Config::mailbox_size`] plus the sum of all registered backlogs.
-    /// This capacity is pooled rather than reserved per channel, and each send uses one slot
-    /// regardless of its number of recipients.
+    /// Outbound send invocations from all channels share one router mailbox. Each successful
+    /// registration grows the pre-start staging mailbox by `backlog`. The final mailbox has the
+    /// same capacity: [`Config::mailbox_size`] plus the sum of all registered backlogs. This
+    /// capacity is pooled rather than reserved per channel, and each send uses one slot regardless
+    /// of its number of recipients.
     ///
     /// For memory budgeting, the inbound queue can retain roughly `backlog * max_message_size`
     /// bytes, and this backlog also adds the same number of slots to the shared outbound queue, in
@@ -145,14 +152,24 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             .context
             .child("channel")
             .with_attribute("index", channel);
-        self.channels.register(channel, rate, backlog, context)
+        let registered = self.channels.register(channel, rate, backlog, context);
+        self.channels.grow_staging(
+            self.router_staging
+                .as_mut()
+                .expect("router staging mailbox missing"),
+            self.context.child("router_staging"),
+            self.cfg.mailbox_size,
+        );
+        registered
     }
 
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
-    /// Registered senders are bound to the outbound router during this call; submissions made
-    /// before it return [`Feedback::Closed`](commonware_actor::Feedback::Closed).
+    /// Before the network starts, outbound content submissions use a staging mailbox bounded by
+    /// [`Config::mailbox_size`] plus the sum of all registered channel backlogs. Accepted
+    /// submissions are transferred to the equally sized final outbound router mailbox during this
+    /// call before the router starts.
     pub fn start(mut self) -> Handle<()> {
         let (router, router_mailbox, _) = router::Actor::new(
             self.context.child("router"),
@@ -160,7 +177,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 mailbox_size: self.channels.outbound_mailbox_size(self.cfg.mailbox_size),
             },
         );
-        self.channels.bind(router_mailbox.clone());
+        self.channels.bind(
+            router_mailbox.clone(),
+            self.router_staging
+                .take()
+                .expect("router staging mailbox missing"),
+        );
         spawn_cell!(self.context, self.run(router, router_mailbox))
     }
 

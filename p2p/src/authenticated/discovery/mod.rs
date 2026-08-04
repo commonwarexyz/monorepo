@@ -304,6 +304,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_registered_backlog_sizes_pre_start_mailbox() {
+        deterministic::Runner::default().start(|context| async move {
+            let signer = ed25519::PrivateKey::from_seed(0);
+            let mut config = Config::test(
+                signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                MAX_MESSAGE_SIZE,
+            );
+            config.mailbox_size = NZUsize!(1);
+            let (mut network, _oracle) = Network::new(context.child("network"), config);
+            let (mut sender, _receiver) = network.register(0, Quota::per_second(NZU32!(100)), 2);
+            let recipient = ed25519::PrivateKey::from_seed(1).public_key();
+
+            for _ in 0..2 {
+                let feedback = sender
+                    .check(Recipients::One(recipient.clone()))
+                    .unwrap()
+                    .send(IoBuf::from(b"message"), false);
+                assert!(feedback.accepted());
+            }
+            let feedback = sender
+                .check(Recipients::One(recipient))
+                .unwrap()
+                .send(IoBuf::from(b"overflow"), false);
+            assert_eq!(feedback, Unreliable::Rejected);
+        });
+    }
+
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"

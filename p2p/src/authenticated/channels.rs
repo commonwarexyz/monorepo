@@ -196,8 +196,22 @@ impl<P: PublicKey> Channels<P> {
             .expect("router mailbox capacity overflow")
     }
 
-    pub(super) fn bind(&self, mailbox: super::router::Mailbox<P>) {
-        self.messenger.bind(mailbox);
+    pub(super) fn grow_staging<M: Metrics>(
+        &self,
+        staging: &mut super::router::Staging<P>,
+        metrics: M,
+        base: NonZeroUsize,
+    ) {
+        self.messenger
+            .grow_staging(staging, metrics, self.outbound_mailbox_size(base));
+    }
+
+    pub(super) fn bind(
+        &self,
+        mailbox: super::router::Mailbox<P>,
+        staging: super::router::Staging<P>,
+    ) {
+        self.messenger.bind(mailbox, staging);
     }
 
     pub fn register<C: Clock + Metrics>(
@@ -261,7 +275,11 @@ mod tests {
     #[test]
     fn registered_backlogs_size_shared_outbound_mailbox() {
         deterministic::Runner::default().start(|context| async move {
-            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let (messenger, staging) = Messenger::unbound(
+                context.network_buffer_pool().clone(),
+                context.child("router_staging"),
+                NZUsize!(2),
+            );
             let mut channels = Channels::new(messenger, 1024);
             let quota = Quota::per_second(NZU32!(100));
             let (mut first, _) = channels.register(1, quota, 2, context.child("first"));
@@ -273,7 +291,7 @@ mod tests {
                     mailbox_size: capacity,
                 },
             );
-            channels.bind(mailbox);
+            channels.bind(mailbox, staging);
             let peer = PrivateKey::from_seed(1).public_key();
 
             for sender in [&mut first, &mut second] {
@@ -298,7 +316,11 @@ mod tests {
     #[should_panic(expected = "router mailbox capacity overflow")]
     fn outbound_mailbox_size_panics_on_overflow() {
         deterministic::Runner::default().start(|context| async move {
-            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let (messenger, _staging) = Messenger::unbound(
+                context.network_buffer_pool().clone(),
+                context.child("router_staging"),
+                NZUsize!(1),
+            );
             let mut channels = Channels::<PublicKey>::new(messenger, 1024);
             channels.outbound_backlog = 1;
 

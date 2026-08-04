@@ -57,8 +57,9 @@ pub struct Config<C: Signer> {
     /// This does not control an application channel's inbound backlog. That capacity is passed to
     /// [`Network::register`](super::Network::register).
     ///
-    /// For the shared outbound router, this provides internal and control-message headroom. Each
-    /// registered channel's backlog is added to the router's final capacity when the network starts.
+    /// For the shared outbound router, this provides initial content capacity and control-message
+    /// headroom. Each registered channel's backlog is added to both the pre-start staging mailbox
+    /// and the final router mailbox.
     pub mailbox_size: NonZeroUsize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.

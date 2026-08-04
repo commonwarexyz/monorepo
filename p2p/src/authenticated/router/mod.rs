@@ -4,6 +4,7 @@ mod ingress;
 pub use actor::Actor;
 #[cfg(test)]
 pub(crate) use ingress::Message;
+pub(in crate::authenticated) use ingress::Staging;
 pub use ingress::{Mailbox, Messenger};
 use std::num::NonZeroUsize;
 
