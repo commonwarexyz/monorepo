@@ -165,6 +165,30 @@ commonware_macros::stability_scope!(BETA {
             SEQ: FnOnce() -> Result<R, E> + Send,
             PAR: FnOnce() -> Result<R, E> + Send;
 
+        /// Like [`try_run`](Self::try_run), but with `arms` interchangeable
+        /// parallel bodies: `parallel` receives the index of the arm the
+        /// strategy chose. Every arm must compute the same result.
+        ///
+        /// Adaptive strategies learn the fastest of the serial body and each
+        /// parallel arm per callsite and input size. Non-adaptive strategies
+        /// run the serial body, or arm 0 when configured for parallelism
+        /// without an adaptive policy.
+        ///
+        /// `arms` must be between 1 and 2.
+        #[track_caller]
+        fn try_run_n<R, E, SEQ, PAR>(
+            &self,
+            len: usize,
+            arms: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce(usize) -> Result<R, E> + Send;
+
         /// Reduces a collection to a single value with per-partition initialization.
         ///
         /// Similar to [`fold`](Self::fold), but provides a separate initialization value
@@ -645,6 +669,23 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
+        fn try_run_n<R, E, SEQ, PAR>(
+            &self,
+            len: usize,
+            arms: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce(usize) -> Result<R, E> + Send,
+        {
+            self.strategy.try_run_n(len, arms, serial, parallel)
+        }
+
+        #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -821,6 +862,22 @@ commonware_macros::stability_scope!(BETA {
             E: Send,
             SEQ: FnOnce() -> Result<R, E> + Send,
             PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            serial()
+        }
+
+        fn try_run_n<R, E, SEQ, PAR>(
+            &self,
+            _len: usize,
+            _arms: usize,
+            serial: SEQ,
+            _parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce(usize) -> Result<R, E> + Send,
         {
             serial()
         }
@@ -1002,6 +1059,25 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let work = len.saturating_mul(multiplier);
             policy.try_run(Location::caller(), len, work, self.parallelism, run)
         }
+
+        #[track_caller]
+        fn try_execute_n<R, E>(
+            &self,
+            len: usize,
+            arms: usize,
+            run: impl FnOnce(policy::Choice) -> Result<R, E>,
+        ) -> Result<R, E> {
+            let Some(policy) = &self.policy else {
+                let choice = if self.parallelism <= 1 {
+                    policy::Choice::Serial
+                } else {
+                    policy::Choice::Parallel(0)
+                };
+                return run(choice);
+            };
+
+            policy.try_run_n(Location::caller(), len, len, self.parallelism, arms, run)
+        }
     }
 
     impl Strategy for Rayon {
@@ -1083,6 +1159,27 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self.try_execute(len, 1, |execution| match execution {
                 policy::Execution::Serial => serial(),
                 policy::Execution::Parallel => parallel(),
+            })
+        }
+
+        #[track_caller]
+        fn try_run_n<R, E, SEQ, PAR>(
+            &self,
+            len: usize,
+            arms: usize,
+            serial: SEQ,
+            parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce(usize) -> Result<R, E> + Send,
+        {
+            assert!((1..=policy::MAX_PARALLEL_ARMS).contains(&arms));
+            self.try_execute_n(len, arms, |choice| match choice {
+                policy::Choice::Serial => serial(),
+                policy::Choice::Parallel(arm) => parallel(arm as usize),
             })
         }
 

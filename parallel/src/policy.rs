@@ -73,6 +73,16 @@ pub(super) enum Execution {
     Parallel,
 }
 
+/// The path the policy chose for a call with multiple parallel arms.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum Choice {
+    Serial,
+    Parallel(u8),
+}
+
+/// The largest number of parallel arms a call may offer.
+pub(super) const MAX_PARALLEL_ARMS: usize = 2;
+
 /// Adaptive serial-vs-parallel decisions, shared cheaply across [`super::Rayon`] clones.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Policy {
@@ -112,6 +122,36 @@ impl Policy {
         result
     }
 
+    /// Like [`Self::try_run`], but choosing among `arms` parallel bodies as
+    /// well as the serial body.
+    pub(super) fn try_run_n<R, E>(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        work: usize,
+        parallelism: usize,
+        arms: usize,
+        run: impl FnOnce(Choice) -> Result<R, E>,
+    ) -> Result<R, E> {
+        if parallelism <= 1 {
+            return run(Choice::Serial);
+        }
+
+        let key = Key::new(caller, len, work, parallelism);
+        let (choice, measure) = self
+            .entries
+            .entry(key)
+            .or_default()
+            .choose_n(parallelism, arms);
+        let start = measure.then(Instant::now);
+        let result = run(choice);
+        if let (Some(start), Ok(_)) = (start, &result) {
+            let mut entry = self.entries.entry(key).or_default();
+            entry.record_choice(choice, start.elapsed());
+        }
+        result
+    }
+
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries.len()
@@ -126,7 +166,9 @@ impl Policy {
         parallelism: usize,
     ) -> Option<(Option<u64>, Option<u64>)> {
         let key = Key::new(caller, len, work, parallelism);
-        self.entries.get(&key).map(|e| (e.serial_ns, e.parallel_ns))
+        self.entries
+            .get(&key)
+            .map(|e| (e.serial_ns, e.parallel_ns[0]))
     }
 }
 
@@ -163,8 +205,10 @@ impl Key {
 #[derive(Clone, Copy, Debug, Default)]
 struct Entry {
     serial_ns: Option<u64>,
-    parallel_ns: Option<u64>,
+    parallel_ns: [Option<u64>; MAX_PARALLEL_ARMS],
     since_probe: u32,
+    /// Alternates which losing path the boundary probes when several exist.
+    probe_flip: bool,
 }
 
 impl Entry {
@@ -191,14 +235,36 @@ impl Entry {
     // Returns the path to run and whether the caller should time it and feed the elapsed duration
     // back to [`record`](Self::record).
     fn choose(&mut self, parallelism: usize) -> (Execution, bool) {
-        // Seed the parallel estimate with the first call. Saturating the probe counter keeps
-        // the entry due for an immediate boundary, so the serial seed is offered as soon as
-        // the parallel estimate lands (when the projection allows) instead of waiting a full
-        // interval that a low-frequency callsite may never reach.
-        let Some(parallel_ns) = self.parallel_ns else {
-            self.since_probe = u32::MAX;
-            return (Execution::Parallel, true);
+        let (choice, measure) = self.choose_n(parallelism, 1);
+        let execution = match choice {
+            Choice::Serial => Execution::Serial,
+            Choice::Parallel(_) => Execution::Parallel,
         };
+        (execution, measure)
+    }
+
+    // Multi-arm form of [`choose`](Self::choose): picks among the serial path
+    // and `arms` parallel paths.
+    fn choose_n(&mut self, parallelism: usize, arms: usize) -> (Choice, bool) {
+        debug_assert!((1..=MAX_PARALLEL_ARMS).contains(&arms));
+
+        // Seed each parallel estimate with the first calls. Saturating the probe counter
+        // keeps the entry due for an immediate boundary, so the next seed is offered as
+        // soon as an estimate lands (when the projection allows) instead of waiting a full
+        // interval that a low-frequency callsite may never reach.
+        for arm in 0..arms {
+            if self.parallel_ns[arm].is_none() {
+                self.since_probe = u32::MAX;
+                return (Choice::Parallel(arm as u8), true);
+            }
+        }
+
+        // The best parallel arm stands in for "parallel" everywhere below; ties go to the
+        // lower arm index.
+        let (best_arm, parallel_ns) = (0..arms)
+            .filter_map(|arm| self.parallel_ns[arm].map(|ns| (arm as u8, ns)))
+            .min_by_key(|(arm, ns)| (*ns, *arm))
+            .expect("all arms are seeded above");
 
         // The projection gates serial in both sampling and preference: a case whose projection
         // exceeds the budget never runs serial. It is live: parallel keeps refreshing whenever
@@ -206,36 +272,72 @@ impl Entry {
         let can_sample_serial =
             Self::projected_serial(parallel_ns, parallelism) < SERIAL_SAMPLE_BUDGET_NS;
 
-        // Until serial is sampled, parallel is preferred by default and the boundary doubles
-        // as the seed slot. Once both estimates exist, the boundary probes the losing path on
-        // an interval that doubles for each multiple of the winner's wall time it is behind,
-        // so a close race is re-checked often while a blowout is re-checked rarely.
-        let (preferred, interval) =
-            self.serial_ns
-                .map_or((Execution::Parallel, RESAMPLE_INTERVAL), |serial_ns| {
-                    let preferred = Self::preferred(serial_ns, parallel_ns, parallelism);
-                    let (winner_ns, loser_ns) = match preferred {
-                        Execution::Serial => (serial_ns, parallel_ns),
-                        Execution::Parallel => (parallel_ns, serial_ns),
-                    };
-                    let slowdown = loser_ns / winner_ns.max(1);
-                    let shift = slowdown
-                        .saturating_sub(1)
-                        .min(u64::from(MAX_RESAMPLE_SHIFT)) as u32;
-                    (preferred, RESAMPLE_INTERVAL << shift)
-                });
+        // Until serial is sampled, the best parallel arm is preferred by default and the
+        // boundary doubles as the seed slot. Once the estimates exist, the boundary probes a
+        // losing path on an interval that doubles for each multiple of the winner's wall time
+        // the closest loser is behind, so a close race is re-checked often while a blowout is
+        // re-checked rarely.
+        let losers = |preferred: Choice| {
+            let mut losers: [Option<Choice>; MAX_PARALLEL_ARMS] = [None; MAX_PARALLEL_ARMS];
+            let mut count = 0;
+            for arm in 0..arms {
+                if preferred != Choice::Parallel(arm as u8) {
+                    losers[count] = Some(Choice::Parallel(arm as u8));
+                    count += 1;
+                }
+            }
+            if preferred != Choice::Serial && can_sample_serial {
+                losers[count] = Some(Choice::Serial);
+                count += 1;
+            }
+            (losers, count)
+        };
+        let estimate = |choice: Choice| match choice {
+            Choice::Serial => self.serial_ns,
+            Choice::Parallel(arm) => self.parallel_ns[arm as usize],
+        };
+        let (preferred, interval) = self.serial_ns.map_or(
+            (Choice::Parallel(best_arm), RESAMPLE_INTERVAL),
+            |serial_ns| {
+                let preferred = match Self::preferred(serial_ns, parallel_ns, parallelism) {
+                    Execution::Serial => Choice::Serial,
+                    Execution::Parallel => Choice::Parallel(best_arm),
+                };
+                let winner_ns = estimate(preferred).expect("preferred path is sampled");
+                let (candidates, count) = losers(preferred);
+                let closest_ns = candidates[..count]
+                    .iter()
+                    .filter_map(|loser| estimate(loser.expect("loser slots are filled")))
+                    .min()
+                    .unwrap_or(winner_ns);
+                let slowdown = closest_ns / winner_ns.max(1);
+                let shift = slowdown
+                    .saturating_sub(1)
+                    .min(u64::from(MAX_RESAMPLE_SHIFT)) as u32;
+                (preferred, RESAMPLE_INTERVAL << shift)
+            },
+        );
 
         // Exactly one caller crosses the boundary, and a serial seed whose sample never lands
         // is simply offered again at the next boundary. A serial seed or probe must fit the
         // live projection. A parallel probe is always allowed: it pays the true parallel wall
-        // (including any pool queueing), which the capped interval amortizes.
+        // (including any pool queueing), which the capped interval amortizes. When several
+        // losers exist the boundary alternates among them.
         self.since_probe = self.since_probe.saturating_add(1);
         if self.since_probe >= interval {
             self.since_probe = 0;
-            let probe = match preferred {
-                Execution::Serial => Execution::Parallel,
-                Execution::Parallel if can_sample_serial => Execution::Serial,
-                Execution::Parallel => Execution::Parallel,
+            // An unsampled serial estimate takes the boundary as its seed.
+            if self.serial_ns.is_none() && can_sample_serial {
+                return (Choice::Serial, true);
+            }
+            let (candidates, count) = losers(preferred);
+            let probe = match count {
+                0 => preferred,
+                _ => {
+                    self.probe_flip = !self.probe_flip;
+                    let index = if self.probe_flip { 0 } else { count - 1 };
+                    candidates[index].expect("loser slots are filled")
+                }
             };
             return (probe, true);
         }
@@ -250,10 +352,18 @@ impl Entry {
     // into the EWMA, so a single outlier (a contended pool) moves an established estimate by
     // at most a fifth of the gap.
     fn record(&mut self, execution: Execution, elapsed: Duration) {
+        let choice = match execution {
+            Execution::Serial => Choice::Serial,
+            Execution::Parallel => Choice::Parallel(0),
+        };
+        self.record_choice(choice, elapsed);
+    }
+
+    fn record_choice(&mut self, choice: Choice, elapsed: Duration) {
         let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-        let estimate = match execution {
-            Execution::Serial => &mut self.serial_ns,
-            Execution::Parallel => &mut self.parallel_ns,
+        let estimate = match choice {
+            Choice::Serial => &mut self.serial_ns,
+            Choice::Parallel(arm) => &mut self.parallel_ns[arm as usize],
         };
         *estimate = Some(estimate.map_or(elapsed_ns, |current| update_ewma(current, elapsed_ns)));
     }
@@ -280,7 +390,8 @@ const fn len_bucket(len: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Entry, Execution, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Policy, RESAMPLE_INTERVAL,
+        Choice, Entry, Execution, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Policy,
+        RESAMPLE_INTERVAL,
     };
     use std::{panic::Location, time::Duration};
 
@@ -434,7 +545,7 @@ mod tests {
         entry.record(Execution::Parallel, Duration::from_millis(10));
         entry.record(Execution::Parallel, Duration::from_millis(20));
 
-        assert_eq!(entry.parallel_ns, Some(12_000_000));
+        assert_eq!(entry.parallel_ns[0], Some(12_000_000));
     }
 
     #[test]
@@ -458,7 +569,7 @@ mod tests {
         // Parallel is preferred, so further parallel samples blend 4:1.
         entry.record(Execution::Parallel, Duration::from_nanos(200));
 
-        assert_eq!(entry.parallel_ns, Some(120));
+        assert_eq!(entry.parallel_ns[0], Some(120));
     }
 
     #[test]
@@ -475,7 +586,7 @@ mod tests {
         assert_eq!(
             Entry::preferred(
                 entry.serial_ns.unwrap(),
-                entry.parallel_ns.unwrap(),
+                entry.parallel_ns[0].unwrap(),
                 PARALLELISM
             ),
             Execution::Parallel
@@ -574,7 +685,7 @@ mod tests {
         assert_eq!(
             Entry::preferred(
                 entry.serial_ns.unwrap(),
-                entry.parallel_ns.unwrap(),
+                entry.parallel_ns[0].unwrap(),
                 PARALLELISM
             ),
             Execution::Serial
@@ -585,7 +696,7 @@ mod tests {
         for i in 1..=1_000 {
             if Entry::preferred(
                 entry.serial_ns.unwrap(),
-                entry.parallel_ns.unwrap(),
+                entry.parallel_ns[0].unwrap(),
                 PARALLELISM,
             ) == Execution::Parallel
             {
@@ -648,7 +759,7 @@ mod tests {
         assert_eq!(
             Entry::preferred(
                 entry.serial_ns.unwrap(),
-                entry.parallel_ns.unwrap(),
+                entry.parallel_ns[0].unwrap(),
                 PARALLELISM
             ),
             Execution::Parallel
@@ -678,7 +789,7 @@ mod tests {
         assert_eq!(
             Entry::preferred(
                 entry.serial_ns.unwrap(),
-                entry.parallel_ns.unwrap(),
+                entry.parallel_ns[0].unwrap(),
                 PARALLELISM
             ),
             Execution::Parallel
@@ -690,7 +801,7 @@ mod tests {
         assert_eq!(
             Entry::preferred(
                 entry.serial_ns.unwrap(),
-                entry.parallel_ns.unwrap(),
+                entry.parallel_ns[0].unwrap(),
                 PARALLELISM
             ),
             Execution::Parallel
@@ -710,6 +821,49 @@ mod tests {
             );
         }
         assert_eq!(choose(&mut entry), (Execution::Parallel, true));
+    }
+
+    #[test]
+    fn seeds_both_arms_then_prefers_best() {
+        let mut entry = Entry::default();
+
+        // Both parallel arms are seeded before anything else, in order.
+        assert_eq!(entry.choose_n(PARALLELISM, 2), (Choice::Parallel(0), true));
+        entry.record_choice(Choice::Parallel(0), Duration::from_micros(400));
+        assert_eq!(entry.choose_n(PARALLELISM, 2), (Choice::Parallel(1), true));
+        entry.record_choice(Choice::Parallel(1), Duration::from_micros(100));
+
+        // The serial seed follows at the next boundary (projection fits).
+        assert_eq!(entry.choose_n(PARALLELISM, 2), (Choice::Serial, true));
+        entry.record_choice(Choice::Serial, Duration::from_micros(300));
+
+        // The fastest arm is preferred over both the slower arm and serial.
+        assert_eq!(entry.choose_n(PARALLELISM, 2).0, Choice::Parallel(1));
+    }
+
+    #[test]
+    fn boundary_probes_alternate_losers() {
+        let mut entry = Entry::default();
+        // Losers within 2x of the winner keep the probe interval at its base.
+        entry.record_choice(Choice::Parallel(0), Duration::from_micros(150));
+        entry.record_choice(Choice::Parallel(1), Duration::from_micros(100));
+        entry.record_choice(Choice::Serial, Duration::from_micros(180));
+
+        // Both losers (arm 0 and serial) are probed over successive
+        // boundaries while arm 1 stays preferred in between.
+        let mut probed = std::collections::HashSet::new();
+        for _ in 0..3 {
+            for _ in 1..RESAMPLE_INTERVAL {
+                let (choice, _) = entry.choose_n(PARALLELISM, 2);
+                assert_eq!(choice, Choice::Parallel(1));
+            }
+            let (probe, measure) = entry.choose_n(PARALLELISM, 2);
+            assert!(measure);
+            assert_ne!(probe, Choice::Parallel(1));
+            probed.insert(probe);
+        }
+        assert!(probed.contains(&Choice::Serial));
+        assert!(probed.contains(&Choice::Parallel(0)));
     }
 
     #[test]

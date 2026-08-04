@@ -11,6 +11,10 @@
 //! - Adapted code to `commonware`'s clippy rules.
 //! - The batch verifier accepts pre-decompressed [`VerificationKey`] values and reuses their
 //!   cached point decompression state.
+//! - Large batches decompress signature R points through an owned batched square-root
+//!   kernel (scalar-interleaved with NEON and AVX-512 IFMA variants) and check one global
+//!   verification equation with an owned multiscalar multiplication (see [`fe`], [`point`],
+//!   [`msm`], `neon`, and `ifma`).
 //!
 //! [`ed25519_consensus`]: https://crates.io/crates/ed25519-consensus
 //! [`ed25519_zebra`]: https://crates.io/crates/ed25519-zebra
@@ -19,6 +23,13 @@
 
 pub mod batch;
 mod error;
+mod fe;
+#[cfg(any(target_arch = "x86_64", test))]
+mod ifma;
+mod msm;
+#[cfg(target_arch = "aarch64")]
+mod neon;
+mod point;
 mod signature;
 mod signing_key;
 mod verification_key;

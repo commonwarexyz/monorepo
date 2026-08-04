@@ -499,6 +499,22 @@ mod tests {
             Sequential.try_run(len, serial, parallel)
         }
 
+        fn try_run_n<R, E, SEQ, PAR>(
+            &self,
+            _len: usize,
+            _arms: usize,
+            serial: SEQ,
+            _parallel: PAR,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce(usize) -> Result<R, E> + Send,
+        {
+            serial()
+        }
+
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
