@@ -256,13 +256,10 @@ stability_scope!(BETA {
         #[must_use]
         fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self;
 
-        /// Copy attributes from another context without changing this context's
-        /// label or supervision-tree position.
+        /// Copy all attributes from `source` to this context.
         ///
-        /// This is useful when work must be reparented for supervision while
-        /// retaining request-scoped metadata. Existing attributes with the same
-        /// key are replaced. Supervisors that do not retain attributes may use
-        /// the default implementation.
+        /// Existing attributes with the same key are replaced. The context's
+        /// label and supervision-tree position remain unchanged.
         #[must_use]
         fn with_attributes_from(self, _source: &Self) -> Self
         where
