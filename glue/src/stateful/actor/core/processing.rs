@@ -412,7 +412,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
+        Clock as _, ContextCell, Error as RuntimeError, Handle, Name, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
     };
     use commonware_utils::{
@@ -441,6 +441,7 @@ mod tests {
         verify_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
         proposal_gate: Arc<Mutex<Option<ApplicationGate>>>,
         verify_valid: bool,
+        observed_contexts: Arc<Mutex<Vec<Name>>>,
     }
 
     impl Application<deterministic::Context> for GatedApp {
@@ -476,10 +477,11 @@ mod tests {
 
         async fn verify(
             &mut self,
-            _context: (deterministic::Context, Self::Context),
+            context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
+            self.observed_contexts.lock().push(context.0.name());
             let mut ancestry = Box::pin(ancestry);
             let _block = ancestry.next().await?;
             let mut gate = self
@@ -686,6 +688,7 @@ mod tests {
             verify_gates: Arc::new(Mutex::new(verify_gates)),
             proposal_gate: Arc::new(Mutex::new(None)),
             verify_valid: true,
+            observed_contexts: Arc::default(),
         };
         let processor = Processor::new(
             app,
@@ -717,6 +720,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
                 spawn_gated_application(&context, "concurrent-verify", app).await;
@@ -774,6 +778,51 @@ mod tests {
     }
 
     #[test]
+    fn verification_preserves_request_attributes() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (gate, started, release) = application_gate();
+            let observed_contexts = Arc::new(Mutex::new(Vec::new()));
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+                observed_contexts: observed_contexts.clone(),
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "verify-attributes", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let request_context = context
+                .child("request")
+                .with_attribute("round", "request-round")
+                .with_attribute("shard", 4);
+            let mut verify = Box::pin(mailbox.verify(
+                (request_context, block.context()),
+                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("verification should start");
+
+            {
+                let observed = observed_contexts.lock();
+                assert_eq!(observed.len(), 1);
+                assert_eq!(
+                    observed[0].attributes,
+                    vec![
+                        ("round".to_string(), "request-round".to_string()),
+                        ("shard".to_string(), "4".to_string()),
+                    ]
+                );
+            }
+
+            release.send(()).expect("verification should remain active");
+            assert!(verify.await);
+            actor.abort();
+        });
+    }
+
+    #[test]
     fn abandoned_incomplete_verifications_cancel_after_supersession() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (first_gate, first_started, first_release) = application_gate();
@@ -782,6 +831,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
                 spawn_gated_application(&context, "incomplete-verify", app).await;
@@ -842,6 +892,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: false,
+                observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
                 spawn_gated_application(&context, "rejected-verify", app).await;
@@ -906,6 +957,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
                 verify_valid: true,
+                observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
                 spawn_gated_application(&context, "propose-verify", app).await;
@@ -965,6 +1017,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
                 verify_valid: true,
+                observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
                 spawn_gated_application(&context, "propose-new-verify", app).await;
@@ -1022,6 +1075,7 @@ mod tests {
                 ]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
                 spawn_gated_application(&context, "finalize-compatible", app).await;
@@ -1078,6 +1132,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([fork_gate, child_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
                 spawn_gated_application(&context, "finalize-incompatible", app).await;
@@ -1154,6 +1209,7 @@ mod tests {
                 ]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
                 spawn_gated_application(&context, "finalize-deep-incompatible", app).await;

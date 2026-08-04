@@ -118,8 +118,12 @@ where
         self.jobs.push(
             async move {
                 let ancestry = request.ancestry.clone();
+                // Actor supervision lets the attempt outlive its caller. Keep
+                // the caller's attributes so reparenting changes only ownership.
                 let attempt_context = (
-                    actor_context.child("application"),
+                    actor_context
+                        .child("application")
+                        .with_attributes_from(&request.context.0),
                     request.context.1.clone(),
                 );
                 let result = select! {
@@ -167,6 +171,12 @@ where
         }
     }
 
+    /// Cancels active attempts and waits for all verification work to stop.
+    ///
+    /// Finalization and pruning must call this before mutating the databases so
+    /// verification-owned replays cannot race those mutations. Requests whose
+    /// callers still need a verdict are returned for rescheduling after the
+    /// mutation completes.
     pub(super) async fn quiesce(&mut self) -> Vec<Request<E, A>> {
         let (retry, reject) = self.quiesce_where(|_| VerificationDisposition::Retry).await;
         assert!(reject.is_empty());

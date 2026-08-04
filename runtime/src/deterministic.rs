@@ -1262,6 +1262,13 @@ impl crate::Supervisor for Context {
         self
     }
 
+    fn with_attributes_from(mut self, source: &Self) -> Self {
+        for (key, value) in &source.attributes {
+            add_attribute(&mut self.attributes, key, value);
+        }
+        self
+    }
+
     fn name(&self) -> Name {
         Name {
             label: self.name.clone(),
