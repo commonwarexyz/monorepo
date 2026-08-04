@@ -221,11 +221,9 @@ where
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Retain or shutdown) before the consumer finished validating.
-                let (peer, delivery, result) = match delivery {
-                    Ok(delivery) => delivery,
-                    Err(_) => continue,
-                };
-                self.handle_delivery(peer, delivery, result);
+                if let Ok((peer, delivery, result)) = delivery {
+                    self.handle_delivery(peer, delivery, result);
+                }
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox.recv() else {
@@ -282,24 +280,10 @@ where
                         self.record_cancellations(count);
                     }
                 }
-
-                // Mailbox work is selected ahead of an elapsed retry deadline so
-                // freshly admitted requests can take precedence. Attempt one
-                // ready send here to keep sustained ingress from starving the
-                // outbound path.
-                if self
-                    .fetcher
-                    .get_pending_deadline()
-                    .is_some_and(|deadline| deadline <= self.context.current())
-                {
-                    self.fetcher.fetch(&mut sender);
-                }
             },
-            // The select is biased, so accept queued fresh work before
-            // spending capacity on a retry whose deadline has elapsed.
-            _ = deadline_pending => {
-                self.fetcher.fetch(&mut sender);
-            },
+            // Wake the loop when pending work becomes ready. The send is
+            // performed in `on_end` after the selected event is handled.
+            _ = deadline_pending => {},
             // Handle completed server requests
             serve = self.serves.next_completed() => {
                 let Serve {
@@ -335,21 +319,31 @@ where
                     }
                 };
 
-                // Skip if there is a decoding error
-                let msg = match msg {
-                    Ok(msg) => msg,
+                match msg {
+                    Ok(msg) => match msg.payload {
+                        wire::Payload::Request(key) => {
+                            self.handle_network_request(peer, msg.id, key)
+                        }
+                        wire::Payload::Response(response) => {
+                            self.handle_network_response(peer, msg.id, response)
+                        }
+                        wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
+                    },
                     Err(err) => {
                         trace!(?err, ?peer, "decode failed");
-                        continue;
                     }
                 };
-                match msg.payload {
-                    wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
-                    wire::Payload::Response(response) => {
-                        self.handle_network_response(peer, msg.id, response)
-                    }
-                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
-                };
+            },
+            on_end => {
+                // Attempt at most one due outbound request after each selected
+                // event so sustained event traffic cannot starve pending work.
+                if self
+                    .fetcher
+                    .get_pending_deadline()
+                    .is_some_and(|deadline| deadline <= self.context.current())
+                {
+                    self.fetcher.fetch(&mut sender);
+                }
             },
         }
     }

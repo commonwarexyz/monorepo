@@ -58,9 +58,8 @@
 //!
 //! # Scheduling
 //!
-//! Fresh keys are attempted before retries, including retries whose deadlines have already
-//! elapsed. This keeps newly admitted keys responsive while allowing retries to consume capacity
-//! whenever no fresh request can be sent. A sustained stream of fresh work can postpone retries.
+//! All pending fresh keys are attempted before any pending retries. Fresh keys and retries are
+//! each ordered by their next attempt time.
 //!
 //! # Peer Selection
 //!
@@ -2697,7 +2696,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fresh_mailbox_request_precedes_overdue_retry() {
+    fn test_due_retry_precedes_queued_fresh_request() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2753,10 +2752,16 @@ mod tests {
                 deliveries.recv().await.expect("requester consumer closed");
             assert_eq!(delivered_key, retry_key);
 
-            // Make the retry immediately due while fresh work is queued. The
-            // two-token quota then admits the fresh request and holds the retry.
+            // Resolving the delivery makes its retry due before the queued
+            // mailbox request is admitted. The two-token quota admits the
+            // retry and holds the fresh request.
             requester_mailbox.fetch(fresh_key.clone());
             verdict.send_lossy(Outcome::Ambiguous);
+
+            let (delivered_key, verdict) =
+                deliveries.recv().await.expect("requester consumer closed");
+            assert_eq!(delivered_key, retry_key);
+            verdict.send_lossy(Outcome::Complete);
 
             let (delivered_key, verdict) =
                 deliveries.recv().await.expect("requester consumer closed");
