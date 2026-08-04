@@ -137,6 +137,12 @@ impl<D: Copy> VerificationProgress<D> {
 
 /// Pending parents whose branch-scoped batches remain valid after one
 /// finalized block is applied.
+///
+/// Marshal delivers finalized blocks in height order. Canonical older blocks
+/// are therefore already covered by the processed anchor and resolve while
+/// their verification is still acquiring. The exact processed phase is the
+/// only older replay or verification phase that can survive from the preceding
+/// finalization.
 pub(super) struct FinalizationBoundary<D> {
     digest: D,
     round: Round,
@@ -201,6 +207,17 @@ where
 }
 
 /// Speculative state shared by independently-polled verification jobs.
+///
+/// The finalization fields form one state machine:
+/// - Idle: `finalizing` is `None`, the batch is not secured, and the compatible
+///   set is empty.
+/// - Acquiring: `finalizing` is set and the batch is not secured. The exact
+///   winner replay and compatible descendants may still publish.
+/// - Secured: `finalizing` is set and the batch is secured. The winner is not
+///   reinserted, while compatible descendants may publish against pending or
+///   applied winner state.
+///
+/// Finishing finalization advances `last_processed` and returns to Idle.
 struct ExecutionState<A, E>
 where
     E: Rng + Spawner + Metrics + Clock,

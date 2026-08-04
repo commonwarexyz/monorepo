@@ -280,6 +280,9 @@ where
                                         },
                                     ),
                                     Some(message) => {
+                                        // Only verification may overtake an active proposal. The
+                                        // first other message is a FIFO barrier, so later
+                                        // verifications must not cross it.
                                         deferred_message = Some(message);
                                         receive_messages = false;
                                     }

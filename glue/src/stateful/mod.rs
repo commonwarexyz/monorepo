@@ -143,8 +143,13 @@ pub struct Input<Upstream, Provider> {
 /// the block tree and applying changesets to the underlying databases on
 /// finalization.
 ///
-/// Verification may overlap other verification, proposal, apply, and finalized calls.
-/// Implementations must remain correct under this interleaving.
+/// Calls are not serialized through one instance. Multiple
+/// [`verify`](Self::verify) and [`apply`](Self::apply) calls may overlap each
+/// other and may overlap [`propose`](Self::propose) or
+/// [`finalized`](Self::finalized). Equivalent execution results may be reused
+/// across requests, so correctness must not depend on every clone observing
+/// every call. State whose visibility affects correctness across calls must be
+/// shared explicitly.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -252,8 +257,9 @@ where
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
     ///
-    /// This future may outlive its caller. Stateful may also cancel and retry it
-    /// before finalization or pruning. Cancellation and retry must not violate
+    /// This future may outlive its caller and receives a Stateful-owned runtime
+    /// context for that reason. Stateful may also cancel and retry it before
+    /// finalization or pruning. Cancellation and retry must not violate
     /// invariants or lose durable progress.
     fn verify(
         &mut self,
