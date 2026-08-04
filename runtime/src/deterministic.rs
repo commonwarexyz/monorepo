@@ -457,6 +457,27 @@ impl Executor {
         }
     }
 
+    /// Wake sleepers until a task is ready or no alarms remain.
+    ///
+    /// Canceling a polled sleep leaves its alarm registered until its deadline. If that alarm
+    /// wakes no task, continue to later deadlines before deciding the runtime has stalled.
+    fn wake_until_ready_or_empty(&self, mut current: SystemTime) {
+        loop {
+            current = self.skip_idle_time(current);
+            if self.deadline.is_some_and(|deadline| current >= deadline) {
+                panic!("runtime timeout");
+            }
+            self.wake_ready_sleepers(current);
+
+            if cfg!(feature = "external")
+                || self.tasks.ready() != 0
+                || self.sleeping.lock().is_empty()
+            {
+                return;
+            }
+        }
+    }
+
     /// Ensure the runtime is making progress.
     ///
     /// When built with the `external` feature, always poll pending tasks after the passage of time.
@@ -664,12 +685,9 @@ impl Runner {
                     break output;
                 }
 
-                // Advance time (skipping ahead if no tasks are ready yet)
-                let mut current = executor.advance_time();
-                current = executor.skip_idle_time(current);
-
-                // Wake sleepers and ensure we continue to make progress
-                executor.wake_ready_sleepers(current);
+                // Advance time and wake sleepers until a task is ready or no alarms remain
+                let current = executor.advance_time();
+                executor.wake_until_ready_or_empty(current);
                 executor.assert_liveness();
 
                 // Record that we completed another iteration of the event loop.
@@ -1723,6 +1741,47 @@ mod tests {
                 now + Duration::new(15, 0),
             ]
         );
+    }
+
+    #[test]
+    fn test_dropped_sleeper_before_live_deadline() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (started_sender, started_receiver) = oneshot::channel();
+            let sleeper = context.child("sleeper").spawn(|context| async move {
+                let mut sleepers = FuturesUnordered::new();
+                sleepers.push(context.sleep(Duration::from_secs(1)));
+                started_sender.send(()).unwrap();
+                sleepers.next().await;
+            });
+
+            // Waiting for the signal ensures the child registered its alarm before being aborted.
+            started_receiver.await.unwrap();
+            sleeper.abort();
+
+            // The stale child alarm must not prevent a later live alarm from firing.
+            context.sleep(Duration::from_secs(2)).await;
+        });
+    }
+
+    #[cfg(not(feature = "external"))]
+    #[test]
+    #[should_panic(expected = "runtime timeout")]
+    fn test_dropped_sleeper_beyond_timeout() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (started_sender, started_receiver) = oneshot::channel();
+            let sleeper = context.child("sleeper").spawn(|context| async move {
+                let mut sleep = Box::pin(context.sleep(Duration::from_secs(20)));
+                assert!(sleep.as_mut().now_or_never().is_none());
+                started_sender.send(()).unwrap();
+                sleep.await;
+            });
+
+            started_receiver.await.unwrap();
+            sleeper.abort();
+            pending::<()>().await;
+        });
     }
 
     #[test]
