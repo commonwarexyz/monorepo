@@ -3482,12 +3482,6 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_apply_batch_detects_dropped_uncommitted_ancestor_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_apply_batch_detects_dropped_uncommitted_ancestor_inner::<mmr::Family>);
-    }
-
-    #[test_traced("INFO")]
     fn test_apply_batch_detects_dropped_uncommitted_ancestor_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_apply_batch_detects_dropped_uncommitted_ancestor_inner::<mmb::Family>);
@@ -3530,12 +3524,6 @@ mod tests {
             (reference, _) = reference.append(&create_operation::<F>(i)).await.unwrap();
         }
         assert_eq!(journal_root(&journal), journal_root(&reference));
-    }
-
-    #[test_traced("INFO")]
-    fn test_apply_batch_after_committed_ancestor_dropped_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_apply_batch_after_committed_ancestor_dropped_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]

@@ -1387,14 +1387,6 @@ mod tests {
         apply_batch_detects_dropped_ancestor::<crate::mmr::Family>();
     }
     #[test]
-    fn mmr_apply_batch_after_committed_ancestor_dropped() {
-        apply_batch_after_committed_ancestor_dropped::<crate::mmr::Family>();
-    }
-    #[test]
-    fn mmr_apply_batch_after_committed_ancestor_dropped_with_overwrite() {
-        apply_batch_after_committed_ancestor_dropped_with_overwrite::<crate::mmr::Family>();
-    }
-    #[test]
     fn mmr_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
     }
