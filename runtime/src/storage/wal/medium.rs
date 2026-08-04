@@ -376,6 +376,10 @@ impl File for SimFileHandle {
 
     async fn write_at(&self, offset: u64, data: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let data: Vec<u8> = data.into().coalesce().as_ref().to_vec();
+        // An empty write changes nothing, not even the length.
+        if data.is_empty() {
+            return Ok(());
+        }
         let mut state = self.state.lock();
         self.check_epoch(&state)?;
         offset

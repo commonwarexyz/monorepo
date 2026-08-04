@@ -46,6 +46,9 @@ const MAX_BATCH_REQUESTS: usize = 1024;
 /// from whatever executor it has.
 pub type Spawn = Arc<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 
+/// Receives one staged request's acknowledgment; Ok proves durability.
+pub(super) type Ack = oneshot::Receiver<Result<(), Error>>;
+
 /// State shared between stagers and the committer.
 pub(super) struct Shared {
     state: Mutex<State>,
@@ -63,11 +66,24 @@ struct State {
     subsumed: u64,
 }
 
-/// One staged record awaiting durability.
+/// One staged record awaiting durability, or a rider (no record) that just awaits
+/// its batch's completion: because the queue is ordered, a rider acknowledges only
+/// after everything staged before it is durable.
 pub(super) struct Request {
-    record: Record,
+    record: Option<Record>,
     seq: u64,
     done: oneshot::Sender<Result<(), Error>>,
+}
+
+/// What one catalog transaction stages.
+pub(super) enum Stage {
+    /// Nothing: the transaction only read (or failed validation).
+    Nothing,
+    /// No record, but an acknowledgment that rides the next batch: proof that every
+    /// earlier-staged record is durable.
+    Rider,
+    /// A record to journal.
+    Record(Record),
 }
 
 fn poisoned_error() -> Error {
@@ -122,33 +138,54 @@ impl Committer {
         &self.shared
     }
 
-    /// Validates and applies `record` to the catalog, then journals it, returning
-    /// when it is durable. The catalog change is visible to reads immediately (as
-    /// filesystem namespaces behave); Ok proves durability.
-    pub async fn submit(&self, record: Record) -> Result<(), Error> {
+    /// One atomic catalog transaction: runs `f` over the catalog and stages whatever
+    /// it returns, all under one critical section, so catalog order is queue order is
+    /// journal order. A staged record was already applied by `f`'s caller contract:
+    /// this method applies it, and an apply failure is an internal invariant breach
+    /// (callers validate inside `f`, under the same lock).
+    ///
+    /// Returns `f`'s output and, if anything was staged, the ack receiver: awaiting
+    /// it proves durability.
+    pub fn transact<T>(
+        &self,
+        f: impl FnOnce(&mut Catalog) -> (Stage, T),
+    ) -> Result<(Option<Ack>, T), Error> {
         if self.shared.poisoned.load(Ordering::Acquire) {
             return Err(poisoned_error());
         }
-        let done = {
-            let mut state = self.shared.state.lock();
-            state
-                .catalog
-                .apply(&record)
-                .map_err(|reason| Error::Io(Arc::new(std::io::Error::other(reason))))?;
-            state.staged += 1;
-            let (done, ack) = oneshot::channel();
-            let request = Request {
-                record,
-                seq: state.staged,
-                done,
-            };
-            // Enqueued under the lock, so queue order is staging order.
-            self.requests
-                .send(request)
-                .map_err(|_| Error::Closed)
-                .map(|()| ack)?
+        let mut state = self.shared.state.lock();
+        let (stage, out) = f(&mut state.catalog);
+        let record = match stage {
+            Stage::Nothing => return Ok((None, out)),
+            Stage::Rider => None,
+            Stage::Record(record) => {
+                state
+                    .catalog
+                    .apply(&record)
+                    .map_err(|reason| Error::Io(Arc::new(std::io::Error::other(reason))))?;
+                Some(record)
+            }
         };
-        done.await.map_err(|_| Error::Closed)?
+        state.staged += 1;
+        let (done, ack) = oneshot::channel();
+        let request = Request {
+            record,
+            seq: state.staged,
+            done,
+        };
+        // Enqueued under the lock, so queue order is staging order.
+        self.requests.send(request).map_err(|_| Error::Closed)?;
+        Ok((Some(ack), out))
+    }
+
+    /// Applies `record` to the catalog and journals it, returning when durable. The
+    /// catalog change is visible to reads immediately (as filesystem namespaces
+    /// behave); Ok proves durability.
+    pub async fn submit(&self, record: Record) -> Result<(), Error> {
+        let (ack, ()) = self.transact(|_| (Stage::Record(record), ()))?;
+        ack.expect("record staged")
+            .await
+            .map_err(|_| Error::Closed)?
     }
 }
 
@@ -200,7 +237,9 @@ async fn run<M: Medium>(
         let subsumed = shared.state.lock().subsumed;
         let mut batch = batch.into_iter();
         for request in batch.by_ref() {
-            if request.seq > subsumed {
+            if let Some(record) = &request.record
+                && request.seq > subsumed
+            {
                 // Headroom for one maximum record keeps the batch's total within the
                 // drain bound, which is exactly recovery's scrub window.
                 if frames.len() as u64 + u64::from(MAX_RECORD_LEN) + 16 > MAX_DRAIN_BYTES {
@@ -208,7 +247,7 @@ async fn run<M: Medium>(
                     carry.extend(batch);
                     break;
                 }
-                request.record.encode(journal.salt(), &mut frames);
+                record.encode(journal.salt(), &mut frames);
             }
             acks.push(request.done);
         }
