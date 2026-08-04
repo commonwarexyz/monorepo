@@ -107,7 +107,7 @@ struct MessengerState<P: PublicKey> {
 }
 
 impl<P: PublicKey> MessengerState<P> {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             mailbox: OnceLock::new(),
             subscriptions: Mutex::new(Vec::new()),

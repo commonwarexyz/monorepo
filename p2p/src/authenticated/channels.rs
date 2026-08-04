@@ -191,7 +191,7 @@ impl<P: PublicKey> Channels<P> {
         }
     }
 
-    pub(super) fn outbound_mailbox_size(&self, base: NonZeroUsize) -> NonZeroUsize {
+    pub(super) const fn outbound_mailbox_size(&self, base: NonZeroUsize) -> NonZeroUsize {
         base.checked_add(self.outbound_backlog)
             .expect("router mailbox capacity overflow")
     }
