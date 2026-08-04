@@ -177,6 +177,8 @@ struct SimDir {
 
 struct SimState {
     rng: u64,
+    /// Completed file barriers, for tests asserting group commit collapses them.
+    syncs: u64,
     /// Post-crash handle invalidation: handles remember the epoch they were opened in.
     epoch: u64,
     /// Barriers left before every barrier fails (fault injection); None = never fail.
@@ -221,6 +223,7 @@ impl Sim {
         Self {
             state: Arc::new(Mutex::new(SimState {
                 rng: seed,
+                syncs: 0,
                 epoch: 0,
                 sync_fuse: None,
                 next_file: 0,
@@ -229,6 +232,11 @@ impl Sim {
                 root_durable: BTreeMap::new(),
             })),
         }
+    }
+
+    /// Completed file barriers so far.
+    pub fn sync_count(&self) -> u64 {
+        self.state.lock().syncs
     }
 
     /// After `n` more successful barriers, every barrier (file, directory, or root)
@@ -386,6 +394,7 @@ impl File for SimFileHandle {
         let mut state = self.state.lock();
         self.check_epoch(&state)?;
         state.burn_fuse()?;
+        state.syncs += 1;
         let file = state
             .files
             .get_mut(&self.id)

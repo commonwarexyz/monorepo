@@ -16,10 +16,11 @@
 //!
 //! Built bottom-up: [medium] is the I/O seam and crash model; [format] the on-disk
 //! layout; [catalog] the namespace as a fold over records; [journal] creation,
-//! recovery, and checkpoints. The committer and the `Storage` implementation land on
-//! top of these.
+//! recovery, and checkpoints; [committer] group commit. The `Storage` implementation
+//! lands on top of these.
 
 mod catalog;
+mod committer;
 mod format;
 mod journal;
 pub mod medium;

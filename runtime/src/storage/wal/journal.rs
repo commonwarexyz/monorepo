@@ -120,15 +120,16 @@ impl<M: Medium> Journal<M> {
         self.file.sync().await
     }
 
-    /// Writes `catalog` as a snapshot into a fresh extent and flips the root to it.
-    /// On return the journal appends into the new extent.
-    pub async fn checkpoint(&mut self, catalog: &Catalog) -> Result<(), Error> {
+    /// Writes a catalog snapshot (from [Catalog::snapshot], with its id floor) into a
+    /// fresh extent and flips the root to it. Taken as records rather than `&Catalog`
+    /// so the caller never holds a catalog lock across this I/O.
+    pub async fn checkpoint(&mut self, records: &[Record], next_blob_id: u64) -> Result<(), Error> {
         // Encode the snapshot under the new epoch: these records live in the new
         // extent and must never validate in the old one, or vice versa.
         let epoch = self.root.epoch + 1;
         let salt = Salt::new(&self.incarnation, epoch);
         let mut snapshot = Vec::new();
-        for record in catalog.snapshot() {
+        for record in records {
             record.encode(&salt, &mut snapshot);
         }
 
@@ -158,7 +159,7 @@ impl<M: Medium> Journal<M> {
             seq: self.root.seq + 1,
             epoch,
             extent,
-            next_blob_id: catalog.next_blob_id(),
+            next_blob_id,
         };
         let page = root.encode(&self.incarnation);
         self.file
@@ -496,7 +497,10 @@ mod tests {
             }
             commit(&mut journal, &records).await;
 
-            journal.checkpoint(&catalog).await.unwrap();
+            journal
+                .checkpoint(&catalog.snapshot(), catalog.next_blob_id())
+                .await
+                .unwrap();
 
             // Records after the checkpoint land in the new extent.
             let record = create_record(catalog.mint_id(), b"post");
@@ -526,7 +530,10 @@ mod tests {
             // Many flips: placement must cycle through gaps, not grow the file
             // unboundedly. With only two live extents, the file stays small.
             for _ in 0..16 {
-                journal.checkpoint(&catalog).await.unwrap();
+                journal
+                    .checkpoint(&catalog.snapshot(), catalog.next_blob_id())
+                    .await
+                    .unwrap();
             }
             let file = sim.open(".wal", "family.cww").await.unwrap().unwrap();
             let size = file.size().await.unwrap();
@@ -556,7 +563,9 @@ mod tests {
                     commit(&mut journal, &records).await;
 
                     sim.fail_syncs_after(fuse);
-                    let result = journal.checkpoint(&catalog).await;
+                    let result = journal
+                        .checkpoint(&catalog.snapshot(), catalog.next_blob_id())
+                        .await;
                     sim.crash();
 
                     let (_, recovered) = open(&sim).await;
