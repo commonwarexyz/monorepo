@@ -16,6 +16,7 @@ use rand_core::Rng;
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
+    mem,
     time::{Duration, SystemTime},
 };
 use tracing::debug;
@@ -256,13 +257,16 @@ where
         // Try each pending key until one succeeds
         let mut earliest_rate_limit: Option<SystemTime> = None;
         let mut found_eligible_peers = false;
-        let mut skipped = Vec::new();
-        while let Some((key, priority @ (retry, _))) = self.pending.pop() {
+
+        // Detach the queue to leave skipped entries untouched and remove only the
+        // successfully sent key.
+        let pending = mem::replace(&mut self.pending, PrioritySet::new());
+        let mut sent = None;
+        'pending: for (key, &(retry, _)) in pending.iter() {
             // Skip keys with no eligible peers
-            let peers = self.get_eligible_peers(&key, retry);
+            let peers = self.get_eligible_peers(key, retry);
             if peers.is_empty() {
                 self.requests_created.inc(Status::Dropped);
-                skipped.push((key, priority));
                 continue;
             }
 
@@ -292,22 +296,9 @@ where
                     Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
-                        for (key, priority) in skipped {
-                            self.pending.put(key, priority);
-                        }
                         let now = self.context.current();
-                        let deadline = now.checked_add(self.timeout).expect("time overflowed");
-                        self.active.put(id, deadline);
-                        self.requests.insert(
-                            id,
-                            ActiveRequest {
-                                key: key.clone(),
-                                peer,
-                                start: now,
-                            },
-                        );
-                        self.key_to_id.insert(key, id);
-                        return;
+                        sent = Some((key.clone(), id, peer, now));
+                        break 'pending;
                     }
                     feedback @ (Unreliable::Rejected | Unreliable::Outcome(Feedback::Closed)) => {
                         // Send was not handled, try next peer
@@ -317,12 +308,24 @@ where
                     }
                 }
             }
-            skipped.push((key, priority));
         }
 
-        // Preserve the original ordering of requests that could not be sent.
-        for (key, priority) in skipped {
-            self.pending.put(key, priority);
+        // Restore the pending queue before moving a successful request to active tracking.
+        self.pending = pending;
+        if let Some((key, id, peer, start)) = sent {
+            assert!(self.pending.remove(&key));
+            let deadline = start.checked_add(self.timeout).expect("time overflowed");
+            self.active.put(id, deadline);
+            self.requests.insert(
+                id,
+                ActiveRequest {
+                    key: key.clone(),
+                    peer,
+                    start,
+                },
+            );
+            self.key_to_id.insert(key, id);
+            return;
         }
 
         // Set waiter for next fetch attempt
