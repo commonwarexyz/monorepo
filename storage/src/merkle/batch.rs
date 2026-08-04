@@ -33,15 +33,16 @@
 //! # Parent chain and memory
 //!
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
-//! plus `Arc` refs to each ancestor's data, collected during
+//! plus `Arc` refs to each retained ancestor's data, collected during
 //! [`UnmerkleizedBatch::merkleize`]. These ancestor batches' data are used by
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
 //! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
 //! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, but their
-//! data is already captured in `ancestor_appended` / `ancestor_overwrites`.
+//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
+//! data in the committed [`Mem`]. `ancestor_base_size` records the position before the
+//! oldest retained ancestor so the remaining suffix is replayed at the correct offset.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
 //! (keeping it alive for the walk), and the `Weak` chain is walked to collect

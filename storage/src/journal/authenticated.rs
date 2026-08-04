@@ -80,14 +80,10 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         self
     }
 
-    /// Collect ancestor items from the parent chain before downgrading.
+    /// Collect ancestor items and the leaf count before the oldest retained ancestor.
     fn collect_ancestor_items(
-        parent: &Option<MerkleizedParent<F, H, Item, S>>,
-        base_leaves: u64,
+        parent: &MerkleizedParent<F, H, Item, S>,
     ) -> (u64, Vec<Arc<Vec<Item>>>) {
-        let Some(parent) = parent else {
-            return (base_leaves, Vec::new());
-        };
         let mut items = Vec::new();
         let mut base_leaves = parent.as_ref().size() - parent.items.len() as u64;
         if !parent.items.is_empty() {
@@ -115,9 +111,10 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             parent,
         } = self;
 
-        let base_leaves = *inner.leaves() - items.len() as u64;
-        let (ancestor_base_leaves, ancestor_items) =
-            Self::collect_ancestor_items(&parent, base_leaves);
+        let (ancestor_base_leaves, ancestor_items) = parent.as_ref().map_or_else(
+            || (*inner.leaves() - items.len() as u64, Vec::new()),
+            Self::collect_ancestor_items,
+        );
         let items = Arc::new(items);
         let merkle = inner.merkleize(base, &hasher);
         Arc::new(MerkleizedBatch {
@@ -558,7 +555,7 @@ where
         if committed_leaves < batch.ancestor_base_leaves {
             return Err(merkle::Error::AncestorDropped {
                 expected: Position::<F>::try_from(Location::new(batch.ancestor_base_leaves))?,
-                actual: merkle_size,
+                actual: Position::<F>::try_from(Location::new(committed_leaves))?,
             }
             .into());
         }
@@ -3451,6 +3448,49 @@ mod tests {
     fn test_apply_batch_skips_only_committed_ancestor_items_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_apply_batch_skips_only_committed_ancestor_items_inner::<mmb::Family>);
+    }
+
+    /// A descendant whose uncommitted ancestor was dropped must fail before
+    /// appending any of its retained journal items.
+    async fn test_apply_batch_detects_dropped_uncommitted_ancestor_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let journal =
+            create_empty_journal::<F>(context.child("storage"), "dropped-uncommitted").await;
+
+        let a_batch = journal.new_batch().add(create_operation::<F>(1));
+        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(2));
+        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+
+        drop(a);
+        let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(3));
+        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+        drop(b);
+
+        assert_eq!(c.ancestor_base_leaves, 1);
+        assert_eq!(c.ancestor_items.len(), 1);
+
+        let result = journal.apply_batch(&c).await;
+        assert!(
+            matches!(
+                result,
+                Err(super::Error::Merkle(merkle::Error::AncestorDropped { .. }))
+            ),
+            "expected AncestorDropped, got {result:?}"
+        );
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_detects_dropped_uncommitted_ancestor_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_detects_dropped_uncommitted_ancestor_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_detects_dropped_uncommitted_ancestor_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_detects_dropped_uncommitted_ancestor_inner::<mmb::Family>);
     }
 
     /// A dropped committed prefix must not shift the remaining uncommitted
