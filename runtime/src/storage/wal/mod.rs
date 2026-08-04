@@ -45,6 +45,7 @@
 //! recovery, and checkpoints; [committer] group commit; [blob] the handles; this
 //! module the family registry and the [crate::Storage] implementation.
 
+mod atomic;
 mod blob;
 mod catalog;
 mod committer;
@@ -55,6 +56,7 @@ mod journal;
 pub mod medium;
 
 use super::header::{Header, Layout, resolve as resolve_header};
+pub use atomic::AtomicBlob;
 pub use blob::Blob;
 pub use committer::Spawn;
 use committer::{Committer, Stage};
@@ -309,6 +311,294 @@ impl<M: Medium> Storage<M> {
         Ok(())
     }
 
+    /// Finds the blob's row or mints one, returning it once its creation is
+    /// provably durable ("Ok means durably created").
+    ///
+    /// An existing row rides a frameless request behind its create in the committer
+    /// queue, so a concurrent opener's not-yet-durable create is covered. Minting is
+    /// serialized per name by a reservation, and a file already under the name (only
+    /// possible from an unacknowledged remove, since acknowledged removes unlink
+    /// durably) is replaced durably BEFORE the create record is staged, so no crash
+    /// can revive predecessor bytes under the durable new row.
+    async fn claim_row(
+        &self,
+        committer: &Committer,
+        partition: &str,
+        name: &[u8],
+        mint: impl Fn() -> Kind,
+        versions: &RangeInclusive<u16>,
+    ) -> Result<catalog::Row, crate::Error> {
+        let filename = hex(name);
+        let (ack, row) = loop {
+            let existing = committer
+                .shared()
+                .read(|catalog| catalog.get(partition, name).cloned());
+            if let Some(row) = existing {
+                let (ack, ()) = committer.transact(|catalog| {
+                    match catalog.get(partition, name) {
+                        Some(_) => (Stage::Rider, ()),
+                        // Deleted between the read and the transact; mint instead.
+                        None => (Stage::Nothing, ()),
+                    }
+                })?;
+                match ack {
+                    Some(ack) => break (ack, row),
+                    None => continue,
+                }
+            }
+
+            let reservation = match committer.shared().reserve(name) {
+                Ok(reservation) => reservation,
+                Err(waiter) => {
+                    let _ = waiter.await;
+                    continue;
+                }
+            };
+            if self.medium.open(partition, &filename).await?.is_some() {
+                let _ = self.medium.remove(partition, &filename).await;
+                self.medium.create(partition, &filename).await?;
+                self.medium.sync_dir(partition).await?;
+            }
+            let version = *versions.end();
+            let (ack, row) = committer.transact(|catalog| {
+                if catalog.get(partition, name).is_some() {
+                    // Lost a race that slipped a row in; retry as existing.
+                    return (Stage::Nothing, None);
+                }
+                let row = catalog::Row {
+                    id: catalog.mint_id(),
+                    kind: mint(),
+                    version,
+                };
+                let record = Record::Create {
+                    id: row.id,
+                    kind: row.kind.clone(),
+                    version,
+                    partition: partition.to_string(),
+                    name: name.to_vec(),
+                };
+                (Stage::Record(record), Some(row))
+            })?;
+            drop(reservation);
+            match (ack, row) {
+                (Some(ack), Some(row)) => break (ack, row),
+                _ => continue,
+            }
+        };
+        if !versions.contains(&row.version) {
+            return Err(crate::Error::BlobVersionMismatch {
+                expected: versions.clone(),
+                found: row.version,
+            });
+        }
+        ack.await.map_err(|_| crate::Error::Closed)??;
+        Ok(row)
+    }
+
+    /// Opens an existing atomic blob or creates a new one. The returned handle is
+    /// append-only with all-or-nothing publication; see [AtomicBlob]. Opening an
+    /// ordinary blob this way fails (promote it first); opening an atomic blob with
+    /// [crate::Storage::open_versioned] fails symmetrically.
+    pub async fn open_atomic_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(AtomicBlob<M>, u64, u16), crate::Error> {
+        super::validate_partition_name(partition)?;
+        if name.len() > MAX_NAME_LEN {
+            return Err(invalid_input(partition, name, "blob name too long"));
+        }
+        let committer = self
+            .family(partition, true)
+            .await?
+            .expect("creating family lookups always return a committer");
+        let row = self
+            .claim_row(&committer, partition, name, Kind::atomic, &versions)
+            .await?;
+        let (committed, trusted) = match &row.kind {
+            Kind::Atomic {
+                committed, trusted, ..
+            } => (*committed, *trusted),
+            Kind::Ordinary => {
+                return Err(invalid_input(
+                    partition,
+                    name,
+                    "blob is ordinary; promote it first",
+                ));
+            }
+        };
+        let filename = hex(name);
+        let (file, data_offset) = self
+            .open_atomic_file(partition, name, &filename, row.version, trusted)
+            .await?;
+        let blob = AtomicBlob::new(
+            self.medium.clone(),
+            file,
+            committer,
+            row.id,
+            partition,
+            name,
+            data_offset,
+            committed,
+        );
+        Ok((blob, committed, row.version))
+    }
+
+    /// Opens an atomic blob's file. Unlike ordinary blobs, a missing or torn file
+    /// under a row with trusted content is a hard error: those bytes were barriered
+    /// before the record asserting them was written (rule M), so their absence means
+    /// the filesystem broke its guarantee, never a legal crash shape. A row with no
+    /// trusted content recreates freely (all its committed bytes live in the WAL).
+    async fn open_atomic_file(
+        &self,
+        partition: &str,
+        name: &[u8],
+        filename: &str,
+        version: u16,
+        trusted: u64,
+    ) -> Result<(M::File, u64), crate::Error> {
+        let existing = self.medium.open(partition, filename).await?;
+        let file = match existing {
+            Some(file) => file,
+            None if trusted == 0 => self.medium.create(partition, filename).await?,
+            None => {
+                return Err(crate::Error::BlobCorrupt(
+                    partition.to_string(),
+                    hex(name),
+                    "atomic blob file with trusted content is missing".into(),
+                ));
+            }
+        };
+        let raw_len = file.size().await?;
+        let raw = file.read_at(0, Header::resolve_len(raw_len)).await?;
+        match resolve_header(&raw, raw_len, &(version..=version), partition, name)? {
+            Some((_, _, data_offset)) => Ok((file, data_offset)),
+            None if trusted == 0 => {
+                let (region, _) = Header::create(&(version..=version));
+                file.write_at(0, region).await?;
+                Ok((file, Layout::V1.data_offset()))
+            }
+            None => Err(crate::Error::BlobCorrupt(
+                partition.to_string(),
+                hex(name),
+                "atomic blob file with trusted content has no valid header".into(),
+            )),
+        }
+    }
+
+    /// Publishes several atomic blobs' staged epochs all-or-nothing: after Ok,
+    /// recovery reproduces every epoch; a crash before the shared frame survives
+    /// reproduces none of them. All blobs must live in `partition` (one family).
+    ///
+    /// Bulk epochs are welcome (their waves complete before the frame), except one
+    /// that rewinds below its trusted length, which needs a durability split that
+    /// would break the batch's atomicity: publish that blob alone.
+    pub async fn publish_all(
+        &self,
+        partition: &str,
+        blobs: &[&AtomicBlob<M>],
+    ) -> Result<(), crate::Error> {
+        let Some(committer) = self.family(partition, false).await? else {
+            return Err(crate::Error::PartitionMissing(partition.to_string()));
+        };
+        for blob in blobs {
+            if blob.partition() != partition {
+                return Err(crate::Error::Io(Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "a batch cannot span partitions (families)",
+                ))));
+            }
+        }
+
+        // Freeze every epoch, plan each (waves included), and stage one frame.
+        let mut frozen: Vec<(usize, usize)> = Vec::new();
+        let result: Result<Option<committer::Ack>, crate::Error> = async {
+            let mut records = Vec::new();
+            for (i, blob) in blobs.iter().enumerate() {
+                if let Some(ops) = blob.freeze()? {
+                    frozen.push((i, ops.len()));
+                    for record in blob.plan(&ops, false).await? {
+                        blob.verify_claims(&record);
+                        records.push(record);
+                    }
+                }
+            }
+            if records.is_empty() {
+                return Ok(None);
+            }
+            let record = if records.len() == 1 {
+                records.pop().expect("one record")
+            } else {
+                Record::Batch(records)
+            };
+            let (ack, ()) = committer.transact(|_| (Stage::Record(record), ()))?;
+            Ok(ack)
+        }
+        .await;
+
+        let failed = result.is_err();
+        for (i, count) in frozen {
+            blobs[i].unfreeze(count, failed);
+        }
+        match result? {
+            Some(ack) => ack.await.map_err(|_| crate::Error::Closed)?,
+            None => Ok(()),
+        }
+    }
+
+    /// Promotes an ordinary blob to atomic, adopting its current content as the
+    /// committed (and trusted) state. The file and its dentry chain are barriered
+    /// before the record asserting them is journaled (rule M). Ordinary handles
+    /// opened before promotion must not mutate the blob afterwards; doing so is
+    /// unspecified, like any conflicting concurrent mutation.
+    pub async fn promote(&self, partition: &str, name: &[u8]) -> Result<(), crate::Error> {
+        super::validate_partition_name(partition)?;
+        let Some(committer) = self.family(partition, false).await? else {
+            return Err(crate::Error::PartitionMissing(partition.to_string()));
+        };
+        let row = committer
+            .shared()
+            .read(|catalog| catalog.get(partition, name).cloned())
+            .ok_or_else(|| crate::Error::BlobMissing(partition.to_string(), hex(name)))?;
+        if row.kind != Kind::Ordinary {
+            return Ok(()); // already atomic
+        }
+        let filename = hex(name);
+        let (file, data_offset, size) = self
+            .open_blob(partition, name, &filename, row.version)
+            .await?;
+        // The wave: content and dentry chain durable before the record.
+        file.sync().await?;
+        self.medium.sync_dir(partition).await?;
+        self.medium.sync_root().await?;
+        debug_assert!(self.medium.covered(&medium::Claim::FileBytes {
+            dir: partition,
+            name: &filename,
+            start: 0,
+            end: data_offset + size,
+        }));
+        let (ack, staged) = committer.transact(|catalog| {
+            match catalog.get(partition, name) {
+                Some(current) if current.id == row.id && current.kind == Kind::Ordinary => (
+                    Stage::Record(Record::Promote {
+                        id: row.id,
+                        len: size,
+                    }),
+                    true,
+                ),
+                // Deleted or promoted concurrently; nothing to do here.
+                _ => (Stage::Nothing, false),
+            }
+        })?;
+        if !staged {
+            return Ok(());
+        }
+        ack.expect("promotion staged")
+            .await
+            .map_err(|_| crate::Error::Closed)?
+    }
+
     /// Opens (creating if needed) the blob's file and resolves its header layout,
     /// returning the file, its data offset, and its logical size.
     ///
@@ -380,78 +670,22 @@ impl<M: Medium> crate::Storage for Storage<M> {
             .await?
             .expect("creating family lookups always return a committer");
 
-        // Find the row, or mint one under a name reservation. An existing row stages
-        // a rider, because its create (staged by a concurrent opener) may not be
-        // durable yet and our Ok must prove it is.
-        let filename = hex(name);
-        let (ack, version) = loop {
-            let existing = committer
-                .shared()
-                .read(|catalog| catalog.get(partition, name).map(|row| row.version));
-            if let Some(version) = existing {
-                let (ack, ()) = committer.transact(|catalog| {
-                    match catalog.get(partition, name) {
-                        Some(_) => (Stage::Rider, ()),
-                        // Deleted between the read and the transact; mint instead.
-                        None => (Stage::Nothing, ()),
-                    }
-                })?;
-                match ack {
-                    Some(ack) => break (ack, version),
-                    None => continue,
-                }
-            }
-
-            // Mint path, serialized per name: a file already under the name can only
-            // be an unacknowledged remove's leftover (acknowledged removes unlink
-            // durably), and it must be replaced durably BEFORE the create record is
-            // staged, or a crash could revive it under the durable new row.
-            let reservation = match committer.shared().reserve(name) {
-                Ok(reservation) => reservation,
-                Err(waiter) => {
-                    let _ = waiter.await;
-                    continue;
-                }
-            };
-            if self.medium.open(partition, &filename).await?.is_some() {
-                let _ = self.medium.remove(partition, &filename).await;
-                self.medium.create(partition, &filename).await?;
-                self.medium.sync_dir(partition).await?;
-            }
-            let version = *versions.end();
-            let (ack, staged) = committer.transact(|catalog| {
-                if catalog.get(partition, name).is_some() {
-                    // Lost a race that slipped a row in; retry as existing.
-                    return (Stage::Nothing, false);
-                }
-                let record = Record::Create {
-                    id: catalog.mint_id(),
-                    kind: Kind::Ordinary,
-                    version,
-                    partition: partition.to_string(),
-                    name: name.to_vec(),
-                };
-                (Stage::Record(record), true)
-            })?;
-            drop(reservation);
-            match (ack, staged) {
-                (Some(ack), true) => break (ack, version),
-                _ => continue,
-            }
-        };
-        if !versions.contains(&version) {
-            return Err(crate::Error::BlobVersionMismatch {
-                expected: versions,
-                found: version,
-            });
+        let row = self
+            .claim_row(&committer, partition, name, || Kind::Ordinary, &versions)
+            .await?;
+        if row.kind != Kind::Ordinary {
+            return Err(invalid_input(
+                partition,
+                name,
+                "blob is atomic; use open_atomic_versioned",
+            ));
         }
-        // "Ok means durably created": await the create record, or the rider proving
-        // an earlier opener's create is durable.
-        ack.await.map_err(|_| crate::Error::Closed)??;
-
-        let (file, data_offset, size) = self.open_blob(partition, name, &filename, version).await?;
+        let filename = hex(name);
+        let (file, data_offset, size) = self
+            .open_blob(partition, name, &filename, row.version)
+            .await?;
         let blob = Blob::new(self.medium.clone(), file, partition, name, data_offset);
-        Ok((blob, size, version))
+        Ok((blob, size, row.version))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
@@ -587,6 +821,237 @@ mod tests {
         assert_eq!(size, 100);
         let bytes = blob.read_at(0, 100).await.unwrap().coalesce();
         assert_eq!(bytes.as_ref(), &[1u8; 100][..]);
+    }
+
+    /// The plan's centerpiece scenario: rewind below the trusted length, then
+    /// append, published atomically in ONE barrier (the inline route writes no file
+    /// bytes, so no durability split is needed).
+    #[tokio::test]
+    async fn rewind_then_append_publishes_atomically() {
+        for seed in 0..16 {
+            let sim = Sim::new(seed);
+            let storage = wal_storage(&sim);
+            // Bulk-publish 100 KiB so trusted == committed == 100 KiB (file-backed).
+            let (blob, _, _) = storage
+                .open_atomic_versioned("p", b"a", 0..=0)
+                .await
+                .unwrap();
+            blob.append(vec![0xAA; 100 << 10]).unwrap();
+            blob.publish().await.unwrap();
+
+            // Rewind below trusted, then a small append: one inline publication.
+            blob.rewind(50).unwrap();
+            blob.append(vec![0xBB; 10]).unwrap();
+            assert_eq!(blob.size(), 60);
+            blob.publish().await.unwrap();
+
+            sim.crash();
+            let storage = wal_storage(&sim);
+            let (blob, committed, _) = storage
+                .open_atomic_versioned("p", b"a", 0..=0)
+                .await
+                .unwrap();
+            assert_eq!(committed, 60, "seed {seed}");
+            let bytes = blob.read_at(0, 60).await.unwrap().coalesce();
+            assert_eq!(&bytes.as_ref()[..50], &[0xAA; 50][..], "seed {seed}");
+            assert_eq!(&bytes.as_ref()[50..], &[0xBB; 10][..], "seed {seed}");
+        }
+    }
+
+    /// Unpublished operations are invisible to recovery; published ones are
+    /// reproduced whole. The epoch is the atomicity unit.
+    #[tokio::test]
+    async fn unpublished_epochs_vanish_published_epochs_survive() {
+        for seed in 0..16 {
+            let sim = Sim::new(seed);
+            let storage = wal_storage(&sim);
+            let (blob, _, _) = storage
+                .open_atomic_versioned("p", b"a", 0..=0)
+                .await
+                .unwrap();
+            blob.append(vec![1u8; 100]).unwrap();
+            blob.publish().await.unwrap();
+            blob.append(vec![2u8; 100]).unwrap(); // never published
+
+            sim.crash();
+            let storage = wal_storage(&sim);
+            let (_, committed, _) = storage
+                .open_atomic_versioned("p", b"a", 0..=0)
+                .await
+                .unwrap();
+            assert_eq!(committed, 100, "seed {seed}");
+        }
+    }
+
+    /// Two blobs' epochs published through publish_all recover together or not at
+    /// all, even when one is inline and the other bulk.
+    #[tokio::test]
+    async fn multi_blob_publication_is_all_or_nothing() {
+        for seed in 0..24 {
+            let sim = Sim::new(seed);
+            let storage = wal_storage(&sim);
+            let (value, _, _) = storage
+                .open_atomic_versioned("p", b"value", 0..=0)
+                .await
+                .unwrap();
+            let (index, _, _) = storage
+                .open_atomic_versioned("p", b"index", 0..=0)
+                .await
+                .unwrap();
+
+            // A durable base pair.
+            value.append(vec![0x11; 100 << 10]).unwrap(); // bulk
+            index.append(vec![0x22; 16]).unwrap(); // inline
+            storage.publish_all("p", &[&value, &index]).await.unwrap();
+
+            // A second pair, racing a crash: publish concurrently with nothing
+            // guaranteed, then crash. Whatever survives must be paired.
+            value.append(vec![0x33; 80 << 10]).unwrap();
+            index.append(vec![0x44; 16]).unwrap();
+            // Let the publication run to completion or not; either way the crash
+            // decides what became durable.
+            let pair = [&value, &index];
+            let _ = storage.publish_all("p", &pair).await;
+            sim.crash();
+
+            let storage = wal_storage(&sim);
+            let (_, value_len, _) = storage
+                .open_atomic_versioned("p", b"value", 0..=0)
+                .await
+                .unwrap();
+            let (_, index_len, _) = storage
+                .open_atomic_versioned("p", b"index", 0..=0)
+                .await
+                .unwrap();
+            let first = value_len == (100 << 10) && index_len == 16;
+            let both = value_len == (180 << 10) && index_len == 32;
+            assert!(
+                first || both,
+                "seed {seed}: value {value_len} index {index_len}"
+            );
+        }
+    }
+
+    /// A bulk epoch rewinding below the trusted length publishes alone (with its
+    /// durability split) and is rejected from multi-blob batches.
+    #[tokio::test]
+    async fn bulk_rewind_below_trusted_splits_and_rejects_batching() {
+        let sim = Sim::new(7);
+        let storage = wal_storage(&sim);
+        let (blob, _, _) = storage
+            .open_atomic_versioned("p", b"a", 0..=0)
+            .await
+            .unwrap();
+        blob.append(vec![0xAA; 100 << 10]).unwrap();
+        blob.publish().await.unwrap();
+
+        // Rewind below trusted plus a bulk append: batching is refused...
+        blob.rewind(10).unwrap();
+        blob.append(vec![0xBB; 90 << 10]).unwrap();
+        assert!(storage.publish_all("p", &[&blob]).await.is_err());
+        // ...but single-blob publication handles it (rewind barrier, then bulk).
+        blob.publish().await.unwrap();
+
+        sim.crash();
+        let storage = wal_storage(&sim);
+        let (blob, committed, _) = storage
+            .open_atomic_versioned("p", b"a", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(committed, 10 + (90 << 10));
+        let bytes = blob.read_at(0, 20).await.unwrap().coalesce();
+        assert_eq!(&bytes.as_ref()[..10], &[0xAA; 10][..]);
+        assert_eq!(&bytes.as_ref()[10..], &[0xBB; 10][..]);
+    }
+
+    /// Inline (WAL-resident) bytes survive checkpoints: the snapshot rows carry
+    /// overlays forward, and recovery still reads no payload from blob files.
+    #[tokio::test]
+    async fn checkpoints_carry_overlays() {
+        let sim = Sim::new(8);
+        let storage = wal_storage(&sim);
+        let (blob, _, _) = storage
+            .open_atomic_versioned("p", b"a", 0..=0)
+            .await
+            .unwrap();
+        blob.append(vec![0x77; 1000]).unwrap();
+        blob.publish().await.unwrap(); // inline: bytes live only in the WAL
+
+        // Force checkpoints with namespace churn.
+        for i in 0..128u32 {
+            let name = format!("{i:04}-{}", "x".repeat(1000));
+            storage.open("p", name.as_bytes()).await.unwrap();
+        }
+
+        sim.crash();
+        let storage = wal_storage(&sim);
+        let (blob, committed, _) = storage
+            .open_atomic_versioned("p", b"a", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(committed, 1000);
+        let bytes = blob.read_at(0, 1000).await.unwrap().coalesce();
+        assert_eq!(bytes.as_ref(), &[0x77; 1000][..]);
+    }
+
+    /// Promotion adopts an ordinary blob's synced content as the atomic committed
+    /// state; cross-kind opens fail in both directions.
+    #[tokio::test]
+    async fn promotion_and_cross_kind_opens() {
+        let sim = Sim::new(9);
+        let storage = wal_storage(&sim);
+        let (blob, _) = storage.open("p", b"a").await.unwrap();
+        blob.write_at(0, vec![0x55; 300], crate::WriteOptions::SYNC)
+            .await
+            .unwrap();
+        // An ordinary blob cannot be opened atomically...
+        assert!(
+            storage
+                .open_atomic_versioned("p", b"a", 0..=0)
+                .await
+                .is_err()
+        );
+        storage.promote("p", b"a").await.unwrap();
+        // ...and a promoted blob cannot be opened ordinarily.
+        assert!(storage.open("p", b"a").await.is_err());
+
+        sim.crash();
+        let storage = wal_storage(&sim);
+        let (blob, committed, _) = storage
+            .open_atomic_versioned("p", b"a", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(committed, 300);
+        blob.append(vec![0x66; 10]).unwrap();
+        blob.publish().await.unwrap();
+        let bytes = blob.read_at(295, 15).await.unwrap().coalesce();
+        assert_eq!(&bytes.as_ref()[..5], &[0x55; 5][..]);
+        assert_eq!(&bytes.as_ref()[5..], &[0x66; 10][..]);
+    }
+
+    /// The whole stack over the rule-M checker: every CommitAtomic and Promote
+    /// claim is verified against what barriers actually covered.
+    #[tokio::test]
+    async fn atomic_paths_pass_the_rule_m_checker() {
+        let medium = medium::Checked::new(Sim::new(10));
+        let storage = Storage::new(medium, test_spawn(), Config::default());
+        let (blob, _, _) = storage
+            .open_atomic_versioned("p", b"a", 0..=0)
+            .await
+            .unwrap();
+        blob.append(vec![0xAB; 100 << 10]).unwrap(); // bulk: wave then record
+        blob.publish().await.unwrap();
+        blob.append(vec![0xCD; 100]).unwrap(); // inline
+        blob.publish().await.unwrap();
+        blob.append(vec![0xEF; 100 << 10]).unwrap(); // bulk over an overlay
+        blob.publish().await.unwrap();
+
+        let (ordinary, _) = storage.open("p", b"b").await.unwrap();
+        ordinary
+            .write_at(0, vec![1u8; 64], crate::WriteOptions::SYNC)
+            .await
+            .unwrap();
+        storage.promote("p", b"b").await.unwrap();
     }
 
     #[tokio::test]

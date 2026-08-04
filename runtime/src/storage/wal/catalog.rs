@@ -5,11 +5,12 @@
 //! snapshot is nothing but [Catalog::snapshot]: the whole catalog re-stated as records
 //! at the head of a fresh extent.
 
-use super::format::{Kind, Record};
+use super::format::{Kind, OVERLAY_MAX, Record};
 use std::collections::{BTreeMap, HashMap};
 
-/// One blob's row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One blob's row. For atomic blobs, [Kind::Atomic] carries the WAL-owned state:
+/// committed and trusted lengths and the overlay bytes between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Row {
     /// Never reused: minted monotonically across the WAL's whole life, so a stale
     /// handle can never alias a recreated name.
@@ -19,7 +20,7 @@ pub(super) struct Row {
 }
 
 /// The partitions and blobs of one family.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct Catalog {
     /// Partition -> blob name -> row. A partition with no blobs persists (matching
     /// per-file backends, where an emptied directory persists).
@@ -61,7 +62,7 @@ impl Catalog {
                     name.clone(),
                     Row {
                         id: *id,
-                        kind: *kind,
+                        kind: kind.clone(),
                         version: *version,
                     },
                 );
@@ -93,6 +94,94 @@ impl Catalog {
                 }
                 Ok(())
             }
+            // The wave completed before this record existed (rule M), so the file is
+            // the whole truth through `len`: trust it and empty the overlay.
+            Record::CommitAtomic { id, len } => {
+                let (committed, trusted, overlay) = self.atomic_mut(*id)?;
+                if *len < *trusted {
+                    return Err("commit below the trusted length".into());
+                }
+                *committed = *len;
+                *trusted = *len;
+                overlay.clear();
+                Ok(())
+            }
+            Record::InlineAppend { id, offset, bytes } => {
+                let (committed, _, overlay) = self.atomic_mut(*id)?;
+                if *offset != *committed {
+                    return Err("inline append not at the committed length".into());
+                }
+                if overlay.len() + bytes.len() > OVERLAY_MAX {
+                    return Err("overlay exceeds its bound".into());
+                }
+                *committed += bytes.len() as u64;
+                overlay.extend_from_slice(bytes);
+                Ok(())
+            }
+            // No file operation: reads clamp at `trusted`, so bytes above the cut
+            // are dead whether or not they physically survive.
+            Record::Rewind { id, len } => {
+                let (committed, trusted, overlay) = self.atomic_mut(*id)?;
+                if *len > *committed {
+                    return Err("rewind beyond the committed length".into());
+                }
+                *committed = *len;
+                *trusted = (*trusted).min(*len);
+                overlay.truncate((*committed - *trusted) as usize);
+                Ok(())
+            }
+            Record::Promote { id, len } => {
+                let Some((partition, name)) = self.ids.get(id) else {
+                    return Err("promote of an unknown blob".into());
+                };
+                let row = self
+                    .partitions
+                    .get_mut(partition)
+                    .and_then(|blobs| blobs.get_mut(name))
+                    .expect("id index points at row");
+                if row.kind != Kind::Ordinary {
+                    return Err("promote of a non-ordinary blob".into());
+                }
+                row.kind = Kind::Atomic {
+                    committed: *len,
+                    trusted: *len,
+                    overlay: Vec::new(),
+                };
+                Ok(())
+            }
+            // One frame, so tearing cannot split it at replay; application must be
+            // all-or-nothing in memory too, because staging validates by applying
+            // and a partial application would diverge from the journal.
+            Record::Batch(records) => {
+                let undo = self.clone();
+                for record in records {
+                    if let Err(reason) = self.apply(record) {
+                        *self = undo;
+                        return Err(reason);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The atomic state of blob `id`, for record application.
+    fn atomic_mut(&mut self, id: u64) -> Result<(&mut u64, &mut u64, &mut Vec<u8>), String> {
+        let Some((partition, name)) = self.ids.get(&id) else {
+            return Err("operation on an unknown blob".into());
+        };
+        let row = self
+            .partitions
+            .get_mut(partition)
+            .and_then(|blobs| blobs.get_mut(name))
+            .expect("id index points at row");
+        match &mut row.kind {
+            Kind::Atomic {
+                committed,
+                trusted,
+                overlay,
+            } => Ok((committed, trusted, overlay)),
+            Kind::Ordinary => Err("atomic operation on an ordinary blob".into()),
         }
     }
 
@@ -121,7 +210,7 @@ impl Catalog {
             for (name, row) in blobs {
                 records.push(Record::Create {
                     id: row.id,
-                    kind: row.kind,
+                    kind: row.kind.clone(),
                     version: row.version,
                     partition: partition.clone(),
                     name: name.clone(),

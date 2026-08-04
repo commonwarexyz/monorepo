@@ -730,14 +730,22 @@ impl<M: Medium> Medium for Checked<M> {
         let Some(inner) = self.inner.open(dir, name).await? else {
             return Ok(None);
         };
+        let size = inner.size().await?;
         let mut state = self.tracker.state.lock();
-        // A file the wrapper never saw created predates the wrapper: track it fresh,
-        // with nothing covered until a barrier.
+        // A file the wrapper never saw created predates the wrapper: its existing
+        // content counts as covered (the wrapper can only judge what it observed).
         let resolved = Tracker::resolve(&state, dir, name);
         let id = resolved.unwrap_or_else(|| {
             let id = state.next_file;
             state.next_file += 1;
-            state.files.insert(id, FileTrack::default());
+            state.files.insert(
+                id,
+                FileTrack {
+                    len: size,
+                    synced_len: size,
+                    ..FileTrack::default()
+                },
+            );
             state
                 .dirs
                 .entry(dir.to_string())

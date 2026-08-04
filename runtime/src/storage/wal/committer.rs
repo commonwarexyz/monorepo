@@ -196,6 +196,14 @@ impl Committer {
             Stage::Nothing => return Ok((None, out)),
             Stage::Rider => None,
             Stage::Record(record) => {
+                // A record beyond the frame bound would decode as a torn tail at
+                // replay: reject it before it can exist.
+                if record.body_size() > MAX_RECORD_LEN as usize {
+                    return Err(Error::Io(Arc::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "record exceeds the maximum frame size",
+                    ))));
+                }
                 state
                     .catalog
                     .apply(&record)

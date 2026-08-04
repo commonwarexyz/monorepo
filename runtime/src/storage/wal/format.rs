@@ -43,10 +43,20 @@ pub(super) const RECORD_SPACE: u64 = 3 * PAGE as u64;
 /// Longest allowed blob name in a record.
 pub(super) const MAX_NAME_LEN: usize = 64 * 1024;
 
-/// Largest record body the writer can produce. Bodies are name-dominated today, with
-/// headroom reserved for inline payloads; a longer length prefix can only be a torn
-/// tail or hostile bytes.
+/// Largest record body the writer can produce: a name plus a full overlay plus
+/// framing always fits. A longer length prefix can only be a torn tail or hostile
+/// bytes.
 pub(super) const MAX_RECORD_LEN: u32 = 128 << 10;
+
+/// Largest single inline append. Bigger appends take the bulk path (payload written
+/// to the blob file under a barrier before its record).
+pub(super) const INLINE_APPEND_MAX: usize = 16 << 10;
+
+/// Largest WAL-resident overlay per blob (committed bytes living only in records).
+/// A publication that would exceed it takes the bulk path, which materializes the
+/// whole overlay into the file and empties it; snapshot rows therefore always fit
+/// one record.
+pub(super) const OVERLAY_MAX: usize = 32 << 10;
 
 /// Largest extent a root may name. Extents are sized from the snapshot and sit far
 /// below this; recovery rejects anything larger as hostile, which bounds its work.
@@ -194,23 +204,84 @@ impl Root {
     }
 }
 
-/// The kind of a blob row. Only ordinary blobs exist today; the atomic kind is
-/// reserved record space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A blob row's kind and, for atomic blobs, the WAL-owned state.
+///
+/// An atomic blob's file content is trusted only up to `trusted`; `overlay` holds the
+/// committed bytes `[trusted, committed)` that live in the WAL alone. Reads never
+/// consult the file beyond `trusted`, which is why rewinds need no file truncation:
+/// bytes above the cut are simply dead.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Kind {
     Ordinary,
+    Atomic {
+        /// Logical length recovery reproduces (WAL truth).
+        committed: u64,
+        /// Prefix of the file that is durable and current; `<= committed`.
+        trusted: u64,
+        /// The committed bytes `[trusted, committed)`, WAL-resident.
+        overlay: Vec<u8>,
+    },
 }
 
 impl Kind {
-    const fn encode(self) -> u8 {
-        match self {
-            Self::Ordinary => 0,
+    /// A fresh atomic row.
+    pub const fn atomic() -> Self {
+        Self::Atomic {
+            committed: 0,
+            trusted: 0,
+            overlay: Vec::new(),
         }
     }
 
-    fn decode(byte: u8) -> Result<Self, String> {
-        match byte {
+    fn write(&self, body: &mut Vec<u8>) {
+        match self {
+            Self::Ordinary => body.push(0),
+            Self::Atomic {
+                committed,
+                trusted,
+                overlay,
+            } => {
+                body.push(1);
+                UInt(*committed).write(body);
+                UInt(*trusted).write(body);
+                UInt(overlay.len() as u32).write(body);
+                body.extend_from_slice(overlay);
+            }
+        }
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            Self::Ordinary => 1,
+            Self::Atomic {
+                committed,
+                trusted,
+                overlay,
+            } => {
+                1 + UInt(*committed).encode_size()
+                    + UInt(*trusted).encode_size()
+                    + UInt(overlay.len() as u32).encode_size()
+                    + overlay.len()
+            }
+        }
+    }
+
+    fn read(body: &mut &[u8]) -> Result<Self, String> {
+        match u8::read(body).map_err(|e| e.to_string())? {
             0 => Ok(Self::Ordinary),
+            1 => {
+                let committed = UInt::<u64>::read(body).map_err(|e| e.to_string())?.0;
+                let trusted = UInt::<u64>::read(body).map_err(|e| e.to_string())?.0;
+                let overlay = read_bytes(body, OVERLAY_MAX)?;
+                if trusted > committed || trusted + overlay.len() as u64 != committed {
+                    return Err("atomic row lengths are inconsistent".into());
+                }
+                Ok(Self::Atomic {
+                    committed,
+                    trusted,
+                    overlay,
+                })
+            }
             other => Err(format!("unknown blob kind {other}")),
         }
     }
@@ -220,6 +291,11 @@ const TYPE_CREATE: u8 = 1;
 const TYPE_DELETE: u8 = 2;
 const TYPE_PARTITION: u8 = 3;
 const TYPE_DELETE_PARTITION: u8 = 4;
+const TYPE_COMMIT_ATOMIC: u8 = 5;
+const TYPE_INLINE_APPEND: u8 = 6;
+const TYPE_REWIND: u8 = 7;
+const TYPE_PROMOTE: u8 = 8;
+const TYPE_BATCH: u8 = 9;
 
 /// A self-contained namespace operation. Applied in order at replay; the catalog is a
 /// fold over the record stream, and the runtime applies the same records to the same
@@ -241,6 +317,25 @@ pub(super) enum Record {
     Partition { partition: String },
     /// The partition and all its blobs are gone.
     DeletePartition { partition: String },
+    /// An atomic blob's file is durable and current through `len` (rule M: the wave
+    /// completed before this record was written); the overlay empties.
+    CommitAtomic { id: u64, len: u64 },
+    /// `bytes` extend an atomic blob at `offset` (its committed length), living in
+    /// the WAL until a bulk publication or a later snapshot carries them forward.
+    InlineAppend {
+        id: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
+    /// An atomic blob's committed length drops to `len`. No file operation: reads
+    /// clamp at the trust watermark, so bytes above the cut are dead.
+    Rewind { id: u64, len: u64 },
+    /// An ordinary blob becomes atomic with committed = trusted = `len` (rule M: its
+    /// file and dentry chain were barriered before this record).
+    Promote { id: u64, len: u64 },
+    /// Several operations that apply all-or-nothing: one frame, so a torn tail can
+    /// never split them. Sub-records may not nest batches.
+    Batch(Vec<Self>),
 }
 
 /// Outcome of decoding one frame from the record stream.
@@ -264,6 +359,15 @@ impl Record {
     /// Appends this record's frame (length, body, checksum) to `out`.
     pub fn encode(&self, salt: &Salt, out: &mut Vec<u8>) {
         let mut body = Vec::with_capacity(self.body_size());
+        self.write_body(&mut body);
+        debug_assert_eq!(body.len(), self.body_size());
+        UInt(body.len() as u32).write(out);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc(RECORD_DOMAIN, &salt.0, &body));
+    }
+
+    /// Appends this record's body (type byte and payload) to `body`.
+    fn write_body(&self, body: &mut Vec<u8>) {
         match self {
             Self::Create {
                 id,
@@ -273,46 +377,73 @@ impl Record {
                 name,
             } => {
                 body.push(TYPE_CREATE);
-                UInt(*id).write(&mut body);
-                body.push(kind.encode());
+                UInt(*id).write(body);
+                kind.write(body);
                 body.extend_from_slice(&version.to_be_bytes());
-                UInt(partition.len() as u32).write(&mut body);
+                UInt(partition.len() as u32).write(body);
                 body.extend_from_slice(partition.as_bytes());
-                UInt(name.len() as u32).write(&mut body);
+                UInt(name.len() as u32).write(body);
                 body.extend_from_slice(name);
             }
             Self::Delete { id } => {
                 body.push(TYPE_DELETE);
-                UInt(*id).write(&mut body);
+                UInt(*id).write(body);
             }
             Self::Partition { partition } => {
                 body.push(TYPE_PARTITION);
-                UInt(partition.len() as u32).write(&mut body);
+                UInt(partition.len() as u32).write(body);
                 body.extend_from_slice(partition.as_bytes());
             }
             Self::DeletePartition { partition } => {
                 body.push(TYPE_DELETE_PARTITION);
-                UInt(partition.len() as u32).write(&mut body);
+                UInt(partition.len() as u32).write(body);
                 body.extend_from_slice(partition.as_bytes());
             }
+            Self::CommitAtomic { id, len } => {
+                body.push(TYPE_COMMIT_ATOMIC);
+                UInt(*id).write(body);
+                UInt(*len).write(body);
+            }
+            Self::InlineAppend { id, offset, bytes } => {
+                body.push(TYPE_INLINE_APPEND);
+                UInt(*id).write(body);
+                UInt(*offset).write(body);
+                UInt(bytes.len() as u32).write(body);
+                body.extend_from_slice(bytes);
+            }
+            Self::Rewind { id, len } => {
+                body.push(TYPE_REWIND);
+                UInt(*id).write(body);
+                UInt(*len).write(body);
+            }
+            Self::Promote { id, len } => {
+                body.push(TYPE_PROMOTE);
+                UInt(*id).write(body);
+                UInt(*len).write(body);
+            }
+            Self::Batch(records) => {
+                body.push(TYPE_BATCH);
+                UInt(records.len() as u32).write(body);
+                for record in records {
+                    debug_assert!(!matches!(record, Self::Batch(_)));
+                    record.write_body(body);
+                }
+            }
         }
-        debug_assert_eq!(body.len(), self.body_size());
-        UInt(body.len() as u32).write(out);
-        out.extend_from_slice(&body);
-        out.extend_from_slice(&crc(RECORD_DOMAIN, &salt.0, &body));
     }
 
     /// Size of this record's body (the frame adds a length varint and a checksum).
-    fn body_size(&self) -> usize {
+    pub(super) fn body_size(&self) -> usize {
         1 + match self {
             Self::Create {
                 id,
+                kind,
                 partition,
                 name,
                 ..
             } => {
                 UInt(*id).encode_size()
-                    + 1
+                    + kind.size()
                     + 2
                     + UInt(partition.len() as u32).encode_size()
                     + partition.len()
@@ -322,6 +453,19 @@ impl Record {
             Self::Delete { id } => UInt(*id).encode_size(),
             Self::Partition { partition } | Self::DeletePartition { partition } => {
                 UInt(partition.len() as u32).encode_size() + partition.len()
+            }
+            Self::CommitAtomic { id, len }
+            | Self::Rewind { id, len }
+            | Self::Promote { id, len } => UInt(*id).encode_size() + UInt(*len).encode_size(),
+            Self::InlineAppend { id, offset, bytes } => {
+                UInt(*id).encode_size()
+                    + UInt(*offset).encode_size()
+                    + UInt(bytes.len() as u32).encode_size()
+                    + bytes.len()
+            }
+            Self::Batch(records) => {
+                UInt(records.len() as u32).encode_size()
+                    + records.iter().map(Self::body_size).sum::<usize>()
             }
         }
     }
@@ -356,22 +500,29 @@ impl Record {
 
     /// Decodes a checksummed body. Any failure here is corruption, not a torn tail.
     fn decode_body(mut body: &[u8]) -> Result<Self, String> {
-        let kind = u8::read(&mut body).map_err(|e| e.to_string())?;
-        let record = match kind {
+        let record = Self::read_body(&mut body, true)?;
+        if body.remaining() != 0 {
+            return Err("trailing bytes in record body".into());
+        }
+        Ok(record)
+    }
+
+    /// Reads one record body from the cursor. `batchable` permits a batch frame,
+    /// whose sub-records may not nest further.
+    fn read_body(body: &mut &[u8], batchable: bool) -> Result<Self, String> {
+        fn id(body: &mut &[u8]) -> Result<u64, String> {
+            Ok(UInt::<u64>::read(body).map_err(|e| e.to_string())?.0)
+        }
+        fn len(body: &mut &[u8]) -> Result<u64, String> {
+            Ok(UInt::<u64>::read(body).map_err(|e| e.to_string())?.0)
+        }
+        let record = match u8::read(body).map_err(|e| e.to_string())? {
             TYPE_CREATE => {
-                let id = UInt::<u64>::read(&mut body).map_err(|e| e.to_string())?.0;
-                let kind = Kind::decode(u8::read(&mut body).map_err(|e| e.to_string())?)?;
-                let version = u16::read(&mut body).map_err(|e| e.to_string())?;
-                let partition = read_partition(&mut body)?;
-                let name_len = UInt::<u32>::read(&mut body).map_err(|e| e.to_string())?.0 as usize;
-                if name_len > MAX_NAME_LEN {
-                    return Err(format!("name length {name_len} exceeds {MAX_NAME_LEN}"));
-                }
-                if name_len > body.remaining() {
-                    return Err("name length exceeds body".into());
-                }
-                let name = body[..name_len].to_vec();
-                body.advance(name_len);
+                let id = id(body)?;
+                let kind = Kind::read(body)?;
+                let version = u16::read(body).map_err(|e| e.to_string())?;
+                let partition = read_partition(body)?;
+                let name = read_bytes(body, MAX_NAME_LEN)?;
                 Self::Create {
                     id,
                     kind,
@@ -380,22 +531,62 @@ impl Record {
                     name,
                 }
             }
-            TYPE_DELETE => Self::Delete {
-                id: UInt::<u64>::read(&mut body).map_err(|e| e.to_string())?.0,
-            },
+            TYPE_DELETE => Self::Delete { id: id(body)? },
             TYPE_PARTITION => Self::Partition {
-                partition: read_partition(&mut body)?,
+                partition: read_partition(body)?,
             },
             TYPE_DELETE_PARTITION => Self::DeletePartition {
-                partition: read_partition(&mut body)?,
+                partition: read_partition(body)?,
             },
+            TYPE_COMMIT_ATOMIC => Self::CommitAtomic {
+                id: id(body)?,
+                len: len(body)?,
+            },
+            TYPE_INLINE_APPEND => Self::InlineAppend {
+                id: id(body)?,
+                offset: len(body)?,
+                bytes: read_bytes(body, INLINE_APPEND_MAX)?,
+            },
+            TYPE_REWIND => Self::Rewind {
+                id: id(body)?,
+                len: len(body)?,
+            },
+            TYPE_PROMOTE => Self::Promote {
+                id: id(body)?,
+                len: len(body)?,
+            },
+            TYPE_BATCH if batchable => {
+                let count = UInt::<u32>::read(body).map_err(|e| e.to_string())?.0 as usize;
+                // Each sub-record is at least two bytes; a hostile count cannot force
+                // allocation beyond the (already length-bounded) body.
+                if count > body.remaining() {
+                    return Err("batch count exceeds body".into());
+                }
+                let mut records = Vec::with_capacity(count);
+                for _ in 0..count {
+                    records.push(Self::read_body(body, false)?);
+                }
+                Self::Batch(records)
+            }
+            TYPE_BATCH => return Err("nested batch".into()),
             other => return Err(format!("unknown record type {other}")),
         };
-        if body.remaining() != 0 {
-            return Err("trailing bytes in record body".into());
-        }
         Ok(record)
     }
+}
+
+/// Reads a length-prefixed byte string of at most `max` bytes.
+fn read_bytes(body: &mut &[u8], max: usize) -> Result<Vec<u8>, String> {
+    let len = UInt::<u32>::read(body).map_err(|e| e.to_string())?.0 as usize;
+    if len > max {
+        return Err(format!("length {len} exceeds {max}"));
+    }
+    if len > body.remaining() {
+        return Err("length exceeds body".into());
+    }
+    let bytes = body[..len].to_vec();
+    body.advance(len);
+    Ok(bytes)
 }
 
 /// Reads a length-prefixed partition name.
@@ -449,7 +640,64 @@ mod tests {
             Record::DeletePartition {
                 partition: "empty".into(),
             },
+            Record::Create {
+                id: 1,
+                kind: Kind::Atomic {
+                    committed: 90,
+                    trusted: 64,
+                    overlay: vec![7u8; 26],
+                },
+                version: 1,
+                partition: "orders".into(),
+                name: b"atomic".to_vec(),
+            },
+            Record::CommitAtomic { id: 1, len: 90 },
+            Record::InlineAppend {
+                id: 1,
+                offset: 90,
+                bytes: vec![9u8; 10],
+            },
+            Record::Rewind { id: 1, len: 40 },
+            Record::Promote { id: 2, len: 512 },
+            Record::Batch(vec![
+                Record::CommitAtomic { id: 1, len: 100 },
+                Record::Delete { id: 2 },
+            ]),
         ]
+    }
+
+    #[test]
+    fn nested_batches_are_corrupt() {
+        let salt = Salt::new(&INCARNATION, 1);
+        // Hand-encode a batch containing a batch.
+        let mut body = vec![TYPE_BATCH];
+        UInt(1u32).write(&mut body);
+        body.push(TYPE_BATCH);
+        UInt(0u32).write(&mut body);
+        let mut buf = Vec::new();
+        UInt(body.len() as u32).write(&mut buf);
+        buf.extend_from_slice(&body);
+        buf.extend_from_slice(&crc(RECORD_DOMAIN, &salt.0, &body));
+        assert!(matches!(Record::decode(&buf, &salt), Frame::Corrupt(_)));
+    }
+
+    #[test]
+    fn inconsistent_atomic_row_is_corrupt() {
+        let salt = Salt::new(&INCARNATION, 1);
+        let record = Record::Create {
+            id: 0,
+            kind: Kind::Atomic {
+                committed: 10,
+                trusted: 8,
+                overlay: vec![1u8; 5], // trusted + overlay != committed
+            },
+            version: 1,
+            partition: "p".into(),
+            name: b"a".to_vec(),
+        };
+        let mut buf = Vec::new();
+        record.encode(&salt, &mut buf);
+        assert!(matches!(Record::decode(&buf, &salt), Frame::Corrupt(_)));
     }
 
     #[test]
