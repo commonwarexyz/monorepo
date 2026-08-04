@@ -2,9 +2,8 @@ use crate::stateful::{
     Application,
     actor::{
         core::{
-            Deferred,
-            mailbox::Message,
-            processing::{Processing, VerificationRequest},
+            Deferred, mailbox::Message, processing::Processing,
+            verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, PendingSyncTargets, Processor, Pruning},

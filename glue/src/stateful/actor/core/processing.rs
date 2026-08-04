@@ -1,18 +1,18 @@
 use crate::stateful::{
     Application, Input,
     actor::{
-        core::mailbox::{Message, Verification},
-        processor::{
-            Applied, PendingDigest, Processor, VerificationDisposition, VerificationProgress,
-            Verifier,
+        core::{
+            mailbox::Message,
+            verifications::{Handler as Verifications, Request as VerificationRequest},
         },
+        processor::{Applied, Processor},
     },
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Heightable,
     marshal::{
-        ancestry::{BlockProvider, BoxedAncestry},
+        ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
     types::Height,
@@ -20,73 +20,20 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    futures::Pool,
-};
+use commonware_utils::{channel::fallible::OneshotExt, futures::Pool};
 use futures::{
     FutureExt as _,
     future::{Either, ready},
-    poll,
 };
 use rand_core::Rng;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    future::Future,
-    sync::mpsc::TryRecvError,
-    task::Poll,
-};
-use tracing::{Instrument as _, Span, debug, info_span};
-
-/// Verification work retained across actor state transitions.
-pub(super) struct VerificationRequest<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    pub(super) span: Span,
-    pub(super) context: (E, A::Context),
-    pub(super) ancestry: BoxedAncestry<A::Block>,
-    pub(super) verification: Verification,
-}
+use std::{collections::BTreeSet, sync::mpsc::TryRecvError};
+use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: either a mailbox message to
 /// handle or a deferred prune to run while the mailbox is idle.
-enum Step<M, P, J> {
+enum Step<M, P> {
     Message(M),
     Prune(P),
-    Verification(J),
-}
-
-enum VerificationResult<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    Finished {
-        id: u64,
-    },
-    Invalidated {
-        id: u64,
-        request: VerificationRequest<E, A>,
-    },
-}
-
-struct VerificationControl<D: Copy> {
-    invalidation: Option<oneshot::Sender<()>>,
-    progress: VerificationProgress<D>,
-}
-
-impl<E, A> VerificationResult<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    const fn id(&self) -> u64 {
-        match self {
-            Self::Finished { id } | Self::Invalidated { id, .. } => *id,
-        }
-    }
 }
 
 /// Records a tracked flush completion and returns whether it is durable.
@@ -140,14 +87,11 @@ where
     pub async fn start(mut self) {
         let mut pending_prune = None;
         let mut deferred_message = None;
-        let mut verifications = Pool::default();
-        let mut invalidations = BTreeMap::new();
-        let mut next_verification_id = 0u64;
+        let mut verifications = Verifications::new(self.marshal.clone());
         for request in std::mem::take(&mut self.initial_verifications) {
-            self.schedule_verification(
-                &mut verifications,
-                &mut invalidations,
-                &mut next_verification_id,
+            verifications.schedule(
+                self.context.as_present().child("verify"),
+                self.processor.verifier(),
                 request,
             );
         }
@@ -159,9 +103,7 @@ where
         select_loop! {
             self.context,
             on_start => {
-                while let Poll::Ready(result) = poll!(verifications.next_completed()) {
-                    Self::handle_verification_result(&mut invalidations, result);
-                }
+                verifications.complete_ready();
 
                 // Observe every already-completed flush (releasing its marshal
                 // acknowledgement) before taking the next unit of work, so
@@ -202,8 +144,8 @@ where
                                                     return None;
                                                 }
                                             },
-                                            result = verifications.next_completed() => {
-                                                break Some(Step::Verification(result));
+                                            _ = verifications.next_completed() => {
+                                                continue;
                                             },
                                         }
                                     }
@@ -256,22 +198,16 @@ where
                         if receive_messages {
                             select! {
                                 _ = &mut proposal => break,
-                                result = verifications.next_completed() => {
-                                    Self::handle_verification_result(&mut invalidations, result);
-                                },
+                                _ = verifications.next_completed() => {},
                                 message = self.mailbox.recv() => match message {
                                     Some(Message::Verify {
                                         span,
                                         context,
                                         ancestry,
                                         verification,
-                                    }) => Self::schedule_verification_with(
-                                        verifier.clone(),
+                                    }) => verifications.schedule(
                                         actor_context.child("verify"),
-                                        marshal.clone(),
-                                        &mut verifications,
-                                        &mut invalidations,
-                                        &mut next_verification_id,
+                                        verifier.clone(),
                                         VerificationRequest {
                                             span,
                                             context,
@@ -292,9 +228,7 @@ where
                         } else {
                             select! {
                                 _ = &mut proposal => break,
-                                result = verifications.next_completed() => {
-                                    Self::handle_verification_result(&mut invalidations, result);
-                                },
+                                _ = verifications.next_completed() => {},
                             }
                         }
                     }
@@ -305,10 +239,9 @@ where
                     ancestry,
                     verification,
                 }) => {
-                    self.schedule_verification(
-                        &mut verifications,
-                        &mut invalidations,
-                        &mut next_verification_id,
+                    verifications.schedule(
+                        self.context.as_present().child("verify"),
+                        self.processor.verifier(),
                         VerificationRequest {
                             span,
                             context,
@@ -325,35 +258,26 @@ where
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
                         async {
-                            Self::drive_verifications(
-                                self.processor.notify_finalized(
+                            verifications
+                                .drive(self.processor.notify_finalized(
                                     self.context.as_present(),
                                     block.as_ref(),
-                                ),
-                                &mut verifications,
-                                &mut invalidations,
-                            )
-                            .await;
+                                ))
+                                .await;
                             acknowledgement.acknowledge();
                         }
                         .instrument(process)
                         .await;
                     } else {
                         let boundary = self.processor.finalization_boundary(block.as_ref());
-                        let (retry, reject) = Self::quiesce_verifications_where(
-                            &mut verifications,
-                            &mut invalidations,
-                            |progress| boundary.disposition(progress),
-                        )
-                        .await;
+                        let (retry, reject) = verifications
+                            .quiesce_where(|progress| boundary.disposition(progress))
+                            .await;
                         drop(boundary);
                         async {
-                            let applied = Self::drive_verifications(
-                                self.processor.finalize(&self.context, block.as_ref()),
-                                &mut verifications,
-                                &mut invalidations,
-                            )
-                            .await;
+                            let applied = verifications
+                                .drive(self.processor.finalize(&self.context, block.as_ref()))
+                                .await;
                             let Some(Applied { barrier, prune }) = applied else {
                                 // Duplicate report: marshal redelivers a processed
                                 // height only after a restart, where startup aligned
@@ -395,10 +319,9 @@ where
                             verification.respond(false);
                         }
                         for request in retry {
-                            self.schedule_verification(
-                                &mut verifications,
-                                &mut invalidations,
-                                &mut next_verification_id,
+                            verifications.schedule(
+                                self.context.as_present().child("verify"),
+                                self.processor.verifier(),
                                 request,
                             );
                         }
@@ -420,16 +343,10 @@ where
                                     return;
                                 }
                             },
-                            result = verifications.next_completed() => {
-                                Self::handle_verification_result(&mut invalidations, result);
-                            },
+                            _ = verifications.next_completed() => {},
                         }
                     }
-                    let retry = Self::quiesce_verifications(
-                        &mut verifications,
-                        &mut invalidations,
-                    )
-                    .await;
+                    let retry = verifications.quiesce().await;
                     assert!(
                         self.processor.replays_idle(),
                         "verification replay remained active after quiescence"
@@ -438,187 +355,15 @@ where
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;
                     for request in retry {
-                        self.schedule_verification(
-                            &mut verifications,
-                            &mut invalidations,
-                            &mut next_verification_id,
+                        verifications.schedule(
+                            self.context.as_present().child("verify"),
+                            self.processor.verifier(),
                             request,
                         );
                     }
                 }
-                Step::Verification(result) => {
-                    Self::handle_verification_result(&mut invalidations, result);
-                }
             },
         }
-    }
-
-    fn schedule_verification(
-        &self,
-        verifications: &mut Pool<VerificationResult<E, A>>,
-        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
-        next_id: &mut u64,
-        request: VerificationRequest<E, A>,
-    ) {
-        Self::schedule_verification_with(
-            self.processor.verifier(),
-            self.context.as_present().child("verify"),
-            self.marshal.clone(),
-            verifications,
-            invalidations,
-            next_id,
-            request,
-        );
-    }
-
-    fn schedule_verification_with(
-        mut verifier: Verifier<E, A>,
-        actor_context: E,
-        marshal: MarshalMailbox<S, V>,
-        verifications: &mut Pool<VerificationResult<E, A>>,
-        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
-        next_id: &mut u64,
-        mut request: VerificationRequest<E, A>,
-    ) {
-        let id = *next_id;
-        *next_id = next_id
-            .checked_add(1)
-            .expect("verification request ID overflowed");
-        let (invalidate, invalidated) = oneshot::channel();
-        let progress = VerificationProgress::default();
-        assert!(
-            invalidations
-                .insert(
-                    id,
-                    VerificationControl {
-                        invalidation: Some(invalidate),
-                        progress: progress.clone(),
-                    },
-                )
-                .is_none()
-        );
-
-        let process = info_span!(parent: &request.span, "stateful.actor.verify");
-        verifications.push(
-            async move {
-                let ancestry = request.ancestry.clone();
-                let attempt_context = (
-                    actor_context.child("application"),
-                    request.context.1.clone(),
-                );
-                let result = select! {
-                    _ = invalidated => None,
-                    result = verifier.verify(
-                        &actor_context,
-                        marshal,
-                        attempt_context,
-                        ancestry,
-                        &progress,
-                        &mut request.verification,
-                    ) => Some(result),
-                };
-                match result {
-                    Some(Some(valid)) => {
-                        request.verification.respond(valid);
-                        VerificationResult::Finished { id }
-                    }
-                    Some(None) => VerificationResult::Finished { id },
-                    None => VerificationResult::Invalidated { id, request },
-                }
-            }
-            .instrument(process),
-        );
-    }
-
-    async fn drive_verifications<T>(
-        operation: impl Future<Output = T>,
-        verifications: &mut Pool<VerificationResult<E, A>>,
-        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
-    ) -> T {
-        futures::pin_mut!(operation);
-        loop {
-            select! {
-                output = &mut operation => break output,
-                result = verifications.next_completed() => {
-                    Self::handle_verification_result(invalidations, result);
-                },
-            }
-        }
-    }
-
-    fn handle_verification_result(
-        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
-        result: VerificationResult<E, A>,
-    ) {
-        let control = invalidations
-            .remove(&result.id())
-            .expect("completed verification must have an invalidation handle");
-        assert!(control.invalidation.is_some());
-        assert!(
-            matches!(result, VerificationResult::Finished { .. }),
-            "verification cannot finish through the actor loop after invalidation",
-        );
-    }
-
-    async fn quiesce_verifications(
-        verifications: &mut Pool<VerificationResult<E, A>>,
-        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
-    ) -> Vec<VerificationRequest<E, A>> {
-        let (retry, reject) =
-            Self::quiesce_verifications_where(verifications, invalidations, |_| {
-                VerificationDisposition::Retry
-            })
-            .await;
-        assert!(reject.is_empty());
-        retry
-    }
-
-    async fn quiesce_verifications_where(
-        verifications: &mut Pool<VerificationResult<E, A>>,
-        invalidations: &mut BTreeMap<u64, VerificationControl<PendingDigest<A, E>>>,
-        disposition: impl Fn(&VerificationProgress<PendingDigest<A, E>>) -> VerificationDisposition,
-    ) -> (Vec<VerificationRequest<E, A>>, Vec<Verification>) {
-        let mut pending = BTreeMap::new();
-        for (&id, control) in invalidations.iter_mut() {
-            let disposition = disposition(&control.progress);
-            if disposition == VerificationDisposition::Retain {
-                continue;
-            }
-            assert!(control.invalidation.take().is_some());
-            assert!(pending.insert(id, disposition).is_none());
-        }
-
-        let mut retry = Vec::with_capacity(pending.len());
-        let mut reject = Vec::with_capacity(pending.len());
-        while !pending.is_empty() {
-            let result = verifications.next_completed().await;
-            let id = result.id();
-            let disposition = pending.remove(&id);
-            let control = invalidations
-                .remove(&id)
-                .expect("completed verification must have an invalidation handle");
-            match result {
-                VerificationResult::Finished { .. } => {}
-                VerificationResult::Invalidated { request, .. } => {
-                    let disposition = disposition.expect("verification must be invalidated");
-                    assert!(control.invalidation.is_none());
-                    match disposition {
-                        VerificationDisposition::Retain => {
-                            unreachable!("retained verification cannot be invalidated")
-                        }
-                        VerificationDisposition::Retry => {
-                            if !request.verification.is_cancelled() {
-                                retry.push(request);
-                            }
-                        }
-                        VerificationDisposition::Reject => {
-                            reject.push(request.verification);
-                        }
-                    }
-                }
-            }
-        }
-        (retry, reject)
     }
 }
 

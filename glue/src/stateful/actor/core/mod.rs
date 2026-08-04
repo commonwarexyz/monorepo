@@ -36,6 +36,7 @@ pub(super) use mailbox::Verification;
 
 mod processing;
 mod syncing;
+mod verifications;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
