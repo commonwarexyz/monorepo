@@ -888,9 +888,9 @@
 
       \vspace{0.02cm}
       \begin{tikzpicture}[node distance=0cm]
-        \node[box,text width=3.65cm,minimum height=.62cm] (page) {page payload\\\scriptsize 4,092 bytes};
-        \node[root,text width=1.05cm,minimum height=.62cm,right=of page] (footer) {CRC\\\scriptsize 4 B};
-        \node[warn,text width=4.82cm,minimum height=.62cm,below=.42cm of page.south west,anchor=north west] (open) {small A + \texttt{sync} + small B + \texttt{sync}\\\scriptsize one open unit continues; no footer yet};
+        \node[box,text width=3.65cm,minimum height=1.36cm] (page) {page payload\\\scriptsize 4,092 bytes};
+        \node[root,text width=1.05cm,minimum height=1.36cm,right=of page] (footer) {CRC\\\scriptsize 4 B};
+        \node[warn,text width=4.82cm,minimum height=.62cm,below=.32cm of page.south west,anchor=north west] (open) {small A + \texttt{sync} + small B + \texttt{sync}\\\scriptsize one open unit continues; no footer yet};
         \draw[flow,draw=Amber] (footer.south |- open.north) -- node[midway,right=.04cm,font=\tiny,text=Amber]{seal at 4,092 B} (footer.south);
       \end{tikzpicture}
 
@@ -902,10 +902,10 @@
 
       \vspace{0.02cm}
       \begin{tikzpicture}[node distance=0cm]
-        \node[box,text width=4.15cm,minimum height=.62cm] (value) {one value from many appends\\\scriptsize part 1 \quad part 2 \quad $\cdots$ \quad last bytes};
-        \node[root,text width=1.05cm,minimum height=.62cm,right=of value] (vfooter) {CRC\\\scriptsize 4 B};
-        \node[panel,text width=5.32cm,minimum height=.62cm,below=.14cm of value.south west,anchor=north west] (complete) {\texttt{Continue} while streaming; \texttt{Complete} once\\\scriptsize the caller chooses the semantic boundary};
-        \draw[flow] (vfooter.south |- complete.north) -- node[right,font=\tiny,text=Accent]{one footer} (vfooter.south);
+        \node[box,text width=4.15cm,minimum height=1.36cm] (value) {one value from many appends\\\scriptsize part 1 \quad part 2 \quad $\cdots$ \quad last bytes};
+        \node[root,text width=1.05cm,minimum height=1.36cm,right=of value] (vfooter) {CRC\\\scriptsize 4 B};
+        \node[panel,text width=5.32cm,minimum height=.62cm,below=.24cm of value.south west,anchor=north west] (complete) {\texttt{Continue} while streaming; \texttt{Complete} once\\\scriptsize the caller chooses the semantic boundary};
+        \draw[flow] (vfooter.south |- complete.north) -- node[midway,right=.04cm,font=\tiny,text=Accent]{one footer} (vfooter.south);
       \end{tikzpicture}
 
       \vspace{0.04cm}
