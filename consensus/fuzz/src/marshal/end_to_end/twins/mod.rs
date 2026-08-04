@@ -185,6 +185,7 @@ where
                 ConstantProvider::new(schemes[idx].clone()),
                 genesis_block.clone(),
                 self.max_pending_acks,
+                None,
             )
             .await;
             let networks = register_engine_networks::<P>(&oracle, validator.clone()).await;

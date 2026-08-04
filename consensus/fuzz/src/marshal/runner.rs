@@ -509,6 +509,7 @@ fn fuzz_marshal_actor_standard(input: MarshalActorStandardInput, kind: WrapperKi
             ConstantProvider::new(schemes[0].clone()),
             StandardHarness::genesis_block(NUM_VALIDATORS as u16),
             NZUsize!(64),
+            None,
         )
         .await;
         let marshal = setup.mailbox.clone();

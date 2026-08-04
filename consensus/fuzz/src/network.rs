@@ -9,7 +9,8 @@
 //! A [`ByzantineFirstReceiver`] then uses a biased select to always service the primary
 //! receiver first when both have buffered messages.
 //! [`NotarizeOmissionReceiver`] models one correct node that receives every
-//! vote except notarize votes.
+//! vote except notarize votes. [`WedgeReceiver`] holds the phase-gated rules of
+//! the split-notarization scenario.
 //!
 //! Note: this is not a global total-order guarantee (the underlying network can still deliver
 //! honest messages before Byzantine messages arrive). It does guarantee that, whenever both a
@@ -18,7 +19,8 @@
 
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_consensus::{
-    Viewable,
+    Block, Viewable,
+    marshal::resolver::handler::Key as MarshalKey,
     simplex::{
         scheme::Scheme,
         types::{Certificate, Notarization, Notarize, Proposal, Vote},
@@ -30,16 +32,19 @@ use commonware_macros::select;
 use commonware_p2p::{Message, Receiver, simulated::SplitTarget};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
+use commonware_runtime::{Clock, deterministic};
 use commonware_utils::{sequence::U64, sync::Mutex};
 use rand::RngExt as _;
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, HashSet},
+    fmt,
     marker::PhantomData,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
+    time::{Duration, SystemTime},
 };
 
 /// Shared cell holding the currently-active honest-message drop rate (0..=90).
@@ -569,6 +574,778 @@ where
         };
         *poison.view.lock() = Some(view);
         Ok((peer, poisoned))
+    }
+}
+
+/// Phase of the split-notarization scenario driven by [`WedgeReceiver`].
+///
+/// One shared flag gates every honest-message rule: they are armed before GST
+/// and disarmed at it. Byzantine withholding is not phase-gated.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WedgePhase {
+    /// The victim is unreachable from every peer.
+    Isolated,
+    /// Links are restored while holder answers are still slow.
+    Asynchronous,
+    /// Every link is healed and every honest-message rule is disarmed.
+    PostGst,
+}
+
+impl WedgePhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Isolated => "isolated",
+            Self::Asynchronous => "async",
+            Self::PostGst => "post-gst",
+        }
+    }
+
+    const fn is_post_gst(self) -> bool {
+        matches!(self, Self::PostGst)
+    }
+}
+
+/// A node's part in the split-notarization scenario.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WedgeRole {
+    /// Correct node that stores the attack block and notarizes it.
+    Holder,
+    /// Attack-view leader that alone assembles the attack notarization.
+    Byzantine,
+    /// Correct node that ends up holding the notarization and nothing else.
+    Victim,
+}
+
+/// Network path a [`WedgeReceiver`] is wrapped around.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WedgeChannel {
+    /// Simplex votes.
+    Vote,
+    /// Simplex certificate broadcast.
+    Certificate,
+    /// Simplex certificate backfill.
+    Resolver,
+    /// Marshal block/certificate backfill.
+    MarshalBackfill,
+    /// Marshal block gossip.
+    MarshalBroadcast,
+}
+
+impl WedgeChannel {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Vote => "vote",
+            Self::Certificate => "certificate",
+            Self::Resolver => "resolver",
+            Self::MarshalBackfill => "marshal-backfill",
+            Self::MarshalBroadcast => "marshal-broadcast",
+        }
+    }
+}
+
+/// Why a message was withheld.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WedgeDrop {
+    /// Attack-view notarize vote between the two holders.
+    HolderNotarizeSplit,
+    /// The victim's single latched attack-view notarization broadcast.
+    VictimNotarizationRebroadcast,
+    /// A notarize vote the byzantine node declines to cast.
+    ByzantineNotarizeWithhold,
+    /// A notarization certificate the byzantine node declines to announce.
+    ByzantineNotarizationWithhold,
+    /// A notarize vote the byzantine node declines to process.
+    ByzantineIgnoreNotarize,
+    /// A marshal backfill request the byzantine node declines to serve.
+    ByzantineServeWithhold,
+}
+
+impl WedgeDrop {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::HolderNotarizeSplit => "holder-notarize-split",
+            Self::VictimNotarizationRebroadcast => "victim-notarization-rebroadcast",
+            Self::ByzantineNotarizeWithhold => "byzantine-notarize-withhold",
+            Self::ByzantineNotarizationWithhold => "byzantine-notarization-withhold",
+            Self::ByzantineIgnoreNotarize => "byzantine-ignore-notarize",
+            Self::ByzantineServeWithhold => "byzantine-serve-withhold",
+        }
+    }
+
+    /// Whether the withheld message belongs to a correct node.
+    const fn is_honest(self) -> bool {
+        matches!(
+            self,
+            Self::HolderNotarizeSplit | Self::VictimNotarizationRebroadcast
+        )
+    }
+}
+
+/// One observation recorded at a node's receive boundary.
+#[derive(Clone, Debug)]
+pub struct WedgeEvent {
+    /// Global arrival order.
+    pub seq: u64,
+    /// Time since the scenario started.
+    pub at: Duration,
+    /// Phase the observation was made in.
+    pub phase: WedgePhase,
+    /// Node that observed it.
+    pub node: String,
+    /// Channel it was observed on.
+    pub channel: WedgeChannel,
+    /// Peer the message came from.
+    pub peer: String,
+    /// What the message was.
+    pub detail: String,
+}
+
+impl fmt::Display for WedgeEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "#{:04} t={:>8.3}s [{}] {} <- {} {:<16} {}",
+            self.seq,
+            self.at.as_secs_f64(),
+            self.phase.as_str(),
+            self.node,
+            self.peer,
+            self.channel.as_str(),
+            self.detail
+        )
+    }
+}
+
+/// A resolver request the victim sent, recorded by the peer asked to serve it.
+#[derive(Clone, Debug)]
+pub struct WedgeRequest {
+    /// Peer the request was sent to.
+    pub responder: String,
+    /// Request id, which is what the requester matches responses on.
+    pub id: u64,
+    /// View requested.
+    pub view: View,
+    /// Time the request arrived at the responder.
+    pub at: Duration,
+}
+
+/// Shared control and ledger for the split-notarization scenario.
+///
+/// Holds the phase flag, the per-category withholding counters, the observation
+/// log, and the two recovery controls.
+pub struct Wedge<P: PublicKey, D: Digest> {
+    state: Arc<WedgeState<P, D>>,
+}
+
+impl<P: PublicKey, D: Digest> Clone for Wedge<P, D> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+struct WedgeState<P: PublicKey, D: Digest> {
+    clock: deterministic::Context,
+    origin: SystemTime,
+    byzantine: P,
+    victim: P,
+    labels: BTreeMap<P, String>,
+    attack_round: Round,
+    phase: Mutex<WedgePhase>,
+    serve_notarized: AtomicBool,
+    inject_nullification: AtomicBool,
+    injected: AtomicBool,
+    seq: AtomicU64,
+    drops: Mutex<BTreeMap<(WedgeDrop, WedgePhase), usize>>,
+    channel_drops: Mutex<BTreeMap<WedgeChannel, usize>>,
+    events: Mutex<Vec<WedgeEvent>>,
+    attack_payload: Mutex<Option<D>>,
+    recorded_nullification: Mutex<Option<(P, commonware_runtime::IoBuf)>>,
+    victim_requests: Mutex<Vec<WedgeRequest>>,
+}
+
+impl<P: PublicKey, D: Digest> Wedge<P, D> {
+    /// Builds the shared state. `labels` names each participant in the log.
+    pub fn new(
+        clock: deterministic::Context,
+        byzantine: P,
+        victim: P,
+        labels: impl IntoIterator<Item = (P, String)>,
+        attack_round: Round,
+    ) -> Self {
+        let origin = clock.current();
+        Self {
+            state: Arc::new(WedgeState {
+                clock,
+                origin,
+                byzantine,
+                victim,
+                labels: labels.into_iter().collect(),
+                attack_round,
+                phase: Mutex::new(WedgePhase::Isolated),
+                serve_notarized: AtomicBool::new(false),
+                inject_nullification: AtomicBool::new(false),
+                injected: AtomicBool::new(false),
+                seq: AtomicU64::new(0),
+                drops: Mutex::new(BTreeMap::new()),
+                channel_drops: Mutex::new(BTreeMap::new()),
+                events: Mutex::new(Vec::new()),
+                attack_payload: Mutex::new(None),
+                recorded_nullification: Mutex::new(None),
+                victim_requests: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Current phase.
+    pub fn phase(&self) -> WedgePhase {
+        *self.state.phase.lock()
+    }
+
+    /// Advances the phase flag every rule reads.
+    pub fn set_phase(&self, phase: WedgePhase) {
+        *self.state.phase.lock() = phase;
+    }
+
+    /// Control 1: the byzantine node serves its attack-round block after GST.
+    pub fn enable_serve_after_gst(&self) {
+        self.state.serve_notarized.store(true, Ordering::Relaxed);
+    }
+
+    /// Control 2: the recorded attack-view nullification is delivered to the
+    /// victim once after GST.
+    pub fn enable_nullification_injection(&self) {
+        self.state
+            .inject_nullification
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Attack-view proposal payload, learned from the notarization the victim
+    /// is served.
+    pub fn attack_payload(&self) -> Option<D> {
+        *self.state.attack_payload.lock()
+    }
+
+    /// Withheld messages of one category in one phase.
+    pub fn drops(&self, drop: WedgeDrop, phase: WedgePhase) -> usize {
+        self.state
+            .drops
+            .lock()
+            .get(&(drop, phase))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Withheld messages belonging to correct nodes, in one phase.
+    pub fn honest_drops(&self, phase: WedgePhase) -> usize {
+        self.state
+            .drops
+            .lock()
+            .iter()
+            .filter(|((drop, at), _)| drop.is_honest() && *at == phase)
+            .map(|(_, count)| *count)
+            .sum()
+    }
+
+    /// Withheld messages belonging to the byzantine node, across all phases.
+    pub fn byzantine_withholds(&self) -> usize {
+        self.state
+            .drops
+            .lock()
+            .iter()
+            .filter(|((drop, _), _)| !drop.is_honest())
+            .map(|(_, count)| *count)
+            .sum()
+    }
+
+    /// Messages withheld on one channel, across all phases and categories.
+    pub fn channel_drops(&self, channel: WedgeChannel) -> usize {
+        self.state
+            .channel_drops
+            .lock()
+            .get(&channel)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Per-category, per-phase withholding ledger.
+    pub fn drop_ledger(&self) -> Vec<(WedgeDrop, WedgePhase, usize)> {
+        self.state
+            .drops
+            .lock()
+            .iter()
+            .map(|((drop, phase), count)| (*drop, *phase, *count))
+            .collect()
+    }
+
+    /// Every observation, in arrival order.
+    pub fn events(&self) -> Vec<WedgeEvent> {
+        self.state.events.lock().clone()
+    }
+
+    /// Attack-view resolver requests the victim sent, as seen by the peers it
+    /// asked.
+    pub fn victim_requests(&self) -> Vec<WedgeRequest> {
+        self.state.victim_requests.lock().clone()
+    }
+
+    fn label(&self, key: &P) -> String {
+        self.state
+            .labels
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| "?".into())
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.state
+            .clock
+            .current()
+            .duration_since(self.state.origin)
+            .unwrap_or_default()
+    }
+
+    fn record(&self, node: &P, channel: WedgeChannel, peer: &P, detail: String) {
+        let event = WedgeEvent {
+            seq: self.state.seq.fetch_add(1, Ordering::Relaxed),
+            at: self.elapsed(),
+            phase: self.phase(),
+            node: self.label(node),
+            channel,
+            peer: self.label(peer),
+            detail,
+        };
+        self.state.events.lock().push(event);
+    }
+
+    fn withhold(&self, node: &P, channel: WedgeChannel, peer: &P, drop: WedgeDrop, detail: String) {
+        let phase = self.phase();
+        *self.state.drops.lock().entry((drop, phase)).or_insert(0) += 1;
+        *self.state.channel_drops.lock().entry(channel).or_insert(0) += 1;
+        self.record(
+            node,
+            channel,
+            peer,
+            format!("DROP[{}] {detail}", drop.as_str()),
+        );
+    }
+}
+
+/// Identity a [`WedgeReceiver`] needs to apply the scenario's rules.
+pub struct WedgeNode<S: Scheme<D>, D: Digest> {
+    wedge: Wedge<S::PublicKey, D>,
+    me: S::PublicKey,
+    role: WedgeRole,
+    scheme: S,
+}
+
+impl<S: Scheme<D>, D: Digest> WedgeNode<S, D> {
+    pub const fn new(
+        wedge: Wedge<S::PublicKey, D>,
+        me: S::PublicKey,
+        role: WedgeRole,
+        scheme: S,
+    ) -> Self {
+        Self {
+            wedge,
+            me,
+            role,
+            scheme,
+        }
+    }
+}
+
+impl<S: Scheme<D>, D: Digest> Clone for WedgeNode<S, D> {
+    fn clone(&self) -> Self {
+        Self {
+            wedge: self.wedge.clone(),
+            me: self.me.clone(),
+            role: self.role,
+            scheme: self.scheme.clone(),
+        }
+    }
+}
+
+/// The receive-side rules of the split-notarization scenario.
+///
+/// One wrapper serves every node and every channel; the rules that fire are
+/// selected by [`WedgeRole`], [`WedgeChannel`] and the shared [`WedgePhase`].
+/// With `node` unset it forwards everything untouched.
+///
+/// Honest-message rules, armed before GST only:
+/// - a holder does not receive the other holder's attack-view notarize vote, so
+///   no correct node assembles the attack notarization;
+/// - a holder does not receive the victim's one latched attack-view
+///   notarization broadcast.
+///
+/// Byzantine withholding, armed for the whole run:
+/// - nobody receives a notarize vote the byzantine node casts outside the
+///   attack view;
+/// - the byzantine node does not receive the victim's marshal request for the
+///   attack round, so it never serves the block behind its notarization.
+///
+/// Nothing is ever withheld on the certificate-backfill channel: the answers
+/// the victim's peers send it are delivered and the protocol decides what to do
+/// with them.
+pub struct WedgeReceiver<S, D, BL, R>
+where
+    D: Digest,
+    S: Scheme<D>,
+    R: Receiver<PublicKey = S::PublicKey>,
+{
+    inner: R,
+    channel: WedgeChannel,
+    node: Option<WedgeNode<S, D>>,
+    _block: PhantomData<fn() -> BL>,
+}
+
+impl<S, D, BL, R> WedgeReceiver<S, D, BL, R>
+where
+    D: Digest,
+    S: Scheme<D>,
+    BL: Block<Digest = D> + Decode<Cfg = ()>,
+    R: Receiver<PublicKey = S::PublicKey>,
+{
+    pub const fn new(inner: R, node: Option<WedgeNode<S, D>>, channel: WedgeChannel) -> Self {
+        Self {
+            inner,
+            channel,
+            node,
+            _block: PhantomData,
+        }
+    }
+
+    /// Control 2: hands the victim the recorded attack-view nullification once.
+    fn injection(&self) -> Option<Message<S::PublicKey>> {
+        let node = self.node.as_ref()?;
+        if node.role != WedgeRole::Victim || self.channel != WedgeChannel::Certificate {
+            return None;
+        }
+        let wedge = &node.wedge;
+        if !wedge.state.inject_nullification.load(Ordering::Relaxed) || !wedge.phase().is_post_gst()
+        {
+            return None;
+        }
+        let (peer, message) = wedge.state.recorded_nullification.lock().clone()?;
+        if wedge.state.injected.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        wedge.record(
+            &node.me,
+            WedgeChannel::Certificate,
+            &peer,
+            format!(
+                "INJECT nullification view={} (control)",
+                wedge.state.attack_round.view()
+            ),
+        );
+        Some((peer, message))
+    }
+
+    fn certificate(&self, message: &commonware_runtime::IoBuf) -> Option<Certificate<S, D>> {
+        let node = self.node.as_ref()?;
+        Certificate::<S, D>::decode_cfg(message.clone(), &node.scheme.certificate_codec_config())
+            .ok()
+    }
+
+    /// Applies the scenario's rules to one message, returning true if it is
+    /// withheld.
+    fn apply(&self, peer: &S::PublicKey, message: &commonware_runtime::IoBuf) -> bool {
+        let Some(node) = self.node.as_ref() else {
+            return false;
+        };
+        let wedge = &node.wedge;
+        let attack_view = wedge.state.attack_round.view();
+        let pre_gst = !wedge.phase().is_post_gst();
+        match self.channel {
+            WedgeChannel::Vote => {
+                let Ok(vote) = Vote::<S, D>::decode(message.clone()) else {
+                    return false;
+                };
+                let view = vote.view();
+                let notarize = matches!(vote, Vote::Notarize(_));
+                if notarize && node.role == WedgeRole::Byzantine && view != attack_view {
+                    wedge.withhold(
+                        &node.me,
+                        self.channel,
+                        peer,
+                        WedgeDrop::ByzantineIgnoreNotarize,
+                        format!("notarize view={view}"),
+                    );
+                    return true;
+                }
+                if notarize && *peer == wedge.state.byzantine && view != attack_view {
+                    wedge.withhold(
+                        &node.me,
+                        self.channel,
+                        peer,
+                        WedgeDrop::ByzantineNotarizeWithhold,
+                        format!("notarize view={view}"),
+                    );
+                    return true;
+                }
+                if notarize
+                    && view == attack_view
+                    && pre_gst
+                    && node.role == WedgeRole::Holder
+                    && *peer != wedge.state.byzantine
+                {
+                    wedge.withhold(
+                        &node.me,
+                        self.channel,
+                        peer,
+                        WedgeDrop::HolderNotarizeSplit,
+                        format!("notarize view={view}"),
+                    );
+                    return true;
+                }
+                if node.role == WedgeRole::Victim && view == attack_view {
+                    let kind = match vote {
+                        Vote::Notarize(_) => "notarize",
+                        Vote::Nullify(_) => "nullify",
+                        Vote::Finalize(_) => "finalize",
+                    };
+                    wedge.record(
+                        &node.me,
+                        self.channel,
+                        peer,
+                        format!("{kind} vote view={view}"),
+                    );
+                }
+                false
+            }
+            WedgeChannel::Certificate => {
+                let Some(certificate) = self.certificate(message) else {
+                    return false;
+                };
+                if *peer == wedge.state.byzantine
+                    && let Certificate::Notarization(notarization) = &certificate
+                {
+                    wedge.withhold(
+                        &node.me,
+                        self.channel,
+                        peer,
+                        WedgeDrop::ByzantineNotarizationWithhold,
+                        format!("notarization view={}", notarization.view()),
+                    );
+                    return true;
+                }
+                match &certificate {
+                    Certificate::Notarization(notarization)
+                        if notarization.view() == attack_view =>
+                    {
+                        if node.role == WedgeRole::Holder && *peer == wedge.state.victim && pre_gst
+                        {
+                            wedge.withhold(
+                                &node.me,
+                                self.channel,
+                                peer,
+                                WedgeDrop::VictimNotarizationRebroadcast,
+                                format!("notarization view={attack_view}"),
+                            );
+                            return true;
+                        }
+                        wedge.record(
+                            &node.me,
+                            self.channel,
+                            peer,
+                            format!("notarization view={attack_view}"),
+                        );
+                    }
+                    Certificate::Nullification(nullification)
+                        if nullification.view() == attack_view =>
+                    {
+                        if node.role != WedgeRole::Victim {
+                            let mut recorded = wedge.state.recorded_nullification.lock();
+                            if recorded.is_none() {
+                                *recorded = Some((peer.clone(), message.clone()));
+                            }
+                        } else {
+                            wedge.record(
+                                &node.me,
+                                self.channel,
+                                peer,
+                                format!("nullification view={attack_view}"),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+                false
+            }
+            WedgeChannel::Resolver => {
+                let Ok(resolver) = ResolverMessage::<U64>::decode(message.clone()) else {
+                    return false;
+                };
+                match resolver.payload {
+                    ResolverPayload::Request(key) => {
+                        let view = View::new(u64::from(&key));
+                        if *peer == wedge.state.victim && view == attack_view {
+                            let request = WedgeRequest {
+                                responder: wedge.label(&node.me),
+                                id: resolver.id,
+                                view,
+                                at: wedge.elapsed(),
+                            };
+                            wedge.state.victim_requests.lock().push(request);
+                            wedge.record(
+                                &node.me,
+                                self.channel,
+                                peer,
+                                format!("REQUEST view={view} id={}", resolver.id),
+                            );
+                        }
+                    }
+                    ResolverPayload::Response(response) => {
+                        let Ok(certificate) = Certificate::<S, D>::decode_cfg(
+                            response,
+                            &node.scheme.certificate_codec_config(),
+                        ) else {
+                            return false;
+                        };
+                        if node.role != WedgeRole::Victim {
+                            return false;
+                        }
+                        let detail = match &certificate {
+                            Certificate::Notarization(notarization) => {
+                                if notarization.view() == attack_view {
+                                    *wedge.state.attack_payload.lock() =
+                                        Some(notarization.proposal.payload);
+                                }
+                                format!("ANSWER notarization view={}", notarization.view())
+                            }
+                            Certificate::Nullification(nullification) => {
+                                format!("ANSWER nullification view={}", nullification.view())
+                            }
+                            Certificate::Finalization(finalization) => {
+                                format!("ANSWER finalization view={}", finalization.view())
+                            }
+                        };
+                        if certificate.view() <= attack_view {
+                            wedge.record(
+                                &node.me,
+                                self.channel,
+                                peer,
+                                format!("{detail} id={}", resolver.id),
+                            );
+                        }
+                    }
+                    ResolverPayload::Error => {}
+                }
+                false
+            }
+            WedgeChannel::MarshalBackfill => {
+                let Ok(resolver) = ResolverMessage::<MarshalKey<D>>::decode(message.clone()) else {
+                    return false;
+                };
+                match resolver.payload {
+                    ResolverPayload::Request(MarshalKey::Notarized { round }) => {
+                        let control = wedge.state.serve_notarized.load(Ordering::Relaxed)
+                            && wedge.phase().is_post_gst();
+                        if node.role == WedgeRole::Byzantine
+                            && round == wedge.state.attack_round
+                            && !control
+                        {
+                            wedge.withhold(
+                                &node.me,
+                                self.channel,
+                                peer,
+                                WedgeDrop::ByzantineServeWithhold,
+                                format!("request notarized round={round}"),
+                            );
+                            return true;
+                        }
+                        wedge.record(
+                            &node.me,
+                            self.channel,
+                            peer,
+                            format!("request notarized round={round}"),
+                        );
+                    }
+                    ResolverPayload::Request(MarshalKey::Block(commitment))
+                        if *peer == wedge.state.victim =>
+                    {
+                        wedge.record(
+                            &node.me,
+                            self.channel,
+                            peer,
+                            format!("request block commitment={commitment}"),
+                        );
+                    }
+                    ResolverPayload::Response(response) if node.role == WedgeRole::Victim => {
+                        wedge.record(
+                            &node.me,
+                            self.channel,
+                            peer,
+                            format!("ANSWER bytes={} id={}", response.len(), resolver.id),
+                        );
+                    }
+                    _ => {}
+                }
+                false
+            }
+            WedgeChannel::MarshalBroadcast => {
+                if node.role != WedgeRole::Victim {
+                    return false;
+                }
+                let Ok(block) = BL::decode(message.clone()) else {
+                    return false;
+                };
+                let digest = block.digest();
+                let attack = wedge.attack_payload();
+                let marker = if attack == Some(digest) {
+                    "ATTACK BLOCK"
+                } else {
+                    "block"
+                };
+                wedge.record(
+                    &node.me,
+                    self.channel,
+                    peer,
+                    format!("{marker} height={} digest={digest}", block.height()),
+                );
+                false
+            }
+        }
+    }
+}
+
+impl<S, D, BL, R> fmt::Debug for WedgeReceiver<S, D, BL, R>
+where
+    D: Digest,
+    S: Scheme<D>,
+    R: Receiver<PublicKey = S::PublicKey>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WedgeReceiver")
+            .field("channel", &self.channel)
+            .field("armed", &self.node.is_some())
+            .finish()
+    }
+}
+
+impl<S, D, BL, R> Receiver for WedgeReceiver<S, D, BL, R>
+where
+    D: Digest,
+    S: Scheme<D>,
+    BL: Block<Digest = D> + Decode<Cfg = ()>,
+    R: Receiver<PublicKey = S::PublicKey>,
+{
+    type Error = R::Error;
+    type PublicKey = S::PublicKey;
+
+    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
+        loop {
+            if let Some(message) = self.injection() {
+                return Ok(message);
+            }
+            let (peer, message) = self.inner.recv().await?;
+            if self.apply(&peer, &message) {
+                continue;
+            }
+            return Ok((peer, message));
+        }
     }
 }
 

@@ -11,6 +11,8 @@
 //! would silently overwrite them).
 
 use super::app::{ApplicationChoice, BlockContextRegistry};
+#[cfg(test)]
+use super::runner::wedge::WedgeOutcome;
 use crate::{network::CertificatePoison, simplex::Simplex};
 use commonware_consensus::{
     Block,
@@ -338,5 +340,61 @@ fn agreement<B: Block<Digest = Sha256Digest>>(
                 seen.insert(height, (*idx, "reported tip", digest));
             }
         }
+    }
+}
+
+/// The phase discipline the split-notarization scenario must keep for its
+/// liveness verdict to mean anything.
+///
+/// After GST no correct node's message may be withheld, and no answer to the
+/// victim's certificate backfill may be withheld at any point: the byzantine
+/// answer has to win by delivery order, not by the harness silencing the
+/// alternatives.
+#[cfg(test)]
+pub(super) fn check_split_notarization_phases(outcome: &WedgeOutcome) {
+    assert_eq!(
+        outcome.honest_drops_post_gst, 0,
+        "post-GST honest-message drops must be zero, ledger={:?}",
+        outcome.ledger
+    );
+    assert_eq!(
+        outcome.resolver_drops, 0,
+        "certificate-backfill answers must never be withheld, ledger={:?}",
+        outcome.ledger
+    );
+}
+
+/// Post-GST liveness of the split-notarization cluster.
+///
+/// With one byzantine node out of four, quorum three, and every link healed,
+/// the three correct nodes must finalize. Returns the stall diagnostic when
+/// they do not.
+#[cfg(test)]
+pub(super) fn split_notarization_progress(outcome: &WedgeOutcome) -> Result<(), String> {
+    let stalled: Vec<&(String, u64)> = outcome
+        .heights
+        .iter()
+        .filter(|(label, height)| label != "B" && *height == 0)
+        .collect();
+    if stalled.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "no correct node finalized a block after GST: heights={:?} honest_drops(pre/post)={}/{} \
+         byzantine_withholds={}",
+        outcome.heights,
+        outcome.honest_drops_pre_gst,
+        outcome.honest_drops_post_gst,
+        outcome.byzantine_withholds
+    ))
+}
+
+/// Panicking form of [`split_notarization_progress`], for callers that require
+/// recovery.
+#[cfg(test)]
+pub(super) fn check_split_notarization_progress(outcome: &WedgeOutcome) {
+    check_split_notarization_phases(outcome);
+    if let Err(diagnostic) = split_notarization_progress(outcome) {
+        panic!("marshal split-notarization: {diagnostic}");
     }
 }
