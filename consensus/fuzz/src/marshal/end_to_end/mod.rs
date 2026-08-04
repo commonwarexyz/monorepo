@@ -40,7 +40,7 @@ pub(crate) mod twins;
 pub use input::{MarshalDisrupterInput, MarshalTwinsInput};
 pub use runner::{
     fuzz_marshal_coding_disrupter, fuzz_marshal_standard_certificate_poison,
-    fuzz_marshal_standard_disrupter,
+    fuzz_marshal_standard_disrupter, wedge::fuzz_split_notarization,
 };
 pub use twins::{
     fuzz_marshal_standard_deferred_id_twins_split_header,

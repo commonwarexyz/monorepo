@@ -11,7 +11,6 @@
 //! would silently overwrite them).
 
 use super::app::{ApplicationChoice, BlockContextRegistry};
-#[cfg(test)]
 use super::runner::wedge::WedgeOutcome;
 use crate::{network::CertificatePoison, simplex::Simplex};
 use commonware_consensus::{
@@ -350,7 +349,6 @@ fn agreement<B: Block<Digest = Sha256Digest>>(
 /// victim's certificate backfill may be withheld at any point: the byzantine
 /// answer has to win by delivery order, not by the harness silencing the
 /// alternatives.
-#[cfg(test)]
 pub(super) fn check_split_notarization_phases(outcome: &WedgeOutcome) {
     assert_eq!(
         outcome.honest_drops_post_gst, 0,
@@ -369,7 +367,6 @@ pub(super) fn check_split_notarization_phases(outcome: &WedgeOutcome) {
 /// With one byzantine node out of four, quorum three, and every link healed,
 /// the three correct nodes must finalize. Returns the stall diagnostic when
 /// they do not.
-#[cfg(test)]
 pub(super) fn split_notarization_progress(outcome: &WedgeOutcome) -> Result<(), String> {
     let stalled: Vec<&(String, u64)> = outcome
         .heights
@@ -380,18 +377,24 @@ pub(super) fn split_notarization_progress(outcome: &WedgeOutcome) -> Result<(), 
         return Ok(());
     }
     Err(format!(
-        "no correct node finalized a block after GST: heights={:?} honest_drops(pre/post)={}/{} \
-         byzantine_withholds={}",
+        "not all correct nodes finalized a block after GST: seed={} scenario={} stalled={:?} \
+         heights={:?} honest_drops(pre/post)={}/{} byzantine_withholds={} attack_payload={:?} \
+         victim_attack_view_requests={} observations={}",
+        outcome.seed,
+        outcome.control.as_str(),
+        stalled,
         outcome.heights,
         outcome.honest_drops_pre_gst,
         outcome.honest_drops_post_gst,
-        outcome.byzantine_withholds
+        outcome.byzantine_withholds,
+        outcome.attack_payload,
+        outcome.requests.len(),
+        outcome.events.len()
     ))
 }
 
 /// Panicking form of [`split_notarization_progress`], for callers that require
 /// recovery.
-#[cfg(test)]
 pub(super) fn check_split_notarization_progress(outcome: &WedgeOutcome) {
     check_split_notarization_phases(outcome);
     if let Err(diagnostic) = split_notarization_progress(outcome) {

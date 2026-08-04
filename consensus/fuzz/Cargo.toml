@@ -428,6 +428,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "marshal_e2e_standard_split_notarization"
+path = "fuzz_targets/marshal_e2e_standard_split_notarization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "marshal_e2e_standard_app_cert_mock_twins"
 path = "fuzz_targets/marshal_e2e_standard_app_cert_mock_twins.rs"
 test = false

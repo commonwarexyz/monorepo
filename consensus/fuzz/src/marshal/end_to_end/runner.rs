@@ -540,10 +540,10 @@ pub fn fuzz_marshal_coding_disrupter(input: MarshalDisrupterInput) {
 
 /// Reproduction of the split-notarization wedge.
 ///
-/// Not a fuzz target: the schedule is fixed and the oracle is expected to fire,
-/// so it is driven from tests rather than from a fuzz entry point.
-#[cfg(test)]
-pub(super) mod wedge {
+/// The schedule is fixed; the fuzzed input only varies the deterministic
+/// runtime's seed, so the byzantine answer wins or loses the backfill race on a
+/// different message interleaving each run.
+pub(crate) mod wedge {
     use super::*;
     use crate::network::{
         ByzantineFirstReceiver, Router, Wedge, WedgeChannel, WedgeDrop, WedgeEvent, WedgeNode,
@@ -581,6 +581,10 @@ pub(super) mod wedge {
 
     /// Recovery path enabled after GST, if any.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "controls drive the recovery tests")
+    )]
     pub enum WedgeControl {
         /// The byzantine node keeps withholding.
         None,
@@ -621,6 +625,10 @@ pub(super) mod wedge {
         pub attack_payload: Option<Sha256Digest>,
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "event views drive the recovery tests")
+    )]
     impl WedgeOutcome {
         /// Observations the victim made, in arrival order.
         pub fn victim_events(&self) -> impl Iterator<Item = &WedgeEvent> {
@@ -883,6 +891,18 @@ pub(super) mod wedge {
         })
     }
 
+    /// Fuzz entry point for the split notarization/block wedge.
+    ///
+    /// The scripted schedule is fixed; `seed` drives the deterministic runtime,
+    /// so each input is a different message interleaving of the same attack.
+    /// Panics when the wedge holds: with one byzantine node of four, quorum
+    /// three and every link healed after GST, the correct nodes must finalize.
+    pub fn fuzz_split_notarization<P: Simplex>(seed: u64) {
+        let outcome = run_split_notarization::<P>(seed, WedgeControl::None);
+        invariants::check_split_notarization_phases(&outcome);
+        invariants::check_split_notarization_progress(&outcome);
+    }
+
     #[cfg(test)]
     mod wedge_repro {
         use super::*;
@@ -976,27 +996,6 @@ pub(super) mod wedge {
             for event in events {
                 println!("      {event}");
             }
-        }
-
-        #[test]
-        fn split_notarization_wedge() {
-            let verbose = std::env::var("WEDGE_VERBOSE").is_ok();
-            let mut stalled = 0usize;
-            let seeds = seeds();
-            for seed in seeds.iter().copied() {
-                let outcome =
-                    run_split_notarization::<SimplexCertificateMock>(seed, WedgeControl::None);
-                report(&outcome, verbose);
-                invariants::check_split_notarization_phases(&outcome);
-                match invariants::split_notarization_progress(&outcome) {
-                    Ok(()) => println!("    VERDICT: cluster progressed (no wedge)"),
-                    Err(diagnostic) => {
-                        stalled += 1;
-                        println!("    VERDICT: ORACLE FIRED: {diagnostic}");
-                    }
-                }
-            }
-            println!("\nSUMMARY wedge stalls {stalled}/{}", seeds.len());
         }
 
         #[test]

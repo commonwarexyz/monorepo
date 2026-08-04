@@ -38,7 +38,7 @@ pub use end_to_end::{
     MarshalDisrupterInput, MarshalTwinsInput, fuzz_marshal_coding_disrupter,
     fuzz_marshal_standard_certificate_poison, fuzz_marshal_standard_deferred_id_twins_split_header,
     fuzz_marshal_standard_disrupter, fuzz_marshal_standard_inline_id_twins_split_header,
-    fuzz_marshal_standard_twins,
+    fuzz_marshal_standard_twins, fuzz_split_notarization,
 };
 pub use runner::{
     MarshalActorStandardInput, fuzz_marshal_actor_deferred, fuzz_marshal_actor_inline,
