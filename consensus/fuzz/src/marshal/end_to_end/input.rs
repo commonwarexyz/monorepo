@@ -128,14 +128,15 @@ fn pre_gst_action(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<PreG
     })
 }
 
-/// Input for the scenario-driven end-to-end marshal harness.
+/// Structured fuzz input for the Standard Marshal notarization/block-split
+/// harness.
 ///
 /// The template and the byzantine omissions are weighted so a minimal input
 /// selects the split notarization/block wedge with every omission armed and no
 /// generated action; larger inputs reshape the pre-GST topology, latency, drop
 /// rules, byzantine behaviour and attack timing around it.
 #[derive(Debug, Clone)]
-pub struct MarshalScenarioInput {
+pub struct NotarizationBlockSplitScenarioInput {
     /// Byte tape used by the deterministic runtime and the application's fault
     /// sampler.
     pub raw_bytes: Vec<u8>,
@@ -149,7 +150,7 @@ pub struct MarshalScenarioInput {
     pub forwarding: ForwardingPolicy,
 }
 
-impl Arbitrary<'_> for MarshalScenarioInput {
+impl Arbitrary<'_> for NotarizationBlockSplitScenarioInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         // The split-notarization wedge is this target's primary quarry, so it
         // stays the default and the heavily weighted template.

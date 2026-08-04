@@ -32,7 +32,7 @@ use super::{
         AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
         FaultyConfig,
     },
-    input::MarshalScenarioInput,
+    input::NotarizationBlockSplitScenarioInput,
     invariants,
     runner::highest_delivered,
     twins::{
@@ -433,7 +433,7 @@ impl ScenarioOutcome {
 /// start; the fuzz entry point passes an empty hook and the recovery tests use
 /// it to enable a control.
 pub fn run_scenario<P: Simplex>(
-    input: &MarshalScenarioInput,
+    input: &NotarizationBlockSplitScenarioInput,
     configure: impl FnOnce(&Wedge<PublicKeyOf<P>, Sha256Digest>) + Send + 'static,
 ) -> ScenarioOutcome {
     let template = input.template;
@@ -734,7 +734,7 @@ async fn apply_action<K: PublicKey, D: commonware_cryptography::Digest>(
 ///
 /// Safety invariants run inside every execution. The crash oracle is post-GST
 /// liveness measured from each correct node's height at GST.
-pub fn fuzz_marshal_standard_scenarios<P: Simplex>(input: MarshalScenarioInput) {
+pub fn fuzz_marshal_standard_scenarios<P: Simplex>(input: NotarizationBlockSplitScenarioInput) {
     let outcome = run_scenario::<P>(&input, |_| {});
     invariants::check_scenario_phases(&outcome);
     invariants::check_scenario_progress(&outcome);
@@ -853,7 +853,7 @@ mod recovery {
         ] {
             let tapes = tapes();
             for tape in &tapes {
-                let input = MarshalScenarioInput {
+                let input = NotarizationBlockSplitScenarioInput {
                     raw_bytes: tape.clone(),
                     template: ScenarioTemplate::SplitNotarization,
                     actions: Vec::new(),

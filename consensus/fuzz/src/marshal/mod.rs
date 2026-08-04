@@ -39,11 +39,11 @@ pub mod runner;
 pub mod store;
 
 pub use end_to_end::{
-    DropRule, MarshalDisrupterInput, MarshalScenarioInput, MarshalTwinsInput, PreGstAction, Role,
-    ScenarioTemplate, fuzz_marshal_coding_disrupter, fuzz_marshal_standard_certificate_poison,
-    fuzz_marshal_standard_deferred_id_twins_split_header, fuzz_marshal_standard_disrupter,
-    fuzz_marshal_standard_inline_id_twins_split_header, fuzz_marshal_standard_scenarios,
-    fuzz_marshal_standard_twins,
+    DropRule, MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput,
+    PreGstAction, Role, ScenarioTemplate, fuzz_marshal_coding_disrupter,
+    fuzz_marshal_standard_certificate_poison, fuzz_marshal_standard_deferred_id_twins_split_header,
+    fuzz_marshal_standard_disrupter, fuzz_marshal_standard_inline_id_twins_split_header,
+    fuzz_marshal_standard_scenarios, fuzz_marshal_standard_twins,
 };
 pub use runner::{
     MarshalActorStandardInput, fuzz_marshal_actor_deferred, fuzz_marshal_actor_inline,
