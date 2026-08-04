@@ -49,18 +49,23 @@ mod blob;
 mod catalog;
 mod committer;
 mod format;
+#[cfg(unix)]
+mod fs;
 mod journal;
 pub mod medium;
 
+use super::header::{Header, Layout, resolve as resolve_header};
 pub use blob::Blob;
 pub use committer::Spawn;
 use committer::{Committer, Stage};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_formatting::hex;
+use commonware_formatting::{from_hex, hex};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use format::{Kind, MAX_NAME_LEN, Record};
+#[cfg(unix)]
+pub use fs::Fs;
 use journal::Journal;
-use medium::Medium;
+use medium::{File as _, Medium};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
 /// Directory holding every family's WAL file. Not a legal partition name (partition
@@ -205,43 +210,136 @@ impl<M: Medium> Storage<M> {
                 partition,
                 armed: true,
             };
-            if !create
-                && matches!(
-                    self.medium.open(WAL_DIR, &Self::wal_name(partition)).await,
-                    Ok(None)
-                )
-            {
-                let result = Ok(None);
-                guard.finish(&result);
-                return result;
-            }
-            let incarnation = incarnation(&self.creation_seed, partition);
-            let result = Journal::open(
-                &self.medium,
-                WAL_DIR,
-                &Self::wal_name(partition),
-                incarnation,
-            )
-            .await
-            .map(|(journal, catalog)| {
-                let shared = Arc::new(committer::Shared::new(catalog));
-                Some(Committer::spawn::<M>(&self.spawn, journal, shared))
-            });
+            let result = self.open_family(partition, create).await;
             guard.finish(&result);
             return result;
         }
     }
 
-    /// Opens (creating if needed) the blob's file. A row may exist without a file
-    /// (lazy creation, or a dentry lost before its first sync): it reopens empty,
-    /// exactly as a never-created blob would under the per-file backends. Stale
-    /// predecessor files cannot reach here: acknowledged removes unlink durably, and
-    /// the mint path durably replaces any leftover before its record is staged.
-    async fn blob_file(&self, partition: &str, name: &str) -> Result<M::File, crate::Error> {
-        if let Some(file) = self.medium.open(partition, name).await? {
-            return Ok(file);
+    /// Opens, creates, or declines to create one family (under the registry's Busy
+    /// slot). A partition directory holding blob files but no WAL is pre-WAL data:
+    /// creating its family first adopts every file into the catalog, before anything
+    /// serves, so catalog-backed scans can never hide legacy blobs.
+    async fn open_family(
+        &self,
+        partition: &str,
+        create: bool,
+    ) -> Result<Option<Committer>, crate::Error> {
+        let existed = self
+            .medium
+            .open(WAL_DIR, &Self::wal_name(partition))
+            .await?
+            .is_some();
+        if !existed && !create {
+            // No WAL: the partition exists only if legacy files do (then any
+            // operation, even a scan, performs the adoption).
+            let legacy = self
+                .medium
+                .list(partition)
+                .await?
+                .is_some_and(|files| !files.is_empty());
+            if !legacy {
+                return Ok(None);
+            }
         }
-        self.medium.create(partition, name).await
+        let incarnation = incarnation(&self.creation_seed, partition);
+        let (journal, catalog) = Journal::open(
+            &self.medium,
+            WAL_DIR,
+            &Self::wal_name(partition),
+            incarnation,
+        )
+        .await?;
+        let shared = Arc::new(committer::Shared::new(catalog));
+        let committer = Committer::spawn::<M>(&self.spawn, journal, shared);
+        if !existed {
+            self.adopt(partition, &committer).await?;
+        }
+        Ok(Some(committer))
+    }
+
+    /// Adopts every pre-WAL blob file in the partition directory: one catalog row per
+    /// file, version read from its header, no payload touched. Runs exactly once, at
+    /// family creation; afterwards un-cataloged files are unlink leftovers, never
+    /// adoptees. Extraction is the inverse: delete the WAL and the files stand alone.
+    async fn adopt(&self, partition: &str, committer: &Committer) -> Result<(), crate::Error> {
+        let Some(files) = self.medium.list(partition).await? else {
+            return Ok(());
+        };
+        let mut acks = Vec::new();
+        for filename in files {
+            // Only files this backend's naming could have produced are adoptable;
+            // anything else is foreign, and adopting around it would silently shadow
+            // data. Fail loudly instead.
+            let name = from_hex(&filename)
+                .filter(|name| hex(name) == filename)
+                .ok_or_else(|| {
+                    crate::Error::PartitionCorrupt(format!(
+                        "{partition}: foreign file {filename:?} in a partition being adopted"
+                    ))
+                })?;
+            let file = self
+                .medium
+                .open(partition, &filename)
+                .await?
+                .expect("listed file exists");
+            let raw_len = file.size().await?;
+            let raw = file.read_at(0, Header::resolve_len(raw_len)).await?;
+            // Empty or torn-creation files (None) are effectively nonexistent,
+            // exactly as the per-file backends treat them; the next open recreates.
+            if let Some((_, version, _)) =
+                resolve_header(&raw, raw_len, &(0..=u16::MAX), partition, &name)?
+            {
+                let (ack, ()) = committer.transact(|catalog| {
+                    let record = Record::Create {
+                        id: catalog.mint_id(),
+                        kind: Kind::Ordinary,
+                        version,
+                        partition: partition.to_string(),
+                        name: name.clone(),
+                    };
+                    (Stage::Record(record), ())
+                })?;
+                acks.push(ack.expect("adoption staged"));
+            }
+        }
+        for ack in acks {
+            ack.await.map_err(|_| crate::Error::Closed)??;
+        }
+        Ok(())
+    }
+
+    /// Opens (creating if needed) the blob's file and resolves its header layout,
+    /// returning the file, its data offset, and its logical size.
+    ///
+    /// A row may exist with a missing or torn-creation file (lazy creation, or a
+    /// dentry lost before its first sync): it gets a fresh V1 header region and
+    /// reopens empty, exactly as under the per-file backends. Stale predecessor
+    /// files cannot reach here: acknowledged removes unlink durably, and the mint
+    /// path durably replaces any leftover before its record is staged. The header
+    /// write itself needs no barrier: until the blob's first durability event, a
+    /// torn region reads as an interrupted creation and heals the same way.
+    async fn open_blob(
+        &self,
+        partition: &str,
+        name: &[u8],
+        filename: &str,
+        version: u16,
+    ) -> Result<(M::File, u64, u64), crate::Error> {
+        let file = match self.medium.open(partition, filename).await? {
+            Some(file) => file,
+            None => self.medium.create(partition, filename).await?,
+        };
+        let raw_len = file.size().await?;
+        let raw = file.read_at(0, Header::resolve_len(raw_len)).await?;
+        if let Some((size, _, data_offset)) =
+            resolve_header(&raw, raw_len, &(version..=version), partition, name)?
+        {
+            return Ok((file, data_offset, size));
+        }
+        let (region, _) = Header::create(&(version..=version));
+        file.write_at(0, region).await?;
+        Ok((file, Layout::V1.data_offset(), 0))
     }
 }
 
@@ -351,9 +449,8 @@ impl<M: Medium> crate::Storage for Storage<M> {
         // an earlier opener's create is durable.
         ack.await.map_err(|_| crate::Error::Closed)??;
 
-        let file = self.blob_file(partition, &filename).await?;
-        let blob = Blob::new(self.medium.clone(), file, partition, name);
-        let size = blob.size().await?;
+        let (file, data_offset, size) = self.open_blob(partition, name, &filename, version).await?;
+        let blob = Blob::new(self.medium.clone(), file, partition, name, data_offset);
         Ok((blob, size, version))
     }
 
@@ -448,6 +545,62 @@ mod tests {
     #[tokio::test]
     async fn storage_suite() {
         run_storage_tests(wal_storage(&Sim::new(1))).await;
+    }
+
+    /// The same conformance suite over real files.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn storage_suite_fs() {
+        let root = std::env::temp_dir().join(format!("wal-suite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let medium = Fs::new(root.clone()).unwrap();
+        run_storage_tests(Storage::new(medium, test_spawn(), Config::default())).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Files created by this backend read back through header resolution with the
+    /// standard V1 layout, so adoption and extraction round-trip without copies.
+    #[tokio::test]
+    async fn adoption_round_trips_without_copies() {
+        let sim = Sim::new(9);
+        let storage = wal_storage(&sim);
+        let (blob, _) = storage.open("p", b"a").await.unwrap();
+        blob.write_at(0, vec![1u8; 100], crate::WriteOptions::SYNC)
+            .await
+            .unwrap();
+        let (blob, _) = storage.open("p", b"b").await.unwrap();
+        blob.write_at(0, vec![2u8; 50], crate::WriteOptions::SYNC)
+            .await
+            .unwrap();
+        drop(storage);
+
+        // Extraction: delete the WAL; the files stand alone, self-describing.
+        sim.remove(".wal", "p.cww").await.unwrap();
+        sim.sync_dir(".wal").await.unwrap();
+
+        // Adoption: a fresh storage over the same medium re-adopts the files into a
+        // new catalog, payload untouched. Even a scan triggers it.
+        let storage = wal_storage(&sim);
+        let names = storage.scan("p").await.unwrap();
+        assert_eq!(names, vec![b"a".to_vec(), b"b".to_vec()]);
+        let (blob, size) = storage.open("p", b"a").await.unwrap();
+        assert_eq!(size, 100);
+        let bytes = blob.read_at(0, 100).await.unwrap().coalesce();
+        assert_eq!(bytes.as_ref(), &[1u8; 100][..]);
+    }
+
+    #[tokio::test]
+    async fn foreign_file_fails_adoption_loudly() {
+        let sim = Sim::new(10);
+        // A partition directory with a file this backend could not have produced.
+        sim.create("p", "not-hex!").await.unwrap();
+        sim.sync_dir("p").await.unwrap();
+        sim.sync_root().await.unwrap();
+        let storage = wal_storage(&sim);
+        assert!(matches!(
+            storage.scan("p").await,
+            Err(crate::Error::PartitionCorrupt(_))
+        ));
     }
 
     #[tokio::test]
