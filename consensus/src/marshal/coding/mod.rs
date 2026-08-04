@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_floor_retires_superseded_ack_commitments() {
+    fn test_coding_floor_retires_only_superseded_ack_commitments() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -584,69 +584,71 @@ mod tests {
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
+                NZUsize!(3),
                 Application::manual_ack(),
             )
             .await;
             assert_eq!(setup.application.acknowledged().await, Height::zero());
 
-            let block_round = Round::new(Epoch::zero(), View::new(1));
-            let block = CodingHarness::make_test_block(
-                Sha256::hash(&[b""]),
-                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
-                Height::new(1),
-                100,
-                NUM_VALIDATORS as u16,
-            );
-            let commitment = block.commitment();
+            let mut parent = Sha256::hash(&[b""]);
+            let mut parent_commitment =
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
+            let mut commitments = Vec::new();
+            let mut floor = None;
+            for height in 1..=3 {
+                let round = Round::new(Epoch::zero(), View::new(height));
+                let block = CodingHarness::make_test_block(
+                    parent,
+                    parent_commitment,
+                    Height::new(height),
+                    height * 100,
+                    NUM_VALIDATORS as u16,
+                );
+                let commitment = block.commitment();
+                parent = block.digest();
+                parent_commitment = commitment;
+                commitments.push(commitment);
 
-            // The cache observation is newer than the delayed floor, so only
-            // exact-commitment retirement can remove it.
-            setup
-                .extra
-                .proposed(Round::new(Epoch::zero(), View::new(10)), block.clone());
-            assert!(setup.mailbox.verified(block_round, block.clone()).await);
-            CodingHarness::report_finalization(
-                &mut setup.mailbox,
-                CodingHarness::make_finalization(
+                // Every cache observation is newer than the floor, so only an exact
+                // commitment retirement can remove it.
+                setup.extra.proposed(
+                    Round::new(Epoch::zero(), View::new(height + 10)),
+                    block.clone(),
+                );
+                assert!(setup.mailbox.verified(round, block).await);
+                let finalization = CodingHarness::make_finalization(
                     Proposal {
-                        round: block_round,
-                        parent: View::zero(),
+                        round,
+                        parent: View::new(height - 1),
                         payload: commitment,
                     },
                     &schemes,
                     QUORUM,
-                ),
-            )
-            .await;
-            while setup.application.pending_ack_heights() != vec![Height::new(1)] {
+                );
+                if height == 2 {
+                    floor = Some(finalization.clone());
+                }
+                CodingHarness::report_finalization(&mut setup.mailbox, finalization).await;
+            }
+
+            while setup.application.pending_ack_heights()
+                != vec![Height::new(1), Height::new(2), Height::new(3)]
+            {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let floor_round = Round::new(Epoch::zero(), View::new(2));
-            let floor_block = CodingHarness::make_test_block(
-                block.digest(),
-                commitment,
-                Height::new(2),
-                200,
-                NUM_VALIDATORS as u16,
-            );
-            let floor_commitment = floor_block.commitment();
-            setup.extra.proposed(floor_round, floor_block);
-            setup.mailbox.set_floor(CodingHarness::make_finalization(
-                Proposal {
-                    round: floor_round,
-                    parent: View::new(1),
-                    payload: floor_commitment,
-                },
-                &schemes,
-                QUORUM,
-            ));
+            setup
+                .mailbox
+                .set_floor(floor.expect("height 2 floor missing"));
 
-            while setup.application.pending_ack_heights() != vec![Height::new(1), Height::new(2)] {
+            // The height-2 floor makes height 1 durable application progress. Heights 2 and 3
+            // are re-dispatched, so their coding-buffer commitments remain live.
+            while setup.mailbox.get_processed_height().await != Some(Height::new(1)) {
                 context.sleep(Duration::from_millis(10)).await;
             }
-            assert!(setup.extra.get(commitment).await.is_none());
+            assert!(setup.extra.get(commitments[0]).await.is_none());
+            assert!(setup.extra.get(commitments[1]).await.is_some());
+            assert!(setup.extra.get(commitments[2]).await.is_some());
         });
     }
 

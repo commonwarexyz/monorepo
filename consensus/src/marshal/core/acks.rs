@@ -44,15 +44,14 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
         }
     }
 
-    /// Drops the current ack and all queued acks, returning their commitments.
-    pub(super) fn clear(&mut self) -> Vec<V::Commitment> {
-        let mut commitments =
-            Vec::with_capacity(self.queue.len() + usize::from(self.current.is_some()));
+    /// Drops the current ack and all queued acks, returning their heights and commitments.
+    pub(super) fn clear(&mut self) -> Vec<(Height, V::Commitment)> {
+        let mut acks = Vec::with_capacity(self.queue.len() + usize::from(self.current.is_some()));
         if let Some(ack) = self.current.take() {
-            commitments.push(ack.commitment);
+            acks.push((ack.height, ack.commitment));
         }
-        commitments.extend(self.queue.drain(..).map(|ack| ack.commitment));
-        commitments
+        acks.extend(self.queue.drain(..).map(|ack| (ack.height, ack.commitment)));
+        acks
     }
 
     /// Returns the currently armed ack future (if any) for `select_loop!`.
@@ -183,8 +182,11 @@ mod tests {
         pending.enqueue(second);
         assert!(!pending.has_capacity());
 
-        let commitments = pending.clear();
-        assert_eq!(commitments, vec![digest(1), digest(2)]);
+        let acks = pending.clear();
+        assert_eq!(
+            acks,
+            vec![(Height::new(3), digest(1)), (Height::new(4), digest(2))]
+        );
         first_ack.acknowledge();
         second_ack.acknowledge();
 
