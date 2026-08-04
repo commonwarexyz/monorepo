@@ -86,8 +86,10 @@
 //!    +----------------------+
 //!    | Ready                |
 //!    | - checked shards     |
-//!    | (frozen; no new      |
-//!    |  shards accepted)    |
+//!    | - no new gossip      |
+//!    |   shards accepted    |
+//!    | - assigned shard may |
+//!    |   still arrive late  |
 //!    +----------------------+
 //!               |
 //!               | checked_shards.len() >= minimum_shards
@@ -2514,7 +2516,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_prune_uses_inclusive_retirement_floor() {
+    fn test_retire_uses_inclusive_retirement_floor() {
         let fixture = Fixture::<C>::default();
         fixture.start(|_, context, _, mut peers, _, coding_config| async move {
             // The processed commitment was re-proposed above the retirement floor. A malicious
@@ -2608,7 +2610,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_prune_unseen_commitment_applies_floor() {
+    fn test_retire_unseen_commitment_applies_floor() {
         let fixture = Fixture::<C>::default();
         fixture.start(|_, context, _, mut peers, _, coding_config| async move {
             let make_block = |id| {
