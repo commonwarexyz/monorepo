@@ -116,7 +116,7 @@ cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
 cargo fuzz run marshal_e2e_standard_deferred_id_twins_split_header
 cargo fuzz run marshal_e2e_standard_inline_id_twins_split_header
 cargo fuzz run marshal_e2e_standard_deferred_cert_mock_poison
-cargo fuzz run marshal_e2e_standard_split_notarization
+cargo fuzz run marshal_e2e_standard_deferred_cert_mock_scenarios
 ```
 
 The inline and deferred targets include split-header equivocation in their

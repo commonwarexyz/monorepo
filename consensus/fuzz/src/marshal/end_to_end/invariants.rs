@@ -10,8 +10,10 @@
 //! gaps, duplicates, and same-height forks are all observable (a by-height map
 //! would silently overwrite them).
 
-use super::app::{ApplicationChoice, BlockContextRegistry};
-use super::runner::wedge::WedgeOutcome;
+use super::{
+    app::{ApplicationChoice, BlockContextRegistry},
+    scenario::{SETTLE, ScenarioOutcome},
+};
 use crate::{network::CertificatePoison, simplex::Simplex};
 use commonware_consensus::{
     Block,
@@ -342,14 +344,19 @@ fn agreement<B: Block<Digest = Sha256Digest>>(
     }
 }
 
-/// The phase discipline the split-notarization scenario must keep for its
-/// liveness verdict to mean anything.
+/// The phase discipline a scenario must keep for its liveness verdict to mean
+/// anything.
 ///
-/// After GST no correct node's message may be withheld, and no answer to the
-/// victim's certificate backfill may be withheld at any point: the byzantine
-/// answer has to win by delivery order, not by the harness silencing the
-/// alternatives.
-pub(super) fn check_split_notarization_phases(outcome: &WedgeOutcome) {
+/// GST must leave every directed link up, after it no correct node's message
+/// may be withheld, and no answer to the victim's certificate backfill may be
+/// withheld at any point: a byzantine answer has to win by delivery order, not
+/// by the harness silencing the alternatives.
+pub(super) fn check_scenario_phases(outcome: &ScenarioOutcome) {
+    assert!(
+        outcome.unhealed_links.is_empty(),
+        "GST must heal every link, still down={:?}",
+        outcome.unhealed_links
+    );
     assert_eq!(
         outcome.honest_drops_post_gst, 0,
         "post-GST honest-message drops must be zero, ledger={:?}",
@@ -362,28 +369,40 @@ pub(super) fn check_split_notarization_phases(outcome: &WedgeOutcome) {
     );
 }
 
-/// Post-GST liveness of the split-notarization cluster.
+/// Post-GST liveness, measured from each correct node's height at GST.
 ///
 /// With one byzantine node out of four, quorum three, and every link healed,
-/// the three correct nodes must finalize. Returns the stall diagnostic when
-/// they do not.
-pub(super) fn split_notarization_progress(outcome: &WedgeOutcome) -> Result<(), String> {
-    let stalled: Vec<&(String, u64)> = outcome
-        .heights
+/// every correct node must deliver one more finalized block than it held at
+/// GST. A run that finalized before GST and stalled afterwards therefore fails
+/// here even though its heights are nonzero. A node already at the single-epoch
+/// boundary this harness can deliver is only required to hold its height.
+/// Returns the stall diagnostic when the window closes short.
+pub(super) fn scenario_progress(outcome: &ScenarioOutcome) -> Result<(), String> {
+    let stalled: Vec<String> = outcome
+        .baselines
         .iter()
-        .filter(|(label, height)| label != "B" && *height == 0)
+        .filter_map(|(label, baseline)| {
+            let target = ScenarioOutcome::target(*baseline);
+            let current = outcome.height(label);
+            (current < target).then(|| {
+                format!("{label}{{baseline={baseline} target={target} current={current}}}")
+            })
+        })
         .collect();
     if stalled.is_empty() {
         return Ok(());
     }
     Err(format!(
-        "not all correct nodes finalized a block after GST: seed={} scenario={} stalled={:?} \
-         heights={:?} honest_drops(pre/post)={}/{} byzantine_withholds={} attack_payload={:?} \
+        "no post-GST progress within {SETTLE:?}: template={} actions={} forwarding={:?} \
+         byzantine_policy={:?} stalled={stalled:?} heights={:?} baselines={:?} \
+         honest_drops(pre/post)={}/{} byzantine_withholds={} attack_payload={:?} \
          victim_attack_view_requests={} observations={}",
-        outcome.seed,
-        outcome.control.as_str(),
-        stalled,
+        outcome.template.as_str(),
+        outcome.actions,
+        outcome.forwarding,
+        outcome.byzantine_policy,
         outcome.heights,
+        outcome.baselines,
         outcome.honest_drops_pre_gst,
         outcome.honest_drops_post_gst,
         outcome.byzantine_withholds,
@@ -393,11 +412,10 @@ pub(super) fn split_notarization_progress(outcome: &WedgeOutcome) -> Result<(), 
     ))
 }
 
-/// Panicking form of [`split_notarization_progress`], for callers that require
-/// recovery.
-pub(super) fn check_split_notarization_progress(outcome: &WedgeOutcome) {
-    check_split_notarization_phases(outcome);
-    if let Err(diagnostic) = split_notarization_progress(outcome) {
-        panic!("marshal split-notarization: {diagnostic}");
+/// Panicking form of [`scenario_progress`]: the crash oracle of the scenario
+/// target.
+pub(super) fn check_scenario_progress(outcome: &ScenarioOutcome) {
+    if let Err(diagnostic) = scenario_progress(outcome) {
+        panic!("marshal scenario: {diagnostic}");
     }
 }

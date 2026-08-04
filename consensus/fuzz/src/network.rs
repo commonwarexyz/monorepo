@@ -37,7 +37,7 @@ use commonware_utils::{sequence::U64, sync::Mutex};
 use rand::RngExt as _;
 use rand_core::CryptoRng;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     marker::PhantomData,
     sync::{
@@ -643,6 +643,33 @@ impl WedgeChannel {
     }
 }
 
+/// Which of the byzantine node's omissions are armed.
+///
+/// Each omission is independent and none is gated by [`WedgePhase`]: a
+/// byzantine node stays byzantine after GST.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ByzantinePolicy {
+    /// Peers do not receive a notarize vote it casts outside the attack view.
+    pub omit_future_notarize_votes: bool,
+    /// It does not process the notarize votes its peers cast outside the attack
+    /// view.
+    pub ignore_inbound_notarize_votes: bool,
+    /// Peers do not receive a notarization certificate it announces.
+    pub omit_certificate_announcements: bool,
+    /// It does not serve marshal `Notarized` requests for the attack round.
+    pub omit_notarized_responses: bool,
+}
+
+impl ByzantinePolicy {
+    /// Every omission armed.
+    pub const ALL: Self = Self {
+        omit_future_notarize_votes: true,
+        ignore_inbound_notarize_votes: true,
+        omit_certificate_announcements: true,
+        omit_notarized_responses: true,
+    };
+}
+
 /// Why a message was withheld.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum WedgeDrop {
@@ -731,8 +758,9 @@ pub struct WedgeRequest {
 
 /// Shared control and ledger for the split-notarization scenario.
 ///
-/// Holds the phase flag, the per-category withholding counters, the observation
-/// log, and the two recovery controls.
+/// Holds the phase flag, the armed correct-message rules, the byzantine
+/// omission policy, the per-category withholding counters, the observation log,
+/// and the two recovery controls.
 pub struct Wedge<P: PublicKey, D: Digest> {
     state: Arc<WedgeState<P, D>>,
 }
@@ -753,6 +781,8 @@ struct WedgeState<P: PublicKey, D: Digest> {
     labels: BTreeMap<P, String>,
     attack_round: Round,
     phase: Mutex<WedgePhase>,
+    policy: ByzantinePolicy,
+    armed: Mutex<BTreeSet<WedgeDrop>>,
     serve_notarized: AtomicBool,
     inject_nullification: AtomicBool,
     injected: AtomicBool,
@@ -767,12 +797,16 @@ struct WedgeState<P: PublicKey, D: Digest> {
 
 impl<P: PublicKey, D: Digest> Wedge<P, D> {
     /// Builds the shared state. `labels` names each participant in the log.
+    ///
+    /// No correct-message rule starts armed; the scenario arms the ones its
+    /// template calls for.
     pub fn new(
         clock: deterministic::Context,
         byzantine: P,
         victim: P,
         labels: impl IntoIterator<Item = (P, String)>,
         attack_round: Round,
+        policy: ByzantinePolicy,
     ) -> Self {
         let origin = clock.current();
         Self {
@@ -784,6 +818,8 @@ impl<P: PublicKey, D: Digest> Wedge<P, D> {
                 labels: labels.into_iter().collect(),
                 attack_round,
                 phase: Mutex::new(WedgePhase::Isolated),
+                policy,
+                armed: Mutex::new(BTreeSet::new()),
                 serve_notarized: AtomicBool::new(false),
                 inject_nullification: AtomicBool::new(false),
                 injected: AtomicBool::new(false),
@@ -806,6 +842,29 @@ impl<P: PublicKey, D: Digest> Wedge<P, D> {
     /// Advances the phase flag every rule reads.
     pub fn set_phase(&self, phase: WedgePhase) {
         *self.state.phase.lock() = phase;
+    }
+
+    /// Arms or disarms one correct-message rule. Byzantine omissions are fixed
+    /// at construction and are not reachable from here.
+    pub fn set_honest_rule(&self, drop: WedgeDrop, armed: bool) {
+        assert!(drop.is_honest(), "{drop:?} is not a correct-message rule");
+        let mut rules = self.state.armed.lock();
+        if armed {
+            rules.insert(drop);
+        } else {
+            rules.remove(&drop);
+        }
+    }
+
+    /// Disarms every correct-message rule.
+    pub fn disarm_honest_rules(&self) {
+        self.state.armed.lock().clear();
+    }
+
+    /// Whether a correct-message rule may fire: it must be armed and the run
+    /// must still be before GST.
+    fn honest_armed(&self, drop: WedgeDrop) -> bool {
+        !self.phase().is_post_gst() && self.state.armed.lock().contains(&drop)
     }
 
     /// Control 1: the byzantine node serves its attack-round block after GST.
@@ -973,13 +1032,14 @@ impl<S: Scheme<D>, D: Digest> Clone for WedgeNode<S, D> {
 /// selected by [`WedgeRole`], [`WedgeChannel`] and the shared [`WedgePhase`].
 /// With `node` unset it forwards everything untouched.
 ///
-/// Honest-message rules, armed before GST only:
+/// Honest-message rules, which fire only while armed and only before GST:
 /// - a holder does not receive the other holder's attack-view notarize vote, so
 ///   no correct node assembles the attack notarization;
 /// - a holder does not receive the victim's one latched attack-view
 ///   notarization broadcast.
 ///
-/// Byzantine withholding, armed for the whole run:
+/// Byzantine withholding, selected by [`ByzantinePolicy`] and armed for the
+/// whole run:
 /// - nobody receives a notarize vote the byzantine node casts outside the
 ///   attack view;
 /// - the byzantine node does not receive the victim's marshal request for the
@@ -1057,7 +1117,7 @@ where
         };
         let wedge = &node.wedge;
         let attack_view = wedge.state.attack_round.view();
-        let pre_gst = !wedge.phase().is_post_gst();
+        let policy = wedge.state.policy;
         match self.channel {
             WedgeChannel::Vote => {
                 let Ok(vote) = Vote::<S, D>::decode(message.clone()) else {
@@ -1065,7 +1125,11 @@ where
                 };
                 let view = vote.view();
                 let notarize = matches!(vote, Vote::Notarize(_));
-                if notarize && node.role == WedgeRole::Byzantine && view != attack_view {
+                if notarize
+                    && policy.ignore_inbound_notarize_votes
+                    && node.role == WedgeRole::Byzantine
+                    && view != attack_view
+                {
                     wedge.withhold(
                         &node.me,
                         self.channel,
@@ -1075,7 +1139,11 @@ where
                     );
                     return true;
                 }
-                if notarize && *peer == wedge.state.byzantine && view != attack_view {
+                if notarize
+                    && policy.omit_future_notarize_votes
+                    && *peer == wedge.state.byzantine
+                    && view != attack_view
+                {
                     wedge.withhold(
                         &node.me,
                         self.channel,
@@ -1087,9 +1155,9 @@ where
                 }
                 if notarize
                     && view == attack_view
-                    && pre_gst
                     && node.role == WedgeRole::Holder
                     && *peer != wedge.state.byzantine
+                    && wedge.honest_armed(WedgeDrop::HolderNotarizeSplit)
                 {
                     wedge.withhold(
                         &node.me,
@@ -1119,7 +1187,8 @@ where
                 let Some(certificate) = self.certificate(message) else {
                     return false;
                 };
-                if *peer == wedge.state.byzantine
+                if policy.omit_certificate_announcements
+                    && *peer == wedge.state.byzantine
                     && let Certificate::Notarization(notarization) = &certificate
                 {
                     wedge.withhold(
@@ -1135,7 +1204,9 @@ where
                     Certificate::Notarization(notarization)
                         if notarization.view() == attack_view =>
                     {
-                        if node.role == WedgeRole::Holder && *peer == wedge.state.victim && pre_gst
+                        if node.role == WedgeRole::Holder
+                            && *peer == wedge.state.victim
+                            && wedge.honest_armed(WedgeDrop::VictimNotarizationRebroadcast)
                         {
                             wedge.withhold(
                                 &node.me,
@@ -1243,7 +1314,8 @@ where
                     ResolverPayload::Request(MarshalKey::Notarized { round }) => {
                         let control = wedge.state.serve_notarized.load(Ordering::Relaxed)
                             && wedge.phase().is_post_gst();
-                        if node.role == WedgeRole::Byzantine
+                        if policy.omit_notarized_responses
+                            && node.role == WedgeRole::Byzantine
                             && round == wedge.state.attack_round
                             && !control
                         {

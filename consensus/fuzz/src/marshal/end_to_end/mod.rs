@@ -24,6 +24,8 @@
 //! - `app` is the block-building automaton bridging the engine to marshal.
 //! - `runner` sets up the cluster, drives the liveness window, and checks
 //!   invariants.
+//! - `scenario` replays a templated, fuzzer-extended pre-GST program, heals the
+//!   network at a rigid GST boundary, and measures progress from there.
 //! - `twins` runs the standard marshal stack under sampled Simplex Twins
 //!   scenarios and checks post-prefix recovery.
 //! - `invariants` holds the safety invariants and automaton assertions.
@@ -35,12 +37,16 @@ pub(crate) mod coding_stack;
 mod input;
 pub(super) mod invariants;
 mod runner;
+mod scenario;
 pub(crate) mod twins;
 
-pub use input::{MarshalDisrupterInput, MarshalTwinsInput};
+pub use input::{MarshalDisrupterInput, MarshalScenarioInput, MarshalTwinsInput};
 pub use runner::{
     fuzz_marshal_coding_disrupter, fuzz_marshal_standard_certificate_poison,
-    fuzz_marshal_standard_disrupter, wedge::fuzz_split_notarization,
+    fuzz_marshal_standard_disrupter,
+};
+pub use scenario::{
+    DropRule, PreGstAction, Role, ScenarioTemplate, fuzz_marshal_standard_scenarios,
 };
 pub use twins::{
     fuzz_marshal_standard_deferred_id_twins_split_header,

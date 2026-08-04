@@ -428,8 +428,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "marshal_e2e_standard_split_notarization"
-path = "fuzz_targets/marshal_e2e_standard_split_notarization.rs"
+name = "marshal_e2e_standard_deferred_cert_mock_scenarios"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_scenarios.rs"
 test = false
 doc = false
 bench = false
