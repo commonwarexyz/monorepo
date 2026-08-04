@@ -257,10 +257,9 @@ where
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
     ///
-    /// This future may outlive its caller and receives a Stateful-owned runtime
-    /// context for that reason. Stateful may also cancel and retry it before
-    /// finalization or pruning. Cancellation and retry must not violate
-    /// invariants or lose durable progress.
+    /// This future is scoped to its caller. Stateful may also cancel and retry
+    /// it before finalization or pruning. Cancellation and retry must not
+    /// violate invariants or lose durable progress.
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -280,9 +279,9 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// This future may be cancelled and retried before finalization or pruning.
-    /// Cancellation and retry must not violate invariants or lose durable
-    /// progress.
+    /// This future may be cancelled if its originating request is dropped, or
+    /// cancelled and retried before finalization or pruning. Cancellation and
+    /// retry must not violate invariants or lose durable progress.
     ///
     /// # Panics
     ///

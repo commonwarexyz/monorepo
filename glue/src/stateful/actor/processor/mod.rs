@@ -18,10 +18,9 @@
 //!   [`Barrier`]), retaining only pending descendants of the finalized
 //!   winner.
 //!
-//! Verification jobs are polled independently. Verification-owned lazy
-//! recovery shares [`Application::apply`] by block digest. Proposal recovery
-//! remains actor-owned. An abandoned verification remains active until newer
-//! actor work supersedes it.
+//! Verification jobs are polled independently and scoped to their callers.
+//! Verification-owned lazy recovery shares [`Application::apply`] by block
+//! digest. Proposal recovery remains actor-owned.
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,

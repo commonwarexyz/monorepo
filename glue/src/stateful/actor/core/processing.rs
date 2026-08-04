@@ -89,11 +89,7 @@ where
         let mut deferred_message = None;
         let mut verifications = Verifications::new(self.marshal.clone());
         for request in std::mem::take(&mut self.initial_verifications) {
-            verifications.schedule(
-                self.context.as_present().child("verify"),
-                self.processor.verifier(),
-                request,
-            );
+            verifications.schedule(self.processor.verifier(), request);
         }
 
         // Deferred finalize flushes, each releasing its block's marshal
@@ -206,7 +202,6 @@ where
                                         ancestry,
                                         verification,
                                     }) => verifications.schedule(
-                                        actor_context.child("verify"),
                                         verifier.clone(),
                                         VerificationRequest {
                                             span,
@@ -240,7 +235,6 @@ where
                     verification,
                 }) => {
                     verifications.schedule(
-                        self.context.as_present().child("verify"),
                         self.processor.verifier(),
                         VerificationRequest {
                             span,
@@ -319,11 +313,7 @@ where
                             verification.respond(false);
                         }
                         for request in retry {
-                            verifications.schedule(
-                                self.context.as_present().child("verify"),
-                                self.processor.verifier(),
-                                request,
-                            );
+                            verifications.schedule(self.processor.verifier(), request);
                         }
                     }
                 }
@@ -355,11 +345,7 @@ where
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;
                     for request in retry {
-                        verifications.schedule(
-                            self.context.as_present().child("verify"),
-                            self.processor.verifier(),
-                            request,
-                        );
+                        verifications.schedule(self.processor.verifier(), request);
                     }
                 }
             },
@@ -793,12 +779,14 @@ mod tests {
 
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
+            let block_context = block.context();
             let request_context = context
                 .child("request")
                 .with_attribute("round", "request-round")
+                .with_attribute("owner", "request")
                 .with_attribute("shard", 4);
             let mut verify = Box::pin(mailbox.verify(
-                (request_context, block.context()),
+                (request_context, block_context),
                 ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -810,6 +798,7 @@ mod tests {
                 assert_eq!(
                     observed[0].attributes,
                     vec![
+                        ("owner".to_string(), "request".to_string()),
                         ("round".to_string(), "request-round".to_string()),
                         ("shard".to_string(), "4".to_string()),
                     ]
@@ -823,7 +812,40 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_incomplete_verifications_cancel_after_supersession() {
+    fn abandoned_verification_cancels_with_caller() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (gate, started, release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "caller-cancellation", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let block_context = block.context();
+            let mut verify = Box::pin(mailbox.verify(
+                (context.child("caller"), block_context),
+                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("application task should start");
+
+            drop(verify);
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                release.send(()).is_err(),
+                "application verification should stop with its caller"
+            );
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn abandoned_incomplete_verifications_do_not_block_later_work() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (first_gate, first_started, first_release) = application_gate();
             let (second_gate, second_started, second_release) = application_gate();
@@ -853,10 +875,10 @@ mod tests {
             assert!(poll!(&mut first).is_pending());
             first_started
                 .await
-                .expect("superseding verification should start");
+                .expect("later verification should start");
             first_release
                 .send(())
-                .expect("superseding verification should remain active");
+                .expect("later verification should remain active");
             assert!(first.await);
 
             let block2 = TestBlock::child(&block1, 2);
@@ -875,10 +897,10 @@ mod tests {
             assert!(poll!(&mut second).is_pending());
             second_started
                 .await
-                .expect("superseding verification should start");
+                .expect("later verification should start");
             second_release
                 .send(())
-                .expect("superseding verification should remain active");
+                .expect("later verification should remain active");
             assert!(second.await);
             actor.abort();
         });

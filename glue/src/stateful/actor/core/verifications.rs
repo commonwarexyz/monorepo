@@ -18,7 +18,7 @@ use rand_core::Rng;
 use std::{collections::BTreeMap, future::Future};
 use tracing::{Instrument as _, Span, info_span};
 
-/// Verification work retained across actor state transitions.
+/// A verification request retained across actor state transitions.
 pub(super) struct Request<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -56,7 +56,7 @@ struct JobControl<D: Copy> {
     progress: VerificationProgress<D>,
 }
 
-/// Owns independently-polled certification requests and their cancellation handles.
+/// Owns independently-polled verification requests and their cancellation handles.
 pub(super) struct Handler<E, A, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -88,12 +88,7 @@ where
         }
     }
 
-    pub(super) fn schedule(
-        &mut self,
-        actor_context: E,
-        mut verifier: Verifier<E, A>,
-        mut request: Request<E, A>,
-    ) {
+    pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -118,20 +113,12 @@ where
         self.jobs.push(
             async move {
                 let ancestry = request.ancestry.clone();
-                // Actor supervision lets the attempt outlive its caller. Keep
-                // the caller's attributes so reparenting changes only ownership.
-                let attempt_context = (
-                    actor_context
-                        .child("application")
-                        .with_attributes_from(&request.context.0),
-                    request.context.1.clone(),
-                );
                 let result = select! {
                     _ = invalidated => None,
                     result = verifier.verify(
-                        &actor_context,
+                        &request.context.0,
                         marshal,
-                        attempt_context,
+                        request.context.1.clone(),
                         ancestry,
                         &progress,
                         &mut request.verification,

@@ -424,13 +424,6 @@ macro_rules! forward_context {
                     $field: self.$field,
                 }
             }
-
-            fn with_attributes_from(self, source: &Self) -> Self {
-                Self {
-                    inner: self.inner.with_attributes_from(&source.inner),
-                    $field: self.$field,
-                }
-            }
         }
 
         impl<E: Clock> Clock for $wrapper<E> {
