@@ -1,14 +1,14 @@
 //! `create` subcommand for `ec2`
 
 use crate::aws::{
+    Architecture, CREATED_FILE_NAME, Config, Error, Host, Hosts, InstanceConfig, Ips, LOGS_PORT,
+    METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION, Metadata, PROFILES_PORT, TRACES_PORT,
     deployer_directory,
     ec2::{self, *},
     images,
     s3::{self, *},
     services::*,
     utils::*,
-    Architecture, Config, Error, Host, Hosts, InstanceConfig, Ips, Metadata, CREATED_FILE_NAME,
-    LOGS_PORT, METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
@@ -830,13 +830,55 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
     ]: [String; 7] = try_join_all([
-        cache_and_presign(&s3_client, &bucket_name, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &grafana_datasources_s3_key(),
+            UploadSource::Static(DATASOURCES_YML.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &grafana_dashboards_s3_key(),
+            UploadSource::Static(ALL_YML.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &loki_config_s3_key(),
+            UploadSource::Static(LOKI_CONFIG.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &pyroscope_config_s3_key(),
+            UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &tempo_config_s3_key(),
+            UploadSource::Static(TEMPO_CONFIG.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &pyroscope_agent_service_s3_key(),
+            UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &pyroscope_agent_timer_s3_key(),
+            UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()),
+            PRESIGN_DURATION,
+        ),
     ])
     .await?
     .try_into()
@@ -874,7 +916,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         })
         .collect();
     let prom_config = generate_prometheus_config(&instances);
-    let prom_digest = Sha256::hash(prom_config.as_bytes()).to_string();
+    let prom_digest = Sha256::hash(&[prom_config.as_bytes()]).to_string();
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
@@ -915,7 +957,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             .collect(),
     };
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
-    let hosts_digest = Sha256::hash(hosts_yaml.as_bytes()).to_string();
+    let hosts_digest = Sha256::hash(&[hosts_yaml.as_bytes()]).to_string();
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
     let hosts_url = cache_and_presign(
@@ -944,7 +986,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             &instance.region,
             arch,
         );
-        let promtail_digest = Sha256::hash(promtail_cfg.as_bytes()).to_string();
+        let promtail_digest = Sha256::hash(&[promtail_cfg.as_bytes()]).to_string();
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
 
@@ -955,7 +997,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             &instance.region,
             arch,
         );
-        let pyroscope_digest = Sha256::hash(pyroscope_script.as_bytes()).to_string();
+        let pyroscope_digest = Sha256::hash(&[pyroscope_script.as_bytes()]).to_string();
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
 
@@ -1412,8 +1454,8 @@ fn grouped_subnets(
 #[cfg(test)]
 mod tests {
     use super::{
-        grouped_subnets, select_availability_zone_groups, select_group_availability_zone,
-        validate_storage_config, RegionResources,
+        RegionResources, grouped_subnets, select_availability_zone_groups,
+        select_group_availability_zone, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
     use std::collections::{BTreeSet, HashMap};

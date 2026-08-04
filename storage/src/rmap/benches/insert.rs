@@ -1,6 +1,6 @@
 use commonware_storage::rmap::RMap;
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use std::time::{Duration, Instant};
 

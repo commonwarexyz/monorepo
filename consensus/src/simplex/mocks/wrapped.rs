@@ -1,12 +1,15 @@
-use crate::{simplex::elector, types::Round};
-use commonware_codec::{types::lazy::Lazy, Encode, Read};
+use crate::{
+    simplex::elector::{self, Terms},
+    types::Round,
+};
+use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
+    Digest, Hasher as _,
     certificate::{Attestation, Scheme as CertificateScheme, Verification, Verifier},
     sha256::Sha256,
-    Digest, Hasher as _,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{modulo, test_rng, Faults, Participant};
+use commonware_utils::{Participant, modulo, test_rng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
@@ -69,10 +72,7 @@ impl<S> Scheme<S> {
 
         // Hash the signer and signature bytes to derive a deterministic starting
         // point for the single-bit flip search.
-        let mut hasher = Sha256::default();
-        hasher.update(&signer.encode());
-        hasher.update(&encoded);
-        let digest = hasher.finalize();
+        let digest = Sha256::hash(&[&signer.encode(), &encoded]);
 
         // Start from a deterministic but non-trivial bit so tests do not always
         // mutate the same low-order bit first.
@@ -131,6 +131,10 @@ where
     S: CertificateScheme,
     E: elector::Elector<S>,
 {
+    fn terms(&self) -> Terms {
+        self.inner.terms()
+    }
+
     fn elect(
         &self,
         round: Round,
@@ -145,10 +149,11 @@ where
     S: CertificateScheme,
 {
     type Subject<'a, D: Digest> = S::Subject<'a, D>;
+    type Faults = S::Faults;
     type PublicKey = S::PublicKey;
     type Certificate = S::Certificate;
 
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -158,10 +163,9 @@ where
     where
         R: rand_core::CryptoRng,
         D: Digest,
-        M: Faults,
     {
         self.inner
-            .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
+            .verify_certificate(rng, subject, certificate, strategy)
     }
 
     fn is_batchable() -> bool {
@@ -262,7 +266,7 @@ where
         )
     }
 
-    fn assemble<I, M>(
+    fn assemble<I>(
         &self,
         attestations: I,
         strategy: &impl commonware_parallel::Strategy,
@@ -270,9 +274,8 @@ where
     where
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
-        M: Faults,
     {
-        self.inner.assemble::<_, M>(
+        self.inner.assemble(
             attestations.into_iter().map(|attestation| Attestation {
                 signer: attestation.signer,
                 signature: attestation.signature,

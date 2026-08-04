@@ -5,14 +5,14 @@ use crate::{
         dkg::feldman_desmedt::deal,
         primitives::{group::Share, sharing::Sharing, variant::Variant},
     },
-    certificate::{mocks::Fixture, Scheme},
+    certificate::{Scheme, mocks::Fixture},
     ed25519,
 };
-use commonware_utils::{ordered::Set, N3f1};
+use commonware_utils::{Faults, ordered::Set};
 use rand_core::CryptoRng;
 
 /// Builds ed25519 identities and matching BLS12-381 threshold schemes.
-pub fn fixture<S, V, R>(
+pub fn fixture<S, V, R, M>(
     rng: &mut R,
     namespace: &[u8],
     n: u32,
@@ -22,7 +22,8 @@ pub fn fixture<S, V, R>(
 where
     V: Variant,
     R: CryptoRng,
-    S: Scheme<PublicKey = ed25519::PublicKey>,
+    M: Faults,
+    S: Scheme<Faults = M, PublicKey = ed25519::PublicKey>,
 {
     assert!(n > 0);
 
@@ -39,7 +40,7 @@ where
         })
         .collect();
 
-    let (output, shares) = deal::<V, _, N3f1>(rng, Default::default(), participants.clone())
+    let (output, shares) = deal::<V, _, M>(rng, Default::default(), participants.clone())
         .expect("deal should succeed");
     let polynomial = output.public().clone();
 

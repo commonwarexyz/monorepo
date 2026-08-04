@@ -1,9 +1,9 @@
 use super::utils::{get_modified_kvs, get_random_kvs, init};
 use commonware_runtime::{
-    benchmarks::{context, tokio},
     Supervisor as _,
+    benchmarks::{context, tokio},
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
 fn bench_sync(c: &mut Criterion) {
@@ -32,8 +32,8 @@ fn bench_sync(c: &mut Criterion) {
                             }
 
                             // Sync twice to ensure both blobs populated
-                            metadata.sync().await.unwrap();
-                            metadata.sync().await.unwrap();
+                            metadata = metadata.sync().await.unwrap();
+                            metadata = metadata.sync().await.unwrap();
 
                             // Update some keys
                             for (k, v) in &modified_kvs {
@@ -42,7 +42,7 @@ fn bench_sync(c: &mut Criterion) {
 
                             // Sync new data
                             let start = Instant::now();
-                            metadata.sync().await.unwrap();
+                            metadata = metadata.sync().await.unwrap();
                             total += start.elapsed();
 
                             metadata.destroy().await.unwrap();

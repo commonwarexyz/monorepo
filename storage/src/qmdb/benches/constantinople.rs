@@ -27,9 +27,9 @@
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
+    Runner as _, Strategizer as _, Supervisor as _,
     buffer::paged::CacheRef,
     tokio::{Config as RConfig, Context, Runner},
-    Runner as _, Strategizer as _, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -37,7 +37,7 @@ use commonware_storage::{
     qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
 use rand::Rng;
 use std::{
     hint::black_box,
@@ -154,14 +154,14 @@ struct Args {
 }
 
 fn key(i: u64) -> Digest {
-    Sha256::hash(&i.to_be_bytes())
+    Sha256::hash(&[&i.to_be_bytes()])
 }
 
 fn gen_muts(rng: &mut TestRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, Digest)> {
     (0..num_updates)
         .map(|_| {
             let idx = rng.next_u64() % num_keys;
-            (key(idx), Sha256::hash(&rng.next_u32().to_be_bytes()))
+            (key(idx), Sha256::hash(&[&rng.next_u32().to_be_bytes()]))
         })
         .collect()
 }
@@ -188,18 +188,18 @@ fn report(db: &str, args: &Args, mut times_ms: Vec<f64>) {
 macro_rules! run_pipeline {
     ($db:ident, $args:ident, $label:literal, $merkleized:ty) => {{
         let args = $args;
-        let mut db = $db;
+        let db = $db;
 
         // Seed all keys in one committed batch.
         let seed_start = Instant::now();
         let mut rng = TestRng::new(42);
         let mut batch = db.new_batch();
         for i in 0..args.num_keys {
-            batch = batch.write(key(i), Some(Sha256::hash(&rng.next_u32().to_be_bytes())));
+            batch = batch.write(key(i), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let mut db = db.commit().await.unwrap();
 
         // Churn: overwrite batches so inactive ops accumulate above the floor.
         for _ in 0..CHURN_BATCHES {
@@ -208,10 +208,10 @@ macro_rules! run_pipeline {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
-        db.commit().await.unwrap();
-        db.sync().await.unwrap();
+        let db = db.commit().await.unwrap();
+        let db = db.sync().await.unwrap();
         eprintln!("seed+churn done in {:?}", seed_start.elapsed());
 
         let mut rng = TestRng::new(99);
@@ -363,6 +363,8 @@ fn main() {
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(
@@ -379,6 +381,8 @@ fn main() {
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = CurrentOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(
@@ -394,6 +398,8 @@ fn main() {
                     journal_config,
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
@@ -411,6 +417,8 @@ fn main() {
                     },
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = AnyVarDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
@@ -421,6 +429,8 @@ fn main() {
                     journal_config,
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
                 };
                 let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)

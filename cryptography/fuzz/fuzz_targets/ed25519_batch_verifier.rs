@@ -2,8 +2,8 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{
-    ed25519::{self, Batch as Ed25519Batch},
     BatchVerifier, Signer, Verifier,
+    ed25519::{self, Batch as Ed25519Batch},
 };
 use commonware_parallel::Sequential;
 use commonware_utils::TestRng;

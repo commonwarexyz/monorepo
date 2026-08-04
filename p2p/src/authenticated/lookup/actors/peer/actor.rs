@@ -1,19 +1,17 @@
 use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
+    channels::{self, Channels},
     data::EncodedData,
-    lookup::{
-        channels::{self, Channels},
-        metrics, types,
-    },
-    relay::{try_recv, Message as RelayMessage, Prioritized, Relay},
+    lookup::{metrics, types},
+    relay::{Message as RelayMessage, Prioritized, Relay, try_recv},
 };
 use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, telemetry::metrics::CounterFamily, BufferPooler, Clock, Handle, IoBufs,
-    Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    iobuf::EncodeExt, telemetry::metrics::CounterFamily,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
@@ -340,23 +338,23 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::lookup::{actors::router, channels::Channels};
+    use crate::authenticated::router;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        deterministic, mocks, telemetry::metrics::MetricsExt as _, BufferPooler,
-        Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
+        BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
+        deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -592,7 +590,7 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
+                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
                         false,
                     )
                     .accepted(),
@@ -601,7 +599,7 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
+                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
                         false,
                     )
                     .accepted(),

@@ -1,6 +1,6 @@
 use commonware_actor::{
-    mailbox::{self, UnreliablePolicy},
     Feedback, Unreliable,
+    mailbox::{self, UnreliablePolicy},
 };
 use commonware_macros::select;
 use commonware_runtime::Metrics;

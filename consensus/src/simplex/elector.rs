@@ -20,22 +20,20 @@
 //!
 //! # Usage
 //!
-//! This module uses a type-state pattern to ensure correct usage:
-//! 1. Users create an elector [`Config`] (e.g., [`RoundRobin`])
-//! 2. The config is passed to the consensus configuration
-//! 3. Consensus calls [`Config::build`] internally with the correct participants
-//! 4. The resulting [`Elector`] can only be created by consensus, preventing misuse
+//! Users configure leader election with an elector [`Config`] (for example,
+//! [`RoundRobin`]) and pass it to the consensus configuration. Consensus builds
+//! the initialized [`Elector`] with the scheme participants before starting.
 
 use crate::{
     simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-    types::{Participant, Round, View},
+    types::{Participant, Round, TermLength, View},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
+    Hasher, PublicKey, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
 use commonware_utils::{modulo, ordered::Set};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, time::Duration};
 
 /// Configuration for creating an [`Elector`].
 ///
@@ -45,10 +43,11 @@ use std::marker::PhantomData;
 ///
 /// # Determinism Requirement
 ///
-/// Implementations **must** be deterministic: given the same construction parameters
-/// and the same inputs to [`Elector::elect`], the method must always return
-/// the same leader index. This is critical for consensus correctness - all honest
-/// participants must agree on the leader for each round.
+/// Implementations **must** be deterministic. Honest participants with the same
+/// configuration and participant set must select the same leader for each round.
+/// This is stronger than returning the same output for identical inputs because
+/// honest participants may call [`Elector::elect`] with different certificates for
+/// the same round. See [`Elector`] for the certificate handling requirements.
 pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     /// The initialized elector type.
     type Elector: Elector<S>;
@@ -63,22 +62,136 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector;
 }
 
+/// Leadership term structure reported by an [`Elector`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Terms {
+    /// Number of consecutive views per term (one if and only if rotating).
+    length: TermLength,
+    /// Term-abandonment timeout (set if and only if `length` exceeds one).
+    stall_timeout: Option<Duration>,
+}
+
+impl Terms {
+    /// Every view is its own term: a new leader is elected each view, and
+    /// leader rotation itself bounds how long finality can stall.
+    pub const fn rotating() -> Self {
+        Self {
+            length: TermLength::ONE,
+            stall_timeout: None,
+        }
+    }
+
+    /// Views are grouped into terms of `length` consecutive views served by
+    /// one leader.
+    ///
+    /// The length is consensus-critical: every participant must configure
+    /// the same value (see [`TermLength`]).
+    ///
+    /// `stall_timeout` is local policy: the maximum time an entered view may
+    /// remain unfinalized before this participant abandons the term. On
+    /// expiry it treats its current view as timed out and votes nullify,
+    /// which (with a quorum) forms a nullification covering the rest of the
+    /// term and evicts the leader.
+    ///
+    /// A Byzantine stable leader can keep every per-view timer satisfied
+    /// while preventing finality: each view notarizes and certifies, but
+    /// no finalization certificate forms. With single-view terms, leader
+    /// rotation bounds such a stall to one view. With longer terms, this
+    /// timeout bounds it instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `length` is 1 or if `stall_timeout` is zero. Single-view
+    /// terms are [`Terms::rotating`] (the default), where per-view timeouts
+    /// already bound a stall.
+    pub const fn stable(length: TermLength, stall_timeout: Duration) -> Self {
+        assert!(
+            length.get() > 1,
+            "stable leaders require a term length greater than 1"
+        );
+        assert!(
+            !stall_timeout.is_zero(),
+            "stable leaders require a stall timeout greater than zero"
+        );
+        Self {
+            length,
+            stall_timeout: Some(stall_timeout),
+        }
+    }
+
+    /// Returns the number of consecutive views per term.
+    ///
+    /// Returns [`TermLength::ONE`] if and only if this is [`Terms::rotating`].
+    /// A length of one is the definition of rotation, not an approximation of
+    /// it: all term arithmetic ([`View::covers`], [`View::admits`],
+    /// [`View::term_index`], [`View::next_term_start`]) reduces exactly to
+    /// per-view behavior at length one. The only regime fact the length does
+    /// not carry is the stall deadline, which callers read from
+    /// [`Terms::stall_timeout`].
+    pub const fn length(&self) -> TermLength {
+        self.length
+    }
+
+    /// Returns the term-abandonment timeout, if stable leaders are configured.
+    ///
+    /// Returns `Some` if and only if [`Self::length`] is greater than one.
+    pub const fn stall_timeout(&self) -> Option<Duration> {
+        self.stall_timeout
+    }
+}
+
+impl Default for Terms {
+    fn default() -> Self {
+        Self::rotating()
+    }
+}
+
 /// An initialized elector that can select leaders for consensus rounds.
 ///
-/// This type can only be created via [`Config::build`], which is called
-/// internally by consensus. This ensures the elector is always initialized with
-/// the correct participant set.
+/// Consensus obtains initialized electors from [`Config::build`] so leader
+/// election and term arithmetic use the same participant set.
 ///
 /// # Certificate Handling
 ///
 /// The `certificate` parameter to [`elect`](Elector::elect) is `None` only for
-/// view 1 (the first view after genesis). For all subsequent views, a certificate
-/// from the previous view is provided. Implementations can use the certificate to
-/// derive randomness (like [`RandomElector`]) or ignore it entirely (like [`RoundRobinElector`]).
+/// view 1 (the first view after genesis). For all subsequent views, the caller
+/// provides the certificate that unlocked the target view. With stable leaders,
+/// a nullification certificate can skip to the next term start, so this is not
+/// necessarily a certificate from the immediately previous view.
+///
+/// Whether certificate data is safe to use for leader selection depends on the
+/// certificate scheme. Certificates are not necessarily canonical: schemes that
+/// retain signer contributions can produce different valid certificates for the
+/// same subject from different quorum subsets. Message reordering or a Byzantine
+/// participant can therefore cause honest participants to call `elect` for the
+/// same round with different certificate values. Implementations must not derive
+/// the leader from a certificate's raw encoding or signer set unless the scheme
+/// guarantees that the result is invariant across every valid representation.
+///
+/// Honest participants may also enter the same round with certificates for
+/// different subjects (for example, one via a notarization of the previous view
+/// and another via a nullification). With `term_length > 1`, those certificates
+/// may even be from different views. Implementations must return the same leader
+/// for every certificate that can unlock the round. [`RoundRobinElector`] meets
+/// this requirement by ignoring the certificate. [`RandomElector`] uses the
+/// recovered threshold seed signature, which is independent of vote type and
+/// quorum subset for a given round. [`Random`] does not support `term_length > 1`
+/// because certificates from different views carry different seed signatures.
 pub trait Elector<S: Scheme>: Clone + Send + 'static {
+    /// Returns the leadership term structure this elector was built with.
+    ///
+    /// Callers that need term arithmetic should use this value so leader
+    /// election and protocol term handling stay aligned.
+    fn terms(&self) -> Terms;
+
     /// Selects the leader for the given round.
     ///
     /// This method **must** be a pure function given the elector's initialization state.
+    ///
+    /// Implementations **must** return the same leader for every view within a
+    /// stable-leader term (as defined by [`Self::terms`]): nullification
+    /// coverage, finalize gating, and leader-inactivity tracking all assume the
+    /// leader is constant for the remainder of a term.
     ///
     /// The `certificate` is expected to be `None` only for view 1.
     ///
@@ -88,14 +201,26 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
 
 /// Configuration for round-robin leader election.
 ///
-/// Rotates through participants based on `(epoch + view) % num_participants`.
+/// Rotates through participants based on `(epoch + term) % num_participants`, where `term` is the
+/// stable-leader term containing the view.
 /// The rotation order can be shuffled at construction using a seed.
 ///
 /// Works with any signing scheme.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct RoundRobin<H: Hasher = Sha256> {
     seed: Option<Vec<u8>>,
+    terms: Terms,
     _phantom: PhantomData<H>,
+}
+
+impl<H: Hasher> Clone for RoundRobin<H> {
+    fn clone(&self) -> Self {
+        Self {
+            seed: self.seed.clone(),
+            terms: self.terms,
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<H: Hasher> RoundRobin<H> {
@@ -106,8 +231,25 @@ impl<H: Hasher> RoundRobin<H> {
     pub fn shuffled(seed: &[u8]) -> Self {
         Self {
             seed: Some(seed.to_vec()),
+            terms: Terms::rotating(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Enables stable leaders: `term_length` consecutive views share a leader,
+    /// and a term abandoned after `stall_timeout` evicts them (see
+    /// [`Terms::stable`]).
+    ///
+    /// The term length is consensus-critical: every participant must configure
+    /// the same value (see [`TermLength`]). The timeout is local policy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `term_length` is 1 or `stall_timeout` is zero (see
+    /// [`Terms::stable`]).
+    pub const fn with_term(mut self, term_length: TermLength, stall_timeout: Duration) -> Self {
+        self.terms = Terms::stable(term_length, stall_timeout);
+        self
     }
 }
 
@@ -122,16 +264,12 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
             .collect();
 
         if let Some(seed) = &self.seed {
-            let mut hasher = H::new();
-            permutation.sort_by_key(|&index| {
-                hasher.update(seed);
-                hasher.update(&index.get().encode());
-                hasher.finalize()
-            });
+            permutation.sort_by_key(|&index| H::hash(&[seed, &index.get().encode()]));
         }
 
         RoundRobinElector {
             permutation,
+            terms: self.terms,
             _phantom: PhantomData,
         }
     }
@@ -143,13 +281,24 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 #[derive(Clone, Debug)]
 pub struct RoundRobinElector<S: Scheme> {
     permutation: Vec<Participant>,
+    terms: Terms,
     _phantom: PhantomData<S>,
 }
 
 impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
+    fn terms(&self) -> Terms {
+        self.terms
+    }
+
     fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
+        // In order to get a stable leader, use the 1-based index of the term
+        let term_idx = round.view().term_index(self.terms.length());
+
+        // Incorporate the epoch number
         let n = self.permutation.len();
-        let idx = (round.epoch().get().wrapping_add(round.view().get())) as usize % n;
+        let idx = round.epoch().get().wrapping_add(term_idx)
+            % u64::try_from(n).expect("permutation length fits in u64");
+        let idx = usize::try_from(idx).expect("leader index fits in usize");
         self.permutation[idx]
     }
 }
@@ -159,6 +308,9 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 /// Uses the seed signature from BLS threshold certificates to derive unpredictable
 /// leader selection. Falls back to standard round-robin for view 1 when no
 /// certificate is available.
+///
+/// This elector does not support stable leaders: it has no term-length
+/// configuration and [`Elector::terms`] always returns [`Terms::rotating`].
 ///
 /// Only works with [`super::scheme::bls12381_threshold::vrf`]
 /// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
@@ -176,9 +328,8 @@ impl Random {
 
         let Some(seed_signature) = seed_signature else {
             // Standard round-robin for view 1
-            return Participant::new(
-                (round.epoch().get().wrapping_add(round.view().get())) as u32 % n,
-            );
+            let idx = round.epoch().get().wrapping_add(round.view().get()) % u64::from(n);
+            return Participant::new(u32::try_from(idx).expect("leader index fits in u32"));
         };
 
         // Use the seed signature as a source of randomness
@@ -217,6 +368,10 @@ where
     P: PublicKey,
     V: Variant,
 {
+    fn terms(&self) -> Terms {
+        Terms::rotating()
+    }
+
     fn elect(
         &self,
         round: Round,
@@ -245,11 +400,11 @@ mod tests {
         types::{Epoch, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
-        sha256::Digest as Sha256Digest, Sha256,
+        Sha256, bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
+        sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TryFromIterator};
+    use commonware_utils::{Faults, N3f1, NZU32, TryFromIterator, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -303,6 +458,73 @@ mod tests {
             seen[usize::from(*leader)] = true;
         }
         assert!(seen.iter().all(|x| *x));
+    }
+
+    #[test]
+    fn round_robin_handles_wrapping_epoch_plus_term_index() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
+            .with_term(TermLength::new(NZU32!(5)), Duration::from_secs(10))
+            .build(&participants);
+
+        let round = Round::new(Epoch::new(u64::MAX - 1), View::new(6));
+        let term_idx = round.view().term_index(TermLength::new(NZU32!(5)));
+        let expected = round.epoch().get().wrapping_add(term_idx) % 5;
+
+        assert_eq!(
+            elector.elect(round, None),
+            Participant::new(expected as u32)
+        );
+    }
+
+    #[test]
+    fn round_robin_uses_stable_leaders_within_terms() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
+            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
+            .build(&participants);
+        let epoch = Epoch::new(0);
+
+        let leader_v1 = elector.elect(Round::new(epoch, View::new(1)), None);
+        let leader_v2 = elector.elect(Round::new(epoch, View::new(2)), None);
+        let leader_v3 = elector.elect(Round::new(epoch, View::new(3)), None);
+        let leader_v4 = elector.elect(Round::new(epoch, View::new(4)), None);
+        let leader_v5 = elector.elect(Round::new(epoch, View::new(5)), None);
+        let leader_v6 = elector.elect(Round::new(epoch, View::new(6)), None);
+
+        assert_eq!(leader_v1, leader_v2);
+        assert_eq!(leader_v1, leader_v3);
+        assert_eq!(leader_v4, leader_v5);
+        assert_eq!(leader_v4, leader_v6);
+        assert_ne!(leader_v1, leader_v4);
+    }
+
+    #[test]
+    fn round_robin_epoch_transition_shifts_stable_term_leader() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
+            .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(10))
+            .build(&participants);
+
+        let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), None);
+        let leader_epoch_0_v2 = elector.elect(Round::new(Epoch::new(0), View::new(2)), None);
+        let leader_epoch_1 = elector.elect(Round::new(Epoch::new(1), View::new(1)), None);
+        let leader_epoch_1_v3 = elector.elect(Round::new(Epoch::new(1), View::new(3)), None);
+        let leader_epoch_2 = elector.elect(Round::new(Epoch::new(2), View::new(1)), None);
+        let leader_epoch_2_v2 = elector.elect(Round::new(Epoch::new(2), View::new(2)), None);
+
+        assert_eq!(leader_epoch_0, Participant::new(1));
+        assert_eq!(leader_epoch_0_v2, leader_epoch_0);
+        assert_eq!(leader_epoch_1, Participant::new(2));
+        assert_eq!(leader_epoch_1_v3, leader_epoch_1);
+        assert_eq!(leader_epoch_2, Participant::new(3));
+        assert_eq!(leader_epoch_2_v2, leader_epoch_2);
     }
 
     #[test]
@@ -417,6 +639,26 @@ mod tests {
     }
 
     #[test]
+    fn random_fallback_does_not_truncate_before_modulo() {
+        // Five participants make truncation observable:
+        // 2^32 % 5 is 1, while (2^32 as u32) % 5 is 0
+        let mut rng = test_rng();
+        let Fixture { participants, .. } =
+            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let random: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let round_robin: RoundRobinElector<ThresholdScheme> =
+            RoundRobin::<Sha256>::default().build(&participants);
+
+        // View 1 exercises Random's round-robin fallback
+        let round = Round::new(Epoch::new(u64::from(u32::MAX)), View::new(1));
+
+        // Both electors must preserve the full u64 sum through the modulo
+        assert_eq!(round_robin.elect(round, None), Participant::new(1));
+        assert_eq!(random.elect(round, None), Participant::new(1));
+    }
+
+    #[test]
     fn random_uses_certificate_randomness() {
         let mut rng = test_rng();
         let Fixture {
@@ -438,9 +680,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert1 = schemes[0]
-            .assemble::<_, N3f1>(attestations1, &Sequential)
-            .unwrap();
+        let cert1 = schemes[0].assemble(attestations1, &Sequential).unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
@@ -452,9 +692,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert2 = schemes[0]
-            .assemble::<_, N3f1>(attestations2, &Sequential)
-            .unwrap();
+        let cert2 = schemes[0].assemble(attestations2, &Sequential).unwrap();
 
         // Same certificate always gives same leader
         let leader1a = elector.elect(round1, Some(&cert1));
@@ -561,9 +799,7 @@ mod tests {
                     .take(quorum)
                     .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
                     .collect();
-                let cert = schemes[0]
-                    .assemble::<_, N3f1>(attestations, &Sequential)
-                    .unwrap();
+                let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
 
                 // Elect leader using the certificate
                 let leader = elector.elect(round, Some(&cert));

@@ -1,12 +1,12 @@
 use super::{
-    elector::Config as Elector,
+    elector,
     types::{Activity, Context, Finalization},
 };
 use crate::{
-    types::{Epoch, ViewDelta},
     CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
+    types::{Epoch, View, ViewDelta},
 };
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -42,6 +42,12 @@ impl ForwardingPolicy {
 }
 
 /// The certified root from which a Simplex instance starts.
+///
+/// The floor must be durable and must never move backwards across restarts:
+/// the voter prunes its durable vote journal relative to the floor, so
+/// restarting with an earlier floor can re-enter views whose vote records
+/// were already discarded (risking equivocation). Derive the floor from
+/// application state that is persisted before the engine starts.
 #[derive(Clone, Debug)]
 pub enum Floor<S: Scheme, D: Digest> {
     /// Start from the epoch genesis payload at view 0.
@@ -51,6 +57,14 @@ pub enum Floor<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Floor<S, D> {
+    /// The finalized view the engine starts from (`View::zero()` for genesis).
+    pub(crate) fn view(&self) -> View {
+        match self {
+            Self::Genesis(_) => View::zero(),
+            Self::Finalized(finalization) => finalization.view(),
+        }
+    }
+
     fn assert<Rng>(&self, epoch: Epoch, rng: &mut Rng, scheme: &S, strategy: &impl Strategy)
     where
         Rng: CryptoRng,
@@ -78,7 +92,7 @@ impl<S: Scheme, D: Digest> Floor<S, D> {
 pub struct Config<S, L, B, D, A, R, F, T>
 where
     S: Scheme,
-    L: Elector<S>,
+    L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
@@ -95,6 +109,10 @@ where
     /// responsible for reusing the exact participant ordering carried by `participants` so that signer indices
     /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
     /// the wrong validator.
+    ///
+    /// Simplex compares complete signed votes when checking duplicates and
+    /// conflicts. Signing the same subject more than once for the same participant
+    /// must therefore produce the same signature encoding.
     pub scheme: S,
 
     /// Leader election configuration.
@@ -118,10 +136,25 @@ where
 
     /// Reporter for the consensus engine.
     ///
-    /// All activity is exported for downstream applications that benefit from total observability,
-    /// consider wrapping with [`crate::simplex::scheme::reporter::AttributableReporter`] to
-    /// automatically filter and verify activities based on scheme attributability.
+    /// Activity is exported for every tracked view, including votes that arrive up to
+    /// `view_retention` views below the highest finalized view; votes below that window
+    /// are dropped without being reported. Reported votes are not guaranteed to be
+    /// verified (see [`crate::simplex::types::Activity`]). Consider wrapping with
+    /// [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter
+    /// and verify activities based on scheme attributability.
+    ///
+    /// Locally constructed votes are exported only after their journal entries are
+    /// durable. Network votes are not persisted, so an equivocating sender may have
+    /// different votes exported before and after a restart.
     pub reporter: F,
+
+    /// Track individual votes after certification.
+    ///
+    /// By default, full vote evidence is released when the corresponding certificate
+    /// is constructed or received, making later conflict reporting and peer blocking
+    /// best effort. Enabling this retains each recorded vote until its round is
+    /// pruned, increasing memory usage.
+    pub track_historical_votes: bool,
 
     /// Strategy for parallel operations.
     pub strategy: T,
@@ -154,22 +187,23 @@ where
 
     /// Amount of time to wait for certification progress in a view
     /// before attempting to skip the view.
+    ///
+    /// This timeout must be greater than the leader timeout.
     pub certification_timeout: Duration,
 
     /// Amount of time to wait before retrying a nullify broadcast if
     /// stuck in a view.
     pub timeout_retry: Duration,
 
-    /// Number of views behind finalized tip to track
-    /// and persist activity derived from validator messages.
-    pub activity_timeout: ViewDelta,
+    /// Number of views behind the finalized tip to track (in memory and in the
+    /// journal) for recent activity.
+    pub view_retention: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
-    /// for this many recent known views (we ignore views we don't have data for).
+    /// for at least this long while a quorum of participants has been active.
     ///
-    /// This number should be less than or equal to `activity_timeout` (how
-    /// many views we are tracking below the finalized tip).
-    pub skip_timeout: ViewDelta,
+    /// This timeout must be greater than the certification timeout and timeout retry.
+    pub skip_timeout: Duration,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
@@ -183,15 +217,15 @@ where
 }
 
 impl<
-        S: Scheme,
-        L: Elector<S>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
-        R: Relay,
-        F: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Config<S, L, B, D, A, R, F, T>
+    S: Scheme,
+    L: elector::Config<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
+    R: Relay,
+    F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
+> Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
     ///
@@ -205,33 +239,34 @@ impl<
             !self.scheme.participants().is_empty(),
             "there must be at least one participant"
         );
+
+        // Vote-to-nullify timeouts.
+        // certification_timeout > leader_timeout > 0.
+        // skip_timeout > certification_timeout and timeout_retry.
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"
         );
         assert!(
-            self.certification_timeout > Duration::default(),
-            "certification timeout must be greater than zero"
+            self.certification_timeout > self.leader_timeout,
+            "certification timeout must be greater than leader timeout"
+        );
+
+        assert!(
+            self.skip_timeout > self.certification_timeout,
+            "skip timeout must be greater than certification timeout"
         );
         assert!(
-            self.leader_timeout <= self.certification_timeout,
-            "leader timeout must be less than or equal to certification timeout"
+            self.skip_timeout > self.timeout_retry,
+            "skip timeout must be greater than timeout retry"
         );
         assert!(
             self.timeout_retry > Duration::default(),
             "timeout retry broadcast must be greater than zero"
         );
         assert!(
-            !self.activity_timeout.is_zero(),
-            "activity timeout must be greater than zero"
-        );
-        assert!(
-            !self.skip_timeout.is_zero(),
-            "skip timeout must be greater than zero"
-        );
-        assert!(
-            self.skip_timeout <= self.activity_timeout,
-            "skip timeout must be less than or equal to activity timeout"
+            !self.view_retention.is_zero(),
+            "view retention timeout must be greater than zero"
         );
         assert!(
             self.fetch_timeout > Duration::default(),

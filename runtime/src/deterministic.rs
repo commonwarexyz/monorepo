@@ -43,8 +43,11 @@
 //! ```
 
 pub use crate::storage::faulty::Config as FaultConfig;
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use crate::{
-    child_label,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
+    METRICS_PREFIX, Name, Panicked, child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -55,38 +58,34 @@ use crate::{
         memory::Storage as MemStorage, metered::Storage as MeteredStorage,
     },
     telemetry::metrics::{
-        add_attribute, raw, task::Label, validate_label, Counter, CounterFamily, GaugeFamily,
-        Metric, Register, Registered, Registry,
+        Counter, CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
+        raw, task::Label, validate_label,
     },
     utils::{
+        Panicker,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker,
     },
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Name, Panicked,
-    METRICS_PREFIX,
 };
-#[cfg(feature = "external")]
-use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::{
+    Cached, SystemTimeExt,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
-    Cached, SystemTimeExt,
 };
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    task::{waker, ArcWake},
     Future,
+    task::{ArcWake, waker},
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
-use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng};
+use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -95,7 +94,7 @@ use std::{
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     sync::{Arc, Weak},
     task::{self, Poll, Waker},
@@ -141,6 +140,37 @@ impl Metrics {
 /// A SHA-256 digest.
 type Digest = [u8; 32];
 
+/// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
+pub(crate) struct AuditHasher(Sha256);
+
+impl AuditHasher {
+    /// Creates an empty audit hasher.
+    pub(crate) fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    /// Adds a length-prefixed field to the audit.
+    pub(crate) fn update(&mut self, value: impl AsRef<[u8]>) {
+        let value = value.as_ref();
+        self.0.update((value.len() as u64).to_be_bytes());
+        self.0.update(value);
+    }
+
+    /// Adds the logical contents of `bufs` as one length-prefixed field.
+    ///
+    /// Physical chunk boundaries are excluded because they are not part of the storage or network
+    /// operation being audited.
+    pub(crate) fn update_bufs(&mut self, bufs: &IoBufs) {
+        self.0.update((bufs.len() as u64).to_be_bytes());
+        bufs.for_each_chunk(|chunk| self.0.update(chunk));
+    }
+
+    /// Returns the digest of all fields added to the audit.
+    pub(crate) fn finalize(self) -> Digest {
+        self.0.finalize().into()
+    }
+}
+
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
     digest: Mutex<Digest>,
@@ -160,16 +190,16 @@ impl Auditor {
     /// whatever other data is passed in the `payload` closure.
     pub(crate) fn event<F>(&self, label: &'static [u8], payload: F)
     where
-        F: FnOnce(&mut Sha256),
+        F: FnOnce(&mut AuditHasher),
     {
         let mut digest = self.digest.lock();
 
-        let mut hasher = Sha256::new();
+        let mut hasher = AuditHasher::new();
         hasher.update(digest.as_ref());
         hasher.update(label);
         payload(&mut hasher);
 
-        *digest = hasher.finalize().into();
+        *digest = hasher.finalize();
     }
 
     /// Generate a representation of the current state of the runtime.
@@ -283,12 +313,12 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = cfg;
         self
     }
     /// See [Config]
-    pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.storage_buffer_pool_cfg = cfg;
         self
     }
@@ -386,6 +416,13 @@ impl Executor {
         now
     }
 
+    /// Ensure the runtime has not reached its configured deadline.
+    fn assert_deadline(&self, current: SystemTime) {
+        if self.deadline.is_some_and(|deadline| current >= deadline) {
+            panic!("runtime timeout");
+        }
+    }
+
     /// When idle, jump directly to the next actionable time.
     ///
     /// When built with the `external` feature, never skip ahead (to ensure we poll all pending tasks
@@ -398,10 +435,10 @@ impl Executor {
         let mut skip_until = None;
         {
             let sleeping = self.sleeping.lock();
-            if let Some(next) = sleeping.peek() {
-                if next.time > current {
-                    skip_until = Some(next.time);
-                }
+            if let Some(next) = sleeping.peek()
+                && next.time > current
+            {
+                skip_until = Some(next.time);
             }
         }
 
@@ -427,15 +464,29 @@ impl Executor {
         }
     }
 
-    /// Ensure the runtime is making progress.
+    /// Wake sleepers until the runtime can make progress.
     ///
-    /// When built with the `external` feature, always poll pending tasks after the passage of time.
-    fn assert_liveness(&self) {
-        if cfg!(feature = "external") || self.tasks.ready() != 0 {
-            return;
-        }
+    /// Canceling a polled sleep leaves its alarm registered until its deadline. If that alarm
+    /// wakes no task, continue to later deadlines before deciding the runtime has stalled.
+    ///
+    /// When built with the `external` feature, the passage of time is sufficient to continue.
+    fn wake_until_progress(&self, mut current: SystemTime) {
+        loop {
+            // Move to the next actionable time. Check the runtime deadline before waking sleepers
+            // so timeout takes precedence over work scheduled at the deadline.
+            current = self.skip_idle_time(current);
+            self.assert_deadline(current);
+            self.wake_ready_sleepers(current);
 
-        panic!("runtime stalled");
+            // Continue once external work or a woken task can make progress. Without either,
+            // another alarm is the runtime's only remaining source of progress.
+            if cfg!(feature = "external") || self.tasks.ready() != 0 {
+                return;
+            }
+            if self.sleeping.lock().is_empty() {
+                panic!("runtime stalled");
+            }
+        }
     }
 }
 
@@ -537,112 +588,103 @@ impl Runner {
 
         // Process tasks until root task completes or progress stalls.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
-        let result = catch_unwind(AssertUnwindSafe(|| loop {
-            // Ensure we have not exceeded our deadline
-            {
-                let current = executor.time.lock();
-                if let Some(deadline) = executor.deadline {
-                    if *current >= deadline {
-                        drop(current);
-                        panic!("runtime timeout");
-                    }
-                }
-            }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            loop {
+                // Ensure we have not exceeded our deadline
+                let current = *executor.time.lock();
+                executor.assert_deadline(current);
 
-            // Drain all ready tasks
-            let mut queue = executor.tasks.drain();
+                // Drain all ready tasks
+                let mut queue = executor.tasks.drain();
 
-            // Shuffle tasks (if more than one)
-            if queue.len() > 1 {
-                let mut rng = executor.rng.lock();
-                queue.shuffle(&mut *rng);
-            }
-
-            // Run all snapshotted tasks
-            //
-            // This approach is more efficient than randomly selecting a task one-at-a-time
-            // because it ensures we don't pull the same pending task multiple times in a row (without
-            // processing a different task required for other tasks to make progress).
-            trace!(
-                iter = executor.metrics.iterations.get(),
-                tasks = queue.len(),
-                "starting loop"
-            );
-            let mut output = None;
-            for id in queue {
-                // Lookup the task (it may have completed already)
-                let Some(task) = executor.tasks.get(id) else {
-                    trace!(id, "skipping missing task");
-                    continue;
-                };
-
-                // Record task for auditing
-                executor.auditor.event(b"process_task", |hasher| {
-                    hasher.update(task.id.to_be_bytes());
-                    hasher.update(task.label.name().as_bytes());
-                });
-                executor.metrics.task_polls.get_or_create(&task.label).inc();
-                trace!(id, "processing task");
-
-                // Prepare task for polling
-                let waker = waker(Arc::new(TaskWaker {
-                    id,
-                    tasks: Arc::downgrade(&executor.tasks),
-                }));
-                let mut cx = task::Context::from_waker(&waker);
-
-                // Poll the task
-                match &task.mode {
-                    Mode::Root => {
-                        // Poll the root task
-                        if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                            trace!(id, "root task is complete");
-                            output = Some(result);
-                            break;
-                        }
-                    }
-                    Mode::Work(future) => {
-                        // Get the future (if it still exists)
-                        let mut fut_opt = future.lock();
-                        let Some(fut) = fut_opt.as_mut() else {
-                            trace!(id, "skipping already complete task");
-
-                            // Remove the future
-                            executor.tasks.remove(id);
-                            continue;
-                        };
-
-                        // Poll the task
-                        if fut.as_mut().poll(&mut cx).is_ready() {
-                            trace!(id, "task is complete");
-
-                            // Remove the future
-                            executor.tasks.remove(id);
-                            *fut_opt = None;
-                            continue;
-                        }
-                    }
+                // Shuffle tasks (if more than one)
+                if queue.len() > 1 {
+                    let mut rng = executor.rng.lock();
+                    queue.shuffle(&mut *rng);
                 }
 
-                // Try again later if task is still pending
-                trace!(id, "task is still pending");
+                // Run all snapshotted tasks
+                //
+                // This approach is more efficient than randomly selecting a task one-at-a-time
+                // because it ensures we don't pull the same pending task multiple times in a row (without
+                // processing a different task required for other tasks to make progress).
+                trace!(
+                    iter = executor.metrics.iterations.get(),
+                    tasks = queue.len(),
+                    "starting loop"
+                );
+                let mut output = None;
+                for id in queue {
+                    // Lookup the task (it may have completed already)
+                    let Some(task) = executor.tasks.get(id) else {
+                        trace!(id, "skipping missing task");
+                        continue;
+                    };
+
+                    // Record task for auditing
+                    executor.auditor.event(b"process_task", |hasher| {
+                        hasher.update(task.id.to_be_bytes());
+                        hasher.update(task.label.name().as_bytes());
+                    });
+                    executor.metrics.task_polls.get_or_create(&task.label).inc();
+                    trace!(id, "processing task");
+
+                    // Prepare task for polling
+                    let waker = waker(Arc::new(TaskWaker {
+                        id,
+                        tasks: Arc::downgrade(&executor.tasks),
+                    }));
+                    let mut cx = task::Context::from_waker(&waker);
+
+                    // Poll the task
+                    match &task.mode {
+                        Mode::Root => {
+                            // Poll the root task
+                            if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
+                                trace!(id, "root task is complete");
+                                output = Some(result);
+                                break;
+                            }
+                        }
+                        Mode::Work(future) => {
+                            // Get the future (if it still exists)
+                            let mut fut_opt = future.lock();
+                            let Some(fut) = fut_opt.as_mut() else {
+                                trace!(id, "skipping already complete task");
+
+                                // Remove the future
+                                executor.tasks.remove(id);
+                                continue;
+                            };
+
+                            // Poll the task
+                            if fut.as_mut().poll(&mut cx).is_ready() {
+                                trace!(id, "task is complete");
+
+                                // Remove the future
+                                executor.tasks.remove(id);
+                                *fut_opt = None;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Try again later if task is still pending
+                    trace!(id, "task is still pending");
+                }
+
+                // If the root task has completed, exit as soon as possible
+                if let Some(output) = output {
+                    break output;
+                }
+
+                // Advance time and wake sleepers until the runtime can make progress
+                let current = executor.advance_time();
+                executor.wake_until_progress(current);
+
+                // Record that we completed another iteration of the event loop.
+                executor.metrics.iterations.inc();
             }
-
-            // If the root task has completed, exit as soon as possible
-            if let Some(output) = output {
-                break output;
-            }
-
-            // Advance time (skipping ahead if no tasks are ready yet)
-            let mut current = executor.advance_time();
-            current = executor.skip_idle_time(current);
-
-            // Wake sleepers and ensure we continue to make progress
-            executor.wake_ready_sleepers(current);
-            executor.assert_liveness();
-
-            // Record that we completed another iteration of the event loop.
-            executor.metrics.iterations.inc();
         }));
 
         // Clear remaining tasks from the executor.
@@ -1159,8 +1201,8 @@ impl crate::Spawner for Context {
     fn stopped(&self) -> Signal {
         let executor = self.executor();
         executor.auditor.event(b"stopped", |_| {});
-        let stopped = executor.shutdown.lock().stopped();
-        stopped
+
+        executor.shutdown.lock().stopped()
     }
 }
 
@@ -1568,20 +1610,21 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        deterministic, reschedule, Blob, Metrics as _, Resolver, Runner as _, Spawner as _,
-        Storage, Supervisor as _,
+        Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
+        Supervisor as _, WriteOptions, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
+    use commonware_parallel::Strategy;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
-    use commonware_utils::channel::oneshot;
+    use commonware_utils::{NZUsize, channel::oneshot};
+    #[cfg(feature = "external")]
+    use futures::StreamExt;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
-    #[cfg(feature = "external")]
-    use futures::StreamExt;
-    use futures::{stream::FuturesUnordered, task::noop_waker};
+    use futures::{FutureExt as _, stream::FuturesUnordered, task::noop_waker};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -1609,6 +1652,21 @@ mod tests {
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
         run_tasks(5, executor)
+    }
+
+    fn run_with_metric(name: &'static str, help: &'static str) -> String {
+        deterministic::Runner::default().start(|context| async move {
+            let _: Registered<raw::Counter> = context.register(name, help, raw::Counter::default());
+            context.auditor().state()
+        })
+    }
+
+    #[test]
+    fn test_auditor_separates_metric_fields() {
+        let state_a = run_with_metric("a", "bc");
+        let state_b = run_with_metric("ab", "c");
+
+        assert_ne!(state_a, state_b);
     }
 
     #[test]
@@ -1678,6 +1736,47 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_sleeper_before_live_deadline() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (started_sender, started_receiver) = oneshot::channel();
+            let sleeper = context.child("sleeper").spawn(|context| async move {
+                let mut sleepers = FuturesUnordered::new();
+                sleepers.push(context.sleep(Duration::from_secs(1)));
+                started_sender.send(()).unwrap();
+                sleepers.next().await;
+            });
+
+            // Waiting for the signal ensures the child registered its alarm before being aborted.
+            started_receiver.await.unwrap();
+            sleeper.abort();
+
+            // The stale child alarm must not prevent a later live alarm from firing.
+            context.sleep(Duration::from_secs(2)).await;
+        });
+    }
+
+    #[cfg(not(feature = "external"))]
+    #[test]
+    #[should_panic(expected = "runtime timeout")]
+    fn test_dropped_sleeper_beyond_timeout() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (started_sender, started_receiver) = oneshot::channel();
+            let sleeper = context.child("sleeper").spawn(|context| async move {
+                let mut sleep = Box::pin(context.sleep(Duration::from_secs(20)));
+                assert!(sleep.as_mut().now_or_never().is_none());
+                started_sender.send(()).unwrap();
+                sleep.await;
+            });
+
+            started_receiver.await.unwrap();
+            sleeper.abort();
+            pending::<()>().await;
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "runtime timeout")]
     fn test_timeout() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1722,7 +1821,9 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, data, WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
         });
@@ -1767,7 +1868,9 @@ mod tests {
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, data, WriteOptions::default())
+                .await
+                .unwrap();
         });
 
         // Recover the runtime
@@ -2124,7 +2227,9 @@ mod tests {
         let (result, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
                 let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
-                blob.write_at(0, b"data".to_vec()).await.unwrap();
+                blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                    .await
+                    .unwrap();
                 blob.sync().await // This should fail due to fault injection
             });
 
@@ -2141,7 +2246,9 @@ mod tests {
             assert_eq!(len, 0, "unsynced data should be lost after recovery");
 
             // Now we can write and sync successfully
-            blob.write_at(0, b"recovered".to_vec()).await.unwrap();
+            blob.write_at(0, b"recovered".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync()
                 .await
                 .expect("sync should succeed with faults disabled");
@@ -2159,7 +2266,9 @@ mod tests {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
             // Initially no faults - sync should succeed
-            blob.write_at(0, b"initial".to_vec()).await.unwrap();
+            blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.expect("initial sync should succeed");
 
             // Enable sync faults dynamically
@@ -2167,7 +2276,9 @@ mod tests {
             storage_fault_cfg.write().sync_rate = Some(1.0);
 
             // Now sync should fail
-            blob.write_at(0, b"updated".to_vec()).await.unwrap();
+            blob.write_at(0, b"updated".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             let result = blob.sync().await;
             assert!(result.is_err(), "sync should fail with faults enabled");
 
@@ -2244,7 +2355,11 @@ mod tests {
                             let name = format!("task{i}_blob{j}");
                             if let Ok((blob, _)) = ctx.open("partition", name.as_bytes()).await {
                                 successes += 1;
-                                if blob.write_at(0, b"data".to_vec()).await.is_ok() {
+                                if blob
+                                    .write_at(0, b"data".to_vec(), WriteOptions::default())
+                                    .await
+                                    .is_ok()
+                                {
                                     successes += 1;
                                 }
                                 if blob.sync().await.is_ok() {
@@ -2277,5 +2392,106 @@ mod tests {
             results1, results3,
             "different seeds should produce different patterns"
         );
+    }
+
+    #[test]
+    fn test_resolver() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register DNS mappings
+            let ip1: IpAddr = "192.168.1.1".parse().unwrap();
+            let ip2: IpAddr = "192.168.1.2".parse().unwrap();
+            context.resolver_register("example.com", Some(vec![ip1, ip2]));
+
+            // Resolve registered hostname
+            let addrs = context.resolve("example.com").await.unwrap();
+            assert_eq!(addrs, vec![ip1, ip2]);
+
+            // Resolve unregistered hostname
+            let result = context.resolve("unknown.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+
+            // Remove mapping
+            context.resolver_register("example.com", None);
+            let result = context.resolve("example.com").await;
+            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+        });
+    }
+
+    /// A strategy with parallelism greater than one must behave as configured under the
+    /// deterministic runtime even though no worker threads exist.
+    #[test]
+    fn test_parallel_strategy_spawn_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            assert_eq!(strategy.parallelism(), 2);
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+
+            assert_eq!(output, vec![1, 2]);
+        });
+    }
+
+    /// Strategies share the pool registered with the executor thread, but each request must
+    /// retain its own planning parallelism and execute work. This covers multiple strategies
+    /// within one runner and a later runner on the same thread.
+    #[test]
+    fn test_strategies_reuse_pool_across_runners() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
+            assert_eq!(first.parallelism(), 1);
+            assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
+            let output = first
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2]);
+
+            let second = context.child("pool_b").strategy(NZUsize!(3)).manual();
+            assert_eq!(second.parallelism(), 3);
+            assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
+            let output = second
+                .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2, 3]);
+        });
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let third = context.child("pool_c").strategy(NZUsize!(4)).manual();
+            assert_eq!(third.parallelism(), 4);
+            assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
+            let output = third
+                .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))
+                .now_or_never()
+                .expect("single-threaded pool should run spawned work inline");
+            assert_eq!(output, vec![1, 2, 3, 4]);
+        });
+    }
+
+    /// Tasks may suspend while a pool exists: pools have no worker tasks for the executor
+    /// to poll (a polled rayon worker loop would block or abort the runtime), so suspension
+    /// must leave the pool usable.
+    #[test]
+    fn test_pool_survives_suspension() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            context.sleep(Duration::from_millis(10)).await;
+
+            let output = strategy
+                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
+            assert_eq!(output, vec![1, 2]);
+
+            context.sleep(Duration::from_millis(10)).await;
+            let sum = strategy.fold(0..100u64, || 0u64, |acc, i| acc + i, |a, b| a + b);
+            assert_eq!(sum, 4950);
+        });
     }
 }

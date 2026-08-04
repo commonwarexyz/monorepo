@@ -1,6 +1,6 @@
 use super::Variant;
 use crate::types::Height;
-use commonware_utils::{futures::OptionFuture, Acknowledgement};
+use commonware_utils::{Acknowledgement, futures::OptionFuture};
 use futures::FutureExt;
 use pin_project::pin_project;
 use std::{
@@ -107,13 +107,13 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{mocks::block::Block, standard::Standard},
+        marshal::{mocks::block::EmptyBlock, standard::Standard},
         types::Height,
     };
     use commonware_cryptography::sha256::{Digest, Sha256};
     use commonware_utils::acknowledgement::Exact;
 
-    type TestBlock = Block<Digest, ()>;
+    type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
 
     fn digest(byte: u8) -> Digest {

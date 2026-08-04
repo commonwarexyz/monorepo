@@ -5,30 +5,30 @@
 //! - [`Processing`] manages the pending-tip DAG and drives the inner application.
 
 use crate::stateful::{
+    Application,
     actor::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
-        processor::Processor,
+        processor::{PendingSyncTargets, Processor, Pruning},
         syncer::{self, SyncPlan, SyncResult},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
-    Application,
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
     marshal::{
         ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
+        core::{Floor, Mailbox as MarshalMailbox, Variant},
     },
     simplex::types::Finalization,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{spawn_cell, telemetry::metrics::GaugeExt, ContextCell, Handle, Spawner};
+use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::{channel::oneshot, sync::AsyncMutex};
+use commonware_utils::{Acknowledgement as _, acknowledgement::Exact, channel::oneshot};
 use futures::join;
 use rand_core::Rng;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -38,29 +38,50 @@ mod syncing;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
+/// Defers marshal's acknowledgement until finalized work completes.
+pub(crate) struct Deferred(Option<Exact>);
+
+impl Deferred {
+    fn acknowledge(mut self) {
+        self.0
+            .take()
+            .expect("pending acknowledgement must exist")
+            .acknowledge();
+    }
+}
+
+impl From<Exact> for Deferred {
+    fn from(acknowledgement: Exact) -> Self {
+        Self(Some(acknowledgement))
+    }
+}
+
+impl Drop for Deferred {
+    fn drop(&mut self) {
+        if let Some(acknowledgement) = self.0.take() {
+            acknowledgement.abandon();
+        }
+    }
+}
+
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneConfig {
-    /// Marshal's ack window. Must match the marshal config used to construct the marshal
-    /// mailbox: pruning retains at least the last `max_pending_acks + 1` finalized blocks so
-    /// that any state a restart may need to rewind to is never pruned.
-    pub max_pending_acks: NonZeroUsize,
-
-    /// Prune databases and marshal every `maintenance_interval` finalized blocks.
+    /// Finalized blocks between database and marshal pruning attempts.
     ///
-    /// This controls only how often pruning runs, not how much history is retained. Each prune
-    /// always leaves at least the configured retention windows in place, so a small interval
-    /// prunes more frequently but never below those floors.
+    /// Stateful selects a random phase within the interval when it starts. This controls only how
+    /// often pruning runs, not how much history is retained.
     pub maintenance_interval: NonZeroUsize,
 
-    /// Finalized blocks to retain in marshal beyond `max_pending_acks + 1`.
+    /// Finalized blocks to retain in marshal beyond its acknowledgement window plus one.
     ///
     /// This should generally be set to a large enough number of blocks to facilitate downtime
     /// on a validator that has completed state sync. If marshal retains too few blocks, a rebooted
     /// node may fail to recover due to peers being unable to serve the blocks it needs to catch up.
     pub retained_marshal_blocks: usize,
 
-    /// Finalized blocks' worth of operations to retain in QMDB beyond `max_pending_acks + 1`.
+    /// Finalized blocks' worth of operations to retain in QMDB beyond marshal's
+    /// acknowledgement window plus one.
     ///
     /// This value is generally safe to set to 0, as QMDB operations below the active range are only
     /// needed to serve state sync requests for lagging peers. Some network topologies may benefit from
@@ -93,11 +114,11 @@ where
     /// Configuration used to construct the database set.
     pub db_config: <A::Databases as DatabaseSet<E>>::Config,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    pub input_provider: A::InputProvider,
+    /// Provider cloned into each proposal.
+    pub provider: A::Provider,
 
-    /// Marshal mailbox used for startup anchoring and lazy recovery.
-    pub marshal: MarshalMailbox<S, V>,
+    /// Marshal mailbox and the durable floor returned with it during initialization.
+    pub marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Capacity of the stateful actor mailbox channel.
     pub mailbox_size: NonZeroUsize,
@@ -140,11 +161,11 @@ where
     /// The inner application that drives state transitions.
     application: A,
 
-    /// Source of input (e.g. transactions) passed to the application on propose.
-    input_provider: A::InputProvider,
+    /// Provider cloned into each proposal.
+    provider: A::Provider,
 
-    /// Marshal mailbox used for startup anchoring and lazy recovery.
-    marshal: MarshalMailbox<S, V>,
+    /// Marshal mailbox and the durable floor returned with it during initialization.
+    marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
@@ -158,8 +179,8 @@ where
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
 
-    /// Periodic prune configuration.
-    prune_config: Option<PruneConfig>,
+    /// Periodic pruning state.
+    pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -176,10 +197,14 @@ where
     ///
     /// This only wires dependencies and allocates the mailbox. The actor does
     /// not process messages until [`Stateful::start`] is called.
-    pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
-        if let Some(prune_config) = config.prune_config {
-            prune_config.assert_valid();
-        }
+    pub fn init(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+        let pruning = config.prune_config.map(|prune_config| {
+            Pruning::random(
+                prune_config,
+                config.marshal.0.max_pending_acks(),
+                &mut context,
+            )
+        });
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -187,13 +212,13 @@ where
                 context: ContextCell::new(context),
                 mailbox,
                 application: config.application,
-                input_provider: config.input_provider,
+                provider: config.provider,
                 marshal: config.marshal,
                 db_config: config.db_config,
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
-                prune_config: config.prune_config,
+                pruning,
             },
             Mailbox::new(sender),
         )
@@ -207,7 +232,7 @@ where
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor).await;
         } else if self.plan.requires_state_sync_floor() {
-            panic!("interrupted state sync must resume from a newly selected floor");
+            panic!("interrupted state sync is missing its persisted floor");
         } else {
             self.start_from_marshal().await;
         }
@@ -215,26 +240,30 @@ where
 
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
-    async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
+    async fn start_state_sync(self, finalization: Finalization<S, V::Commitment>) {
+        let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
-        let sync_metadata = Arc::new(AsyncMutex::new(self.plan.into_sync_metadata()));
+        let sync_metadata = self
+            .plan
+            .into_sync_metadata()
+            .begin_sync(finalization.clone())
+            .await;
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),
-            sync_metadata: sync_metadata.clone(),
-            finalization: floor,
-            marshal: self.marshal.clone(),
+            finalization,
+            marshal: (marshal.clone(), floor),
             sync_complete,
         });
         let syncing = Syncing {
             context: self.context,
             mailbox: self.mailbox,
             application: self.application,
-            input_provider: self.input_provider,
-            marshal: self.marshal,
+            provider: self.provider,
+            marshal,
             sync_metadata,
             syncer: syncer_mailbox,
             held_verify_requests: Vec::new(),
@@ -242,7 +271,8 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
-            prune_config: self.prune_config,
+            pending_finalizations: Default::default(),
+            pruning: self.pruning,
             metrics,
         };
         let _ = join!(syncer.start(), syncing.start());
@@ -250,12 +280,13 @@ where
 
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(self) {
+        let (marshal, _) = self.marshal;
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
             skip_finalized_until,
         } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
-            &self.marshal,
+            &marshal,
             self.db_config,
             self.plan.into_sync_metadata(),
         )
@@ -269,18 +300,12 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(
-            self.application,
-            databases,
-            anchor,
-            metrics,
-            self.prune_config,
-        );
+        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
         Processing {
             context: self.context,
             mailbox: self.mailbox,
-            input_provider: self.input_provider,
-            marshal: self.marshal,
+            provider: self.provider,
+            marshal,
             processor,
             skip_finalized_until,
         }
@@ -291,39 +316,33 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Stateful};
+    use super::{Config, Deferred, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
-        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
+        db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
+        tests::{
+            fixtures,
+            mocks::{TestApp, TestBlock, TestDb},
+        },
     };
     use commonware_consensus::{
-        marshal::{self, ancestry, core::Actor as MarshalActor},
-        simplex::{
-            mocks::scheme as scheme_mocks,
-            types::{Finalization, Finalize, Proposal},
-        },
-        types::{Epoch, FixedEpocher, Round, View, ViewDelta},
-        Application as _, CertifiableBlock as _,
+        Application as _, CertifiableBlock as _, marshal::ancestry,
+        simplex::mocks::scheme as scheme_mocks,
     };
-    use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider},
-        sha256::Digest as Sha256Digest,
-    };
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
-    use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
+    use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::{
+        Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::mpsc,
     };
-    use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use futures::FutureExt as _;
+    use std::{convert::Infallible, time::Duration};
 
     #[derive(Clone)]
     struct NoopResolver;
 
     impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<TestDb>>) {}
+        async fn attach_database(&self, _db: Shared<TestDb>) {}
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
@@ -339,49 +358,15 @@ mod tests {
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            Ok(Self)
+            Ok(Self::default())
         }
     }
 
-    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
-        immutable::Config {
-            metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-freezer-table"),
-            freezer_table_initial_size: 4,
-            freezer_table_resize_frequency: 2,
-            freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-freezer-value"),
-            freezer_value_target_size: 128,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition}-ordinal"),
-            items_per_section: NZU64!(4),
-            codec_config: (),
-            replay_buffer: NZUsize!(64),
-            freezer_key_write_buffer: NZUsize!(64),
-            freezer_value_write_buffer: NZUsize!(64),
-            ordinal_write_buffer: NZUsize!(64),
-        }
-    }
-
-    fn build_finalization(
-        fixture: &Fixture<TestScheme>,
-        payload: Sha256Digest,
-    ) -> Finalization<TestScheme, Sha256Digest> {
-        let proposal = Proposal::new(
-            Round::new(Epoch::zero(), View::new(1)),
-            View::zero(),
-            payload,
-        );
-        let votes: Vec<_> = fixture
-            .schemes
-            .iter()
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-
-        Finalization::from_finalizes(&fixture.verifier, &votes, &Sequential)
-            .expect("finalization quorum")
+    #[test]
+    fn dropped_deferred_keeps_waiter_pending() {
+        let (acknowledgement, waiter) = Exact::handle();
+        drop(Deferred::from(acknowledgement));
+        assert!(waiter.now_or_never().is_none());
     }
 
     #[test]
@@ -389,47 +374,16 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"pending-floor", 1);
-            let provider = ConstantProvider::new(fixture.schemes[0].clone());
-            let finalization = build_finalization(&fixture, Sha256Digest::from([7; 32]));
-
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
-            let finalizations_by_height = immutable::Archive::init(
-                context.child("finalizations_by_height"),
-                archive_config(page_cache.clone(), "pending-floor-finalizations"),
+            let finalization = fixtures::finalization(&fixture, 1, Sha256Digest::from([7; 32]));
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal_fixture"),
+                "pending-floor",
+                fixture.schemes[0].clone(),
+                None,
+                NZUsize!(1),
+                false,
             )
-            .await
-            .expect("failed to initialize finalizations archive");
-            let finalized_blocks = immutable::Archive::init(
-                context.child("finalized_blocks"),
-                archive_config(page_cache.clone(), "pending-floor-blocks"),
-            )
-            .await
-            .expect("failed to initialize blocks archive");
-
-            let (_marshal_actor, marshal, _height) =
-                MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
-                    context.child("marshal"),
-                    finalizations_by_height,
-                    finalized_blocks,
-                    marshal::Config {
-                        provider,
-                        epocher: FixedEpocher::new(NZU64!(u64::MAX)),
-                        start: marshal::Start::Genesis(TestBlock::new(0, 0)),
-                        partition_prefix: "pending-floor-marshal".to_string(),
-                        mailbox_size: NZUsize!(8),
-                        view_retention_timeout: ViewDelta::new(1),
-                        prunable_items_per_section: NZU64!(4),
-                        page_cache,
-                        replay_buffer: NZUsize!(64),
-                        key_write_buffer: NZUsize!(64),
-                        value_write_buffer: NZUsize!(64),
-                        block_codec_config: (),
-                        max_repair: NZUsize!(1),
-                        max_pending_acks: NZUsize!(1),
-                        strategy: Sequential,
-                    },
-                )
-                .await;
+            .await;
 
             let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
             let (stateful, mut mailbox) = Stateful::init(
@@ -437,14 +391,14 @@ mod tests {
                 Config {
                     application: TestApp,
                     db_config: (),
-                    input_provider: (),
-                    marshal,
+                    provider: (),
+                    marshal: (marshal.mailbox, marshal.floor),
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
-                        apply_batch_size: 1,
+                        apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
@@ -458,6 +412,7 @@ mod tests {
                 result = mailbox.propose(
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
                     ancestry::from_iter([]),
+                    (),
                 ) => {
                     assert!(result.is_none());
                 },

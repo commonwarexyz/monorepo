@@ -1,15 +1,15 @@
 //! Mailbox for the shard buffer engine.
 
 use crate::{
-    marshal::coding::types::CodedBlock,
-    types::{coding::Commitment, Round},
     CertifiableBlock,
+    marshal::coding::types::CodedBlock,
+    types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 /// A message that can be sent to the coding [`Engine`].
 ///
@@ -24,7 +24,7 @@ where
     /// A request to broadcast a proposed [`CodedBlock`] to all peers.
     Proposed {
         /// The erasure coded block.
-        block: CodedBlock<B, C, H>,
+        block: Arc<CodedBlock<B, C, H>>,
         /// The round in which the block was proposed.
         round: Round,
     },
@@ -53,14 +53,14 @@ where
         /// The [`Commitment`] of the block to get.
         commitment: Commitment,
         /// The response channel.
-        response: oneshot::Sender<Option<CodedBlock<B, C, H>>>,
+        response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
     /// A request to get a reconstructed block by its digest, if available.
     GetByDigest {
         /// The digest of the block to get.
         digest: B::Digest,
         /// The response channel.
-        response: oneshot::Sender<Option<CodedBlock<B, C, H>>>,
+        response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
     /// A request to open a subscription for assigned shard verification.
     ///
@@ -84,7 +84,7 @@ where
         /// The block's digest.
         commitment: Commitment,
         /// The response channel.
-        response: oneshot::Sender<CodedBlock<B, C, H>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
     /// by its digest.
@@ -92,9 +92,9 @@ where
         /// The block's digest.
         digest: B::Digest,
         /// The response channel.
-        response: oneshot::Sender<CodedBlock<B, C, H>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to prune all caches at and below the given commitment.
+    /// A request to evict cached blocks and reconstruction state relative to a commitment.
     Prune {
         /// Inclusive prune target [`Commitment`].
         through: Commitment,
@@ -192,7 +192,6 @@ where
 /// A mailbox for sending messages to the [`Engine`].
 ///
 /// [`Engine`]: super::Engine
-#[derive(Clone)]
 pub struct Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -201,6 +200,20 @@ where
     P: PublicKey,
 {
     pub(super) sender: Sender<Message<B, C, H, P>>,
+}
+
+impl<B, C, H, P> Clone for Mailbox<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
 }
 
 impl<B, C, H, P> Mailbox<B, C, H, P>
@@ -217,6 +230,10 @@ where
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
     pub fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
+        self.proposed_shared(round, Arc::new(block));
+    }
+
+    pub(crate) fn proposed_shared(&self, round: Round, block: Arc<CodedBlock<B, C, H>>) {
         let _ = self.sender.enqueue(Message::Proposed { block, round });
     }
 
@@ -242,7 +259,7 @@ where
     }
 
     /// Request a reconstructed block by its [`Commitment`].
-    pub async fn get(&self, commitment: Commitment) -> Option<CodedBlock<B, C, H>> {
+    pub async fn get(&self, commitment: Commitment) -> Option<Arc<CodedBlock<B, C, H>>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetByCommitment {
             commitment,
@@ -252,7 +269,7 @@ where
     }
 
     /// Request a reconstructed block by its digest.
-    pub async fn get_by_digest(&self, digest: B::Digest) -> Option<CodedBlock<B, C, H>> {
+    pub async fn get_by_digest(&self, digest: B::Digest) -> Option<Arc<CodedBlock<B, C, H>>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
@@ -285,7 +302,7 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
-    pub fn subscribe(&self, commitment: Commitment) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    pub fn subscribe(&self, commitment: Commitment) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             commitment,
@@ -295,7 +312,10 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
-    pub fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    pub fn subscribe_by_digest(
+        &self,
+        digest: B::Digest,
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByDigest {
             digest,
@@ -304,7 +324,10 @@ where
         receiver
     }
 
-    /// Request to prune all caches at and below the given commitment.
+    /// Evict cached blocks and reconstruction state through `through`.
+    ///
+    /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
+    /// subscriptions remain open, and later consensus notifications may recreate state.
     pub fn prune(&self, through: Commitment) {
         let _ = self.sender.enqueue(Message::Prune { through });
     }

@@ -5,31 +5,37 @@
 //! pruned.
 //!
 //! This module is generic over [`Family`], so it works for both MMR and MMB.
+//!
+//! # Ownership
+//!
+//! Mutating methods take the structure by value and return it on success. If a mutating
+//! method returns an error, or its future is dropped before it finishes, the structure is
+//! gone: state that was not yet durable is discarded, but everything already on disk stays
+//! recoverable.
 
 use crate::{
+    Context,
     journal::{
-        contiguous::{
-            fixed::{Config as JConfig, Journal},
-            Contiguous, Many,
-        },
         Error as JError,
+        contiguous::{
+            Contiguous, Many,
+            fixed::{Config as JConfig, Journal},
+        },
     },
     merkle::{
-        batch,
+        Error, Family, Location, Position, Proof, Readable, batch,
         hasher::Hasher,
         mem::{Config as MemConfig, Mem},
-        Error, Family, Location, Position, Proof, Readable,
     },
     metadata::{Config as MConfig, Metadata},
-    Context,
 };
 use commonware_codec::{DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::CacheRef;
+use commonware_runtime::{Handle, buffer::paged::CacheRef};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
@@ -123,7 +129,8 @@ pub struct Config<S: Strategy> {
 /// Determines how to handle existing persistent data based on sync boundaries:
 /// - **Fresh Start**: Existing data < range start -> discard and start fresh
 /// - **Prune and Reuse**: range contains existing data -> prune and reuse
-/// - **Error**: existing data > range end
+/// - **Ahead**: retained data extends beyond range end -> rewind to range end
+/// - **Incompatible**: retained data starts after range start -> discard and start fresh
 pub struct SyncConfig<F: Family, D: Digest, S: Strategy> {
     /// Base configuration (journal, metadata, etc.)
     pub config: Config<S>,
@@ -166,6 +173,15 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
 
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
+}
+
+impl<F: Family, E: Context, D: Digest, S: Strategy> std::fmt::Debug for Merkle<F, E, D, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Merkle")
+            .field("size", &self.size())
+            .field("leaves", &self.leaves())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Prefix used for nodes in the metadata prefixed U8 key.
@@ -287,9 +303,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             });
         }
 
-        // Make sure the journal's oldest retained node is as expected based on the last pruning
-        // boundary stored in metadata. If they don't match, prune the journal to the appropriate
-        // location.
+        // Metadata stores the pruning boundary as a leaf index. Journal recovery compares node
+        // positions.
         let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
         let metadata_pruned_to = Location::<F>::new(metadata.get(&key).map_or(0, |bytes| {
             u64::from_be_bytes(
@@ -301,27 +316,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }));
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
         let journal_bounds_start = journal.bounds().start;
-        if *metadata_prune_pos > journal_bounds_start {
-            // Metadata is ahead of journal (crashed before completing journal prune).
-            // Prune the journal to match metadata.
-            journal.prune(*metadata_prune_pos).await?;
-            if journal.bounds().start != journal_bounds_start {
-                // This should only happen in the event of some failure during the last attempt to
-                // prune the journal.
-                warn!(
-                    journal_bounds_start,
-                    ?metadata_prune_pos,
-                    "journal pruned to match metadata"
-                );
-            }
-        } else if *metadata_prune_pos < journal_bounds_start {
-            // Metadata is stale (e.g., missing/corrupted while journal has valid state).
-            // Use the journal's state as authoritative.
-            warn!(
-                ?metadata_prune_pos,
-                journal_bounds_start, "metadata stale, using journal pruning boundary"
-            );
-        }
 
         // Use the more restrictive (higher) pruning boundary between metadata and journal.
         // This handles both cases: metadata ahead (crash during prune) and metadata stale.
@@ -343,6 +337,40 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             std::cmp::max(metadata_prune_pos, journal_boundary_leaf_aligned_pos);
 
         let last_valid_size = F::to_nearest_size(journal_size);
+        if effective_prune_pos > last_valid_size {
+            error!(
+                ?effective_prune_pos,
+                ?last_valid_size,
+                "pruning boundary exceeds recovered journal size"
+            );
+            return Err(Error::MissingNode(effective_prune_pos));
+        }
+
+        // Make sure the journal's oldest retained node is as expected based on the last pruning
+        // boundary stored in metadata. If they don't match, prune the journal to the appropriate
+        // location.
+        if *metadata_prune_pos > journal_bounds_start {
+            // Metadata is ahead of journal (crashed before completing journal prune).
+            // Prune the journal to match metadata.
+            (journal, _) = journal.prune(*metadata_prune_pos).await?;
+            if journal.bounds().start != journal_bounds_start {
+                // This should only happen in the event of some failure during the last attempt to
+                // prune the journal.
+                warn!(
+                    journal_bounds_start,
+                    ?metadata_prune_pos,
+                    "journal pruned to match metadata"
+                );
+            }
+        } else if *metadata_prune_pos < journal_bounds_start {
+            // Metadata is stale (e.g., missing/corrupted while journal has valid state).
+            // Use the journal's state as authoritative.
+            warn!(
+                ?metadata_prune_pos,
+                journal_bounds_start, "metadata stale, using journal pruning boundary"
+            );
+        }
+
         let mut orphaned_leaf: Option<D> = None;
         if last_valid_size != journal_size {
             warn!(
@@ -355,8 +383,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             if let Ok(item) = recovered_item {
                 orphaned_leaf = Some(item);
             }
-            journal.rewind(*last_valid_size).await?;
-            journal.sync().await?;
+            journal = journal.rewind(*last_valid_size).await?.sync().await?;
             journal_size = last_valid_size
         }
 
@@ -389,9 +416,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             for p in journal.size()..*mem.size() {
                 let p = Position::new(p);
                 let node = *mem.get_node_unchecked(p);
-                journal.append(&node).await?;
+                (journal, _) = journal.append(&node).await?;
             }
-            journal.sync().await?;
+            journal = journal.sync().await?;
             assert_eq!(mem.size(), journal.size());
 
             // Prune mem and reinstate pinned nodes.
@@ -428,8 +455,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///    - Keeps existing journal data
     ///    - Prunes the journal toward `range.start` (section-aligned)
     ///
-    /// 3. **Error**: existing_size > range.end
-    ///    - Returns [crate::journal::Error::ItemOutOfRange]
+    /// 3. **Ahead**: retained data covers range.start but ends after range.end
+    ///    - Rewinds the journal to `range.end`
+    ///
+    /// 4. **Incompatible**: retained data starts after range.start
+    ///    - Discards existing data and creates a new [Journal] at `range.start`
     pub async fn init_sync(context: E, cfg: SyncConfig<F, D, S>) -> Result<Self, Error<F>> {
         let prune_pos = Position::try_from(cfg.range.start())?;
         let end_pos = Position::try_from(cfg.range.end())?;
@@ -453,17 +483,32 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 ?last_valid_size,
                 "init_sync: encountered invalid structure, recovering from last valid size"
             );
-            journal.rewind(*last_valid_size).await?;
-            journal.sync().await?;
+            journal = journal.rewind(*last_valid_size).await?.sync().await?;
             journal_size = last_valid_size;
         }
 
-        // Handle existing data vs sync range.
-        if journal_size > *end_pos {
-            return Err(crate::journal::Error::ItemOutOfRange(*journal_size).into());
-        }
-        if journal_size <= *prune_pos && *prune_pos != 0 {
-            journal.clear_to_size(*prune_pos).await?;
+        // A pruned start cannot be reconstructed from the retained suffix.
+        let journal_bounds = journal.bounds();
+        let missing_start = journal_bounds.start > *prune_pos;
+        let ahead = journal_size > *end_pos;
+        let reinitialized = missing_start || ahead || journal_size <= *prune_pos;
+        if missing_start {
+            debug!(
+                journal_size = *journal_size,
+                journal_start = journal_bounds.start,
+                range_start = *prune_pos,
+                range_end = *end_pos,
+                "existing Merkle journal is incompatible with sync range, resetting"
+            );
+            journal = journal.clear_to_size(*prune_pos).await?;
+            journal_size = Position::new(journal.size());
+        } else if ahead {
+            // Sync targets describe the same append-only tree, so a later target retains every
+            // node through this target's end.
+            journal = journal.rewind(*end_pos).await?.sync().await?;
+            journal_size = Position::new(journal.size());
+        } else if journal_size <= *prune_pos && *prune_pos != 0 {
+            journal = journal.clear_to_size(*prune_pos).await?;
             journal_size = Position::new(journal.size());
         }
 
@@ -473,6 +518,21 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::init(context.child("merkle_metadata"), metadata_cfg).await?;
+
+        let prune_loc = Location::try_from(prune_pos)?;
+        let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
+        if reinitialized {
+            let retained_node_keys: BTreeSet<_> = nodes_to_pin_persisted
+                .iter()
+                .map(|pos| U64::new(NODE_PREFIX, **pos))
+                .collect();
+            // Reinitializing the journal invalidates pins from an abandoned target. Retain only
+            // boundary pins so supplied values can replace them, and so a retry after a crash
+            // cannot prefer stale metadata over rebuilt journal nodes.
+            metadata.retain(|key: &U64, _| {
+                key.prefix() != NODE_PREFIX || retained_node_keys.contains(key)
+            });
+        }
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
@@ -484,11 +544,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Write the required pinned nodes to metadata.
         // The set of pinned nodes depends only on the prune boundary, not on the total
         // structure size, so we validate against `nodes_to_pin(prune_loc)` alone.
-        let prune_loc = Location::try_from(prune_pos)?;
         let journal_leaves = Location::try_from(journal_size)?;
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             // Use caller-provided pinned nodes.
-            let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
             if pinned_nodes.len() != nodes_to_pin_persisted.len() {
                 return Err(Error::<F>::InvalidPinnedNodes);
             }
@@ -519,10 +577,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
-        metadata.sync().await?;
+        let metadata = metadata.sync().await?;
 
         // Prune the journal to range.start.
-        journal.prune(*prune_pos).await?;
+        (journal, _) = journal.prune(*prune_pos).await?;
 
         Ok(Self {
             mem: Arc::new(mem),
@@ -537,9 +595,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Compute and add required nodes for the given pruning point to the metadata, and write it to
     /// disk. Return the computed set of required nodes.
     async fn update_metadata(
-        &mut self,
+        mut self,
         prune_to_pos: Position<F>,
-    ) -> Result<BTreeMap<Position<F>, D>, Error<F>> {
+    ) -> Result<(Self, BTreeMap<Position<F>, D>), Error<F>> {
         assert!(prune_to_pos >= self.pruned_to_pos);
 
         let prune_loc = Location::try_from(prune_to_pos).expect("valid prune_to_pos");
@@ -554,7 +612,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        self.metadata
+        self.metadata = self
+            .metadata
             .put_sync(
                 key,
                 Location::try_from(prune_to_pos)?
@@ -565,7 +624,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             .await
             .map_err(Error::Metadata)?;
 
-        Ok(pinned_nodes)
+        Ok((self, pinned_nodes))
     }
 
     pub async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
@@ -594,28 +653,42 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
     /// disk. Flushed nodes are pruned from the in-memory structure and remain readable through the
     /// journal, but they are not guaranteed to survive a crash until [Self::sync] is called.
-    pub async fn flush(&mut self) -> Result<(), Error<F>> {
+    pub async fn flush(self) -> Result<Self, Error<F>> {
         self.flush_internal().await
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal and make them durable.
-    pub async fn sync(&mut self) -> Result<(), Error<F>> {
-        self.flush_internal().await?;
+    pub async fn sync(mut self) -> Result<Self, Error<F>> {
+        self = self.flush_internal().await?;
 
         // Sync the journal to ensure durability before returning. This covers nodes appended by
         // the flush above as well as nodes left non-durable by earlier [Self::flush] calls.
         if self.journal_dirty {
-            self.journal.sync().await?;
+            self.journal = self.journal.sync().await?;
             self.journal_dirty = false;
         }
 
-        Ok(())
+        Ok(self)
+    }
+
+    /// Flush all nodes cached in the in-memory structure to the journal and begin making them
+    /// durable, returning a completion handle.
+    ///
+    /// The handle covers only nodes flushed so far. A later [Self::sync] still performs a full
+    /// durable sync.
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        // `journal_dirty` is deliberately not cleared: the started sync covers only nodes
+        // flushed so far, and sync() remains the durability authority.
+        self = self.flush_internal().await?;
+        let (journal, handle) = self.journal.start_sync().await?;
+        self.journal = journal;
+        Ok((self, handle))
     }
 
     /// Append nodes cached in the in-memory structure that are missing from the journal, then
     /// prune them from the in-memory structure. Sets [Self::journal_dirty] when nodes are
     /// appended.
-    async fn flush_internal(&mut self) -> Result<(), Error<F>> {
+    async fn flush_internal(mut self) -> Result<Self, Error<F>> {
         let journal_size = Position::<F>::new(self.journal.size());
 
         // Encode the nodes missing from the journal directly to bytes and snapshot the pinned
@@ -629,7 +702,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 "journal size should never exceed in-memory structure size"
             );
             if journal_size == size {
-                return Ok(());
+                return Ok(self);
             }
 
             // Encode the un-journaled tail to an owned buffer before the journal I/O below.
@@ -649,7 +722,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         };
 
         // Append missing nodes to the journal.
-        self.journal.append_prepared(encoded).await?;
+        (self.journal, _) = self.journal.append_prepared(encoded).await?;
         self.journal_dirty = true;
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
@@ -659,7 +732,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             .expect("captured leaves is in bounds");
         mem.add_pinned_nodes(pinned_nodes);
 
-        Ok(())
+        Ok(self)
     }
 
     /// Prune all nodes up to but not including the given leaf location and update the pinned nodes.
@@ -669,27 +742,28 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
-    pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
         let pos = Position::try_from(loc)?;
         if loc > self.mem.leaves() {
             return Err(Error::LeafOutOfBounds(loc));
         }
         if pos <= self.pruned_to_pos {
-            return Ok(());
+            return Ok(self);
         }
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        self.sync().await?;
+        self = self.sync().await?;
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
-        let pinned_nodes = self.update_metadata(pos).await?;
+        let pinned_nodes;
+        (self, pinned_nodes) = self.update_metadata(pos).await?;
 
-        self.journal.prune(*pos).await?;
+        (self.journal, _) = self.journal.prune(*pos).await?;
         Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
-        Ok(())
+        Ok(self)
     }
 
     /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.
@@ -703,12 +777,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
     /// blob.
-    pub async fn prune_all(&mut self) -> Result<(), Error<F>> {
+    pub async fn prune_all(mut self) -> Result<Self, Error<F>> {
         let leaves = self.mem.leaves();
         if leaves != 0 {
-            self.prune(leaves).await?;
+            self = self.prune(leaves).await?;
         }
-        Ok(())
+        Ok(self)
     }
 
     /// Close and permanently remove any disk resources.
@@ -722,7 +796,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     #[cfg(any(test, feature = "fuzzing"))]
     /// Sync elements to disk until `write_limit` elements have been written, then abort to simulate
     /// a partial write for testing failure scenarios.
-    pub async fn simulate_partial_sync(&mut self, write_limit: usize) -> Result<(), Error<F>> {
+    pub async fn simulate_partial_sync(mut self, write_limit: usize) -> Result<(), Error<F>> {
         if write_limit == 0 {
             return Ok(());
         }
@@ -734,7 +808,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let mut written_count = 0usize;
         for i in *journal_size..*self.mem.size() {
             let node = *self.mem.get_node_unchecked(Position::new(i));
-            self.journal.append(&node).await?;
+            (self.journal, _) = self.journal.append(&node).await?;
             written_count += 1;
             if written_count >= write_limit {
                 break;
@@ -758,7 +832,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         assert!(prune_to_pos <= self.mem.size());
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        self.sync().await?;
+        self = self.sync().await?;
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
@@ -774,9 +848,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// chain was created, or if only ancestors of this batch have been applied.
     /// Already-committed ancestors are skipped automatically.
     /// Applying a batch from a different fork returns [`Error::StaleBatch`].
-    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
+    pub fn apply_batch(
+        mut self,
+        batch: &batch::MerkleizedBatch<F, D, S>,
+    ) -> Result<Self, Error<F>> {
         Arc::make_mut(&mut self.mem).apply_batch(batch)?;
-        Ok(())
+        Ok(self)
     }
 
     /// Create an owned [`batch::MerkleizedBatch`] representing the current committed state.
@@ -820,9 +897,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// n) pinned nodes. A batch pop would expose new peaks that are not in memory, and `merkleize`
     /// cannot load them because [`Readable::get_node`] is synchronous. `rewind` performs async
     /// journal I/O to rebuild state at the target position.
-    pub(crate) async fn rewind(&mut self, leaves_to_remove: usize) -> Result<(), Error<F>> {
+    pub(crate) async fn rewind(mut self, leaves_to_remove: usize) -> Result<Self, Error<F>> {
         if leaves_to_remove == 0 {
-            return Ok(());
+            return Ok(self);
         }
 
         let current_leaves = *self.leaves();
@@ -848,8 +925,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Rewind the journal if needed.
         let journal_size = Position::<F>::new(self.journal.size());
         if new_size < journal_size {
-            self.journal.rewind(*new_size).await?;
-            self.journal.sync().await?;
+            self.journal = self.journal.rewind(*new_size).await?.sync().await?;
         }
 
         // Truncate the in-memory structure to the target size.
@@ -880,7 +956,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             self.mem = Arc::new(mem);
         }
 
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -1041,28 +1117,28 @@ mod tests {
     use crate::{
         journal::contiguous::fixed::{Config as JConfig, Journal},
         merkle::{
-            hasher::Standard, mmb, mmr, Bagging::ForwardFold, Location, LocationRangeExt as _,
-            Position, Proof,
+            Bagging::ForwardFold, Location, LocationRangeExt as _, Position, Proof,
+            hasher::Standard, mmb, mmr,
         },
         metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::{
-        sha256::{self, Digest},
         Hasher as _, Sha256,
+        sha256::{self, Digest},
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{non_empty_range, sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::prefixed_u64::U64};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
     };
 
     fn test_digest(v: usize) -> Digest {
-        Sha256::hash(&v.to_be_bytes())
+        Sha256::hash(&[&v.to_be_bytes()])
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
@@ -1092,19 +1168,27 @@ mod tests {
         assert!(mmr.get_node(Position::<F>::new(0)).await.is_err());
         let bounds = mmr.bounds();
         assert!(bounds.is_empty());
-        assert!(mmr.prune_all().await.is_ok());
+        mmr = mmr.prune_all().await.unwrap();
         assert_eq!(bounds.start, 0);
-        assert!(mmr.prune(Location::<F>::new(0)).await.is_ok());
-        assert!(mmr.sync().await.is_ok());
+        mmr = mmr.prune(Location::<F>::new(0)).await.unwrap();
+        mmr = mmr.sync().await.unwrap();
         assert!(matches!(mmr.rewind(1).await, Err(Error::Empty)));
 
+        // Reopen the same partitions.
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("reopen"),
+            &hasher,
+            test_config(&context),
+        )
+        .await
+        .unwrap();
         let batch = mmr.new_batch().add(&hasher, &test_digest(0));
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         assert_eq!(mmr.size(), 1);
-        mmr.sync().await.unwrap();
+        mmr = mmr.sync().await.unwrap();
         assert!(mmr.get_node(Position::<F>::new(0)).await.is_ok());
-        assert!(mmr.rewind(1).await.is_ok());
+        mmr = mmr.rewind(1).await.unwrap();
         assert_eq!(mmr.size(), 0);
         mmr.sync().await.unwrap();
 
@@ -1135,7 +1219,7 @@ mod tests {
         // Confirm empty proof no longer verifies after adding an element.
         let batch = mmr.new_batch().add(&hasher, &test_digest(0));
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let root = mmr.root(&hasher, 0).unwrap();
         assert!(!empty_proof.verify_range_inclusion(
             &hasher,
@@ -1178,14 +1262,12 @@ mod tests {
 
         let batch = mmr.new_batch().add(&hasher, &test_digest(0));
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         assert!(matches!(
             mmr.prune(Location::<F>::new(2)).await,
             Err(Error::LeafOutOfBounds(loc)) if loc == Location::<F>::new(2)
         ));
-
-        mmr.destroy().await.unwrap();
     }
 
     #[test_traced]
@@ -1219,33 +1301,56 @@ mod tests {
             batch = batch.add(&hasher, &i.to_be_bytes());
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        mmr.prune(Location::<F>::new(8)).await.unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.prune(Location::<F>::new(8)).await.unwrap();
         let leaves_before = mmr.leaves();
         assert!(matches!(
             mmr.rewind(128).await,
             Err(Error::ElementPruned(_))
         ));
-        // After error, leaves should reflect any partial rewinds that occurred.
-        assert!(mmr.leaves() <= leaves_before);
+
+        // The failed rewind mutated nothing durable; reopening recovers the synced state.
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+            element_pruned_context.child("element_pruned_reopen"),
+            &hasher,
+            test_config(&element_pruned_context),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mmr.leaves(), leaves_before);
         mmr.destroy().await.unwrap();
 
-        // Case 2: rewind partially succeeds, then returns Empty.
+        // Case 2: rewind underflows and returns Empty without removing any leaves.
         let empty_context = context.child("empty_case");
-        let cfg = test_config(&empty_context);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(empty_context, &hasher, cfg)
-            .await
-            .unwrap();
+        let cfg = Config {
+            journal_partition: "empty-journal-partition".into(),
+            metadata_partition: "empty-metadata-partition".into(),
+            ..test_config(&empty_context)
+        };
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(empty_context.child("open"), &hasher, cfg)
+                .await
+                .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0u64..8 {
             batch = batch.add(&hasher, &i.to_be_bytes());
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        let leaves_before = mmr.leaves();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.sync().await.unwrap();
         assert!(matches!(mmr.rewind(9).await, Err(Error::Empty)));
-        // Rewind returns error without partial modification.
-        assert_eq!(mmr.leaves(), leaves_before);
+
+        // Reopen: the underflowing rewind persisted nothing.
+        let cfg = Config {
+            journal_partition: "empty-journal-partition".into(),
+            metadata_partition: "empty-metadata-partition".into(),
+            ..test_config(&empty_context)
+        };
+        let mmr =
+            Merkle::<F, _, Digest, Sequential>::init(empty_context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(mmr.leaves(), Location::<F>::new(8));
         mmr.destroy().await.unwrap();
     }
 
@@ -1278,7 +1383,7 @@ mod tests {
             batch = batch.add(&hasher, leaf);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
 
@@ -1296,7 +1401,7 @@ mod tests {
         ));
 
         // Sync the structure, make sure it flushes the in-mem structure as expected.
-        mmr.sync().await.unwrap();
+        mmr = mmr.sync().await.unwrap();
 
         // Now that the element is flushed from the in-mem structure, confirm its proof is still
         // generated correctly.
@@ -1350,12 +1455,12 @@ mod tests {
             batch = batch.add(&hasher, leaf);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         let root = mmr.root(&hasher, 0).unwrap();
 
         // Flush writes all cached nodes to the journal and prunes them from the mem.
-        mmr.flush().await.unwrap();
+        mmr = mmr.flush().await.unwrap();
         assert_eq!(Position::<F>::new(mmr.journal.size()), expected_size);
         assert_eq!(mmr.size(), expected_size);
         assert_eq!(
@@ -1364,7 +1469,7 @@ mod tests {
         );
 
         // Flushing again is a no-op.
-        mmr.flush().await.unwrap();
+        mmr = mmr.flush().await.unwrap();
         assert_eq!(Position::<F>::new(mmr.journal.size()), expected_size);
 
         // Flushed nodes remain readable and provable, and the root is unchanged.
@@ -1376,7 +1481,7 @@ mod tests {
 
         // Sync after flush succeeds (and must fsync the journal even though there is nothing
         // left to flush).
-        mmr.sync().await.unwrap();
+        mmr = mmr.sync().await.unwrap();
 
         mmr.destroy().await.unwrap();
     }
@@ -1393,20 +1498,25 @@ mod tests {
         executor.start(full_flush_inner::<mmb::Family>);
     }
 
-    /// Flushed-but-unsynced nodes are lost on a crash, while synced nodes survive: the durability
-    /// barrier comes from `sync`, not `flush`.
+    /// Flushed-but-unsynced nodes in the tail blob are lost on a crash, while synced nodes
+    /// survive: the durability barrier comes from `sync`, not `flush`.
     fn full_flush_crash_inner<F: Family>() {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
-        // Phase 1: durably sync a first batch of leaves, flush (but don't sync) a second batch,
-        // then simulate an unclean shutdown.
+        // Phase 1: durably sync a first batch of leaves, flush (but don't sync) a second batch into
+        // the tail blob, then simulate an unclean shutdown.
         let executor = deterministic::Runner::default();
         let (synced_size, checkpoint) = executor.start_and_recover(|context| async move {
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
             let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("first"),
                 &hasher,
-                test_config(&context),
+                Config {
+                    // 512 items per blob keeps both batches in the tail blob: a rollover would
+                    // fsync the sealed predecessor and defeat the flushed-but-unsynced scenario.
+                    items_per_blob: NZU64!(512),
+                    ..test_config(&context)
+                },
             )
             .await
             .unwrap();
@@ -1416,8 +1526,8 @@ mod tests {
                 batch = batch.add(&hasher, &test_digest(i));
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            mmr.apply_batch(&batch).unwrap();
-            mmr.sync().await.unwrap();
+            mmr = mmr.apply_batch(&batch).unwrap();
+            let mut mmr = mmr.sync().await.unwrap();
             let synced_size = mmr.size();
 
             let mut batch = mmr.new_batch();
@@ -1425,8 +1535,8 @@ mod tests {
                 batch = batch.add(&hasher, &test_digest(i));
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            mmr.apply_batch(&batch).unwrap();
-            mmr.flush().await.unwrap();
+            mmr = mmr.apply_batch(&batch).unwrap();
+            mmr = mmr.flush().await.unwrap();
             assert_eq!(Position::<F>::new(mmr.journal.size()), mmr.size());
 
             synced_size
@@ -1438,7 +1548,12 @@ mod tests {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("second"),
                 &hasher,
-                test_config(&context),
+                Config {
+                    // 512 items per blob keeps both batches in the tail blob: a rollover would
+                    // fsync the sealed predecessor and defeat the flushed-but-unsynced scenario.
+                    items_per_blob: NZU64!(512),
+                    ..test_config(&context)
+                },
             )
             .await
             .unwrap();
@@ -1479,9 +1594,9 @@ mod tests {
                 batch = batch.add(&hasher, &test_digest(i));
             }
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            mmr.apply_batch(&batch).unwrap();
-            mmr.flush().await.unwrap();
-            mmr.sync().await.unwrap();
+            mmr = mmr.apply_batch(&batch).unwrap();
+            mmr = mmr.flush().await.unwrap();
+            let mmr = mmr.sync().await.unwrap();
 
             mmr.size()
         });
@@ -1536,16 +1651,16 @@ mod tests {
             batch = batch.add(&hasher, leaf);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
         drop(mmr);
 
         // Simulate a crash that wrote a leaf but not its parent nodes by appending one
         // extra digest to the journal. This creates an invalid structure size.
         {
-            let mut journal: Journal<_, Digest> = Journal::init(
+            let journal: Journal<_, Digest> = Journal::init(
                 context.child("corrupt"),
                 JConfig {
                     partition: "journal-partition".into(),
@@ -1557,8 +1672,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(journal.size(), expected_size);
-            journal.append(&Sha256::hash(b"orphan")).await.unwrap();
-            journal.sync().await.unwrap();
+            let (journal, _) = journal.append(&Sha256::hash(&[b"orphan"])).await.unwrap();
+            let journal = journal.sync().await.unwrap();
             assert_eq!(journal.size(), expected_size + 1);
         }
 
@@ -1637,13 +1752,13 @@ mod tests {
             batch = batch.add(&hasher, leaf);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let mut batch = pruned_mmr.new_batch();
         for leaf in &leaves {
             batch = batch.add(&hasher, leaf);
         }
         let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        pruned_mmr.apply_batch(&batch).unwrap();
+        pruned_mmr = pruned_mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
         assert_eq!(pruned_mmr.size(), expected_size);
@@ -1652,7 +1767,7 @@ mod tests {
         // roots and accept new elements.
         for i in 0usize..300 {
             let prune_loc = Location::<F>::new(std::cmp::min(i as u64 * 10, *pruned_mmr.leaves()));
-            pruned_mmr.prune(prune_loc).await.unwrap();
+            pruned_mmr = pruned_mmr.prune(prune_loc).await.unwrap();
             assert_eq!(prune_loc, pruned_mmr.bounds().start);
 
             let digest = test_digest(LEAF_COUNT + i);
@@ -1660,10 +1775,10 @@ mod tests {
             let last_leaf = leaves.last().unwrap();
             let batch = pruned_mmr.new_batch().add(&hasher, last_leaf);
             let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            pruned_mmr.apply_batch(&batch).unwrap();
+            pruned_mmr = pruned_mmr.apply_batch(&batch).unwrap();
             let batch = mmr.new_batch().add(&hasher, last_leaf);
             let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            mmr.apply_batch(&batch).unwrap();
+            mmr = mmr.apply_batch(&batch).unwrap();
             assert_eq!(
                 pruned_mmr.root(&hasher, 0).unwrap(),
                 mmr.root(&hasher, 0).unwrap()
@@ -1671,7 +1786,7 @@ mod tests {
         }
 
         // Sync the structures.
-        pruned_mmr.sync().await.unwrap();
+        pruned_mmr = pruned_mmr.sync().await.unwrap();
         assert_eq!(
             pruned_mmr.root(&hasher, 0).unwrap(),
             mmr.root(&hasher, 0).unwrap()
@@ -1679,7 +1794,6 @@ mod tests {
 
         // Sync the structure & reopen.
         pruned_mmr.sync().await.unwrap();
-        drop(pruned_mmr);
         let mut pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("pruned_reopen"),
             &hasher,
@@ -1694,7 +1808,7 @@ mod tests {
 
         // Prune everything.
         let size = pruned_mmr.size();
-        pruned_mmr.prune_all().await.unwrap();
+        pruned_mmr = pruned_mmr.prune_all().await.unwrap();
         assert_eq!(
             pruned_mmr.root(&hasher, 0).unwrap(),
             mmr.root(&hasher, 0).unwrap()
@@ -1707,15 +1821,14 @@ mod tests {
         // expected on reopening.
         let batch = mmr.new_batch().add(&hasher, &test_digest(LEAF_COUNT));
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let batch = pruned_mmr
             .new_batch()
             .add(&hasher, &test_digest(LEAF_COUNT));
         let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        pruned_mmr.apply_batch(&batch).unwrap();
+        pruned_mmr = pruned_mmr.apply_batch(&batch).unwrap();
         assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
         pruned_mmr.sync().await.unwrap();
-        drop(pruned_mmr);
         let mut pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("pruned_reopen").with_attribute("index", 2),
             &hasher,
@@ -1732,10 +1845,10 @@ mod tests {
         assert_eq!(bounds.start, Location::<F>::try_from(size).unwrap());
 
         // Make sure pruning to older location is a no-op.
-        assert!(pruned_mmr
+        pruned_mmr = pruned_mmr
             .prune(Location::<F>::try_from(size).unwrap() - 1)
             .await
-            .is_ok());
+            .unwrap();
         assert_eq!(
             pruned_mmr.bounds().start,
             Location::<F>::try_from(size).unwrap()
@@ -1748,9 +1861,9 @@ mod tests {
                 .new_batch()
                 .add(&hasher, &test_digest(LEAF_COUNT));
             let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-            pruned_mmr.apply_batch(&batch).unwrap();
+            pruned_mmr = pruned_mmr.apply_batch(&batch).unwrap();
         }
-        pruned_mmr.prune_all().await.unwrap();
+        pruned_mmr = pruned_mmr.prune_all().await.unwrap();
         assert!(pruned_mmr.bounds().is_empty());
 
         pruned_mmr.destroy().await.unwrap();
@@ -1790,10 +1903,10 @@ mod tests {
             batch = batch.add(&hasher, leaf);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
         drop(mmr);
 
         // Prune the structure in increments of 50, simulating a partial write after each prune.
@@ -1812,7 +1925,7 @@ mod tests {
                 mmr.simulate_pruning_failure(prune_loc).await.unwrap();
                 continue;
             }
-            mmr.prune(prune_loc).await.unwrap();
+            mmr = mmr.prune(prune_loc).await.unwrap();
 
             // add new elements, simulating a partial write after each.
             for j in 0..10 {
@@ -1823,7 +1936,7 @@ mod tests {
                     .add(&hasher, leaves.last().unwrap())
                     .add(&hasher, leaves.last().unwrap());
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-                mmr.apply_batch(&batch).unwrap();
+                mmr = mmr.apply_batch(&batch).unwrap();
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
                 let batch = mmr
@@ -1831,7 +1944,7 @@ mod tests {
                     .add(&hasher, leaves.last().unwrap())
                     .add(&hasher, leaves.last().unwrap());
                 let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-                mmr.apply_batch(&batch).unwrap();
+                mmr = mmr.apply_batch(&batch).unwrap();
             }
             let end_size = mmr.size();
             let total_to_write = (*end_size - *start_size) as usize;
@@ -1879,7 +1992,7 @@ mod tests {
             batch = batch.add(&hasher, elt);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let original_leaves = mmr.leaves();
 
         // Historical proof should match "regular" proof when historical size == current database size
@@ -1916,7 +2029,7 @@ mod tests {
             batch = batch.add(&hasher, elt);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let new_historical_proof = mmr
             .historical_range_proof(
                 &hasher,
@@ -1964,11 +2077,11 @@ mod tests {
             batch = batch.add(&hasher, elt);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         // Prune to leaf 16 (position 30)
         let prune_loc = Location::<F>::new(16);
-        mmr.prune(prune_loc).await.unwrap();
+        let mmr = mmr.prune(prune_loc).await.unwrap();
 
         // Create reference structure for verification to get correct size
         let mut ref_mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -1991,7 +2104,7 @@ mod tests {
             batch = batch.add(&hasher, elt);
         }
         let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        ref_mmr.apply_batch(&batch).unwrap();
+        ref_mmr = ref_mmr.apply_batch(&batch).unwrap();
         let historical_leaves = ref_mmr.leaves();
         let historical_root = ref_mmr.root(&hasher, 0).unwrap();
 
@@ -2059,7 +2172,7 @@ mod tests {
             batch = batch.add(&hasher, elt);
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         let range = Location::<F>::new(30)..Location::<F>::new(61);
 
@@ -2085,7 +2198,7 @@ mod tests {
             batch = batch.add(&hasher, elt);
         }
         let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        ref_mmr.apply_batch(&batch).unwrap();
+        ref_mmr = ref_mmr.apply_batch(&batch).unwrap();
         let historical_leaves = ref_mmr.leaves();
         let expected_root = ref_mmr.root(&hasher, 0).unwrap();
 
@@ -2128,7 +2241,7 @@ mod tests {
         let element = test_digest(0);
         let batch = mmr.new_batch().add(&hasher, &element);
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         // Test single element proof at historical position
         let single_proof = mmr
@@ -2190,7 +2303,7 @@ mod tests {
         let new_element = test_digest(999);
         let batch = sync_mmr.new_batch().add(&hasher, &new_element);
         let batch = sync_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        sync_mmr.apply_batch(&batch).unwrap();
+        sync_mmr = sync_mmr.apply_batch(&batch).unwrap();
 
         // Root should be computable
         let _root = sync_mmr.root(&hasher, 0).unwrap();
@@ -2227,8 +2340,8 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        mmr.sync().await.unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.sync().await.unwrap();
         let original_size = mmr.size();
         let original_leaves = mmr.leaves();
         let original_root = mmr.root(&hasher, 0).unwrap();
@@ -2251,7 +2364,7 @@ mod tests {
             pinned_nodes: None,
         };
 
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
         drop(mmr);
 
         let sync_mmr =
@@ -2307,9 +2420,9 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        mmr.sync().await.unwrap();
-        mmr.prune(Location::<F>::new(6)).await.unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.sync().await.unwrap();
+        let mmr = mmr.prune(Location::<F>::new(6)).await.unwrap();
 
         let original_size = mmr.size();
         let original_leaves = mmr.leaves();
@@ -2333,7 +2446,7 @@ mod tests {
             pinned_nodes: None,
         };
 
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
         drop(mmr);
 
         let sync_mmr =
@@ -2370,6 +2483,203 @@ mod tests {
     fn test_full_init_sync_partial_overlap_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_init_sync_partial_overlap_inner::<mmb::Family>);
+    }
+
+    async fn full_init_sync_rewinds_state_beyond_range_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
+                .await
+                .unwrap();
+
+        let target_end = Location::<F>::new(20);
+        let mut batch = merkle.new_batch();
+        for i in 0..20 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let target_root = merkle.root(&hasher, 0).unwrap();
+        let restart = Location::<F>::new(7);
+        let pinned_nodes = merkle.pinned_nodes_at(restart).await.unwrap();
+
+        let mut batch = merkle.new_batch();
+        for i in 20..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        drop(merkle);
+
+        let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
+            config: cfg.clone(),
+            range: non_empty_range!(restart, target_end),
+            pinned_nodes: Some(pinned_nodes),
+        };
+        let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(context.child("sync"), sync_cfg)
+            .await
+            .unwrap();
+
+        assert_eq!(merkle.leaves(), target_end);
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
+        let merkle = merkle.sync().await.unwrap();
+        drop(merkle);
+
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(merkle.leaves(), target_end);
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_init_sync_rewinds_state_beyond_range_mmr() {
+        deterministic::Runner::default()
+            .start(full_init_sync_rewinds_state_beyond_range_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_init_sync_rewinds_state_beyond_range_mmb() {
+        deterministic::Runner::default()
+            .start(full_init_sync_rewinds_state_beyond_range_inner::<mmb::Family>);
+    }
+
+    async fn full_init_sync_discards_state_pruned_past_range_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
+                .await
+                .unwrap();
+
+        let mut batch = merkle.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let target_root = merkle.root(&hasher, 0).unwrap();
+        let restart = Location::<F>::new(7);
+        let pinned_nodes = merkle.pinned_nodes_at(restart).await.unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        let merkle = merkle.prune(Location::new(30)).await.unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        assert!(merkle.bounds().start > restart);
+        drop(merkle);
+
+        let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
+            config: cfg,
+            range: non_empty_range!(restart, Location::<F>::new(60)),
+            pinned_nodes: Some(pinned_nodes),
+        };
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init_sync(context.child("sync"), sync_cfg)
+                .await
+                .unwrap();
+
+        assert_eq!(merkle.bounds(), restart..restart);
+        let mut batch = merkle.new_batch();
+        for i in 7..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_init_sync_discards_state_pruned_past_range_mmr() {
+        deterministic::Runner::default()
+            .start(full_init_sync_discards_state_pruned_past_range_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_init_sync_discards_state_pruned_past_range_mmb() {
+        deterministic::Runner::default()
+            .start(full_init_sync_discards_state_pruned_past_range_inner::<mmb::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_init_sync_discards_stale_pinned_metadata() {
+        deterministic::Runner::default().start(|context| async move {
+            type F = mmr::Family;
+
+            let hasher = Standard::<Sha256>::new(ForwardFold);
+            let cfg = test_config(&context);
+            let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("old"),
+                &hasher,
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            let mut batch = merkle.new_batch();
+            for i in 0..40 {
+                batch = batch.add(&hasher, &test_digest(i));
+            }
+            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            merkle = merkle.apply_batch(&batch).unwrap();
+            let merkle = merkle.sync().await.unwrap();
+            let merkle = merkle.prune(Location::new(30)).await.unwrap();
+            let merkle = merkle.sync().await.unwrap();
+            drop(merkle);
+
+            let mut target_cfg = test_config(&context);
+            target_cfg.journal_partition = "target-journal-partition".into();
+            target_cfg.metadata_partition = "target-metadata-partition".into();
+            let mut target = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("target"),
+                &hasher,
+                target_cfg,
+            )
+            .await
+            .unwrap();
+            let mut batch = target.new_batch();
+            for i in 0..20 {
+                batch = batch.add(&hasher, &test_digest(1_000 + i));
+            }
+            let batch = target.with_mem(|mem| batch.merkleize(mem, &hasher));
+            target = target.apply_batch(&batch).unwrap();
+            let target_root = target.root(&hasher, 0).unwrap();
+            let restart = Location::new(7);
+            let pinned_nodes = target.pinned_nodes_at(restart).await.unwrap();
+            target.destroy().await.unwrap();
+
+            let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
+                config: cfg.clone(),
+                range: non_empty_range!(restart, Location::new(20)),
+                pinned_nodes: Some(pinned_nodes),
+            };
+            let mut merkle =
+                Merkle::<F, _, Digest, Sequential>::init_sync(context.child("sync"), sync_cfg)
+                    .await
+                    .unwrap();
+            let mut batch = merkle.new_batch();
+            for i in 7..20 {
+                batch = batch.add(&hasher, &test_digest(1_000 + i));
+            }
+            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            merkle = merkle.apply_batch(&batch).unwrap();
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
+            let merkle = merkle.sync().await.unwrap();
+            drop(merkle);
+
+            let merkle =
+                Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
+            merkle.destroy().await.unwrap();
+        });
     }
 
     async fn full_init_sync_rejects_extra_pinned_nodes_inner<F: Family>(
@@ -2421,13 +2731,12 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        mmr.sync().await.unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.sync().await.unwrap();
 
         // Prune enough that the journal boundary's pinned nodes span pruned blobs.
         let prune_loc = Location::<F>::new(25);
         mmr.prune(prune_loc).await.unwrap();
-        drop(mmr);
 
         // Simulate a crash after journal prune but before metadata was updated:
         // clear all metadata and write only a stale pruning boundary of 0 (no pinned nodes).
@@ -2445,7 +2754,6 @@ mod tests {
             .put_sync(key, 0u64.to_be_bytes().to_vec())
             .await
             .unwrap();
-        drop(metadata);
 
         // Reopen the structure - before the fix, this would panic with assertion failure
         // After the fix, it returns MissingNode error (pinned nodes for the lower
@@ -2477,6 +2785,64 @@ mod tests {
         executor.start(full_init_stale_metadata_returns_error_inner::<mmb::Family>);
     }
 
+    async fn full_init_rejects_prune_boundary_beyond_recovered_size_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
+                .await
+                .unwrap();
+
+        let mut batch = merkle.new_batch();
+        for i in 0..12 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        let merkle = merkle.prune(Location::new(12)).await.unwrap();
+        let merkle = merkle.sync().await.unwrap();
+        drop(merkle);
+
+        let journal_cfg = JConfig {
+            partition: cfg.journal_partition.clone(),
+            items_per_blob: cfg.items_per_blob,
+            page_cache: cfg.page_cache.clone(),
+            write_buffer: cfg.write_buffer,
+        };
+        let journal = Journal::<_, Digest>::init(context.child("interrupted_reset"), journal_cfg)
+            .await
+            .unwrap();
+        let recovered_size = Position::<F>::try_from(Location::<F>::new(8)).unwrap();
+        assert!(
+            journal.bounds().start > *recovered_size,
+            "test reset must discard a pruned prefix"
+        );
+        let journal = journal.clear_to_size(*recovered_size).await.unwrap();
+        drop(journal);
+
+        match Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg).await
+        {
+            Err(Error::MissingNode(_)) => {}
+            Ok(_) => panic!("pruning boundary beyond recovered size must fail closed"),
+            Err(err) => panic!("expected MissingNode error, got {err:?}"),
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_init_rejects_prune_boundary_beyond_recovered_size_mmr() {
+        deterministic::Runner::default()
+            .start(full_init_rejects_prune_boundary_beyond_recovered_size_inner::<mmr::Family>);
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_init_rejects_prune_boundary_beyond_recovered_size_mmb() {
+        deterministic::Runner::default()
+            .start(full_init_rejects_prune_boundary_beyond_recovered_size_inner::<mmb::Family>);
+    }
+
     // Test that init() handles the case where metadata pruning boundary is ahead
     // of journal (crashed before journal prune completed). This should successfully
     // prune the journal to match metadata.
@@ -2498,12 +2864,12 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        mmr.sync().await.unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.sync().await.unwrap();
 
         // Prune to position 30 (this stores pinned nodes and updates metadata)
         let prune_loc = Location::<F>::new(16);
-        mmr.prune(prune_loc).await.unwrap();
+        let mmr = mmr.prune(prune_loc).await.unwrap();
         let expected_root = mmr.root(&hasher, 0).unwrap();
         let expected_size = mmr.size();
         drop(mmr);
@@ -2568,8 +2934,8 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        mmr.sync().await.unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.sync().await.unwrap();
 
         // Don't prune - this ensures metadata has no pinned nodes. init_sync will need to
         // read pinned nodes from the journal.
@@ -2629,10 +2995,10 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         let prune_loc = Location::<F>::new(16);
-        mmr.prune(prune_loc).await.unwrap();
+        let mmr = mmr.prune(prune_loc).await.unwrap();
 
         let historical_leaves = mmr.leaves();
         let mut pruned_loc = None;
@@ -2654,7 +3020,7 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(10_000 + i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.apply_batch(&batch).unwrap();
 
         let requested = mmr.leaves();
         let result = mmr
@@ -2694,7 +3060,7 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         let historical_leaves = Location::<F>::new(10);
         let range = Location::<F>::new(2)..Location::<F>::new(8);
@@ -2705,7 +3071,7 @@ mod tests {
             .add(&hasher, &test_digest(100))
             .add(&hasher, &test_digest(101));
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         let proof = mmr
             .historical_range_proof(&hasher, historical_leaves, range.clone(), 0)
@@ -2750,8 +3116,8 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        mmr.sync().await.unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.sync().await.unwrap();
 
         let historical_leaves = Location::<F>::new(20);
         let range = Location::<F>::new(5)..Location::<F>::new(15);
@@ -2796,10 +3162,10 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         let prune_loc = Location::<F>::new(10);
-        mmr.prune(prune_loc).await.unwrap();
+        let mmr = mmr.prune(prune_loc).await.unwrap();
 
         let requested = Location::<F>::new(20);
         let range = prune_loc..requested;
@@ -2862,9 +3228,9 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let end = mmr.leaves();
-        mmr.prune_all().await.unwrap();
+        mmr = mmr.prune_all().await.unwrap();
         assert!(mmr.bounds().is_empty());
         let pruned_result = mmr
             .historical_range_proof(&hasher, end, end - 1..end, 0)
@@ -2892,10 +3258,10 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let end = mmr.leaves();
         let keep_loc = end - 1;
-        mmr.prune(keep_loc).await.unwrap();
+        mmr = mmr.prune(keep_loc).await.unwrap();
         let ok_result = mmr
             .historical_range_proof(&hasher, end, keep_loc..end, 0)
             .await;
@@ -2941,7 +3307,7 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let requested = mmr.leaves() + 1;
 
         let result = mmr
@@ -2984,7 +3350,7 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         let valid_range = Location::<F>::new(0)..Location::<F>::new(1);
 
@@ -3073,13 +3439,13 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
 
         let end = mmr.leaves();
         let mut failures = Vec::new();
         for prune_leaf in 1..*end {
             let prune_loc = Location::<F>::new(prune_leaf);
-            mmr.prune(prune_loc).await.unwrap();
+            mmr = mmr.prune(prune_loc).await.unwrap();
             for loc_u64 in 0..*end {
                 let loc = Location::<F>::new(loc_u64);
                 let range_includes_pruned_leaf = loc < prune_loc;
@@ -3139,17 +3505,17 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
         let valid_size = mmr.size();
         let valid_root = mmr.root(&hasher, 0).unwrap();
-        mmr.sync().await.unwrap();
+        let mmr = mmr.sync().await.unwrap();
         drop(mmr);
 
         // Append one extra digest to the journal, simulating a crash that wrote a
         // leaf (for the 4th element) but not its parent nodes. This makes the
         // journal size invalid.
         {
-            let mut journal: Journal<_, Digest> = Journal::init(
+            let journal: Journal<_, Digest> = Journal::init(
                 context.child("corrupt"),
                 JConfig {
                     partition: "journal-partition".into(),
@@ -3161,8 +3527,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(journal.size(), valid_size);
-            journal.append(&Sha256::hash(b"orphan")).await.unwrap();
-            journal.sync().await.unwrap();
+            let (journal, _) = journal.append(&Sha256::hash(&[b"orphan"])).await.unwrap();
+            let journal = journal.sync().await.unwrap();
             assert_eq!(journal.size(), valid_size + 1);
         }
 
@@ -3212,16 +3578,13 @@ mod tests {
         let batch_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &hasher));
 
         // Apply A -- should succeed.
-        mmr.apply_batch(&batch_a).unwrap();
+        mmr = mmr.apply_batch(&batch_a).unwrap();
 
         // Apply B -- should fail (stale).
-        let result = mmr.apply_batch(&batch_b);
-        assert!(
-            matches!(result, Err(Error::StaleBatch { .. })),
-            "expected StaleBatch, got {result:?}"
-        );
-
-        mmr.destroy().await.unwrap();
+        assert!(matches!(
+            mmr.apply_batch(&batch_b),
+            Err(Error::StaleBatch { .. })
+        ));
     }
 
     #[test]
@@ -3288,8 +3651,8 @@ mod tests {
             batch = batch.add(&hasher, &test_digest(i));
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr.apply_batch(&batch).unwrap();
-        mmr.sync().await.unwrap();
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.sync().await.unwrap();
 
         // Attempt to update leaf 0 which has been synced out of memory.
         // Use the inner batch type directly since the full wrapper

@@ -1,8 +1,8 @@
-use super::{msm, point, Error, Signature};
+use super::{Error, Signature, msm, point};
 use commonware_formatting::Hex;
 use core::convert::{TryFrom, TryInto};
 use curve25519_dalek::scalar::Scalar;
-use sha2::{digest::Update, Sha512};
+use sha2::{Sha512, digest::Update};
 
 /// A refinement type for `[u8; 32]` indicating that the bytes represent an
 /// encoding of an Ed25519 verification key.

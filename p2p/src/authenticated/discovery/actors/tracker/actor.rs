@@ -1,26 +1,27 @@
 use super::{
+    Config,
     directory::{self, Directory},
     ingress::{Mailbox, Message, Oracle},
-    Config,
 };
 use crate::{
+    PeerSetUpdate,
     authenticated::discovery::{
         actors::{peer, tracker::ingress::Releaser},
         types::{self, Info, InfoVerifier},
     },
-    PeerSetUpdate,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
 };
 use commonware_utils::{
+    SystemTimeExt,
     channel::{fallible::FallibleExt, mpsc},
-    union, SystemTimeExt,
+    union,
 };
-use rand::{seq::SliceRandom, Rng};
+use rand::{Rng, seq::SliceRandom};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -312,21 +313,21 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 mod tests {
     use super::*;
     use crate::{
+        Ingress, Manager, Provider, TrackedPeers,
         authenticated::discovery::{
             actors::{peer, tracker},
             config::Bootstrapper,
             types,
         },
-        Ingress, Manager, Provider, TrackedPeers,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey, Signature},
         Signer,
+        ed25519::{PrivateKey, PublicKey, Signature},
     };
-    use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
-    use commonware_utils::{bitmap::BitMap, ordered::Set, NZUsize, TryCollect};
-    use futures::{future::Either, FutureExt};
+    use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
+    use commonware_utils::{NZUsize, TryCollect, bitmap::BitMap, ordered::Set};
+    use futures::{FutureExt, future::Either};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},

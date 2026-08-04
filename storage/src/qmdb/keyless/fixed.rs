@@ -3,18 +3,18 @@
 //! For variable-size values, use [super::variable].
 
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
+        Error, ROOT_BAGGING,
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
         operation::Committable,
-        Error, ROOT_BAGGING,
     },
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -66,17 +66,22 @@ impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> CompactDb<F, 
 mod test {
     use super::*;
     use crate::{
-        merkle::{mmb, mmr},
+        merkle::{Location, mmb, mmr},
         qmdb::keyless::tests,
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner as _,
-        Strategizer as _, Supervisor as _,
+        BufferPooler, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        reschedule,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+    use core::future::Future;
+    use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -149,10 +154,245 @@ mod test {
         Box::new(|ctx| Box::pin(open_db(ctx)))
     }
 
+    /// A keyless db over a delayed-sync storage backend.
+    type DelayedDb =
+        Db<mmr::Family, DelayedSyncContext<deterministic::Context>, U64, Sha256, Sequential>;
+
+    /// Open a [DelayedDb] whose blob syncs park on `pending`.
+    ///
+    /// Init durably persists the recovered database, so while syncs park the returned future
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The journal
+    /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
+    /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
+    fn open_delayed_db(
+        context: &deterministic::Context,
+        label: &'static str,
+        suffix: &str,
+        pending: &PendingSyncs,
+    ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
+        let mut cfg = db_config(suffix, context, Sequential);
+        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        cfg.log.items_per_blob = NZU64!(1000);
+        cfg.log.page_cache = page_cache.clone();
+        cfg.merkle.items_per_blob = NZU64!(1000);
+        cfg.merkle.page_cache = page_cache;
+        DelayedDb::init(
+            DelayedSyncContext {
+                inner: context.child(label),
+                pending: pending.clone(),
+            },
+            cfg,
+        )
+    }
+
+    /// Apply a single-append batch with inactivity floor `floor`, returning the appended
+    /// value's location.
+    async fn apply_append(
+        db: DelayedDb,
+        value: U64,
+        floor: Location<mmr::Family>,
+    ) -> (DelayedDb, Location<mmr::Family>) {
+        let batch = db
+            .new_batch()
+            .append(value)
+            .merkleize(&db, None, floor)
+            .await;
+        let (db, range) = db.apply_batch(batch).await.unwrap();
+        (db, range.start)
+    }
+
+    /// A sync handle must not block database use while the backend sync is pending.
+    #[test_traced]
+    fn test_keyless_fixed_start_sync_overlaps_work() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "start-sync-overlap", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let value0 = U64::new(1);
+            let loc0;
+            let floor = db.inactivity_floor_loc();
+            (db, loc0) = apply_append(db, value0.clone(), floor).await;
+
+            let starts_before = pending.starts();
+            let entered_before = pending.entered();
+            let completions_before = pending.completions();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
+            assert_eq!(pending.completions(), completions_before);
+
+            // Observe the sync while the database keeps working.
+            let waiter = ctx
+                .child("await_sync")
+                .spawn(|_| async move { handle.await.unwrap() });
+            while pending.entered() == entered_before {
+                reschedule().await;
+            }
+
+            // Reads and applies complete before the sync does.
+            assert_eq!(db.get(loc0).await.unwrap(), Some(value0));
+            let value1 = U64::new(2);
+            let loc1;
+            let floor = db.inactivity_floor_loc();
+            (db, loc1) = apply_append(db, value1.clone(), floor).await;
+            assert_eq!(
+                pending.completions(),
+                completions_before,
+                "the database made progress while the sync was still in flight"
+            );
+
+            pending.unblock();
+            waiter.await.unwrap();
+
+            // The mid-sync batch is durable after the next start_sync completes.
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = open_delayed_db(&ctx, "reopen", "start-sync-overlap", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(loc1).await.unwrap(), Some(value1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation.
+    #[test_traced]
+    fn test_keyless_fixed_start_sync_failure_propagates() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // Pass syncs through so opening the database doesn't park.
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-fail", &pending)
+                .await
+                .unwrap();
+            let floor = db.inactivity_floor_loc();
+            (db, _) = apply_append(db, U64::new(1), floor).await;
+
+            // Arm all future syncs to resolve to an injected error.
+            pending.arm_fail();
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(
+                handle.await.is_err(),
+                "the sync handle surfaces the failure"
+            );
+            let starts_before = pending.starts();
+            // A failed mutable method consumes the database per the failures-are-fatal contract.
+            assert!(
+                db.commit().await.is_err(),
+                "the next durability op surfaces the failed in-flight sync"
+            );
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "the surfaced error is the retained failure, not a fresh sync's"
+            );
+        });
+    }
+
+    /// State persisted via an awaited start_sync handle is recovered on reopen.
+    #[test_traced]
+    fn test_keyless_fixed_start_sync_recovery() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-recovery", &pending)
+                .await
+                .unwrap();
+            let value = U64::new(1);
+            let loc;
+            let floor = db.inactivity_floor_loc();
+            (db, loc) = apply_append(db, value.clone(), floor).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = open_delayed_db(&ctx, "reopen", "start-sync-recovery", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(loc).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pruning drains the in-flight sync before mutating storage.
+    #[test_traced]
+    fn test_keyless_fixed_start_sync_prune_waits() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "start-sync-prune", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            // Two batches: the second declares floor 2 so the prune below is non-trivial.
+            (db, _) = apply_append(db, U64::new(1), Location::new(0)).await;
+            (db, _) = apply_append(db, U64::new(2), Location::new(2)).await;
+
+            let starts_before = pending.starts();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
+
+            let floor = db.inactivity_floor_loc();
+            assert!(*floor > 0);
+            let db = {
+                let mut prune = std::pin::pin!(db.prune(floor));
+                assert!(
+                    prune.as_mut().now_or_never().is_none(),
+                    "prune proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                prune.await.unwrap()
+            };
+            handle.await.unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding drains the in-flight sync before mutating storage.
+    #[test_traced]
+    fn test_keyless_fixed_start_sync_rewind_waits() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "start-sync-rewind", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            (db, _) = apply_append(db, U64::new(1), Location::new(0)).await;
+            db = drive_pending_syncs(&pending, db.commit()).await.unwrap();
+            let committed_root = db.root();
+            let committed_size = db.bounds().end;
+            (db, _) = apply_append(db, U64::new(2), Location::new(0)).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+
+            let db = {
+                let mut rewind = std::pin::pin!(db.rewind(committed_size));
+                assert!(
+                    rewind.as_mut().now_or_never().is_none(),
+                    "rewind proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                rewind.await.unwrap()
+            };
+            handle.await.unwrap();
+            assert_eq!(db.root(), committed_root);
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_keyless_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db")).await;
             let value = commonware_utils::sequence::U64::new(7);
             let floor = db.inactivity_floor_loc();
             let batch = db
@@ -160,15 +400,17 @@ mod test {
                 .append(value.clone())
                 .merkleize(&db, None, floor)
                 .await;
-            let range = db.apply_batch(batch).await.unwrap();
+            let (db, range) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(range.start).await.unwrap(), Some(value.clone()));
             assert_eq!(
                 db.get_many(&[range.start]).await.unwrap(),
                 vec![Some(value)]
             );
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
-            db.prune(crate::merkle::Location::new(0)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            let (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let _db = db.prune(crate::merkle::Location::new(0)).await.unwrap();
 
             let metrics = ctx.encode();
             for expected in [
@@ -184,6 +426,7 @@ mod test {
                 "db_operations_applied_total 2",
                 "db_commit_calls_total 1",
                 "db_sync_calls_total 1",
+                "db_start_sync_calls_total 1",
                 "db_prune_calls_total 1",
                 "db_get_duration_count 1",
                 "db_get_many_duration_count 1",
@@ -307,8 +550,8 @@ mod test {
     async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {
-        let mut db = open_db::<F>(ctx.child("db")).await;
-        let mut compact = open_compact::<F>(ctx.child("compact")).await;
+        let db = open_db::<F>(ctx.child("db")).await;
+        let compact = open_compact::<F>(ctx.child("compact")).await;
         assert_eq!(db.root(), compact.root());
 
         let v1 = commonware_utils::sequence::U64::new(1);
@@ -331,10 +574,10 @@ mod test {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        db.apply_batch(retained).await.unwrap();
-        compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
-        compact.sync().await.unwrap();
+        let (db, _) = db.apply_batch(retained).await.unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let db = db.commit().await.unwrap();
+        let compact = compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata.clone()));
@@ -366,7 +609,7 @@ mod test {
     fn test_keyless_fixed_pruning() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_pruning(db).await;
+            tests::test_keyless_db_pruning(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
 
@@ -462,7 +705,7 @@ mod test {
     fn test_keyless_fixed_stale_batch() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_stale_batch(db).await;
+            tests::test_keyless_stale_batch(ctx, db, reopen::<mmr::Family>()).await;
         });
     }
 
@@ -518,7 +761,8 @@ mod test {
     fn test_keyless_fixed_rewind_pruned_target_errors() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_rewind_pruned_target_errors(db).await;
+            tests::test_keyless_db_rewind_pruned_target_errors(ctx, db, reopen::<mmr::Family>())
+                .await;
         });
     }
 
@@ -534,7 +778,8 @@ mod test {
     fn test_keyless_fixed_floor_regression_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_regression_rejected(db).await;
+            tests::test_keyless_db_floor_regression_rejected(ctx, db, reopen::<mmr::Family>())
+                .await;
         });
     }
 
@@ -542,7 +787,12 @@ mod test {
     fn test_keyless_fixed_floor_beyond_commit_loc_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(
+                ctx,
+                db,
+                reopen::<mmr::Family>(),
+            )
+            .await;
         });
     }
 
@@ -584,7 +834,12 @@ mod test {
     fn test_keyless_fixed_ancestor_floor_regression_rejected() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(
+                ctx,
+                db,
+                reopen::<mmr::Family>(),
+            )
+            .await;
         });
     }
 
@@ -707,7 +962,7 @@ mod test {
     fn test_keyless_fixed_pruning_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_pruning(db).await;
+            tests::test_keyless_db_pruning(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
 
@@ -795,7 +1050,7 @@ mod test {
     fn test_keyless_fixed_stale_batch_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_stale_batch(db).await;
+            tests::test_keyless_stale_batch(ctx, db, reopen::<mmb::Family>()).await;
         });
     }
 
@@ -851,7 +1106,8 @@ mod test {
     fn test_keyless_fixed_rewind_pruned_target_errors_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_rewind_pruned_target_errors(db).await;
+            tests::test_keyless_db_rewind_pruned_target_errors(ctx, db, reopen::<mmb::Family>())
+                .await;
         });
     }
 
@@ -867,7 +1123,8 @@ mod test {
     fn test_keyless_fixed_floor_regression_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_regression_rejected(db).await;
+            tests::test_keyless_db_floor_regression_rejected(ctx, db, reopen::<mmb::Family>())
+                .await;
         });
     }
 
@@ -875,7 +1132,12 @@ mod test {
     fn test_keyless_fixed_floor_beyond_commit_loc_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_floor_beyond_commit_loc_rejected(db).await;
+            tests::test_keyless_db_floor_beyond_commit_loc_rejected(
+                ctx,
+                db,
+                reopen::<mmb::Family>(),
+            )
+            .await;
         });
     }
 
@@ -917,7 +1179,12 @@ mod test {
     fn test_keyless_fixed_ancestor_floor_regression_rejected_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.child("db")).await;
-            tests::test_keyless_db_ancestor_floor_regression_rejected(db).await;
+            tests::test_keyless_db_ancestor_floor_regression_rejected(
+                ctx,
+                db,
+                reopen::<mmb::Family>(),
+            )
+            .await;
         });
     }
 
@@ -952,17 +1219,16 @@ mod test {
     fn test_keyless_fixed_sync() {
         use crate::{
             merkle::Location,
-            qmdb::sync::{self, engine::Config, Target},
+            qmdb::sync::{self, Target, engine::Config},
         };
         use commonware_utils::{non_empty_range, sequence::U64};
         use std::sync::Arc;
 
         deterministic::Runner::default().start(|ctx| async move {
             let target_config = db_config("sync-target", &ctx, Sequential);
-            let mut target_db: TestDb<mmr::Family> =
-                TestDb::init(ctx.child("target"), target_config)
-                    .await
-                    .unwrap();
+            let target_db: TestDb<mmr::Family> = TestDb::init(ctx.child("target"), target_config)
+                .await
+                .unwrap();
 
             let mut batch = target_db.new_batch();
             for i in 0..20u64 {
@@ -970,7 +1236,7 @@ mod test {
             }
             let floor = target_db.inactivity_floor_loc();
             let merkleized = batch.merkleize(&target_db, None, floor).await;
-            target_db.apply_batch(merkleized).await.unwrap();
+            let (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();
             let bounds = target_db.bounds();
@@ -987,8 +1253,8 @@ mod test {
                     range: non_empty_range!(lower_bound, upper_bound),
                 },
                 context: ctx.child("client"),
-                resolver: target_db.clone(),
-                apply_batch_size: 1024,
+                source: target_db.clone(),
+                apply_batch_size: NZU64!(1024),
                 max_outstanding_requests: 1,
                 update_rx: None,
                 finish_rx: None,

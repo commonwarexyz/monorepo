@@ -1,12 +1,12 @@
 use commonware_cryptography::{
-    bls12381::primitives::group::{Scalar, G1},
-    transcript::Transcript,
+    bls12381::primitives::group::{G1, Scalar},
+    transcript::{Transcript, Version},
     zk::bulletproofs::ipa::{self, Proof, Setup, Witness},
 };
 use commonware_math::algebra::{CryptoGroup, Random};
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::test_rng;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand_core::CryptoRng;
 use std::{hint::black_box, num::NonZeroUsize};
 
@@ -35,7 +35,7 @@ fn make_proof(setup: &Setup<G1>, len: usize) -> (ipa::Claim<Scalar, G1>, Proof<S
     let y = Scalar::random(&mut rng);
     let (witness, claim) =
         Witness::new_with_claim(setup, y, make_elements(&mut rng, len)).expect("valid witness");
-    let mut transcript = Transcript::new(b"ipa-bench");
+    let mut transcript = Transcript::new(b"ipa-bench", Version::V1);
     transcript.commit(&b"context"[..]);
     let proof = ipa::prove(&mut transcript, setup, &claim, witness, &Sequential)
         .expect("proof should succeed");
@@ -58,7 +58,7 @@ fn bench_prove(c: &mut Criterion) {
                     (claim, witness)
                 },
                 |(claim, witness)| {
-                    let mut transcript = Transcript::new(b"ipa-bench");
+                    let mut transcript = Transcript::new(b"ipa-bench", Version::V1);
                     transcript.commit(&b"context"[..]);
                     black_box(ipa::prove(
                         &mut transcript,
@@ -83,7 +83,7 @@ fn bench_prove(c: &mut Criterion) {
                     (claim, witness)
                 },
                 |(claim, witness)| {
-                    let mut transcript = Transcript::new(b"ipa-bench");
+                    let mut transcript = Transcript::new(b"ipa-bench", Version::V1);
                     transcript.commit(&b"context"[..]);
                     black_box(ipa::prove(&mut transcript, &setup, &claim, witness, &par));
                 },
@@ -102,7 +102,7 @@ fn bench_verify(c: &mut Criterion) {
             b.iter_batched(
                 || make_proof(&setup, len),
                 |(claim, proof)| {
-                    let mut transcript = Transcript::new(b"ipa-bench");
+                    let mut transcript = Transcript::new(b"ipa-bench", Version::V1);
                     transcript.commit(&b"context"[..]);
                     black_box(setup.eval(
                         |vs| ipa::verify(&mut transcript, vs, &claim, proof),
@@ -117,7 +117,7 @@ fn bench_verify(c: &mut Criterion) {
             b.iter_batched(
                 || make_proof(&setup, len),
                 |(claim, proof)| {
-                    let mut transcript = Transcript::new(b"ipa-bench");
+                    let mut transcript = Transcript::new(b"ipa-bench", Version::V1);
                     transcript.commit(&b"context"[..]);
                     black_box(
                         setup.eval(|vs| ipa::verify(&mut transcript, vs, &claim, proof), &par),

@@ -1,13 +1,13 @@
-use crate::{append_fixed_random_data, get_variable_journal, ITEMS_PER_BLOB, ITEM_SIZE};
+use crate::{ITEM_SIZE, ITEMS_PER_BLOB, append_fixed_random_data, get_variable_journal};
 use commonware_runtime::{
+    Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
-    Runner as _, Supervisor as _,
 };
-use commonware_storage::journal::contiguous::{variable::Journal, Contiguous as _};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
-use criterion::{criterion_group, Criterion};
-use futures::{pin_mut, StreamExt};
+use commonware_storage::journal::contiguous::{Contiguous as _, variable::Journal};
+use commonware_utils::{NZUsize, sequence::FixedBytes};
+use criterion::{Criterion, criterion_group};
+use futures::{StreamExt, pin_mut};
 use std::{
     hint::black_box,
     time::{Duration, Instant},
@@ -17,8 +17,11 @@ use std::{
 const PARTITION: &str = "variable-test-partition";
 
 /// Replay all items in the given `journal`.
-async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
-    let reader = journal.snapshot().await.unwrap();
+async fn bench_run(
+    journal: Journal<Context, FixedBytes<ITEM_SIZE>>,
+    buffer: usize,
+) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+    let (journal, reader) = journal.snapshot().await.unwrap();
     let stream = reader
         .replay(0, NZUsize!(buffer))
         .await
@@ -32,6 +35,7 @@ async fn bench_run(journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>, buffer
             Err(err) => panic!("Failed to read item: {err}"),
         }
     }
+    journal
 }
 
 /// Benchmark the replaying of items from a variable journal containing exactly that
@@ -54,9 +58,8 @@ fn bench_variable_replay(c: &mut Criterion) {
                     // Setup: populate journal (once, on first sample).
                     if !initialized {
                         Runner::new(cfg.clone()).start(|ctx| async move {
-                            let mut j = get_variable_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
-                            append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
-                            j.sync().await.unwrap();
+                            let j = get_variable_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                            append_fixed_random_data::<_, ITEM_SIZE>(j, items).await;
                         });
                         initialized = true;
                     }
@@ -70,7 +73,7 @@ fn bench_variable_replay(c: &mut Criterion) {
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            bench_run(&mut j, buffer).await;
+                            j = bench_run(j, buffer).await;
                             duration += start.elapsed();
                         }
                         duration

@@ -1,8 +1,123 @@
 use crate::types::Height;
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, Codec, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 use commonware_cryptography::{Digest, Digestible, Hasher};
 use std::fmt::Debug;
+
+/// A mock block with no explicit consensus context.
+/// Its parent digest also serves as its certification context.
+pub struct EmptyBlock<H: Hasher> {
+    /// The parent block's digest.
+    pub parent: H::Digest,
+
+    /// The height of the block in the blockchain.
+    pub height: Height,
+
+    /// The timestamp of the block (in milliseconds since the Unix epoch).
+    pub timestamp: u64,
+}
+
+impl<H: Hasher> EmptyBlock<H> {
+    pub const fn new(parent: H::Digest, height: Height, timestamp: u64) -> Self {
+        Self {
+            parent,
+            height,
+            timestamp,
+        }
+    }
+}
+
+impl<H: Hasher> Clone for EmptyBlock<H> {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent,
+            height: self.height,
+            timestamp: self.timestamp,
+        }
+    }
+}
+
+impl<H: Hasher> Debug for EmptyBlock<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmptyBlock")
+            .field("parent", &self.parent)
+            .field("height", &self.height)
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
+}
+
+impl<H: Hasher> PartialEq for EmptyBlock<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.parent == other.parent
+            && self.height == other.height
+            && self.timestamp == other.timestamp
+    }
+}
+
+impl<H: Hasher> Eq for EmptyBlock<H> {}
+
+impl<H: Hasher> Write for EmptyBlock<H> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.parent.write(writer);
+        self.height.write(writer);
+        UInt(self.timestamp).write(writer);
+    }
+}
+
+impl<H: Hasher> Read for EmptyBlock<H> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        let parent = H::Digest::read(reader)?;
+        let height = Height::read(reader)?;
+        let timestamp = UInt::read(reader)?.into();
+
+        Ok(Self {
+            parent,
+            height,
+            timestamp,
+        })
+    }
+}
+
+impl<H: Hasher> EncodeSize for EmptyBlock<H> {
+    fn encode_size(&self) -> usize {
+        self.parent.encode_size() + self.height.encode_size() + UInt(self.timestamp).encode_size()
+    }
+}
+
+impl<H: Hasher> Digestible for EmptyBlock<H> {
+    type Digest = H::Digest;
+
+    fn digest(&self) -> H::Digest {
+        H::hash(&[
+            self.parent.as_ref(),
+            &self.height.get().to_be_bytes(),
+            &self.timestamp.to_be_bytes(),
+        ])
+    }
+}
+
+impl<H: Hasher> crate::Heightable for EmptyBlock<H> {
+    fn height(&self) -> Height {
+        self.height
+    }
+}
+
+impl<H: Hasher> crate::Block for EmptyBlock<H> {
+    fn parent(&self) -> Self::Digest {
+        self.parent
+    }
+}
+
+impl<H: Hasher> crate::CertifiableBlock for EmptyBlock<H> {
+    type Context = H::Digest;
+
+    fn context(&self) -> Self::Context {
+        self.parent
+    }
+}
 
 /// A mock block type for testing that stores consensus context.
 ///
@@ -32,12 +147,12 @@ impl<D: Digest, C: Codec> Block<D, C> {
         height: Height,
         timestamp: u64,
     ) -> D {
-        let mut hasher = H::new();
-        hasher.update(parent);
-        hasher.update(&height.get().to_be_bytes());
-        hasher.update(&context.encode());
-        hasher.update(&timestamp.to_be_bytes());
-        hasher.finalize()
+        H::hash(&[
+            parent.as_ref(),
+            &height.get().to_be_bytes(),
+            &context.encode(),
+            &timestamp.to_be_bytes(),
+        ])
     }
 
     pub fn new<H: Hasher<Digest = D>>(

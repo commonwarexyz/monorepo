@@ -1,25 +1,24 @@
+#[cfg(feature = "external")]
+use crate::Pacer;
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
-#[cfg(feature = "external")]
-use crate::Pacer;
 use crate::{
-    child_label,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
+    Spawner as _, StreamOf, Supervisor as _, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::{
-        add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
-        Register, Registered, Registry,
+        CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
+        task::Label, validate_label,
     },
-    utils::{self, signal::Stopper, supervision::Tree, Panicker},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Name, SinkOf, Spawner as _,
-    StreamOf, Supervisor as _, METRICS_PREFIX,
+    utils::{self, Panicker, signal::Stopper, supervision::Tree},
 };
 #[cfg(feature = "iouring-network")]
 use crate::{
@@ -29,7 +28,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
-use commonware_utils::{sync::Mutex, sys_rng, NZUsize};
+use commonware_utils::{NZUsize, sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
@@ -98,11 +97,18 @@ pub struct NetworkConfig {
     /// Defaults to `true`.
     zero_linger: bool,
 
+    /// Timeout for establishing an outbound TCP connection.
+    ///
+    /// Defaults to 10 seconds.
+    connect_timeout: Duration,
+
     /// Read/write timeout for network operations.
     ///
     /// Bounds the full `Sink::send` and `Stream::recv` calls rather than each
-    /// individual socket syscall. Larger
-    /// batched writes may therefore require a larger timeout.
+    /// individual socket syscall. Larger batched writes may therefore require a
+    /// larger timeout.
+    ///
+    /// Defaults to 60 seconds.
     read_write_timeout: Duration,
 }
 
@@ -111,6 +117,7 @@ impl Default for NetworkConfig {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -218,6 +225,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.network_cfg.connect_timeout = timeout;
+        self
+    }
+    /// See [Config]
     pub const fn with_read_write_timeout(mut self, d: Duration) -> Self {
         self.network_cfg.read_write_timeout = d;
         self
@@ -243,12 +255,12 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = Some(cfg);
         self
     }
     /// See [Config]
-    pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.storage_buffer_pool_cfg = Some(cfg);
         self
     }
@@ -273,6 +285,10 @@ impl Config {
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
+    }
+    /// See [Config]
+    pub const fn connect_timeout(&self) -> Duration {
+        self.network_cfg.connect_timeout
     }
     /// See [Config]
     pub const fn read_write_timeout(&self) -> Duration {
@@ -437,6 +453,7 @@ impl crate::Runner for Runner {
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     zero_linger: self.cfg.network_cfg.zero_linger,
+                    connect_timeout: self.cfg.network_cfg.connect_timeout,
                     read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
@@ -459,6 +476,7 @@ impl crate::Runner for Runner {
                 );
             } else {
                 let config = TokioNetworkConfig::default()
+                    .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
                     .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
@@ -765,8 +783,8 @@ impl crate::Network for Context {
 
 impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
-        // Uses the host's DNS configuration (e.g. /etc/resolv.conf on Unix,
-        // registry on Windows). This delegates to the system's libc resolver.
+        // Uses the host's DNS configuration (e.g. /etc/resolv.conf). This delegates to the
+        // system's libc resolver.
         //
         // The `:0` port is required by lookup_host's API but is not used
         // for DNS resolution.
@@ -830,6 +848,18 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
+        tokio::telemetry,
+    };
+    use bytes::Bytes;
+    use std::{
+        self,
+        collections::HashMap,
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        str::FromStr,
+    };
+    use tracing::{Level, error};
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -837,14 +867,14 @@ mod tests {
 
         assert_eq!(cfg.worker_threads, 8);
         let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism, NZUsize!(8));
+        assert_eq!(network.parallelism(), NZUsize!(8));
         assert_eq!(
             network.thread_cache_config,
             BufferPoolConfig::for_network().thread_cache_config
         );
 
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism, NZUsize!(8));
+        assert_eq!(storage.parallelism(), NZUsize!(8));
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage().thread_cache_config
@@ -879,14 +909,14 @@ mod tests {
             );
 
         let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism, NZUsize!(2));
+        assert_eq!(network.parallelism(), NZUsize!(2));
         assert_eq!(
             network.thread_cache_config,
             BufferPoolConfig::for_network().thread_cache_config
         );
 
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism, NZUsize!(1));
+        assert_eq!(storage.parallelism(), NZUsize!(1));
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage()
@@ -895,28 +925,156 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn test_startup_flush_survives_restart() {
-        use crate::{Blob as _, Runner as _, Storage as _};
+    fn test_process_rss_metric() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            loop {
+                // Wait for RSS metric to be available
+                let metrics = context.encode();
+                if !metrics.contains("runtime_process_rss") {
+                    context.sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
 
-        // Write and sync a blob, drop the runtime, then reopen the same storage directory in a new
-        // runtime. `sync` runs on startup and reads the blob back.
-        // Confirms the startup flush path runs and storage survives a restart.
-        let cfg = Config::new();
-        let dir = cfg.storage_directory().clone();
-        Runner::new(cfg).start(|context| async move {
-            let (blob, _) = context.open("test", b"blob").await.unwrap();
-            blob.write_at(0, vec![1u8, 2, 3, 4]).await.unwrap();
-            blob.sync().await.unwrap();
+                // Verify the RSS value is eventually populated (greater than 0)
+                for line in metrics.lines() {
+                    if line.starts_with("runtime_process_rss")
+                        && !line.starts_with("runtime_process_rss{")
+                    {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            let rss_value: i64 =
+                                parts[1].parse().expect("Failed to parse RSS value");
+                            if rss_value > 0 {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
         });
-        let reopened_len = Runner::new(Config::new().with_storage_directory(dir.clone())).start(
-            |context| async move {
-                let (_, len) = context.open("test", b"blob").await.unwrap();
-                len
-            },
-        );
-        assert_eq!(reopened_len, 4);
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_telemetry() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            // Define the server address
+            let address = SocketAddr::from_str("127.0.0.1:8000").unwrap();
+
+            // Configure telemetry
+            telemetry::init(
+                context.child("metrics"),
+                telemetry::Logs {
+                    level: Level::INFO,
+                    json: false,
+                },
+                Some(address),
+                None,
+            );
+
+            // Register a test metric
+            let counter: Counter<u64> = Counter::default();
+            let _registered = context.register("test_counter", "Test counter", counter.clone());
+            counter.inc();
+
+            // Helper functions to parse HTTP response
+            async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
+                let mut line = Vec::new();
+                loop {
+                    let received = stream.recv(1).await?;
+                    let byte = received.coalesce().as_ref()[0];
+                    if byte == b'\n' {
+                        if line.last() == Some(&b'\r') {
+                            line.pop(); // Remove trailing \r
+                        }
+                        break;
+                    }
+                    line.push(byte);
+                }
+                String::from_utf8(line).map_err(|_| Error::ReadFailed)
+            }
+
+            async fn read_headers<St: Stream>(
+                stream: &mut St,
+            ) -> Result<HashMap<String, String>, Error> {
+                let mut headers = HashMap::new();
+                loop {
+                    let line = read_line(stream).await?;
+                    if line.is_empty() {
+                        break;
+                    }
+                    let parts: Vec<&str> = line.splitn(2, ": ").collect();
+                    if parts.len() == 2 {
+                        headers.insert(parts[0].to_string(), parts[1].to_string());
+                    }
+                }
+                Ok(headers)
+            }
+
+            async fn read_body<St: Stream>(
+                stream: &mut St,
+                content_length: usize,
+            ) -> Result<String, Error> {
+                let received = stream.recv(content_length).await?;
+                String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
+            }
+
+            // Simulate a client connecting to the server
+            let client_handle = context.child("client").spawn(move |context| async move {
+                let (mut sink, mut stream) = loop {
+                    match context.dial(address).await {
+                        Ok((sink, stream)) => break (sink, stream),
+                        Err(e) => {
+                            // The client may be polled before the server is ready, that's alright!
+                            error!(err =?e, "failed to connect");
+                            context.sleep(Duration::from_millis(10)).await;
+                        }
+                    }
+                };
+
+                // Send a GET request to the server
+                let request = format!(
+                    "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+                );
+                sink.send(Bytes::from(request)).await.unwrap();
+
+                // Read and verify the HTTP status line
+                let status_line = read_line(&mut stream).await.unwrap();
+                assert_eq!(status_line, "HTTP/1.1 200 OK");
+
+                // Read and parse headers
+                let headers = read_headers(&mut stream).await.unwrap();
+                println!("Headers: {headers:?}");
+                let content_length = headers
+                    .get("content-length")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+
+                // Read and verify the body
+                let body = read_body(&mut stream, content_length).await.unwrap();
+                assert!(body.contains("test_counter_total 1"));
+            });
+
+            // Wait for the client task to complete
+            client_handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_resolver() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let addrs = context.resolve("localhost").await.unwrap();
+            assert!(!addrs.is_empty());
+            for addr in addrs {
+                assert!(
+                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                );
+            }
+        });
     }
 }

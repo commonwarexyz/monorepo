@@ -33,15 +33,16 @@
 //! # Parent chain and memory
 //!
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
-//! plus `Arc` refs to each ancestor's data, collected during
+//! plus `Arc` refs to each retained ancestor's data, collected during
 //! [`UnmerkleizedBatch::merkleize`]. These ancestor batches' data are used by
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
 //! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
 //! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, but their
-//! data is already captured in `ancestor_appended` / `ancestor_overwrites`.
+//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
+//! data in the committed [`Mem`]. `ancestor_base_size` records the position before the
+//! oldest retained ancestor so the remaining suffix is replayed at the correct offset.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
 //! (keeping it alive for the walk), and the `Weak` chain is walked to collect
@@ -81,7 +82,7 @@
 //! ```
 
 use crate::merkle::{
-    hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
+    Error, Family, Location, Position, Readable, hasher::Hasher, mem::Mem, path, proof::Proof,
 };
 use ahash::RandomState;
 use alloc::{
@@ -372,7 +373,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
 
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
-        let (ancestor_appended, ancestor_overwrites) = collect_ancestor_batches(&self.parent);
+        let (ancestor_base_size, ancestor_appended, ancestor_overwrites) =
+            collect_ancestor_batches(&self.parent);
 
         let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
@@ -381,6 +383,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             overwrites: Arc::new(self.overwrites),
             parent_size,
             base_size: self.parent.base_size,
+            ancestor_base_size,
             pruning_boundary: self.parent.pruning_boundary(),
             ancestor_appended,
             ancestor_overwrites,
@@ -388,7 +391,45 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         })
     }
 
+    /// Fetch the child digests of the node at `pos`.
+    fn child_digests(&self, base: &Mem<F, D>, pos: Position<F>, height: u32) -> (D, D) {
+        let (left, right) = F::children(pos, height);
+        let left = self.get_node(base, left).expect("left child missing");
+        let right = self.get_node(base, right).expect("right child missing");
+        (left, right)
+    }
+
+    /// Compute the digests of `positions` two at a time so the hasher can make progress on both
+    /// concurrently, appending `(position, digest)` results to `output`.
+    fn zip_nodes(
+        &self,
+        base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        positions: &[Position<F>],
+        height: u32,
+        output: &mut Vec<(Position<F>, D)>,
+    ) {
+        let mut pairs = positions.chunks_exact(2);
+        for pair in &mut pairs {
+            let (left, right) = (pair[0], pair[1]);
+            let (ll, lr) = self.child_digests(base, left, height);
+            let (rl, rr) = self.child_digests(base, right, height);
+            let (left_digest, right_digest) =
+                hasher.node_digest_pair([(left, &ll, &lr), (right, &rl, &rr)]);
+            output.push((left, left_digest));
+            output.push((right, right_digest));
+        }
+        if let [pos] = pairs.remainder() {
+            let (left, right) = self.child_digests(base, *pos, height);
+            output.push((*pos, hasher.node_digest(*pos, &left, &right)));
+        }
+    }
+
     /// Compute digests for one height's dirty nodes via the configured strategy.
+    ///
+    /// Positions are split evenly across the strategy's workers so each worker can pair
+    /// adjacent nodes for [`Hasher::node_digest_pair`]. The chunk size is rounded up to
+    /// even so no pair straddles a chunk boundary.
     fn merkleize_bucket(
         &mut self,
         base: &Mem<F, D>,
@@ -396,32 +437,40 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         positions: &[Position<F>],
         height: u32,
     ) {
-        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
-            positions,
-            || hasher.clone(),
-            |hasher, &pos| {
-                let (left, right) = F::children(pos, height);
-                let left_d = self.get_node(base, left).expect("left child missing");
-                let right_d = self.get_node(base, right).expect("right child missing");
-                let digest = hasher.node_digest(pos, &left_d, &right_d);
-                (pos, digest)
-            },
-        );
-        for (pos, digest) in computed {
-            self.store_node(pos, digest);
+        let chunk = positions
+            .len()
+            .div_ceil(self.parent.strategy.manual().parallelism())
+            .max(1)
+            .next_multiple_of(2);
+        let computed: Vec<Vec<(Position<F>, D)>> =
+            self.parent.strategy.map_init_collect_vec_with_multiplier(
+                positions.chunks(chunk),
+                chunk,
+                || hasher.clone(),
+                |hasher, positions| {
+                    let mut computed = Vec::with_capacity(positions.len());
+                    self.zip_nodes(base, &*hasher, positions, height, &mut computed);
+                    computed
+                },
+            );
+        for nodes in computed {
+            for (pos, digest) in nodes {
+                self.store_node(pos, digest);
+            }
         }
     }
 }
 
 /// Collect ancestor batch data by walking the parent + its Weak chain.
-/// Returns (appended, overwrites) in root-to-tip order. Skips empty batches
-/// (e.g. root batches from `from_mem`).
+/// Returns the size before the oldest retained ancestor followed by its appended nodes and
+/// overwrites in root-to-tip order. Skips empty batches (e.g. root batches from `from_mem`).
 #[allow(clippy::type_complexity)]
 fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     parent: &Arc<MerkleizedBatch<F, D, S>>,
-) -> (Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
+) -> (Position<F>, Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
     let mut appended = Vec::new();
     let mut overwrites = Vec::new();
+    let mut base_size = parent.parent_size;
 
     // Parent is alive (strong Arc held by UnmerkleizedBatch).
     if !parent.appended.is_empty() || !parent.overwrites.is_empty() {
@@ -432,6 +481,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     // Walk Weak chain for grandparents+.
     let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
     while let Some(batch) = current {
+        base_size = batch.parent_size;
         if !batch.appended.is_empty() || !batch.overwrites.is_empty() {
             appended.push(Arc::clone(&batch.appended));
             overwrites.push(Arc::clone(&batch.overwrites));
@@ -441,7 +491,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
 
     appended.reverse();
     overwrites.reverse();
-    (appended, overwrites)
+    (base_size, appended, overwrites)
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +517,9 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// Number of committed nodes when the batch chain was forked. Inherited unchanged
     /// by all descendants. Used by `apply_batch` to detect already-committed ancestors.
     pub(crate) base_size: Position<F>,
+
+    /// Number of nodes before the oldest retained ancestor batch.
+    pub(crate) ancestor_base_size: Position<F>,
 
     /// Pruning boundary of the [`Mem`] when the batch chain was forked. Inherited
     /// unchanged by all descendants, like `base_size`.
@@ -501,6 +554,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             overwrites: Arc::new(Overwrites::default()),
             parent_size: mem.size(),
             base_size: mem.size(),
+            ancestor_base_size: mem.size(),
             pruning_boundary: Readable::pruning_boundary(mem),
             ancestor_appended: Vec::new(),
             ancestor_overwrites: Vec::new(),
@@ -653,9 +707,9 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard, mem::Mem, Bagging::ForwardFold};
-    use commonware_cryptography::{sha256, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
+    use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem};
+    use commonware_cryptography::{Sha256, sha256};
+    use commonware_runtime::{Runner as _, deterministic};
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
@@ -1243,6 +1297,55 @@ mod tests {
     fn mmb_multiple_forks() {
         multiple_forks::<crate::mmb::Family>();
     }
+
+    /// A structure rebuilt from the pinned nodes at `n - 1` plus the final element generates a
+    /// verifiable proof for that element against the root at `n`.
+    fn tip_proof_from_pins<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            for &n in &[1u64, 2, 3, 8, 100, 199] {
+                let reference = build_reference::<F>(&hasher, n);
+                let boundary = Location::new(n - 1);
+                let pin_map = reference.nodes_to_pin(boundary);
+                let pinned_nodes: Vec<D> =
+                    F::nodes_to_pin(boundary).map(|pos| pin_map[&pos]).collect();
+                let element = hasher.digest(&(n - 1).to_be_bytes());
+
+                let peaks = F::peaks(F::location_to_position(Location::new(n))).count();
+                for inactive_peaks in 0..=peaks.min(2) {
+                    let root = reference.root(&hasher, inactive_peaks).unwrap();
+
+                    let mut rebuilt = Mem::<F, D>::init(crate::merkle::mem::Config {
+                        nodes: Vec::new(),
+                        pruning_boundary: boundary,
+                        pinned_nodes: pinned_nodes.clone(),
+                    })
+                    .unwrap();
+                    let batch = rebuilt
+                        .new_batch()
+                        .add(&hasher, &element)
+                        .merkleize(&rebuilt, &hasher);
+                    rebuilt.apply_batch(&batch).unwrap();
+                    assert_eq!(rebuilt.root(&hasher, inactive_peaks).unwrap(), root);
+
+                    let proof = rebuilt.proof(&hasher, boundary, inactive_peaks).unwrap();
+                    assert!(proof.verify_range_inclusion(&hasher, &[element], boundary, &root));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn mmr_tip_proof_from_pins() {
+        tip_proof_from_pins::<crate::mmr::Family>();
+    }
+
+    #[test]
+    fn mmb_tip_proof_from_pins() {
+        tip_proof_from_pins::<crate::mmb::Family>();
+    }
+
     #[test]
     fn mmb_fork_of_fork_reads() {
         fork_of_fork_reads::<crate::mmb::Family>();

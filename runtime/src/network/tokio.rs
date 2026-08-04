@@ -3,8 +3,8 @@ use std::{convert::identity, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     time::timeout,
 };
@@ -159,17 +159,17 @@ impl crate::Listener for Listener {
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
         }
 
         // Set SO_LINGER to zero if configured
-        if self.cfg.zero_linger {
-            if let Err(err) = stream.set_zero_linger() {
-                warn!(?err, "failed to set SO_LINGER");
-            }
+        if self.cfg.zero_linger
+            && let Err(err) = stream.set_zero_linger()
+        {
+            warn!(?err, "failed to set SO_LINGER");
         }
 
         // Return the sink and stream
@@ -213,6 +213,10 @@ pub struct Config {
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     zero_linger: bool,
+    /// Timeout for establishing an outbound TCP connection.
+    ///
+    /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
+    connect_timeout: Duration,
     /// Read timeout for connections, after which the stream half returns
     /// [`Error::Timeout`] and is no longer reusable.
     ///
@@ -247,6 +251,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+    /// See [Config]
     pub const fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
         self.read_timeout = read_timeout;
         self
@@ -272,6 +281,10 @@ impl Config {
         self.zero_linger
     }
     /// See [Config]
+    pub const fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+    /// See [Config]
     pub const fn read_timeout(&self) -> Duration {
         self.read_timeout
     }
@@ -290,6 +303,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            connect_timeout: Duration::from_secs(10),
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(60),
             read_buffer_size: 64 * 1024, // 64 KB
@@ -330,22 +344,23 @@ impl crate::Network for Network {
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
         // Create a new TCP stream
-        let stream = TcpStream::connect(socket)
+        let stream = timeout(self.cfg.connect_timeout, TcpStream::connect(socket))
             .await
+            .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
-            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                warn!(?err, "failed to set TCP_NODELAY");
-            }
+        if let Some(tcp_nodelay) = self.cfg.tcp_nodelay
+            && let Err(err) = stream.set_nodelay(tcp_nodelay)
+        {
+            warn!(?err, "failed to set TCP_NODELAY");
         }
 
         // Set SO_LINGER to zero if configured
-        if self.cfg.zero_linger {
-            if let Err(err) = stream.set_zero_linger() {
-                warn!(?err, "failed to set SO_LINGER");
-            }
+        if self.cfg.zero_linger
+            && let Err(err) = stream.set_zero_linger()
+        {
+            warn!(?err, "failed to set SO_LINGER");
         }
 
         // Return the sink and stream
@@ -369,9 +384,9 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::{
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
         network::{tests, tokio as TokioNetwork},
         telemetry::metrics::Registry,
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use std::time::{Duration, Instant};
@@ -392,6 +407,18 @@ mod tests {
             )
         })
         .await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_connect_timeout() {
+        let connect_timeout = Duration::from_millis(100);
+        let network = TokioNetwork::Network::new(
+            TokioNetwork::Config::default().with_connect_timeout(connect_timeout),
+            test_pool(),
+        );
+
+        tests::test_network_connect_timeout(network, connect_timeout).await;
     }
 
     #[test_group("slow")]

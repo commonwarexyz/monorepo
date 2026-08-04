@@ -1,6 +1,6 @@
 use crate::{ordered_broadcast::types::SequencersProvider, types::Epoch};
 use commonware_cryptography::PublicKey;
-use commonware_utils::{ordered::Set, TryFromIterator};
+use commonware_utils::{TryFromIterator, ordered::Set};
 use std::sync::Arc;
 
 #[derive(Clone)]

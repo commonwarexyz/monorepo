@@ -1,37 +1,36 @@
 //! Implementation of a simulated p2p network.
 
 use super::{
+    Error,
     ingress::{self, Oracle},
     metrics,
     transmitter::{self, Completion},
-    Error,
 };
 use crate::{
-    utils::{
-        limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
-        PeerSetsAtIndex as PeerSetsAtIndexBase,
-    },
     Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
     UnlimitedSender as _,
+    utils::{
+        PeerSetsAtIndex as PeerSetsAtIndexBase,
+        limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
+    },
 };
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{CounterFamily, MetricsExt as _},
     Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner,
+    Spawner, spawn_cell,
+    telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
+    NZUsize, TryCollect,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
-    NZUsize, TryCollect,
 };
 use either::Either;
-use futures::{future, Sink};
+use futures::{Sink, future};
 use rand::{Rng, RngExt as _};
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -41,8 +40,8 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -53,6 +52,9 @@ type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, IoBuf);
+
+/// Overhead from prepending a channel identifier to an application payload.
+pub const MAX_PAYLOAD_OVERHEAD: u32 = Channel::SIZE as u32;
 
 struct RegistrationGuard {
     active: Arc<AtomicBool>,
@@ -117,7 +119,9 @@ struct PeerRefCounts {
 
 /// Configuration for the simulated network.
 pub struct Config {
-    /// Maximum size of a message that can be sent over the network.
+    /// Maximum size allowed for an application payload provided to a sender.
+    ///
+    /// Providing a larger payload panics. Exchanged messages are larger due to framing overhead.
     pub max_size: u32,
 
     /// True if peers should disconnect upon being blocked. While production networking would
@@ -136,8 +140,11 @@ pub struct Config {
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
-    // Maximum size of a message that can be sent over the network
+    // Maximum size of an application payload.
     max_size: u32,
+
+    // Maximum size of an internal message containing a channel identifier and payload.
+    max_frame_size: u32,
 
     // True if peers should disconnect upon being blocked.
     // While production networking would typically disconnect, for testing purposes it may be useful
@@ -191,10 +198,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`Config::max_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
+        let max_frame_size = cfg
+            .max_size
+            .checked_add(MAX_PAYLOAD_OVERHEAD)
+            .expect("maximum frame size overflow");
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
@@ -203,6 +218,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             Self {
                 context: ContextCell::new(context),
                 max_size: cfg.max_size,
+                max_frame_size,
                 disconnect_on_block: cfg.disconnect_on_block,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
@@ -274,15 +290,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.peer_sets.last_key_value() {
-            if id <= *last {
-                warn!(
-                    new_id = id,
-                    old_id = last,
-                    "attempted to register peer set with non-monotonically increasing ID"
-                );
-                return false;
-            }
+        if let Some((last, _)) = self.peer_sets.last_key_value()
+            && id <= *last
+        {
+            warn!(
+                new_id = id,
+                old_id = last,
+                "attempted to register peer set with non-monotonically increasing ID"
+            );
+            return false;
         }
 
         // Create and store new primary peer set.
@@ -531,7 +547,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     receiver_socket,
                     sampler,
                     success_rate,
-                    self.max_size,
+                    self.max_frame_size,
                     self.received_messages.clone(),
                 );
                 self.links.insert(key, link);
@@ -568,7 +584,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.context.child("peer"),
                 public_key.clone(),
                 socket,
-                self.max_size,
+                self.max_frame_size,
             )
             .await;
 
@@ -1252,12 +1268,12 @@ impl<P: PublicKey> Peer<P> {
     /// Create and return a new peer.
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
-    /// `max_size` is the maximum size of a message that can be sent to the peer.
+    /// `max_frame_size` is the maximum size of an internal framed message.
     async fn new<E: Spawner + RNetwork + Metrics + Clock>(
         context: E,
         public_key: P,
         socket: SocketAddr,
-        max_size: u32,
+        max_frame_size: u32,
     ) -> Self {
         // The control is used to register channels.
         let (control_sender, mut control_receiver): (
@@ -1324,7 +1340,7 @@ impl<P: PublicKey> Peer<P> {
                     let inbox_sender = inbox_sender.clone();
                     move |_| async move {
                         // Receive dialer's public key as a handshake
-                        let dialer = match recv_frame(&mut stream, max_size).await {
+                        let dialer = match recv_frame(&mut stream, max_frame_size).await {
                             Ok(data) => data,
                             Err(_) => {
                                 error!("failed to receive public key from dialer");
@@ -1337,7 +1353,7 @@ impl<P: PublicKey> Peer<P> {
                         };
 
                         // Continually receive messages from the dialer and send them to the inbox
-                        while let Ok(data) = recv_frame(&mut stream, max_size).await {
+                        while let Ok(data) = recv_frame(&mut stream, max_frame_size).await {
                             let data = data.coalesce();
                             let channel = Channel::from_be_bytes(
                                 data.as_ref()[..Channel::SIZE].try_into().unwrap(),
@@ -1401,7 +1417,7 @@ impl Link {
         socket: SocketAddr,
         sampler: Normal<f64>,
         success_rate: f64,
-        max_size: u32,
+        max_frame_size: u32,
         received_messages: CounterFamily<metrics::Message>,
     ) -> Self {
         // Spawn a task that will wait for messages to be sent to the link and then send them
@@ -1410,7 +1426,8 @@ impl Link {
         context.child("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
             let (mut sink, _) = context.dial(socket).await.unwrap();
-            if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_size).await {
+            if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_frame_size).await
+            {
                 error!(?err, "failed to send public key to listener");
                 return;
             }
@@ -1425,7 +1442,7 @@ impl Link {
                 let mut data = Vec::with_capacity(channel_bytes.len() + message.len());
                 data.extend_from_slice(&channel_bytes);
                 data.extend_from_slice(message.as_ref());
-                let _ = send_frame(&mut sink, data, max_size).await;
+                let _ = send_frame(&mut sink, data, max_frame_size).await;
 
                 // Bump received messages metric
                 received_messages
@@ -1462,9 +1479,9 @@ mod tests {
         CheckedSender as _, LimitedSender as _, Manager as _, Provider, Receiver as _, Recipients,
         Sender as _, TrackedPeers,
     };
-    use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic, Quota, Runner as _, Supervisor as _};
-    use commonware_utils::{ordered::Set, NZUsize};
+    use commonware_cryptography::{Signer as _, ed25519};
+    use commonware_runtime::{Quota, Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::{NZUsize, ordered::Set};
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
@@ -1537,6 +1554,97 @@ mod tests {
                 oracle.add_link(pk1, pk2, link).await,
                 Err(Error::LinkExists)
             ));
+        });
+    }
+
+    /// [`Config::max_size`] must leave enough frame capacity for internal overhead.
+    #[test]
+    #[should_panic(expected = "maximum frame size overflow")]
+    fn test_max_size_overflow_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: u32::MAX,
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            };
+            let _ = Network::<deterministic::Context, ed25519::PublicKey>::new(
+                context.child("network"),
+                cfg,
+            );
+        });
+    }
+
+    /// [`Config::max_size`] limits the payload without counting the internal channel identifier.
+    #[test]
+    fn test_max_size_applies_to_payload() {
+        const MAX_SIZE: usize = 64;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_SIZE as u32,
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            };
+            let (network, oracle) = Network::new(context.child("network"), cfg);
+            let network_handle = network.start();
+
+            let sender_pk = ed25519::PrivateKey::from_seed(1).public_key();
+            let recipient_pk = ed25519::PrivateKey::from_seed(2).public_key();
+
+            let mut manager = oracle.manager();
+            manager.track(
+                0,
+                Set::try_from([sender_pk.clone(), recipient_pk.clone()]).unwrap(),
+            );
+
+            let (mut sender, _) = oracle
+                .control(sender_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut receiver) = oracle
+                .control(recipient_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            oracle
+                .add_link(
+                    sender_pk.clone(),
+                    recipient_pk.clone(),
+                    ingress::Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            let message = vec![42; MAX_SIZE];
+            send_when_ready(
+                &context,
+                &mut sender,
+                Recipients::One(recipient_pk),
+                1,
+                message.clone(),
+                false,
+            )
+            .await;
+
+            let (origin, received) = context
+                .timeout(Duration::from_secs(1), async move { receiver.recv().await })
+                .await
+                .expect("maximum-sized payload was not delivered")
+                .unwrap();
+            assert_eq!(origin, sender_pk);
+            assert_eq!(received, message.as_slice());
+
+            drop(oracle);
+            drop(sender);
+            network_handle.abort();
         });
     }
 

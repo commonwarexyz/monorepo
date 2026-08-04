@@ -1,15 +1,15 @@
 mod banderwagon;
 
 use crate::{
-    bls12381::primitives::group::{Scalar, ScalarReadCfg, G1},
-    transcript::{Summary, Transcript},
+    Secret,
+    bls12381::primitives::group::{G1, Scalar, ScalarReadCfg},
+    transcript::{Summary, Transcript, Version},
     zk::{
         bulletproofs::circuit::{self, prove, verify},
         pedersen_to_plain,
     },
-    Secret,
 };
-use banderwagon::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
+use banderwagon::{F, G, vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
@@ -19,8 +19,8 @@ use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    ordered::{Map, Set},
     Array, Span, TryCollect, TryFromIterator,
+    ordered::{Map, Set},
 };
 use core::{
     fmt::{Debug, Display},
@@ -177,7 +177,7 @@ impl crate::Signer for PrivateKey {
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         let pk = self.public();
-        let mut t = Transcript::new(SCHNORR_NS);
+        let mut t = Transcript::new(SCHNORR_NS, Version::V1);
         t.commit(namespace).commit(msg).commit(pk.raw.as_slice());
 
         // Derive deterministic nonce from secret key + public transcript state
@@ -410,7 +410,7 @@ impl crate::Verifier for PublicKey {
         };
 
         // Recompute the challenge
-        let mut t = Transcript::new(SCHNORR_NS);
+        let mut t = Transcript::new(SCHNORR_NS, Version::V1);
         t.commit(namespace)
             .commit(msg)
             .commit(self.raw.as_slice())
@@ -597,7 +597,7 @@ impl VrfCommitments {
     /// `msg` is the same nonce ([`Summary`]) the dealer passed to
     /// [`PrivateKey::vrf_batch_checked`], and `commitments` is what they
     /// produced. `transcript` must match the outer transcript the dealers used
-    /// when proving (typically `Transcript::resume(*info.summary())`).
+    /// when proving (typically `Transcript::resume(*info.summary(), Version::V1)`).
     ///
     /// `players` is the set of receiver public keys relevant to this round.
     /// Senders whose commitment map references any receiver outside `players`
@@ -774,7 +774,7 @@ mod tests {
         // The outer transcript both sides agree on. The prover forks it the
         // same way `golden::deal` does, and `check_batch` re-forks it
         // internally per sender.
-        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test", Version::V1);
 
         let mut prover_t = outer_transcript.fork(b"dealer vrf");
         prover_t.commit(sender_pk.encode());
@@ -818,7 +818,7 @@ mod tests {
         let nonce = Summary::random(&mut rng);
         let msg = Bytes::copy_from_slice(nonce.as_ref());
 
-        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test", Version::V1);
 
         let mut prover_t = outer_transcript.fork(b"dealer vrf");
         prover_t.commit(sender_pk.encode());
@@ -859,7 +859,7 @@ mod tests {
         let nonce = Summary::random(&mut rng);
         let msg = Bytes::copy_from_slice(nonce.as_ref());
 
-        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test", Version::V1);
 
         let mut prover_t = outer_transcript.fork(b"dealer vrf");
         prover_t.commit(sender_pk.encode());
@@ -910,7 +910,7 @@ mod tests {
             .map(|_| PrivateKey::random(&mut rng).public())
             .collect();
 
-        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test", Version::V1);
 
         let mut prepared = Vec::new();
         for (sk, pk) in &senders {

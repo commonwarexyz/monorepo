@@ -4,57 +4,56 @@
 //! and running them against both the standard and coding marshal variants.
 
 use crate::{
+    Heightable, Reporter,
     marshal::{
+        Identifier,
         ancestry::BlockProvider,
         coding::{
-            shards,
-            types::{coding_config_for_participants, hash_context, CodedBlock},
-            Coding,
+            Coding, shards,
+            types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
         core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
-        Identifier,
     },
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
     },
-    types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-    Heightable, Reporter,
+    types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
 use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
+    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
+    certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
-    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
+    Clock, Quota, Runner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::metrics::{
-        histogram::{Buckets, Timed},
         MetricsExt as _,
+        histogram::{Buckets, Timed},
     },
-    Clock, Quota, Runner, Supervisor as _,
 };
 use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{test_rng, vec::NonEmptyVec, NZUsize, TestRng, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, test_rng, vec::NonEmptyVec};
 use futures::StreamExt;
 use rand::{
-    seq::{IteratorRandom, SliceRandom},
     RngExt as _,
+    seq::{IteratorRandom, SliceRandom},
 };
 use std::{
     collections::BTreeMap,
@@ -203,14 +202,15 @@ pub trait TestHarness: 'static + Sized {
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
-        ApplicationBlock = Self::ApplicationBlock,
-        Commitment = Self::Commitment,
-    >;
+            ApplicationBlock = Self::ApplicationBlock,
+            Commitment = Self::Commitment,
+        >;
 
     /// The block type used in test operations.
     type TestBlock: Heightable
         + Clone
         + Send
+        + Sync
         + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
 
     /// Additional per-validator state (e.g., shards mailbox for coding).
@@ -252,7 +252,7 @@ pub trait TestHarness: 'static + Sized {
     /// Create the height-zero block used to seed a fresh marshal actor.
     fn genesis_block(num_participants: u16) -> Self::TestBlock {
         Self::make_test_block(
-            Sha256::hash(b""),
+            Sha256::hash(&[b""]),
             Self::genesis_parent_commitment(num_participants),
             Height::zero(),
             0,
@@ -269,12 +269,25 @@ pub trait TestHarness: 'static + Sized {
     /// Get the height from a test block.
     fn height(block: &Self::TestBlock) -> Height;
 
-    /// Propose a block (broadcast to network).
+    /// Drive the leader's propose durability handshake: persist the proposed
+    /// block and assert it is durable, without broadcasting it (mirroring the
+    /// certify-time flush of a staged proposal whose broadcast was never
+    /// requested). Scenarios drive dissemination explicitly, so a proposal
+    /// must not pre-seed peer buffers and mask delivery and backfill paths.
     fn propose(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &Self::TestBlock,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            let block: <Self::Variant as crate::marshal::core::Variant>::Block =
+                block.clone().into();
+            assert!(
+                handle.mailbox.verified(round, block).await,
+                "proposed block must be durable"
+            );
+        }
+    }
 
     /// Mark a block as verified.
     fn verify(
@@ -725,7 +738,7 @@ pub fn hailstorm<H: TestHarness>(
         }
 
         let mut canonical = CanonicalChain::<H>::new();
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut target_height = 0u64;
         let max_interval = interval.max(1);
@@ -898,8 +911,9 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.proposed(...)=true` means the block survives an
-/// immediate crash and repeated recoveries.
+/// Contract: a durable propose handshake (the proposal's sync handle
+/// resolving durable) means the block survives an immediate crash and
+/// repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -918,7 +932,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
         let provider = ConstantProvider::new(schemes[0].clone());
         let round = Round::new(Epoch::zero(), View::new(1));
         let block = H::make_test_block(
-            Sha256::hash(b""),
+            Sha256::hash(&[b""]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             Height::new(1),
             100,
@@ -977,18 +991,9 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered =
-                            restarted
-                                .mailbox
-                                .get_verified(round)
-                                .await
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "marshal.proposed() returning true must imply \
-                                     get_verified(round) recovers the block after restart \
-                                     (seed={seed}, cycle={cycle})"
-                                    )
-                                });
+                        let recovered = restarted.mailbox.get_verified(round).await.unwrap_or_else(
+                            || panic!("durable proposal lost after restart (seed={seed}, cycle={cycle})"),
+                        );
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -1027,7 +1032,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
         let provider = ConstantProvider::new(schemes[0].clone());
         let round = Round::new(Epoch::zero(), View::new(1));
         let block = H::make_test_block(
-            Sha256::hash(b""),
+            Sha256::hash(&[b""]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             Height::new(1),
             100,
@@ -1142,7 +1147,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
         let provider = ConstantProvider::new(schemes[0].clone());
         let round = Round::new(Epoch::zero(), View::new(1));
         let block = H::make_test_block(
-            Sha256::hash(b""),
+            Sha256::hash(&[b""]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             Height::new(1),
             100,
@@ -1270,7 +1275,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         // we'll drive below, so it never enters the finalized archive via
         // gap repair and lives solely in the prunable caches.
         let repeated = H::make_test_block(
-            Sha256::hash(b""),
+            Sha256::hash(&[b""]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             Height::new(5_000),
             9_999,
@@ -1286,7 +1291,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         // asserting it was present before pruning) confirms the prune
         // actually fires at the expected floor.
         let orphan = H::make_test_block(
-            Sha256::hash(b"orphan"),
+            Sha256::hash(&[b"orphan"]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             Height::new(6_000),
             9_998,
@@ -1318,11 +1323,11 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
 
         // Drive the finalized chain forward to advance `last_processed_round`
         // past V=2's retention boundary but not past V=25's. With
-        // view_retention_timeout=10 and prunable_items_per_section=10, the
+        // view_retention=10 and prunable_items_per_section=10, the
         // prune floor snaps down to the section boundary and evicts V=1 and
         // V=2 while leaving V=25 intact.
         const CHAIN_LEN: u64 = 21;
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
         for i in 1..=CHAIN_LEN {
             let block = H::make_test_block(
@@ -1401,7 +1406,7 @@ pub fn certify_persists_equivocated_block<H: TestHarness>() {
         };
 
         let round = Round::new(Epoch::zero(), View::new(1));
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
 
         // Two distinct blocks at the same height/round (leader equivocation):
@@ -1512,7 +1517,7 @@ where
     let me = participants[0].clone();
     let provider = ConstantProvider::new(schemes[0].clone());
     let round = Round::new(Epoch::zero(), View::new(1));
-    let parent = Sha256::hash(b"");
+    let parent = Sha256::hash(&[b""]);
     let parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
 
     // Two distinct blocks at the same height/round (leader equivocation):
@@ -1648,7 +1653,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
         let application = Application::<H::ApplicationBlock>::manual_ack();
         let round = Round::new(Epoch::zero(), View::new(1));
         let block = H::make_test_block(
-            Sha256::hash(b""),
+            Sha256::hash(&[b""]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             Height::new(1),
             100,
@@ -1807,7 +1812,7 @@ impl TestHarness for StandardHarness {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
             block_codec_config: (),
@@ -1928,7 +1933,7 @@ impl TestHarness for StandardHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox, height) = Actor::init(
+        let (actor, mailbox, floor) = Actor::init(
             context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -1941,13 +1946,13 @@ impl TestHarness for StandardHarness {
             application,
             mailbox,
             extra: buffer,
-            height,
+            height: floor.height(),
             actor_handle,
         }
     }
 
     fn genesis_parent_commitment(_num_participants: u16) -> D {
-        Sha256::hash(b"")
+        Sha256::hash(&[b""])
     }
 
     fn make_test_block(
@@ -1970,10 +1975,6 @@ impl TestHarness for StandardHarness {
 
     fn height(block: &B) -> Height {
         block.height()
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -2044,7 +2045,7 @@ impl TestHarness for StandardHarness {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),
@@ -2220,18 +2221,6 @@ impl TestHarness for InlineHarness {
 
     fn height(block: &Self::TestBlock) -> Height {
         StandardHarness::height(block)
-    }
-
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        StandardHarness::propose(
-            &mut ValidatorHandle::<StandardHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
     }
 
     async fn verify(
@@ -2426,18 +2415,6 @@ impl TestHarness for DeferredHarness {
         InlineHarness::height(block)
     }
 
-    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
-        InlineHarness::propose(
-            &mut ValidatorHandle::<InlineHarness> {
-                mailbox: handle.mailbox.clone(),
-                extra: handle.extra.clone(),
-            },
-            round,
-            block,
-        )
-        .await;
-    }
-
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
@@ -2579,7 +2556,7 @@ pub fn make_coding_genesis_block() -> CodingB {
         leader: default_leader(),
         parent: (View::zero(), genesis_commitment()),
     };
-    make_coding_block(context, Sha256::hash(b""), Height::zero(), 0)
+    make_coding_block(context, Sha256::hash(&[b""]), Height::zero(), 0)
 }
 
 /// Create a test block with a Commitment-based context.
@@ -2624,7 +2601,7 @@ impl TestHarness for CodingHarness {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
             block_codec_config: (),
@@ -2751,7 +2728,7 @@ impl TestHarness for CodingHarness {
         let network = control.register(2, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
 
-        let (actor, mailbox, height) = Actor::init(
+        let (actor, mailbox, floor) = Actor::init(
             context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -2764,7 +2741,7 @@ impl TestHarness for CodingHarness {
             application,
             mailbox,
             extra: shard_mailbox,
-            height,
+            height: floor.height(),
             actor_handle,
         }
     }
@@ -2815,14 +2792,6 @@ impl TestHarness for CodingHarness {
 
     fn height(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Height {
         block.height()
-    }
-
-    async fn propose(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
-    ) {
-        assert!(handle.mailbox.proposed(round, block.clone()).await);
     }
 
     async fn verify(
@@ -2905,7 +2874,7 @@ impl TestHarness for CodingHarness {
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),
@@ -3053,7 +3022,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
         setup_network_links(&mut oracle, &participants, link.clone()).await;
 
         let mut blocks = Vec::new();
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=NUM_BLOCKS {
             let block = H::make_test_block(
@@ -3191,7 +3160,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
         assert_eq!(application.acknowledged().await, Height::zero());
 
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
         for i in 1..=5 {
             let block = H::make_test_block(
@@ -3288,7 +3257,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
         assert_eq!(application.acknowledged().await, Height::zero());
 
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
         for i in 1..=3 {
             let block = H::make_test_block(
@@ -3463,7 +3432,7 @@ pub fn sync_height_floor<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants[1..], LINK).await;
 
         let mut blocks = Vec::new();
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=NUM_BLOCKS {
             let block = H::make_test_block(
@@ -3636,7 +3605,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         let (mut mailbox, extra, application) = init_marshal(context.child("init")).await;
         let _ = extra; // Used by CodingHarness, silence warning for StandardHarness
 
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         for i in 1..=20u64 {
@@ -3820,7 +3789,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let stale_height = Height::new(5);
         let round = Round::new(Epoch::zero(), View::new(stale_height.get()));
         let stale_block = H::make_test_block(
-            Sha256::hash(b"stale-parent"),
+            Sha256::hash(&[b"stale-parent"]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             stale_height,
             stale_height.get(),
@@ -3856,7 +3825,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         // Advance floor beyond the stale block and prune.
         let floor = Height::new(10);
         let floor_parent = H::make_test_block(
-            Sha256::hash(b"floor-grandparent"),
+            Sha256::hash(&[b"floor-grandparent"]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             floor.previous().expect("floor must have a parent"),
             floor.get() - 1,
@@ -3968,7 +3937,7 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
         let actual_height = Height::new(7);
         let expected_height = Height::new(1_000_000);
         let block = H::make_test_block(
-            Sha256::hash(b"commitment-fetch-height-hint-mismatch"),
+            Sha256::hash(&[b"commitment-fetch-height-hint-mismatch"]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             actual_height,
             7,
@@ -4047,7 +4016,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
 
         setup_network_links(&mut oracle, &participants, LINK).await;
 
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let block = H::make_test_block(
             parent,
@@ -4125,7 +4094,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
 
         setup_network_links(&mut oracle, &participants, LINK).await;
 
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let block1 = H::make_test_block(
             parent,
@@ -4226,7 +4195,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
 
         setup_network_links(&mut oracle, &participants, LINK).await;
 
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let block1 = H::make_test_block(
             parent,
@@ -4316,7 +4285,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         setup_network_links(&mut oracle, &participants, LINK).await;
 
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let n = participants.len() as u16;
         let block1 = H::make_test_block(
             parent,
@@ -4535,7 +4504,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
         assert!(handle.mailbox.get_info(Height::new(1)).await.is_none());
 
         // Create and verify a block, then finalize it
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let block = H::make_test_block(
             parent,
@@ -4581,7 +4550,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
         assert!(handle.mailbox.get_info(Height::new(2)).await.is_none());
 
         // Missing commitment
-        let missing = Sha256::hash(b"missing");
+        let missing = Sha256::hash(&[b"missing"]);
         assert!(handle.mailbox.get_info(&missing).await.is_none());
     })
 }
@@ -4615,7 +4584,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             extra: setup.extra,
         };
 
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut digests = Vec::new();
 
@@ -4694,14 +4663,16 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         };
 
         // Initially, no blocks
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Height(Height::new(1)))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_block(Identifier::Height(Height::new(1)))
+                .await
+                .is_none()
+        );
         assert!(handle.mailbox.get_block(Identifier::Latest).await.is_none());
 
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut blocks = Vec::new();
 
@@ -4751,11 +4722,13 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         assert_eq!(latest.height(), Height::new(3));
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Height(Height::new(10)))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_block(Identifier::Height(Height::new(10)))
+                .await
+                .is_none()
+        );
     })
 }
 
@@ -4789,7 +4762,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
         };
 
         // Create and finalize a block
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let block = H::make_test_block(
             parent,
@@ -4819,7 +4792,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
         assert_eq!(fetched.height(), Height::new(1));
 
         // Missing commitment
-        let missing = Sha256::hash(b"missing");
+        let missing = Sha256::hash(&[b"missing"]);
         assert!(handle.mailbox.get_block(&missing).await.is_none());
     })
 }
@@ -4854,13 +4827,15 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         };
 
         // Initially, no finalization
-        assert!(handle
-            .mailbox
-            .get_finalization(Height::new(1))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .is_none()
+        );
 
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
 
         for i in 1..=3u64 {
@@ -4900,11 +4875,13 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         }
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_finalization(Height::new(10))
-            .await
-            .is_none());
+        assert!(
+            handle
+                .mailbox
+                .get_finalization(Height::new(10))
+                .await
+                .is_none()
+        );
     })
 }
 
@@ -4958,7 +4935,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants[..2], LINK).await;
 
         // Validator 0: Create and finalize blocks 1-5
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=5u64 {
             let block = H::make_test_block(
@@ -4993,11 +4970,13 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         }
 
         // Validator 1 should not have block 5 yet
-        assert!(handle1
-            .mailbox
-            .get_finalization(Height::new(5))
-            .await
-            .is_none());
+        assert!(
+            handle1
+                .mailbox
+                .get_finalization(Height::new(5))
+                .await
+                .is_none()
+        );
 
         // Validator 1: hint that block 5 is finalized, targeting validator 0
         handle1
@@ -5057,7 +5036,7 @@ where
         };
 
         // Finalize blocks at heights 1-5
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=5u64 {
             let block = H::make_test_block(
@@ -5102,7 +5081,10 @@ where
             )
             .await
             .unwrap();
-        let blocks = ancestry.collect::<Vec<_>>().await;
+
+        // Consume the known finalized range. The stream may keep waiting for
+        // an older parent while that parent can still become available.
+        let blocks = ancestry.take(5).collect::<Vec<_>>().await;
 
         // Ensure correct delivery order: 5,4,3,2,1
         assert_eq!(blocks.len(), 5);
@@ -5145,7 +5127,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
         }
 
         // Create block at height 1
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let block = H::make_test_block(
             parent,
@@ -5282,7 +5264,7 @@ pub fn init_processed_height<H: TestHarness>() {
         assert_eq!(initial_height, None);
 
         // Finalize blocks 1-5
-        let mut parent = Sha256::hash(b"");
+        let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=5u64 {
             let block = H::make_test_block(
@@ -5367,7 +5349,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
         };
 
         // Create block at height 1
-        let parent = Sha256::hash(b"");
+        let parent = Sha256::hash(&[b""]);
         let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let block = H::make_test_block(
             parent,

@@ -1,11 +1,11 @@
 use super::{Digest, DummyMetrics};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
-    index::{partitioned, unordered, Unordered},
+    index::{Unordered, partitioned, unordered},
     translator::{Cap, EightCap, FourCap, OneCap, Translator, TwoCap},
 };
 use commonware_utils::TestRng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use std::{
     hint::black_box,
@@ -86,7 +86,7 @@ fn run_lookup_prebuilt<I: Unordered<Value = u64>>(
 fn bench_lookup(c: &mut Criterion) {
     let max_items = *N_ITEMS.last().unwrap();
     let keys: Vec<_> = (0..max_items)
-        .map(|i| Sha256::hash(&i.to_be_bytes()))
+        .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
         .collect();
 
     for items in N_ITEMS {

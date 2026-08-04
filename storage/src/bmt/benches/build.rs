@@ -1,8 +1,8 @@
-use commonware_cryptography::{sha256, Sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use commonware_utils::test_rng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 
 fn bench_new(c: &mut Criterion) {
     for n in [100, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {

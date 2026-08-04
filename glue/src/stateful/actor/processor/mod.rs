@@ -1,11 +1,11 @@
 //! Speculative execution engine for the [`Stateful`](super::Stateful) actor.
 //!
-//! The [`Processor`] owns the in-memory pending-tip DAG and the committed
+//! The [`Processor`] owns the in-memory pending-tip DAG and the applied
 //! database set. It is the workhorse behind the actor's `Processing` mode,
 //! handling three operations:
 //!
 //! - Propose/Verify: fork unmerkleized batches from a parent's pending
-//!   state (or from committed state), delegate to the [`Application`], and
+//!   state (or from applied state), delegate to the [`Application`], and
 //!   cache the resulting merkleized batches keyed by block digest.
 //!
 //! - Lazy recovery: when a parent's pending state is missing (e.g. after
@@ -15,7 +15,8 @@
 //!   into the pending map.
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
-//!   committed databases, then prune all pending entries at or below the
+//!   databases and start flushing them (durability is reported via
+//!   [`Barrier`]), then prune all pending entries at or below the
 //!   finalized round.
 //!
 //! All propose/verify paths are cancellation-aware: if the caller drops the
@@ -23,39 +24,40 @@
 //! [`await_or_cancel`].
 
 use crate::stateful::{
+    Application, Input, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
-    db::{Anchor, DatabaseSet},
-    Application, Proposed, PruneConfig,
+    db::{Anchor, Barrier, DatabaseSet},
 };
 use commonware_consensus::{
+    Block, CertifiableBlock, Heightable, Roundable,
     marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
         Identifier,
+        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
+        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
     types::{Height, Round},
-    Block, CertifiableBlock, Heightable, Roundable,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
-    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
     Clock, Metrics, Spawner,
+    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use futures::{stream, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
-    num::NonZeroUsize,
+    sync::Arc,
 };
 use tracing::{debug, info_span, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
-type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+pub(super) type PendingSyncTargets<A, E> =
+    <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
@@ -80,25 +82,28 @@ pub(super) enum PrepareBatchesError {
     Cancelled,
 }
 
-/// Finalization result for a finalized block report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FinalizeStatus {
-    /// The finalized digest was already processed.
-    Duplicate,
+/// State applied for a newly finalized block.
+pub(super) struct Applied<T> {
+    /// Deferred flush for the applied batch (see [`Barrier`]).
+    pub(super) barrier: Barrier,
 
-    /// The finalized state was persisted and in-memory forks were pruned.
-    Persisted { height: Height },
+    /// Prune made due by this finalization.
+    pub(super) prune: DeferredPrune<T>,
 }
 
 /// Marshal and database prune targets selected from finalized history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Prune<T> {
     marshal_height: Height,
+    pub(super) barrier_height: Height,
     qmdb_target: T,
 }
 
 impl<T> Prune<T> {
     /// Run database and marshal pruning.
+    ///
+    /// Every finalize barrier through `barrier_height` is durable before this runs. The marshal
+    /// prune that follows retains every later block a restart could replay.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &mut DBs, marshal: &MarshalMailbox<S, V>)
     where
         E: Rng + Spawner + Metrics + Clock,
@@ -113,19 +118,35 @@ impl<T> Prune<T> {
 
 /// Tracks the configured prune cadence and finalized sync targets needed to
 /// make pruning safe.
-struct Pruning<T> {
-    maintenance_interval: NonZeroUsize,
+pub(super) struct Pruning<T> {
+    maintenance_interval: u64,
+    maintenance_offset: u64,
     marshal_retention_window: usize,
     qmdb_retention_window: usize,
     retained_targets: VecDeque<(Height, T)>,
 }
 
 impl<T: Clone> Pruning<T> {
-    const fn new(config: PruneConfig) -> Self {
+    pub(super) fn random(config: PruneConfig, max_pending_acks: usize, rng: &mut impl Rng) -> Self {
+        let interval = u64::try_from(config.maintenance_interval.get())
+            .expect("prune interval should fit in u64");
+        let offset = rng.next_u64() % interval;
+        Self::build(config, max_pending_acks, offset)
+    }
+
+    pub(super) fn build(
+        config: PruneConfig,
+        max_pending_acks: usize,
+        maintenance_offset: u64,
+    ) -> Self {
         config.assert_valid();
-        let base_retention_window = config
-            .max_pending_acks
-            .get()
+        let maintenance_interval = u64::try_from(config.maintenance_interval.get())
+            .expect("prune interval should fit in u64");
+        assert!(
+            maintenance_offset < maintenance_interval,
+            "prune maintenance offset must be within the interval",
+        );
+        let base_retention_window = max_pending_acks
             .checked_add(1)
             .expect("max_pending_acks retention window overflowed");
         let marshal_retention_window = base_retention_window
@@ -135,7 +156,8 @@ impl<T: Clone> Pruning<T> {
             .checked_add(config.retained_qmdb_blocks)
             .expect("qmdb prune retention window overflowed");
         Self {
-            maintenance_interval: config.maintenance_interval,
+            maintenance_interval,
+            maintenance_offset,
             marshal_retention_window,
             qmdb_retention_window,
             retained_targets: VecDeque::new(),
@@ -147,16 +169,14 @@ impl<T: Clone> Pruning<T> {
     /// Pruning first retains the last `max_pending_acks + 1` finalized targets
     /// plus the configured retained block windows. It then prunes only when the
     /// largest required window is populated and the current finalized height
-    /// matches the configured maintenance interval.
+    /// matches the selected phase of the configured maintenance interval.
     fn observe_finalized(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
         self.retained_targets.push_back((height, targets));
         if self.retained_targets.len() > self.marshal_retention_window {
             self.retained_targets.pop_front();
         }
 
-        let interval = u64::try_from(self.maintenance_interval.get())
-            .expect("prune interval should fit in u64");
-        if !height.get().is_multiple_of(interval) {
+        if height.get() % self.maintenance_interval != self.maintenance_offset {
             return None;
         }
 
@@ -176,16 +196,15 @@ impl<T: Clone> Pruning<T> {
             .len()
             .checked_sub(self.qmdb_retention_window)
             .expect("qmdb retention window must not exceed marshal window");
-        let qmdb_target = self
+        let (barrier_height, qmdb_target) = self
             .retained_targets
             .get(qmdb_index)
-            .expect("qmdb prune target must exist")
-            .1
-            .clone();
+            .expect("qmdb prune target must exist");
 
         Some(Prune {
             marshal_height,
-            qmdb_target,
+            barrier_height: *barrier_height,
+            qmdb_target: qmdb_target.clone(),
         })
     }
 }
@@ -211,12 +230,12 @@ where
 {
     /// Create a new processor with the given application, databases, and
     /// the last finalized block's anchor.
-    pub(super) fn new(
+    pub(super) const fn new(
         app: A,
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: StatefulMetrics,
-        prune_config: Option<PruneConfig>,
+        pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
     ) -> Self {
         Self {
             app,
@@ -224,7 +243,7 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
-            pruning: prune_config.map(Pruning::new),
+            pruning,
         }
     }
 
@@ -247,8 +266,8 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
-        input_provider: &mut A::InputProvider,
+        mut ancestry: impl Ancestry<A::Block>,
+        input: Input<A::Input, A::Provider>,
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
         S: Scheme,
@@ -257,7 +276,6 @@ where
     {
         let timer = self.metrics.propose_duration.timer(context);
 
-        let mut ancestry = Box::pin(ancestry);
         let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
@@ -270,7 +288,7 @@ where
             }
         };
         let parent_digest = parent.digest();
-        let ancestry = stream::once(std::future::ready(parent.clone())).chain(ancestry);
+        let ancestry = marshal_ancestry::with_prefix([Arc::clone(&parent)], ancestry);
 
         let round = consensus_context.round();
         let batches = match self
@@ -305,7 +323,7 @@ where
                 (runtime_context, consensus_context),
                 ancestry,
                 batches,
-                input_provider,
+                input,
             ),
         )
         .await
@@ -339,7 +357,7 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: impl Stream<Item = A::Block> + Send + 'static,
+        mut ancestry: impl Ancestry<A::Block>,
         mut response: oneshot::Sender<bool>,
     ) where
         S: Scheme,
@@ -348,7 +366,6 @@ where
     {
         let timer = self.metrics.verify_duration.timer(context);
 
-        let mut ancestry = Box::pin(ancestry);
         let block = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(block)) => block,
             Some(None) => {
@@ -380,8 +397,13 @@ where
         //
         // `last_processed.height` is only advanced from finalized state
         // (genesis, startup reconciliation, or finalize/ack path).
-        match is_already_processed(self.last_processed, marshal.clone(), &block, &mut response)
-            .await
+        match is_already_processed(
+            self.last_processed,
+            marshal.clone(),
+            block.as_ref(),
+            &mut response,
+        )
+        .await
         {
             Ok(true) => {
                 timer.observe(context);
@@ -468,7 +490,7 @@ where
             }
         };
 
-        let ancestry = stream::iter([block.clone(), parent]).chain(ancestry);
+        let ancestry = marshal_ancestry::with_prefix([block.clone(), parent], ancestry);
         let verified = match await_or_cancel(
             &mut response,
             self.app
@@ -529,7 +551,7 @@ where
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
-        parent: A::Block,
+        parent: Arc<A::Block>,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
@@ -572,7 +594,7 @@ where
         &mut self,
         context: &E,
         provider: P,
-        target: A::Block,
+        target: Arc<A::Block>,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<(), PrepareBatchesError>
     where
@@ -690,12 +712,15 @@ where
         Ok(())
     }
 
-    /// Persist finalized state and prune dead in-memory forks.
+    /// Apply finalized state, start persisting it, and prune dead in-memory forks.
+    ///
+    /// Returns [`None`] when the block was already processed (a duplicate
+    /// report).
     pub(super) async fn finalize(
         &mut self,
         context: &E,
-        block: A::Block,
-    ) -> (FinalizeStatus, DeferredPrune<PendingSyncTargets<A, E>>) {
+        block: &A::Block,
+    ) -> Option<Applied<PendingSyncTargets<A, E>>> {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -709,13 +734,13 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            return (FinalizeStatus::Duplicate, None);
+            return None;
         }
 
         let timer = self.metrics.finalize_duration.timer(context);
         let block_context = block.context();
         let round = block_context.round();
-        let sync_targets = A::sync_targets(&block);
+        let sync_targets = A::sync_targets(block);
 
         // Marshal finalization is ordered. A pending miss means we can replay
         // this block on top of finalized state.
@@ -730,7 +755,7 @@ where
                     .app
                     .apply(
                         (context.child("finalize_replay"), block_context),
-                        &block,
+                        block,
                         batches,
                     )
                     .await;
@@ -742,8 +767,8 @@ where
             }
         };
 
-        self.databases.finalize(batch).await;
-        self.notify_finalized(context, &block).await;
+        let barrier = self.databases.finalize(batch).await;
+        self.notify_finalized(context, block).await;
         let prune = self
             .pruning
             .as_mut()
@@ -756,7 +781,7 @@ where
         };
         timer.observe(context);
 
-        (FinalizeStatus::Persisted { height }, prune)
+        Some(Applied { barrier, prune })
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -839,7 +864,7 @@ where
     }
 }
 
-/// Returns true when `block` is already covered by committed state.
+/// Returns true when `block` is already covered by applied state.
 #[tracing::instrument(
     name = "stateful.processor.is_already_processed",
     level = "info",
@@ -914,49 +939,45 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        await_or_cancel, fetch_ancestor, FinalizeStatus, PrepareBatchesError, Processor, Prune,
-        Pruning,
+        Applied, PrepareBatchesError, Processor, Prune, Pruning, await_or_cancel, fetch_ancestor,
     };
     use crate::stateful::{
+        Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
-        Application, Proposed, PruneConfig,
+        db::{Anchor, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
-        marshal::ancestry::BlockProvider,
+        Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
+        marshal::ancestry::{Ancestry, BlockProvider},
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
-        Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
     };
     use commonware_cryptography::{
-        ed25519, sha256::Digest, Digest as _, Digestible, Hasher, Sha256, Signer as _,
+        Digest as _, Digestible, Hasher, Sha256, Signer as _, ed25519, sha256::Digest,
     };
+    use commonware_macros::boxed;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, full::Config as MmrJournalConfig, Location},
+        mmr::{self, Location, full::Config as MmrJournalConfig},
         qmdb::{any, sync::Target},
         translator::TwoCap,
     };
     use commonware_utils::{
-        channel::oneshot,
-        non_empty_range,
-        range::NonEmptyRange,
-        sync::{Mutex, TracedAsyncRwLock},
-        NZUsize, NZU16, NZU64,
+        NZU16, NZU64, NZUsize, channel::oneshot, non_empty_range, range::NonEmptyRange, sync::Mutex,
     };
-    use futures::{Stream, StreamExt};
+    use futures::StreamExt;
     use std::{
         collections::{BTreeMap, VecDeque},
         future::Future,
         num::NonZeroUsize,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -968,7 +989,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
+    type DbSet<E> = Shared<Qmdb<E>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1020,7 +1041,7 @@ mod tests {
         type Digest = Digest;
 
         fn digest(&self) -> Digest {
-            Sha256::hash(&self.encode())
+            Sha256::hash(&[&self.encode()])
         }
     }
 
@@ -1087,23 +1108,17 @@ mod tests {
     }
 
     fn height_key(height: Height) -> Digest {
-        Sha256::hash(&height.get().to_be_bytes())
+        Sha256::hash(&[&height.get().to_be_bytes()])
     }
 
     fn counter_key() -> Digest {
-        Sha256::hash(b"processor_harness_counter")
-    }
-
-    #[derive(Clone)]
-    struct FinalizedObserver {
-        db_config: any::FixedConfig<TwoCap, Sequential>,
-        reopened_values: Arc<Mutex<Vec<u64>>>,
+        Sha256::hash(&[b"processor_harness_counter"])
     }
 
     #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
-        finalized_observer: Option<FinalizedObserver>,
+        finalized_observer: Option<Arc<Mutex<Vec<u64>>>>,
     }
 
     impl ExecutionApp {
@@ -1114,20 +1129,14 @@ mod tests {
             }
         }
 
-        fn with_finalized_observer(
-            db_config: any::FixedConfig<TwoCap, Sequential>,
-        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
-            let reopened_values = Arc::new(Mutex::new(Vec::new()));
-            let observer = FinalizedObserver {
-                db_config,
-                reopened_values: reopened_values.clone(),
-            };
+        fn with_finalized_observer() -> (Self, Arc<Mutex<Vec<u64>>>) {
+            let finalized_values = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     genesis: Block::genesis(),
-                    finalized_observer: Some(observer),
+                    finalized_observer: Some(finalized_values.clone()),
                 },
-                reopened_values,
+                finalized_values,
             )
         }
 
@@ -1153,7 +1162,8 @@ mod tests {
         type Context = TestContext;
         type Block = Block;
         type Databases = DbSet<deterministic::Context>;
-        type InputProvider = ();
+        type Provider = ();
+        type Input = ();
 
         async fn genesis(&mut self) -> Self::Block {
             self.genesis.clone()
@@ -1162,9 +1172,9 @@ mod tests {
         async fn propose(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-            _input: &mut Self::InputProvider,
+            _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             let mut ancestry = Box::pin(ancestry);
             let parent = ancestry.next().await?;
@@ -1179,7 +1189,7 @@ mod tests {
                 state_root: merkleized.root(),
                 range: non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.bounds().tip.size
                 ),
             };
             Some(Proposed { block, merkleized })
@@ -1188,7 +1198,7 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             let mut ancestry = Box::pin(ancestry);
@@ -1212,23 +1222,20 @@ mod tests {
 
         async fn finalized(
             &mut self,
-            context: (deterministic::Context, Self::Context),
+            _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            _databases: &Self::Databases,
+            databases: &Self::Databases,
         ) {
             let Some(observer) = self.finalized_observer.clone() else {
                 return;
             };
-            let reopened: Qmdb<deterministic::Context> =
-                Qmdb::init(context.0.child("reopen_finalized"), observer.db_config)
-                    .await
-                    .expect("database reopen should succeed");
-            let value = reopened
+            let db = databases.read().await;
+            let value = db
                 .get(&height_key(block.height()))
                 .await
-                .expect("reopened db read should succeed")
-                .expect("finalized height should be durable");
-            observer.reopened_values.lock().push(digest_to_u64(&value));
+                .expect("database read should succeed")
+                .expect("finalized height should be reflected in the database set");
+            observer.lock().push(digest_to_u64(&value));
         }
 
         fn sync_targets(
@@ -1265,10 +1272,10 @@ mod tests {
         fn subscribe_parent(
             &self,
             block: &Self::Block,
-        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             let provider = self.clone();
             let parent = block.parent();
-            async move { provider.fetch_by_digest(parent) }
+            async move { provider.fetch_by_digest(parent).map(Arc::new) }
         }
     }
 
@@ -1296,7 +1303,7 @@ mod tests {
         fn subscribe_parent(
             &self,
             block: &Self::Block,
-        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
             let provider = self.clone();
             let child = block.digest();
             async move {
@@ -1307,6 +1314,7 @@ mod tests {
                     .get_mut(&child)
                     .and_then(VecDeque::pop_front)
                     .flatten()
+                    .map(Arc::new)
             }
         }
     }
@@ -1330,10 +1338,10 @@ mod tests {
         ) -> (Self, Arc<Mutex<Vec<u64>>>) {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
-            let (app, reopened_values) = ExecutionApp::with_finalized_observer(config.clone());
+            let (app, finalized_values) = ExecutionApp::with_finalized_observer();
             (
                 Self::with_app(context, provider, config, app).await,
-                reopened_values,
+                finalized_values,
             )
         }
 
@@ -1382,7 +1390,7 @@ mod tests {
                 state_root: merkleized.root(),
                 range: non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.bounds().tip.size
                 ),
             };
             let round = Round::new(Epoch::zero(), view);
@@ -1482,29 +1490,38 @@ mod tests {
             false
         }
 
-        async fn finalize(&mut self, block: Block) -> FinalizeStatus {
-            self.processor
-                .finalize(self.context_cell.as_present(), block)
+        /// Finalize `block` and wait for its deferred flush.
+        /// Returns whether the block was newly applied (`false` for a
+        /// duplicate report).
+        #[boxed]
+        async fn finalize(&mut self, block: Block) -> bool {
+            let Some(Applied { barrier, .. }) = self
+                .processor
+                .finalize(self.context_cell.as_present(), &block)
                 .await
-                .0
+            else {
+                return false;
+            };
+            assert!(barrier.durable().await, "finalize flush must complete");
+            true
         }
 
+        #[boxed]
         async fn finalize_with_prune(
             &mut self,
             block: Block,
-        ) -> (
-            FinalizeStatus,
-            Option<
-                Prune<
-                    <DbSet<deterministic::Context> as DatabaseSet<
-                        deterministic::Context,
-                    >>::SyncTargets,
-                >,
+        ) -> Option<
+            Prune<
+                <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
             >,
-        ){
-            self.processor
-                .finalize(self.context_cell.as_present(), block)
+        > {
+            let Applied { barrier, prune } = self
+                .processor
+                .finalize(self.context_cell.as_present(), &block)
                 .await
+                .expect("finalized block must apply");
+            assert!(barrier.durable().await, "finalize flush must complete");
+            prune
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
@@ -1568,17 +1585,19 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         }
     }
 
     #[test]
     fn pruning_waits_for_full_retention_window() {
-        let mut pruning = Pruning::new(PruneConfig {
-            max_pending_acks: NZUsize!(2),
+        let config = PruneConfig {
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
-        });
+        };
+        let mut pruning = Pruning::build(config, 2, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1587,6 +1606,7 @@ mod tests {
             pruning.observe_finalized(Height::new(4), 40_u64),
             Some(Prune {
                 marshal_height: Height::new(1),
+                barrier_height: Height::new(1),
                 qmdb_target: 10,
             }),
         );
@@ -1594,12 +1614,12 @@ mod tests {
 
     #[test]
     fn pruning_uses_oldest_retained_target() {
-        let mut pruning = Pruning::new(PruneConfig {
-            max_pending_acks: NZUsize!(1),
+        let config = PruneConfig {
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
-        });
+        };
+        let mut pruning = Pruning::build(config, 1, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1607,6 +1627,7 @@ mod tests {
             pruning.observe_finalized(Height::new(3), 30_u64),
             Some(Prune {
                 marshal_height: Height::new(1),
+                barrier_height: Height::new(1),
                 qmdb_target: 10,
             }),
         );
@@ -1614,6 +1635,7 @@ mod tests {
             pruning.observe_finalized(Height::new(4), 40_u64),
             Some(Prune {
                 marshal_height: Height::new(2),
+                barrier_height: Height::new(2),
                 qmdb_target: 20,
             }),
         );
@@ -1621,12 +1643,12 @@ mod tests {
 
     #[test]
     fn pruning_can_retain_more_marshal_history_than_qmdb() {
-        let mut pruning = Pruning::new(PruneConfig {
-            max_pending_acks: NZUsize!(1),
+        let config = PruneConfig {
             maintenance_interval: NZUsize!(3),
             retained_marshal_blocks: 3,
             retained_qmdb_blocks: 1,
-        });
+        };
+        let mut pruning = Pruning::build(config, 1, 0);
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None);
@@ -1637,46 +1659,47 @@ mod tests {
             pruning.observe_finalized(Height::new(6), 60_u64),
             Some(Prune {
                 marshal_height: Height::new(2),
+                barrier_height: Height::new(4),
                 qmdb_target: 40,
             }),
         );
     }
 
     #[test]
-    fn pruning_only_runs_on_maintenance_interval() {
-        let mut pruning = Pruning::new(PruneConfig {
-            max_pending_acks: NZUsize!(1),
+    fn pruning_uses_maintenance_phase() {
+        let config = PruneConfig {
             maintenance_interval: NZUsize!(5),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 0,
-        });
+        };
+        let mut pruning = Pruning::build(config, 1, 2);
 
-        // Window fills at height 3, but pruning only fires on multiples of the
-        // maintenance interval regardless of how small the retention window is.
-        for height in 1..=4 {
+        for height in 1..=6 {
             assert_eq!(
                 pruning.observe_finalized(Height::new(height), height * 10),
                 None,
             );
         }
         assert_eq!(
-            pruning.observe_finalized(Height::new(5), 50),
+            pruning.observe_finalized(Height::new(7), 70),
             Some(Prune {
-                marshal_height: Height::new(3),
-                qmdb_target: 40,
+                marshal_height: Height::new(5),
+                barrier_height: Height::new(6),
+                qmdb_target: 60,
             }),
         );
-        for height in 6..=9 {
+        for height in 8..=11 {
             assert_eq!(
                 pruning.observe_finalized(Height::new(height), height * 10),
                 None,
             );
         }
         assert_eq!(
-            pruning.observe_finalized(Height::new(10), 100),
+            pruning.observe_finalized(Height::new(12), 120),
             Some(Prune {
-                marshal_height: Height::new(8),
-                qmdb_target: 90,
+                marshal_height: Height::new(10),
+                barrier_height: Height::new(11),
+                qmdb_target: 110,
             }),
         );
     }
@@ -1685,7 +1708,6 @@ mod tests {
     #[should_panic(expected = "marshal must retain at least as many blocks as QMDB")]
     fn prune_config_rejects_less_marshal_retention_than_qmdb() {
         PruneConfig {
-            max_pending_acks: NZUsize!(1),
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 2,
@@ -1696,7 +1718,6 @@ mod tests {
     #[test]
     fn prune_config_accepts_zero_retention() {
         PruneConfig {
-            max_pending_acks: NZUsize!(1),
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 0,
             retained_qmdb_blocks: 0,
@@ -1720,24 +1741,21 @@ mod tests {
                     digest: Block::genesis().digest(),
                 },
                 StatefulMetrics::new(harness.context_cell.as_present()),
-                Some(PruneConfig {
-                    max_pending_acks: NZUsize!(1),
-                    maintenance_interval: NZUsize!(1),
-                    retained_marshal_blocks: 1,
-                    retained_qmdb_blocks: 1,
-                }),
+                Some(Pruning::build(
+                    PruneConfig {
+                        maintenance_interval: NZUsize!(1),
+                        retained_marshal_blocks: 1,
+                        retained_qmdb_blocks: 1,
+                    },
+                    1,
+                    0,
+                )),
             );
 
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let (status, prune) = harness.finalize_with_prune(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
+            let prune = harness.finalize_with_prune(block1).await;
             assert_eq!(
                 prune, None,
                 "pruning should wait for the full retention window",
@@ -1757,12 +1775,8 @@ mod tests {
             assert!(harness.processor.pending.contains_key(&winner.digest()));
             assert!(harness.processor.pending.contains_key(&loser.digest()));
 
-            let status = harness.finalize(winner.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(2)
-                },
+            assert!(
+                harness.finalize(winner.clone()).await,
                 "finalization should persist winner state",
             );
             assert!(
@@ -1786,17 +1800,15 @@ mod tests {
 
             assert!(harness.processor.pending.contains_key(&winner.digest()));
             assert!(harness.processor.pending.contains_key(&loser.digest()));
-            assert!(harness
-                .processor
-                .pending
-                .contains_key(&loser_child.digest()));
+            assert!(
+                harness
+                    .processor
+                    .pending
+                    .contains_key(&loser_child.digest())
+            );
 
-            let status = harness.finalize(winner.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(2)
-                },
+            assert!(
+                harness.finalize(winner.clone()).await,
                 "finalization should persist winner state",
             );
             assert!(
@@ -1819,13 +1831,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
@@ -1859,13 +1865,7 @@ mod tests {
             let mut parent = genesis;
             for view in 1..=5 {
                 let block = harness.stage_pending_child(&parent, View::new(view)).await;
-                let status = harness.finalize(block.clone()).await;
-                assert_eq!(
-                    status,
-                    FinalizeStatus::Persisted {
-                        height: Height::new(view),
-                    }
-                );
+                assert!(harness.finalize(block.clone()).await);
                 parent = block.clone();
                 chain.push(block);
             }
@@ -1898,13 +1898,7 @@ mod tests {
             let genesis = Block::genesis();
 
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let mut block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -1935,13 +1929,7 @@ mod tests {
             let genesis = Block::genesis();
 
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let gap_height = Height::new(3);
             let gap_view = View::new(3);
@@ -1958,7 +1946,7 @@ mod tests {
                 state_root: merkleized.root(),
                 range: non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    Location::new(merkleized.bounds().total_size)
+                    merkleized.bounds().tip.size
                 ),
             };
 
@@ -1971,7 +1959,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider,
-                    gap_block.clone(),
+                    Arc::new(gap_block.clone()),
                     &mut response,
                 )
                 .await;
@@ -1997,13 +1985,7 @@ mod tests {
             let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
             let conflicting = harness.stage_pending_child(&genesis, View::new(2)).await;
 
-            let status = harness.finalize(canonical).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1),
-                }
-            );
+            assert!(harness.finalize(canonical).await);
 
             assert!(
                 !harness.is_canonical_processed(&conflicting),
@@ -2022,15 +2004,22 @@ mod tests {
             let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
             let conflicting = harness.stage_pending_child(&genesis, View::new(2)).await;
 
-            let status = harness.finalize(canonical).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1),
-                }
-            );
+            assert!(harness.finalize(canonical).await);
 
             let _ = harness.finalize(conflicting).await;
+        });
+    }
+
+    #[test]
+    fn execution_finalize_identical_duplicate_returns_false() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let canonical = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            assert!(harness.finalize(canonical.clone()).await);
+            assert!(!harness.finalize(canonical).await);
+            assert_eq!(harness.counter_value().await, Some(1));
         });
     }
 
@@ -2041,13 +2030,7 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let status = harness.finalize(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1).await);
             assert_eq!(harness.counter_value().await, Some(1));
             assert_eq!(
                 harness
@@ -2060,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalized_hook_runs_for_each_durable_block() {
+    fn execution_finalized_hook_runs_for_each_applied_block() {
         deterministic::Runner::default().start(|context| async move {
             let (mut harness, finalized_values) =
                 Harness::new_with_finalized_observer(context).await;
@@ -2068,24 +2051,12 @@ mod tests {
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
 
-            let status = harness.finalize(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
-            let status = harness.finalize(block2).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(2)
-                }
-            );
+            assert!(harness.finalize(block1).await);
+            assert!(harness.finalize(block2).await);
             assert_eq!(
                 finalized_values.lock().clone(),
                 vec![1, 2],
-                "finalized hook should observe every durably committed block",
+                "finalized hook should observe every applied block",
             );
         });
     }
@@ -2098,13 +2069,7 @@ mod tests {
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             finalized_values.lock().clear();
             harness
@@ -2150,13 +2115,7 @@ mod tests {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -2170,7 +2129,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider,
-                    block2,
+                    Arc::new(block2),
                     &mut response,
                 )
                 .await;
@@ -2185,13 +2144,7 @@ mod tests {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let status = harness.finalize(block1.clone()).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
+            assert!(harness.finalize(block1.clone()).await);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             harness.processor.pending.clear();
@@ -2205,7 +2158,7 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider.clone(),
-                    block2,
+                    Arc::new(block2),
                     &mut response,
                 )
                 .await;

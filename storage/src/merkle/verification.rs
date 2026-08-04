@@ -12,10 +12,10 @@
 //! past state of the structure rather than its current state.
 
 use crate::merkle::{
+    Bagging, Error, Family, Location, Position, Proof,
     hasher::Hasher,
     proof::{self as merkle_proof, Blueprint},
     storage::Storage,
-    Bagging, Error, Family, Location, Position, Proof,
 };
 use ahash::AHashMap;
 use commonware_cryptography::Digest;
@@ -136,9 +136,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
             digests.push(acc.expect("fold_prefix is non-empty so acc must be set"));
         }
 
-        let prefix_active_count = bp.prefix_active_count();
-        let after_count = bp.after_peaks_count();
-        for &pos in &bp.fetch_nodes[..prefix_active_count + after_count] {
+        let sibling_start = bp.sibling_start();
+        for &pos in &bp.fetch_nodes[..sibling_start] {
             match self.digests.get(&pos) {
                 Some(d) => digests.push(*d),
                 None => return Err(Error::ElementPruned(pos)),
@@ -147,7 +146,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         if let Some(suffix_peaks) = bp.suffix_peaks() {
             digests.push(self.suffix_acc(hasher, suffix_peaks)?);
         }
-        for &pos in &bp.fetch_nodes[prefix_active_count + after_count..] {
+        for &pos in &bp.fetch_nodes[sibling_start..] {
             match self.digests.get(&pos) {
                 Some(d) => digests.push(*d),
                 None => return Err(Error::ElementPruned(pos)),
@@ -322,12 +321,7 @@ pub async fn historical_range_proof<
 ) -> Result<Proof<F, D>, Error<F>> {
     let bp = Blueprint::new(leaves, inactive_peaks, hasher.root_bagging(), range)?;
 
-    let mut all_positions = BTreeSet::new();
-    all_positions.extend(bp.fold_prefix.iter().map(|s| s.pos));
-    all_positions.extend(bp.fetch_nodes.iter().copied());
-    if let Some(suffix_peaks) = bp.suffix_peaks() {
-        all_positions.extend(suffix_peaks.iter().copied());
-    }
+    let all_positions: BTreeSet<_> = bp.required_positions().collect();
 
     let node_futures: Vec<_> = all_positions
         .into_iter()
@@ -404,15 +398,15 @@ mod tests {
             Bagging::{BackwardFold, ForwardFold},
             LocationRangeExt as _,
         },
-        mmb::{mem::Mmb, Location as MmbLocation},
-        mmr::{mem::Mmr, StandardHasher as Standard},
+        mmb::{Location as MmbLocation, mem::Mmb},
+        mmr::{StandardHasher as Standard, mem::Mmr},
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{Runner, deterministic};
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[v])
+        Sha256::hash(&[&[v]])
     }
 
     #[test_traced]

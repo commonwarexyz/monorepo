@@ -1,15 +1,15 @@
 use commonware_cryptography::{
+    Signer as _,
     bls12381::{
-        dkg::feldman_desmedt::{deal, Dealer, Info, Logs, Player, Verdict},
+        dkg::feldman_desmedt::{Dealer, Info, Logs, Player, Verdict, deal},
         primitives::variant::MinSig,
     },
     ed25519::{Batch, PrivateKey, PublicKey},
-    Signer as _,
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{ordered::Set, test_rng, Faults, N3f1, NZUsize, TryCollect};
-use criterion::{criterion_group, BatchSize, Criterion};
+use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, ordered::Set, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box};
 
@@ -81,12 +81,11 @@ impl Bench {
             .unwrap();
             for (target_pk, priv_msg) in priv_msgs {
                 // The only missing player should be ourselves.
-                if let Some(player) = player_states.get_mut(&target_pk) {
-                    if let Verdict::Valid(ack) =
+                if let Some(player) = player_states.get_mut(&target_pk)
+                    && let Verdict::Valid(ack) =
                         player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
-                    {
-                        dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
-                    }
+                {
+                    dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
                 }
             }
             logs.record(pk, dealer.finalize::<N3f1>().check(&info).unwrap().1);

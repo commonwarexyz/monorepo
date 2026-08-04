@@ -127,13 +127,13 @@
 mod evrf;
 
 use crate::{
+    Signer as _, Verifier as _,
     bls12381::primitives::{
-        group::{Private, Scalar, ScalarReadCfg, Share, SmallScalar, G1},
+        group::{G1, Private, Scalar, ScalarReadCfg, Share, SmallScalar},
         sharing::{Mode, ModeVersion, Sharing},
         variant::MinPk,
     },
-    transcript::{Summary, Transcript},
-    Signer as _, Verifier as _,
+    transcript::{Summary, Transcript, Version},
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
@@ -143,8 +143,8 @@ use commonware_math::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{
+    Faults, NZU32, Participant, TryCollect as _,
     ordered::{Map, Quorum as _, Set},
-    Faults, Participant, TryCollect as _, NZU32,
 };
 pub use evrf::{PrivateKey, PublicKey, Setup};
 use evrf::{Signature, VrfCommitments};
@@ -377,7 +377,7 @@ impl Info {
             .map(|previous| dealer_quorum.max(previous.quorum()))
             .unwrap_or(dealer_quorum);
         let summary = {
-            let mut transcript = Transcript::new(NAMESPACE);
+            let mut transcript = Transcript::new(NAMESPACE, Version::V1);
             transcript
                 .commit(namespace)
                 .commit(round.encode())
@@ -505,7 +505,7 @@ pub fn deal(
     let (masks, commitments) = me.vrf_batch_checked(
         &mut *rng,
         setup,
-        Transcript::resume(*info.summary())
+        Transcript::resume(*info.summary(), Version::V1)
             .fork(b"dealer vrf")
             .commit(me_pub.encode()),
         &nonce,
@@ -785,7 +785,7 @@ impl SignedDealerLog {
     }
 
     fn signature_message(info: &Info, log: &DealerLog) -> Vec<u8> {
-        Transcript::resume(*info.summary())
+        Transcript::resume(*info.summary(), Version::V1)
             .fork(b"dealer log")
             .commit(log.encode())
             .summarize()
@@ -857,7 +857,7 @@ impl DealerLog {
         let mask_commitments = VrfCommitments::check_batch(
             rng,
             setup,
-            &Transcript::resume(*info.summary()),
+            &Transcript::resume(*info.summary(), Version::V1),
             &info.players,
             commitments,
             strategy,
@@ -1341,7 +1341,7 @@ mod test_plan {
                         let (masks, commitments) = dk.vrf_batch_checked(
                             &mut rng,
                             setup,
-                            Transcript::resume(*info.summary())
+                            Transcript::resume(*info.summary(), Version::V1)
                                 .fork(b"dealer vrf")
                                 .commit(dk.public().encode()),
                             &nonce,
@@ -1563,7 +1563,7 @@ mod test_plan {
 }
 
 #[cfg(feature = "arbitrary")]
-pub use test_plan::{Plan as FuzzPlan, MAX_PARTICIPANTS as FUZZ_PLAN_MAX_PARTICIPANTS};
+pub use test_plan::{MAX_PARTICIPANTS as FUZZ_PLAN_MAX_PARTICIPANTS, Plan as FuzzPlan};
 
 #[cfg(test)]
 mod tests {

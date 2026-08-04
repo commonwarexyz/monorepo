@@ -1,22 +1,22 @@
 use crate::stateful::{
-    db::{Anchor, DatabaseSet},
     Application,
+    db::{Anchor, DatabaseSet},
 };
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
+    CertifiableBlock, Heightable, Roundable,
     marshal::{
-        core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant},
         Identifier,
+        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Variant},
     },
     simplex::types::Finalization,
     types::Height,
-    CertifiableBlock, Heightable, Roundable,
 };
-use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
+use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner};
 use commonware_storage::{
-    metadata::{self, Metadata},
     Context,
+    metadata::{self, Metadata},
 };
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use rand_core::Rng;
@@ -24,7 +24,7 @@ use rand_core::Rng;
 mod actor;
 pub(crate) use actor::{Config, Syncer};
 
-mod mailbox;
+pub(crate) mod mailbox;
 pub(crate) use mailbox::Mailbox;
 
 mod plan;
@@ -35,92 +35,20 @@ const SYNC_STATE_KEY: FixedBytes<1> = fixed_bytes!("C0");
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
-/// Durable identity for an in-progress state sync floor.
-///
-/// The height enforces monotonic restarts, and the commitment distinguishes
-/// conflicting blocks at the same height.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FloorMarker<C>
-where
-    C: Digest,
-{
-    height: Height,
-    commitment: C,
-}
-
-impl<C> FloorMarker<C>
-where
-    C: Digest,
-{
-    /// Constructs a durable floor marker from the resolved floor block.
-    pub(crate) const fn new(height: Height, commitment: C) -> Self {
-        Self { height, commitment }
-    }
-
-    /// Ensures a newly selected floor is compatible with this persisted one.
-    ///
-    /// Restarts may resume from the same floor or advance to a newer one, but
-    /// must never move backward or switch to a different block at the same height.
-    pub(crate) fn ensure_not_behind(&self, selected: &Self) {
-        assert!(
-            selected.height >= self.height,
-            "selected state sync floor cannot move behind the persisted in-progress floor",
-        );
-
-        if selected.height == self.height {
-            assert!(
-                selected.commitment == self.commitment,
-                "selected state sync floor conflicts with the persisted in-progress floor",
-            );
-        }
-    }
-}
-
-impl<C> Write for FloorMarker<C>
-where
-    C: Digest,
-{
-    fn write(&self, writer: &mut impl BufMut) {
-        self.height.write(writer);
-        self.commitment.write(writer);
-    }
-}
-
-impl<C> EncodeSize for FloorMarker<C>
-where
-    C: Digest,
-{
-    fn encode_size(&self) -> usize {
-        self.height.encode_size() + self.commitment.encode_size()
-    }
-}
-
-impl<C> Read for FloorMarker<C>
-where
-    C: Digest,
-{
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        Ok(Self {
-            height: Height::read(reader)?,
-            commitment: C::read_cfg(reader, &())?,
-        })
-    }
-}
-
 /// Durable sync progress.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SyncState<C>
+pub(crate) enum SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
-    InProgress(FloorMarker<C>),
+    InProgress(Finalization<S, C>),
     Complete(Height),
 }
 
-impl<C> SyncState<C>
+impl<S, C> SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
     /// Returns the completed state sync height, if state sync has finished.
@@ -132,8 +60,9 @@ where
     }
 }
 
-impl<C> Write for SyncState<C>
+impl<S, C> Write for SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
     fn write(&self, writer: &mut impl BufMut) {
@@ -150,8 +79,9 @@ where
     }
 }
 
-impl<C> EncodeSize for SyncState<C>
+impl<S, C> EncodeSize for SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
     fn encode_size(&self) -> usize {
@@ -163,18 +93,35 @@ where
     }
 }
 
-impl<C> Read for SyncState<C>
+impl<S, C> Read for SyncState<S, C>
 where
+    S: Scheme,
     C: Digest,
 {
-    type Cfg = ();
+    type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(reader)? {
-            0 => Ok(Self::InProgress(FloorMarker::<C>::read(reader)?)),
+            0 => Ok(Self::InProgress(Finalization::read_cfg(reader, cfg)?)),
             1 => Ok(Self::Complete(Height::read(reader)?)),
             n => Err(Error::InvalidEnum(n)),
         }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a, S, C> arbitrary::Arbitrary<'a> for SyncState<S, C>
+where
+    S: Scheme,
+    S::Certificate: for<'b> arbitrary::Arbitrary<'b>,
+    C: Digest + for<'b> arbitrary::Arbitrary<'b>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(if u.arbitrary::<bool>()? {
+            Self::InProgress(u.arbitrary()?)
+        } else {
+            Self::Complete(u.arbitrary()?)
+        })
     }
 }
 
@@ -203,31 +150,34 @@ where
     }
 }
 
-/// Resolved state sync floor data derived from the selected finalization.
-pub(crate) struct ResolvedFloor<E, A, C>
+/// Resolved state sync floor data derived from the selected finalization and marshal progress.
+pub(crate) struct ResolvedFloor<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    C: Digest,
 {
     pub anchor: Anchor<BlockDigest<A, E>>,
     pub targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
-    pub marker: FloorMarker<C>,
 }
 
 /// Durable state-sync metadata.
-pub(crate) struct StateSyncMetadata<E, C>
+///
+/// Mutating functions consume the metadata and return it only on success. Storage failures
+/// panic.
+pub(crate) struct StateSyncMetadata<E, S, C>
 where
     E: Context,
+    S: Scheme,
     C: Digest,
 {
     partition_prefix: String,
-    metadata: Metadata<E, FixedBytes<1>, SyncState<C>>,
+    metadata: Metadata<E, FixedBytes<1>, SyncState<S, C>>,
 }
 
-impl<E, C> StateSyncMetadata<E, C>
+impl<E, S, C> StateSyncMetadata<E, S, C>
 where
     E: Context,
+    S: Scheme,
     C: Digest,
 {
     /// Load the durable state-sync metadata partition, creating it if needed.
@@ -237,7 +187,7 @@ where
             context.child("metadata"),
             metadata::Config {
                 partition: format!("{partition_prefix}{SYNC_METADATA_SUFFIX}"),
-                codec_config: (),
+                codec_config: S::certificate_codec_config_unbounded(),
             },
         )
         .await
@@ -269,17 +219,35 @@ where
         )
     }
 
-    /// Marks state sync as in progress for the resolved floor.
+    /// Returns the floor selected before an interrupted state sync.
+    pub(crate) fn in_progress_floor(&self) -> Option<&Finalization<S, C>> {
+        match self.metadata.get(&SYNC_STATE_KEY) {
+            Some(SyncState::InProgress(floor)) => Some(floor),
+            _ => None,
+        }
+    }
+
+    /// Marks state sync as in progress for the selected floor.
     ///
     /// This must be persisted before any state sync database mutation begins so the database
     /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
+    /// The storage target may still advance to marshal's durable processed height during startup.
     ///
     /// If an interrupted state sync already stored a floor, the newly selected
-    /// floor must resume from that same floor or a later one.
-    pub(crate) async fn begin_sync(&mut self, floor: FloorMarker<C>) {
+    /// floor must resume from the same or a later consensus round.
+    pub(crate) async fn begin_sync(mut self, floor: Finalization<S, C>) -> Self {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(existing)) => {
-                existing.ensure_not_behind(&floor);
+                assert!(
+                    floor.round() >= existing.round(),
+                    "selected state sync floor cannot move behind the persisted in-progress floor",
+                );
+                if floor.round() == existing.round() {
+                    assert!(
+                        floor.proposal.payload == existing.proposal.payload,
+                        "selected state sync floor conflicts with the persisted in-progress round",
+                    );
+                }
             }
             Some(SyncState::Complete(_)) => {
                 panic!("completed state sync cannot be marked in-progress");
@@ -287,10 +255,12 @@ where
             None => {}
         }
 
-        self.metadata
+        self.metadata = self
+            .metadata
             .put_sync(SYNC_STATE_KEY, SyncState::InProgress(floor))
             .await
             .expect("failed to set state sync state to in-progress");
+        self
     }
 
     /// Records that one-time state sync completed at the given height.
@@ -298,57 +268,87 @@ where
     /// Once this height is set, future startups skip peer state sync and initialize
     /// from the later of this height and marshal's processed height instead. This
     /// action is irreversible.
-    pub(crate) async fn set_complete(&mut self, height: Height) {
-        match self.metadata.get(&SYNC_STATE_KEY) {
-            Some(SyncState::InProgress(floor)) => {
-                assert!(
-                    height >= floor.height,
-                    "completed state sync height cannot be behind the in-progress floor",
-                );
-            }
-            Some(SyncState::Complete(existing)) => {
-                assert!(
-                    height >= *existing,
-                    "completed state sync height cannot move backward",
-                );
-            }
-            None => {}
+    pub(crate) async fn set_complete(mut self, height: Height) -> Self {
+        if let Some(SyncState::Complete(existing)) = self.metadata.get(&SYNC_STATE_KEY) {
+            assert!(
+                height >= *existing,
+                "completed state sync height cannot move backward",
+            );
         }
 
-        self.metadata
-            .put_sync(SYNC_STATE_KEY, SyncState::<C>::Complete(height))
+        self.metadata = self
+            .metadata
+            .put_sync(SYNC_STATE_KEY, SyncState::Complete(height))
             .await
             .expect("failed to set state sync state to complete");
+        self
     }
 }
 
-/// Resolves the selected state sync floor into the anchor, targets, and
-/// durable floor marker used by restart validation.
+/// Returns the archived block that covers marshal's durable processed position.
+///
+/// Glue cannot reopen below this position because marshal will not redeliver acknowledged blocks.
+/// An acknowledgement-derived position retains its own block. Installing a floor instead records
+/// and prunes the anchor's predecessor so marshal redispatches the anchor, leaving `height.next()`
+/// as the block that covers the processed position.
+async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, height: Height) -> V::Block
+where
+    S: Scheme,
+    V: Variant,
+{
+    if let Some(block) = marshal.get_block(Identifier::Height(height)).await {
+        return block;
+    }
+    marshal
+        .get_block(Identifier::Height(height.next()))
+        .await
+        .expect("marshal must return floor anchor after processed height")
+}
+
+/// Resolves a state sync floor that covers both the selected finalization and marshal's
+/// durable processed height.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
+    floor: Floor,
     finalization: &Finalization<S, V::Commitment>,
-) -> ResolvedFloor<E, A, V::Commitment>
+) -> ResolvedFloor<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    // Wait to retrieve the floor block from marshal. We use `Wait` here,
-    // since marshal triggers a fetch for the floor block if it is not
-    // already available.
-    let floor = {
-        let block = marshal
-            .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
-            .await
-            .expect("marshal must yield floor block");
-        V::into_inner(block)
+    // Marshal skips installing a startup floor whose round is already processed. Its block may
+    // have been pruned, so apply the same rule before registering a local-only waiter.
+    let block = if let Some(height) = floor.height()
+        && floor.round() >= finalization.round()
+    {
+        V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+    } else {
+        // Marshal's configured startup floor fetches its anchor when needed. This local-only
+        // subscription observes that result without starting a separate fetch.
+        let selected = {
+            let block = marshal
+                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .await
+                .expect("marshal must yield floor block");
+            V::into_inner_shared(block)
+        };
+
+        // Marshal does not redeliver acknowledged blocks. A newly installed floor is the
+        // exception: its processed position is the predecessor so the retained anchor is
+        // dispatched once.
+        match marshal.get_processed_height().await {
+            Some(height) if height > selected.height() => {
+                V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+            }
+            _ => selected,
+        }
     };
 
     ResolvedFloor {
-        anchor: Anchor::from(&floor),
-        targets: A::sync_targets(&floor),
-        marker: FloorMarker::new(floor.height(), finalization.proposal.payload),
+        anchor: Anchor::from(block.as_ref()),
+        targets: A::sync_targets(block.as_ref()),
     }
 }
 
@@ -381,7 +381,7 @@ pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-    mut sync_metadata: StateSyncMetadata<E, V::Commitment>,
+    sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
 ) -> StartupResult<E, A>
 where
     E: Rng + Spawner + Context,
@@ -403,13 +403,20 @@ where
         .chain(processed_height)
         .max()
         .unwrap_or_else(Height::zero);
-    let floor_block = {
-        let marshal_block = marshal
-            .get_block(Identifier::Height(marshal_floor))
-            .await
-            .expect("marshal must return floor block");
-        V::into_inner(marshal_block)
+    let floor_block = if processed_height == Some(marshal_floor) {
+        V::into_inner(processed_anchor(marshal, marshal_floor).await)
+    } else {
+        V::into_inner(
+            marshal
+                .get_block(Identifier::Height(marshal_floor))
+                .await
+                .expect("marshal must return completed state sync block"),
+        )
     };
+    let skip_finalized_until = skip_finalized_until
+        .into_iter()
+        .chain((floor_block.height() > marshal_floor).then_some(floor_block.height()))
+        .max();
 
     let databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
@@ -441,5 +448,18 @@ where
     StartupResult {
         sync: SyncResult { databases, anchor },
         skip_finalized_until,
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod tests {
+    mod conformance {
+        use crate::stateful::{actor::syncer::SyncState, tests::mocks::TestScheme};
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<SyncState<TestScheme, Sha256Digest>>,
+        }
     }
 }

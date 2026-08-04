@@ -7,21 +7,21 @@ use commonware_codec::{
     Write,
 };
 use commonware_collector::{
-    p2p::{Config, Engine, Mailbox},
     Handler, Monitor, Originator,
+    p2p::{Config, Engine, Mailbox},
 };
 use commonware_cryptography::{
+    Committable, Digestible, Hasher, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
-    Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{
-    deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
+    Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
 };
 use commonware_utils::{
-    channel::{mpsc, oneshot},
     TestRng,
+    channel::{mpsc, oneshot},
 };
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
@@ -73,14 +73,14 @@ impl EncodeSize for FuzzRequest {
 impl Committable for FuzzRequest {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&self.id.encode())
+        Sha256::hash(&[&self.id.encode()])
     }
 }
 
 impl Digestible for FuzzRequest {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[&self.encode()])
     }
 }
 
@@ -115,14 +115,14 @@ impl EncodeSize for FuzzResponse {
 impl Committable for FuzzResponse {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&self.id.encode())
+        Sha256::hash(&[&self.id.encode()])
     }
 }
 
 impl Digestible for FuzzResponse {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[&self.encode()])
     }
 }
 
@@ -379,10 +379,8 @@ fn fuzz(input: FuzzInput) {
                         let (tx, rx) = oneshot::channel();
                         handler.process(peers[origin_idx].public_key(), request.clone(), tx);
 
-                        if should_respond {
-                            if let Ok(response) = rx.await {
-                                assert_eq!(response.id, request.id);
-                            }
+                        if should_respond && let Ok(response) = rx.await {
+                            assert_eq!(response.id, request.id);
                         }
                     }
                 }

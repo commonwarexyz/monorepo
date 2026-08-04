@@ -47,16 +47,19 @@
 mod application;
 mod gui;
 
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_consensus::{
     simplex::{self, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{ed25519, Sha256, Signer as _};
-use commonware_p2p::{authenticated::discovery, Manager as _};
+use commonware_cryptography::{Sha256, Signer as _, ed25519};
+use commonware_p2p::{
+    Manager as _,
+    authenticated::{self, discovery},
+};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, tokio, Quota, Runner, Supervisor as _};
-use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -164,6 +167,13 @@ fn main() {
         // Initialize network
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
+        // Configure channel capacity
+        //
+        // The rate is enforced independently for each peer. All peers share each channel's inbound
+        // mailbox, so size its backlog for one full burst from every peer.
+        let message_rate = Quota::per_second(NZU32!(10));
+        let message_backlog = authenticated::backlog(validators.len(), message_rate);
+
         // Provide authorized peers
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
@@ -172,32 +182,21 @@ fn main() {
 
         // Register consensus channels
         //
-        // If you want to maximize the number of views per second, increase the rate limit
-        // for this channel.
-        let (vote_sender, vote_receiver) = network.register(
-            0,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (certificate_sender, certificate_receiver) = network.register(
-            1,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (resolver_sender, resolver_receiver) = network.register(
-            2,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
+        // To support more views per second, increase the rate and retain enough backlog for every
+        // participant's full burst.
+        let (vote_sender, vote_receiver) = network.register(0, message_rate, message_backlog);
+        let (certificate_sender, certificate_receiver) =
+            network.register(1, message_rate, message_backlog);
+        let (resolver_sender, resolver_receiver) =
+            network.register(2, message_rate, message_backlog);
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
             .expect("private key must be in participants");
-        let (application, scheme, reporter, mailbox) = application::Application::new(
+        let (application, scheme, reporter, mailbox) = application::Application::<_, Sha256>::new(
             context.child("application"),
             application::Config {
-                hasher: Sha256::default(),
                 scheme,
                 mailbox_size: NZUsize!(1024),
             },
@@ -221,12 +220,13 @@ fn main() {
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
-            activity_timeout: ViewDelta::new(10),
-            skip_timeout: ViewDelta::new(5),
+            view_retention: ViewDelta::new(10),
+            skip_timeout: Duration::from_secs(11),
             fetch_concurrent: NZUsize!(32),
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
             forwarding: simplex::ForwardingPolicy::Disabled,
+            track_historical_votes: false,
         };
         let engine = simplex::Engine::new(context.child("engine"), cfg);
 

@@ -6,17 +6,18 @@
 //! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
 use commonware_runtime::{
-    buffer::paged::{CacheRef, Writer},
     Storage,
+    buffer::paged::{CacheRef, Writer, page_size},
 };
-use commonware_utils::NZU16;
 use criterion::{criterion_group, criterion_main};
 use std::num::NonZeroU16;
 
 mod append;
 mod read;
+mod sync;
 
-const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+const PHYSICAL_PAGE_SIZE: u32 = 4096;
+const PAGE_SIZE: NonZeroU16 = page_size(PHYSICAL_PAGE_SIZE);
 const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;
 const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
 const CACHE_SIZE: usize = 10_000;
@@ -34,6 +35,6 @@ async fn destroy_append<C: Storage>(ctx: &C, append: Writer<C::Blob>, name: &[u8
     ctx.remove("bench_partition", Some(name)).await.unwrap();
 }
 
-criterion_group!(benches, append::bench, read::bench);
+criterion_group!(benches, append::bench, read::bench, sync::bench);
 
 criterion_main!(benches);

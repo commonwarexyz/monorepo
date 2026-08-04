@@ -10,8 +10,8 @@ use futures::task::AtomicWaker;
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -37,7 +37,7 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 
 /// [Acknowledgement] that returns after all instances are acknowledged.
 ///
-/// If any acknowledgement is not handled, the acknowledgement will be cancelled.
+/// Dropping an acknowledgement cancels the waiter unless [`Exact::abandon`] is used.
 pub struct Exact {
     state: Arc<ExactState>,
     acknowledged: bool,
@@ -48,6 +48,15 @@ impl Debug for Exact {
         f.debug_struct("Exact")
             .field("acknowledged", &self.acknowledged)
             .finish()
+    }
+}
+
+impl Exact {
+    /// Consume this handle without resolving or canceling its waiter.
+    ///
+    /// The waiter remains pending so incomplete work can be redelivered after restart.
+    pub fn abandon(mut self) {
+        self.acknowledged = true;
     }
 }
 
@@ -170,7 +179,7 @@ impl ExactState {
 #[cfg(test)]
 mod tests {
     use super::{Acknowledgement, Exact};
-    use futures::{future::FusedFuture, FutureExt};
+    use futures::{FutureExt, future::FusedFuture};
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -189,6 +198,13 @@ mod tests {
         let (ack, waiter) = Exact::handle();
         drop(ack);
         assert!(waiter.now_or_never().unwrap().is_err());
+    }
+
+    #[test]
+    fn abandon_neither_acknowledges_nor_cancels() {
+        let (ack, waiter) = Exact::handle();
+        ack.abandon();
+        assert!(waiter.now_or_never().is_none());
     }
 
     #[test]

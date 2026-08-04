@@ -5,20 +5,22 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
+        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Stateful as StatefulActor, SyncPlan,
         db::{
-            p2p::standard as qmdb_resolver, DatabaseSet, Merkleized as _, SyncEngineConfig,
-            Unmerkleized as _,
+            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
+            p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
-        SyncPlan,
     },
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
+    Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
+        ancestry::Ancestry,
         core::{Actor as MarshalActor, CommitmentFallback},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -31,37 +33,31 @@ use commonware_consensus::{
         types::Context,
     },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, ConstantProvider},
-    ed25519,
-    sha256::{self, Digest as Sha256Digest},
     Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    certificate::{ConstantProvider, mocks::Fixture},
+    ed25519, sha256,
 };
-use commonware_formatting::hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Handle, Quota, Spawner, Supervisor as _,
+    Buf, BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
+    Context as StorageContext,
     archive::prunable,
     journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{self, full::Config as MmrJournalConfig, Location},
+    mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
-        any::{unordered::fixed, FixedConfig},
+        any::{FixedConfig, unordered::fixed},
         sync::Target,
     },
     translator::TwoCap,
-    Context as StorageContext,
 };
 use commonware_utils::{
-    non_empty_range,
-    range::NonEmptyRange,
-    sync::{Mutex, TracedAsyncRwLock},
-    test_rng, NZDuration, NZUsize, NZU64,
+    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
 };
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -69,7 +65,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
+pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,7 +115,7 @@ impl Digestible for Block {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
-        Sha256::hash(&self.encode())
+        Sha256::hash(&[&self.encode()])
     }
 }
 
@@ -175,7 +171,7 @@ impl App {
         height: Height,
         mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
-        let counter = Sha256::hash(b"counter");
+        let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batches
             .get(&counter)
             .await
@@ -183,7 +179,7 @@ impl App {
             .map_or(0, |v| digest_to_u64(&v));
         batches = batches.write(counter, Some(u64_to_digest(current + 1)));
         batches = batches.write(
-            Sha256::hash(&height.get().to_be_bytes()),
+            Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
         batches.merkleize().await.unwrap()
@@ -195,7 +191,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = SingleDatabaseSet<E>;
-    type InputProvider = ();
+    type Provider = ();
+    type Input = ();
 
     async fn genesis(&mut self) -> Self::Block {
         self.genesis.clone()
@@ -204,9 +201,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-        _input: &mut Self::InputProvider,
+        _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
@@ -218,7 +215,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
         };
         Some(Proposed { block, merkleized })
     }
@@ -226,7 +223,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
@@ -234,8 +231,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
         if merkleized.root() != tip.state_root
-            || non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
-                != tip.range
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.range
         {
             return None;
         }
@@ -263,6 +259,7 @@ pub(crate) struct SingleDbEngine {
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
+    retained_marshal_blocks: usize,
     sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
@@ -282,11 +279,12 @@ impl SingleDbEngine {
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
                 fetch_batch_size: NZU64!(16),
-                apply_batch_size: 64,
+                apply_batch_size: NZU64!(64),
                 max_outstanding_requests: 8,
                 update_channel_size: NZUsize!(256),
                 max_retained_roots: 8,
             },
+            retained_marshal_blocks: 10,
             sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
             sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -301,11 +299,12 @@ impl SingleDbEngine {
     pub(crate) fn with_slow_state_sync(mut self) -> Self {
         self.sync_config = SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
-            apply_batch_size: 1,
+            apply_batch_size: NZU64!(1),
             max_outstanding_requests: 1,
             update_channel_size: NZUsize!(4),
             max_retained_roots: 8,
         };
+        self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
     }
 }
@@ -366,6 +365,8 @@ impl EngineDefinition for SingleDbEngine {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: (),
         };
 
         // Destructure the 7 channels.
@@ -424,15 +425,9 @@ impl EngineDefinition for SingleDbEngine {
         .await
         .expect("failed to initialize blocks archive");
 
-        let genesis_block = {
-            let empty_db_root = Sha256Digest::from(hex!(
-                "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
-            ));
-            Block::genesis(
-                empty_db_root,
-                non_empty_range!(Location::new(0), Location::new(1)),
-            )
-        };
+        let initial_target =
+            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+        let genesis_block = Block::genesis(initial_target.root, initial_target.range);
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
@@ -465,7 +460,7 @@ impl EngineDefinition for SingleDbEngine {
             start: plan.marshal_start(genesis_block.clone()),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
-            view_retention_timeout: ViewDelta::new(10),
+            view_retention: ViewDelta::new(10),
             prunable_items_per_section: NZU64!(10),
             page_cache: page_cache.clone(),
             replay_buffer: IO_BUFFER_SIZE,
@@ -476,7 +471,7 @@ impl EngineDefinition for SingleDbEngine {
             max_pending_acks,
             strategy: Sequential,
         };
-        let (marshal_actor, marshal_mailbox, _last_height) =
+        let (marshal_actor, marshal_mailbox, floor) =
             MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
                 context.child("marshal"),
                 finalizations_by_height,
@@ -513,16 +508,15 @@ impl EngineDefinition for SingleDbEngine {
             StatefulConfig {
                 application,
                 db_config,
-                input_provider: (),
-                marshal: marshal_mailbox.clone(),
+                provider: (),
+                marshal: (marshal_mailbox.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
-                    max_pending_acks,
                     maintenance_interval: NZUsize!(5),
-                    retained_marshal_blocks: 10,
+                    retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
             },
@@ -598,11 +592,12 @@ impl EngineDefinition for SingleDbEngine {
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_millis(500),
-            activity_timeout: ViewDelta::new(10),
-            skip_timeout: ViewDelta::new(5),
+            view_retention: ViewDelta::new(10),
+            skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),
             forwarding: ForwardingPolicy::Disabled,
+            track_historical_votes: false,
         };
 
         let engine = simplex::Engine::new(context, simplex_config);

@@ -1,8 +1,8 @@
 //! Metrics for [super::Queue].
 
 use commonware_runtime::{
-    telemetry::metrics::{Gauge, MetricsExt as _},
     Metrics as RuntimeMetrics,
+    telemetry::metrics::{Gauge, MetricsExt as _},
 };
 
 /// Metrics for [super::Queue].

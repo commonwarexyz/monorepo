@@ -1,10 +1,10 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
+    Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
+    Spawner, Storage, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
-    Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor,
 };
 use bytes::{Bytes, BytesMut};
 use commonware_utils::{
@@ -13,7 +13,12 @@ use commonware_utils::{
 };
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
-use std::{future::Future, mem, sync::Arc};
+use std::{
+    future::{Future, poll_fn},
+    mem,
+    sync::Arc,
+    task::Poll,
+};
 
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
@@ -259,10 +264,10 @@ impl crate::Stream for Stream {
                 self.buffer.extend_from_slice(&data);
 
                 // Wake a blocked sender if the buffer drained below the limit.
-                if channel.buffer.len() <= channel.buffer_size {
-                    if let Some(sender) = channel.drain_waiter.take() {
-                        sender.send_lossy(());
-                    }
+                if channel.buffer.len() <= channel.buffer_size
+                    && let Some(sender) = channel.drain_waiter.take()
+                {
+                    sender.send_lossy(());
                 }
             }
 
@@ -336,14 +341,63 @@ pub struct DeferredSync {
 /// Coordinates durability operations for a [DelayedSyncContext] or [DelayedSyncBlob].
 ///
 /// Every started sync parks in a deferred queue (in start order) until a test
-/// releases it. [Self::arm] additionally installs a one-shot gate that blocks
+/// releases it or [Self::unblock] runs. [Self::arm] additionally installs a one-shot gate that blocks
 /// the next durability operation and counts operations from that point on
 /// ([Self::calls]). The gate is pushed onto the deferred queue when [Self::arm]
 /// is called, before any operation reaches it.
 #[derive(Clone, Default)]
 pub struct PendingSyncs {
-    syncs: Arc<Mutex<Vec<DeferredSync>>>,
-    gate: Arc<Mutex<SyncGateState>>,
+    state: Arc<Mutex<State>>,
+}
+
+/// State shared by all clones of a [PendingSyncs].
+#[derive(Default)]
+struct State {
+    /// Deferred syncs in start order.
+    syncs: Vec<DeferredSync>,
+    /// One-shot gate blocking the next durability operation (see [PendingSyncs::arm]).
+    gate: SyncGateState,
+    /// Sticky: stop parking started syncs (see [PendingSyncs::unblock]).
+    unblocked: bool,
+    /// Sticky: syncs resolve to an injected error (see [PendingSyncs::arm_fail]).
+    fail: bool,
+    /// Started syncs issued.
+    starts: usize,
+    /// Started syncs whose completion futures have begun executing.
+    entered: usize,
+    /// Started syncs that completed durably.
+    completions: usize,
+}
+
+impl State {
+    /// Creates a waiter parked in the deferred queue.
+    fn defer(&mut self) -> SyncWaiter {
+        let (release, release_rx) = oneshot::channel();
+        let (entered, blocked) = oneshot::channel();
+        self.syncs.push(DeferredSync { release, blocked });
+        SyncWaiter {
+            entered,
+            release: release_rx,
+        }
+    }
+
+    /// Records a durability operation if the gate is armed, returning the
+    /// one-shot gate waiter if it has not been consumed yet.
+    const fn observe(&mut self) -> Option<SyncWaiter> {
+        if !self.gate.tracking {
+            return None;
+        }
+        self.gate.calls += 1;
+        self.gate.waiter.take()
+    }
+
+    /// Parks a new deferred sync, unless [PendingSyncs::unblock] already ran.
+    fn park(&mut self) -> Option<SyncWaiter> {
+        if self.unblocked {
+            return None;
+        }
+        Some(self.defer())
+    }
 }
 
 /// Forwards [Supervisor], [Clock], [GovernorClock], [ReasonablyRealtime],
@@ -550,21 +604,19 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        if !self.pending.tracking() {
-            return self.inner.write_at_sync(offset, bufs).await;
+        if !options.contains(WriteOptions::SYNC) || !self.pending.tracking() {
+            return self.inner.write_at(offset, bufs, options).await;
         }
-        self.inner.write_at(offset, bufs).await?;
-        self.pending.wait().await?;
-        self.inner.sync().await
+        self.inner
+            .write_at(offset, bufs, options.without(WriteOptions::SYNC))
+            .await?;
+        self.sync().await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -577,14 +629,28 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
     }
 
     async fn start_sync(&self) -> Handle<()> {
+        let pending = self.pending.clone();
         let inner = self.inner.clone();
-        let waiter = self
-            .pending
-            .observe()
-            .unwrap_or_else(|| self.pending.defer());
+        let waiter = {
+            let mut state = pending.state.lock();
+            state.starts += 1;
+            // An armed gate takes precedence over parking.
+            state.observe().or_else(|| state.park())
+        };
         Handle::from_future(async move {
-            waiter.wait().await?;
-            inner.sync().await
+            let fail = {
+                let mut state = pending.state.lock();
+                state.entered += 1;
+                state.fail
+            };
+            match waiter {
+                Some(waiter) => waiter.wait().await?,
+                None if fail => return Err(injected_sync_failure()),
+                None => {}
+            }
+            inner.sync().await?;
+            pending.state.lock().completions += 1;
+            Ok(())
         })
     }
 }
@@ -619,12 +685,32 @@ pub fn release_pending_syncs(pending: &PendingSyncs) {
     }
 }
 
+/// Drive `fut` to completion, releasing any parked syncs each time it stalls.
+pub async fn drive_pending_syncs<T>(pending: &PendingSyncs, fut: impl Future<Output = T>) -> T {
+    let mut fut = std::pin::pin!(fut);
+    poll_fn(|cx| match fut.as_mut().poll(cx) {
+        Poll::Ready(out) => Poll::Ready(out),
+        Poll::Pending => {
+            // A concurrent task may park a new sync after this release, so
+            // self-wake to check again on the next scheduler tick.
+            release_pending_syncs(pending);
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
+}
+
 /// Fail all pending syncs with an injected I/O error.
 pub fn fail_pending_syncs(pending: &PendingSyncs) {
     for sync in mem::take(&mut *pending.lock()) {
-        let err = std::io::Error::other("injected sync failure");
-        let _ = sync.release.send(Err(Error::Io(err.into())));
+        let _ = sync.release.send(Err(injected_sync_failure()));
     }
+}
+
+/// The error injected by [fail_pending_syncs] and [PendingSyncs::arm_fail].
+fn injected_sync_failure() -> Error {
+    Error::Io(std::io::Error::other("injected sync failure").into())
 }
 
 struct SyncWaiter {
@@ -649,8 +735,8 @@ struct SyncGateState {
 
 impl PendingSyncs {
     /// Locks the deferred sync queue.
-    pub fn lock(&self) -> commonware_utils::sync::MutexGuard<'_, Vec<DeferredSync>> {
-        self.syncs.lock()
+    pub fn lock(&self) -> commonware_utils::sync::MappedMutexGuard<'_, Vec<DeferredSync>> {
+        commonware_utils::sync::MutexGuard::map(self.state.lock(), |state| &mut state.syncs)
     }
 
     /// Begins counting durability operations and blocks the next one behind a
@@ -659,49 +745,203 @@ impl PendingSyncs {
     /// Once the gate is consumed, started syncs park in the deferred queue as
     /// usual while [Self::calls] keeps counting.
     pub fn arm(&self) {
-        let mut state = self.gate.lock();
-        assert!(!state.tracking, "sync gate already armed");
-        assert!(state.waiter.is_none(), "sync gate already has a waiter");
-        state.tracking = true;
-        state.calls = 0;
-        state.waiter = Some(self.defer());
+        let mut state = self.state.lock();
+        assert!(!state.gate.tracking, "sync gate already armed");
+        assert!(
+            state.gate.waiter.is_none(),
+            "sync gate already has a waiter"
+        );
+        state.gate.tracking = true;
+        state.gate.calls = 0;
+        let waiter = state.defer();
+        state.gate.waiter = Some(waiter);
     }
 
     /// Returns the number of durability operations observed since [Self::arm].
     pub fn calls(&self) -> usize {
-        self.gate.lock().calls
+        self.state.lock().gate.calls
     }
 
     fn tracking(&self) -> bool {
-        self.gate.lock().tracking
+        self.state.lock().gate.tracking
     }
 
-    fn defer(&self) -> SyncWaiter {
-        let (release, release_rx) = oneshot::channel();
-        let (entered, blocked) = oneshot::channel();
-        self.syncs.lock().push(DeferredSync { release, blocked });
-        SyncWaiter {
-            entered,
-            release: release_rx,
+    /// Releases every parked sync and permanently stops parking new ones: future started syncs
+    /// proceed immediately (or fail, after [Self::arm_fail]). Unlike [release_pending_syncs],
+    /// which drains the queue once, this is sticky. A gate armed via [Self::arm] parks in the
+    /// same queue, so this releases it too.
+    pub fn unblock(&self) {
+        let (drained, fail) = {
+            let mut state = self.state.lock();
+            state.unblocked = true;
+            (mem::take(&mut state.syncs), state.fail)
+        };
+        for sync in drained {
+            let result = if fail {
+                Err(injected_sync_failure())
+            } else {
+                Ok(())
+            };
+            let _ = sync.release.send(result);
         }
     }
 
-    /// Records a durability operation if the gate is armed, returning the
-    /// one-shot gate waiter if it has not been consumed yet.
-    fn observe(&self) -> Option<SyncWaiter> {
-        let mut state = self.gate.lock();
-        if !state.tracking {
-            return None;
-        }
-        state.calls += 1;
-        state.waiter.take()
+    /// Arms every parked and future started sync to resolve to an injected error once released
+    /// via [Self::unblock]. The release helpers send explicit results and ignore this.
+    pub fn arm_fail(&self) {
+        self.state.lock().fail = true;
+    }
+
+    /// Number of started syncs issued.
+    pub fn starts(&self) -> usize {
+        self.state.lock().starts
+    }
+
+    /// Number of started syncs whose completion futures have begun executing, parked or not.
+    pub fn entered(&self) -> usize {
+        self.state.lock().entered
+    }
+
+    /// Number of started syncs that completed durably.
+    pub fn completions(&self) -> usize {
+        self.state.lock().completions
     }
 
     async fn wait(&self) -> Result<(), Error> {
-        match self.observe() {
+        let waiter = self.state.lock().observe();
+        match waiter {
             Some(waiter) => waiter.wait().await,
             None => Ok(()),
         }
+    }
+}
+
+/// Controls a [WriteFaultContext]: while armed, every `write_at` fails with an
+/// injected error. Successful writes are counted.
+#[derive(Clone, Default)]
+pub struct WriteFaults {
+    state: Arc<Mutex<WriteFaultState>>,
+}
+
+#[derive(Default)]
+struct WriteFaultState {
+    fail: bool,
+    writes: u64,
+}
+
+impl WriteFaults {
+    /// Start failing writes.
+    pub fn arm(&self) {
+        self.state.lock().fail = true;
+    }
+
+    /// Stop failing writes.
+    pub fn disarm(&self) {
+        self.state.lock().fail = false;
+    }
+
+    /// The number of successful writes so far.
+    pub fn writes(&self) -> u64 {
+        self.state.lock().writes
+    }
+
+    fn check(&self) -> Result<(), Error> {
+        if self.state.lock().fail {
+            return Err(Error::Io(
+                std::io::Error::other("injected write failure").into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn note(&self) {
+        self.state.lock().writes += 1;
+    }
+}
+
+/// Context wrapper whose blobs fail `write_at` while the shared [WriteFaults]
+/// is armed, counting successful writes. Unlike [DelayedSyncContext], this injects failures
+/// into inline writes issued before any blob sync starts.
+#[derive(Clone)]
+pub struct WriteFaultContext<E> {
+    pub inner: E,
+    pub faults: WriteFaults,
+}
+
+forward_context!(WriteFaultContext, faults);
+
+impl<E: Storage> Storage for WriteFaultContext<E> {
+    type Blob = WriteFaultBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            WriteFaultBlob {
+                inner,
+                faults: self.faults.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper that fails `write_at` while its [WriteFaults] is armed.
+#[derive(Clone)]
+pub struct WriteFaultBlob<B> {
+    inner: B,
+    faults: WriteFaults,
+}
+
+impl<B: Blob> Blob for WriteFaultBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.write_at(offset, bufs, options).await?;
+        self.faults.note();
+        Ok(())
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
     }
 }
 
@@ -764,16 +1004,13 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        self.inner.write_at_sync(offset, bufs).await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -799,7 +1036,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Clock, Runner, Sink, Spawner, Stream};
+    use crate::{Clock, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 

@@ -1,10 +1,10 @@
 use crate::{append_fixed_random_data, get_fixed_journal};
 use commonware_runtime::{
-    benchmarks::{context, tokio},
     Supervisor as _,
+    benchmarks::{context, tokio},
 };
 use commonware_utils::NZU64;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::{
     num::NonZeroU64,
     time::{Duration, Instant},
@@ -35,7 +35,7 @@ fn bench_fixed_append(c: &mut Criterion) {
                     let mut duration = Duration::ZERO;
                     for _ in 0..iters {
                         // Create a new journal for each iteration
-                        let mut j = get_fixed_journal::<ITEM_SIZE>(
+                        let j = get_fixed_journal::<ITEM_SIZE>(
                             ctx.child("storage"),
                             PARTITION,
                             ITEMS_PER_BLOB,
@@ -44,7 +44,7 @@ fn bench_fixed_append(c: &mut Criterion) {
 
                         // Append random data to the journal
                         let start = Instant::now();
-                        append_fixed_random_data(&mut j, items_to_write).await;
+                        let j = append_fixed_random_data(j, items_to_write).await;
                         duration += start.elapsed();
 
                         // Destroy the journal after appending to avoid polluting the next iteration

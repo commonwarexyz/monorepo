@@ -1,21 +1,21 @@
 use super::{
-    ingress::{Mailbox, Message},
     Config,
+    ingress::{Mailbox, Message},
 };
 use crate::{
+    Scheme,
     types::{
         block::BlockFormat,
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    Scheme,
 };
 use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Activity, Viewable};
+use commonware_consensus::{Viewable, simplex::types::Activity};
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
+    bls12381::primitives::variant::{MinSig, Variant},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics, Sink, Spawner, Stream};
@@ -30,13 +30,12 @@ pub struct Application<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St
     indexer: (Sender<Si>, Receiver<St>),
     this_network: <MinSig as Variant>::Public,
     other_network: Scheme,
-    hasher: H,
     mailbox: ActorReceiver<Message<H::Digest>>,
 }
 
 impl<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
+    pub fn new(context: R, config: Config<Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let this_network = *config.this_network.identity();
         (
@@ -45,7 +44,6 @@ impl<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> Applicat
                 indexer: config.indexer,
                 this_network,
                 other_network: config.other_network,
-                hasher: config.hasher,
                 mailbox,
             },
             config.this_network,
@@ -107,8 +105,7 @@ impl<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> Applicat
                     };
 
                     // Hash the message
-                    self.hasher.update(&block.encode());
-                    let digest = self.hasher.finalize();
+                    let digest = H::hash(&[&block.encode()]);
                     info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer

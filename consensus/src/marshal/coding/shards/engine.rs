@@ -143,30 +143,29 @@ use super::{
     metrics::ShardMetrics,
 };
 use crate::{
+    Block, CertifiableBlock, Heightable,
     marshal::coding::{
         types::{CodedBlock, Shard},
-        validation::{validate_reconstruction, ReconstructionError as InvariantError},
+        validation::{ReconstructionError as InvariantError, validate_reconstruction},
     },
-    types::{coding::Commitment, Epoch, Round},
-    Block, CertifiableBlock, Heightable,
+    types::{Epoch, Round, coding::Commitment},
 };
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher, PublicKey,
+    certificate::{Provider, Scheme as CertificateScheme},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, HistogramExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -177,6 +176,7 @@ use rand_core::Rng;
 use std::{
     collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
+    sync::Arc,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -276,7 +276,7 @@ where
     H: Hasher,
 {
     round: Round,
-    block: CodedBlock<B, C, H>,
+    block: Arc<CodedBlock<B, C, H>>,
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
@@ -363,7 +363,7 @@ where
     /// the keyed [`Commitment`].
     #[allow(clippy::type_complexity)]
     block_subscriptions:
-        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<CodedBlock<B, C, H>>>>,
+        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>>,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
@@ -572,19 +572,19 @@ where
             // Notarized recovery can create state before leader discovery. Until
             // the leader is known, only sender-indexed gossip shards are safe to
             // ingest: a participant may only gossip its own shard.
-            if existing.leader().is_none() {
-                if let Some(sender_index) = scheme.participants().index(&peer) {
-                    let expected_index: u16 = sender_index
-                        .get()
-                        .try_into()
-                        .expect("participant index impossibly out of bounds");
-                    if shard.index() != expected_index {
-                        // A mismatched shard is invalid for a non-leader, but it may be
-                        // the assigned shard if this peer later turns out to be the leader.
-                        // Keep it buffered until the sender's role is known.
-                        self.buffer_peer_shard(peer, shard);
-                        return;
-                    }
+            if existing.leader().is_none()
+                && let Some(sender_index) = scheme.participants().index(&peer)
+            {
+                let expected_index: u16 = sender_index
+                    .get()
+                    .try_into()
+                    .expect("participant index impossibly out of bounds");
+                if shard.index() != expected_index {
+                    // A mismatched shard is invalid for a non-leader, but it may be
+                    // the assigned shard if this peer later turns out to be the leader.
+                    // Keep it buffered until the sender's role is known.
+                    self.buffer_peer_shard(peer, shard);
+                    return;
                 }
             }
 
@@ -637,7 +637,7 @@ where
     fn try_reconstruct(
         &mut self,
         commitment: Commitment,
-    ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
+    ) -> Result<Option<Arc<CodedBlock<B, C, H>>>, Error<C>> {
         if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(entry.block.clone()));
         }
@@ -693,8 +693,7 @@ where
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
-        let block = CodedBlock::new_trusted(inner, commitment);
-        self.cache_block(round, block.clone());
+        let block = self.cache_block(round, Arc::new(CodedBlock::new_trusted(inner, commitment)));
         self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
     }
@@ -880,16 +879,21 @@ where
     }
 
     /// Cache a block and notify all subscribers waiting on it.
-    fn cache_block(&mut self, round: Round, block: CodedBlock<B, C, H>) {
+    fn cache_block(
+        &mut self,
+        round: Round,
+        block: Arc<CodedBlock<B, C, H>>,
+    ) -> Arc<CodedBlock<B, C, H>> {
         let commitment = block.commitment();
         self.reconstructed_blocks.insert(
             commitment,
             ReconstructedBlock {
                 round,
-                block: block.clone(),
+                block: Arc::clone(&block),
             },
         );
-        self.notify_block_subscribers(block);
+        self.notify_block_subscribers(Arc::clone(&block));
+        block
     }
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
@@ -900,7 +904,7 @@ where
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
-        mut block: CodedBlock<B, C, H>,
+        block: Arc<CodedBlock<B, C, H>>,
     ) {
         let commitment = block.commitment();
 
@@ -1027,7 +1031,7 @@ where
             Err(err) => {
                 warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
                 self.state.remove(&commitment);
-                self.drop_subscriptions(commitment);
+                self.drop_commitment_subscriptions(commitment);
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -1072,7 +1076,7 @@ where
     fn handle_block_subscription(
         &mut self,
         key: BlockSubscriptionKey<B::Digest>,
-        response: oneshot::Sender<CodedBlock<B, C, H>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     ) {
         let block = match key {
             BlockSubscriptionKey::Commitment(commitment) => self
@@ -1087,7 +1091,7 @@ where
 
         // Answer immediately if we have the block cached.
         if let Some(block) = block {
-            response.send_lossy(block.clone());
+            response.send_lossy(Arc::clone(block));
             return;
         }
 
@@ -1111,7 +1115,7 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    fn notify_block_subscribers(&mut self, block: CodedBlock<B, C, H>) {
+    fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         let digest = block.digest();
 
@@ -1121,7 +1125,7 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(block.clone());
+                subscriber.send_lossy(Arc::clone(&block));
             }
         }
 
@@ -1131,35 +1135,26 @@ where
             .remove(&BlockSubscriptionKey::Digest(digest))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(block.clone());
+                subscriber.send_lossy(Arc::clone(&block));
             }
         }
     }
 
-    /// Drops all subscriptions associated with a commitment.
+    /// Drops subscriptions bound to an exact commitment.
     ///
-    /// Removing these entries drops all senders, causing receivers to resolve
-    /// with cancellation (`RecvError`) instead of hanging indefinitely.
-    fn drop_subscriptions(&mut self, commitment: Commitment) {
+    /// Before marshal accepts a block, a candidate can claim a digest it cannot reconstruct.
+    /// Retiring it therefore does not prove the digest unavailable.
+    fn drop_commitment_subscriptions(&mut self, commitment: Commitment) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
         self.block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(commitment));
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(
-                commitment.block::<B::Digest>(),
-            ));
     }
 
-    /// Prunes all blocks in the reconstructed block cache that are older than the block
-    /// with the given commitment. Also cleans up stale reconstruction state
-    /// and subscriptions.
+    /// Evicts cached blocks and reconstruction state through `through`.
     ///
-    /// This is the only place reconstruction state is pruned by round. We
-    /// intentionally avoid pruning on reconstruction success because a
-    /// Byzantine leader can equivocate, producing multiple valid commitments
-    /// in the same round. Both must remain recoverable until finalization
-    /// determines which one is canonical.
+    /// Pruning waits for finalization because a Byzantine leader may produce multiple valid
+    /// commitments in one round.
     fn prune(&mut self, through: Commitment) {
         let cached = self
             .reconstructed_blocks
@@ -1170,10 +1165,9 @@ where
                 .retain(|_, entry| entry.block.height() > height);
         }
 
-        // Always clear direct state/subscriptions for the pruned commitment.
-        // This avoids dangling waiters when prune is called for a commitment
-        // that was never reconstructed locally.
-        self.drop_subscriptions(through);
+        // Finalization makes existing exact-commitment and assigned-shard waits for these states
+        // obsolete. Digest waits are not commitment-specific.
+        self.drop_commitment_subscriptions(through);
         let state_round = self.state.remove(&through).map(|state| state.round());
         let cached_round = cached.map(|(round, _)| round);
         let Some(round) = state_round.or(cached_round) else {
@@ -1189,7 +1183,7 @@ where
             keep
         });
         for pruned in pruned_commitments {
-            self.drop_subscriptions(pruned);
+            self.drop_commitment_subscriptions(pruned);
         }
     }
 }
@@ -1626,17 +1620,12 @@ where
                 blocker,
             );
 
-            if progressed {
-                if let Self::AwaitingQuorum(state) = self {
-                    if let Some(ready) = state.try_transition(
-                        commitment,
-                        ctx.participants_len,
-                        ctx.strategy,
-                        blocker,
-                    ) {
-                        *self = Self::Ready(ready);
-                    }
-                }
+            if progressed
+                && let Self::AwaitingQuorum(state) = self
+                && let Some(ready) =
+                    state.try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
+            {
+                *self = Self::Ready(ready);
             }
             return progressed;
         }
@@ -1667,9 +1656,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{
-            coding::types::coding_config_for_participants, mocks::block::Block as MockBlock,
-        },
+        marshal::{coding::types::coding_config_for_participants, mocks::block::EmptyBlock},
         types::{Epoch, Height, View},
     };
     use bytes::Bytes;
@@ -1678,29 +1665,29 @@ mod tests {
         CodecConfig, Config as CodingConfig, PhasedAsScheme, ReedSolomon, Zoda,
     };
     use commonware_cryptography::{
+        Committable, Digest, Sha256, Signer,
         certificate::{Scoped, Subject},
         ed25519::{PrivateKey, PublicKey},
         impl_certificate_ed25519,
         sha256::Digest as Sha256Digest,
-        Committable, Digest, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{self, Control, Link, Oracle},
         Manager as _, TrackedPeers,
+        simulated::{self, Control, Link, Oracle},
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Quota, Runner, Supervisor as _};
+    use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
+        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
     };
     use std::{
         future::Future,
         marker::PhantomData,
         num::NonZeroU32,
         sync::{
-            atomic::{AtomicIsize, Ordering},
             Arc,
+            atomic::{AtomicIsize, Ordering},
         },
         time::Duration,
     };
@@ -1722,7 +1709,7 @@ mod tests {
         }
     }
 
-    impl_certificate_ed25519!(TestSubject, Vec<u8>);
+    impl_certificate_ed25519!(TestSubject, Vec<u8>, N3f1);
 
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
@@ -1807,7 +1794,7 @@ mod tests {
     }
 
     // Type aliases for test convenience.
-    type B = MockBlock<Sha256Digest, ()>;
+    type B = EmptyBlock<H>;
     type H = Sha256;
     type P = PublicKey;
     type C = ReedSolomon<H>;
@@ -2045,7 +2032,7 @@ mod tests {
 
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2089,7 +2076,7 @@ mod tests {
 
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, PhasedAsScheme<Zoda<H>>, H>::new(
                     inner,
                     coding_config,
@@ -2137,7 +2124,7 @@ mod tests {
 
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let digest = coded_block.digest();
@@ -2185,7 +2172,7 @@ mod tests {
         };
 
         fixture.start(|config, context, _, peers, _, coding_config| async move {
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
             let digest = coded_block.digest();
@@ -2241,7 +2228,7 @@ mod tests {
                 // peers[1] = honest proposer
                 // peers[2] = receiver
 
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let receiver_index = peers[2].index.get() as u16;
@@ -2303,17 +2290,17 @@ mod tests {
         fixture.start(|_, context, _, mut peers, _, coding_config| async move {
             // Create 3 blocks at heights 1, 2, 3.
             let block1 = CodedBlock::<B, C, H>::new(
-                B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                 coding_config,
                 &STRATEGY,
             );
             let block2 = CodedBlock::<B, C, H>::new(
-                B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 100),
+                B::new(Sha256Digest::EMPTY, Height::new(2), 100),
                 coding_config,
                 &STRATEGY,
             );
             let block3 = CodedBlock::<B, C, H>::new(
-                B::new::<H>((), Sha256Digest::EMPTY, Height::new(3), 100),
+                B::new(Sha256Digest::EMPTY, Height::new(3), 100),
                 coding_config,
                 &STRATEGY,
             );
@@ -2370,7 +2357,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2419,12 +2406,12 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment = coded_block1.commitment();
 
                 // Create a second block with different payload to get different shard data.
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 2's shard from both blocks.
@@ -2474,7 +2461,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2513,7 +2500,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2559,7 +2546,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2631,7 +2618,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2694,7 +2681,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2750,7 +2737,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2826,7 +2813,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
 
                 // Get peer 2's shard (from the leader).
@@ -2893,11 +2880,11 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
 
                 // Create a second block with different payload to get different shard data.
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 1's shard from block 1.
@@ -2962,7 +2949,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Commitment A at lower view (1).
                 let block_a = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                     coding_config,
                     &STRATEGY,
                 );
@@ -2970,7 +2957,7 @@ mod tests {
 
                 // Commitment B at higher view (2), which we will reconstruct.
                 let block_b = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
                     coding_config,
                     &STRATEGY,
                 );
@@ -3058,14 +3045,14 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let block_a = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                     coding_config,
                     &STRATEGY,
                 );
                 let commitment_a = block_a.commitment();
 
                 let block_b = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
                     coding_config,
                     &STRATEGY,
                 );
@@ -3083,7 +3070,7 @@ mod tests {
                 let shard_a = block_a.shard(peer1_index).expect("missing shard");
 
                 let block_a_equivocating = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 300),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 300),
                     coding_config,
                     &STRATEGY,
                 );
@@ -3150,7 +3137,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -3232,7 +3219,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -3315,7 +3302,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -3407,7 +3394,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -3457,7 +3444,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -3555,7 +3542,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
 
                 // Get peer 2's shard.
@@ -3605,11 +3592,11 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Create two different blocks — shard from block2 won't verify
                 // against commitment from block1.
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 2's shard from block2, but re-wrap it with
@@ -3652,7 +3639,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -3706,11 +3693,11 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Create two different blocks.
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 3's leader shard from block1 (valid).
@@ -3777,11 +3764,11 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 let receiver_idx = 3usize;
@@ -3873,11 +3860,11 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Create two different blocks.
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 1's shard from block2, but wrap with block1's commitment.
@@ -4026,7 +4013,7 @@ mod tests {
 
             // Build a coded block using epoch 1's participant set.
             let coding_config = coding_config_for_participants(epoch1_set.len() as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
@@ -4177,7 +4164,7 @@ mod tests {
             receiver_engine.start((receiver_sender, receiver_receiver));
 
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -4222,8 +4209,9 @@ mod tests {
         // decoded blob has a different digest than what the commitment claims. This triggers
         // Error::DigestMismatch in try_reconstruct. Verify that:
         //   1. The failed commitment's state is cleaned up
-        //   2. Subscriptions for the failed commitment never resolve
-        //   3. A subsequent valid commitment reconstructs successfully
+        //   2. The exact commitment subscription closes
+        //   3. The digest subscription survives the invalid candidate
+        //   4. The valid commitment later reconstructs the claimed digest
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -4232,15 +4220,16 @@ mod tests {
         fixture.start(
             |config, context, _oracle, mut peers, _, coding_config| async move {
                 // Block 1: the "claimed" block (its digest goes in the fake commitment).
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
 
                 // Block 2: the actual data behind the shards.
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
                 let real_commitment2 = coded_block2.commitment();
 
-                // Build a fake commitment: block1's digest + block2's coding root/context/config.
+                // This is an invalid claim, not a second accepted commitment for block1.
+                // Build it from block1's digest and block2's coding root/context/config.
                 // Shards from block2 will verify against block2's root (present in the fake
                 // commitment), but try_reconstruct will decode block2 and find its digest != D1.
                 let fake_commitment = Commitment::from((
@@ -4304,16 +4293,16 @@ mod tests {
                     "block should not be available after DigestMismatch"
                 );
 
-                // Block subscription should be closed after failed reconstruction cleanup.
+                // Commitment validity governs the exact-commitment subscription.
+                // The digest subscription accepts another valid commitment.
                 assert!(
                     matches!(block_sub.try_recv(), Err(TryRecvError::Closed)),
                     "subscription should close for failed reconstruction"
                 );
                 assert!(
-                    matches!(digest_sub.try_recv(), Err(TryRecvError::Closed)),
-                    "digest subscription should close after failed reconstruction"
+                    matches!(digest_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "digest subscription should survive failed reconstruction"
                 );
-
                 // Now verify the engine is not stuck: send valid shards for block1's real
                 // commitment and confirm reconstruction succeeds.
                 let real_commitment1 = coded_block1.commitment();
@@ -4349,6 +4338,10 @@ mod tests {
                     .await
                     .expect("valid block should reconstruct after prior failure");
                 assert_eq!(reconstructed.commitment(), real_commitment1);
+                let by_digest = digest_sub
+                    .await
+                    .expect("valid commitment should satisfy digest subscription");
+                assert_eq!(by_digest.commitment(), real_commitment1);
             },
         );
     }
@@ -4365,11 +4358,11 @@ mod tests {
 
         fixture.start(
             |config, context, _oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let real_commitment = coded_block.commitment();
 
-                let wrong_context_digest = Sha256::hash(b"wrong_context");
+                let wrong_context_digest = Sha256::hash(&[b"wrong_context"]);
                 assert_ne!(
                     real_commitment.context::<Sha256Digest>(),
                     wrong_context_digest,
@@ -4473,13 +4466,16 @@ mod tests {
         // - we receive a shard for commitment B (the certifiable one)
         // - commitment A reconstructs first
         // - commitment B must still remain recoverable
+        // - the leader must not be blocked (a leader that crashes after its
+        //   broadcast but before its local persist legitimately re-proposes
+        //   a different block for the same round after restart)
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
 
         fixture.start(
-            |config, context, _oracle, mut peers, _, coding_config| async move {
+            |config, context, oracle, mut peers, _, coding_config| async move {
                 let receiver_idx = 3usize;
                 let receiver_pk = peers[receiver_idx].public_key.clone();
                 let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
@@ -4489,13 +4485,13 @@ mod tests {
 
                 // Two different commitments in the same round (equivocation scenario).
                 let block_a = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 111),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 111),
                     coding_config,
                     &STRATEGY,
                 );
                 let commitment_a = block_a.commitment();
                 let block_b = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 222),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 222),
                     coding_config,
                     &STRATEGY,
                 );
@@ -4567,6 +4563,17 @@ mod tests {
                         panic!("certifiable commitment was not recoverable after same-round equivocation");
                     },
                 }
+
+                // Cross-commitment equivocation within a round is tolerated,
+                // so the leader must not be blocked.
+                let blocked_peers = oracle.blocked().await.unwrap();
+                let is_blocked = blocked_peers
+                    .iter()
+                    .any(|(a, b)| a == &receiver_pk && b == &leader);
+                assert!(
+                    !is_blocked,
+                    "leader must not be blocked for same-round cross-commitment shards"
+                );
             },
         );
     }
@@ -4585,7 +4592,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Commitment being tracked by the receiver.
                 let tracked_block = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                     coding_config,
                     &STRATEGY,
                 );
@@ -4593,7 +4600,7 @@ mod tests {
 
                 // Separate block used to source "unrelated" shard data.
                 let unrelated_block = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
                     coding_config,
                     &STRATEGY,
                 );
@@ -4645,7 +4652,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -4719,7 +4726,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -4775,7 +4782,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, non_participants, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -4836,7 +4843,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, non_participants, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -4957,7 +4964,7 @@ mod tests {
 
             // Build a coded block and extract the shard destined for the receiver.
             let coding_config = coding_config_for_participants(num_peers as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
@@ -5061,7 +5068,7 @@ mod tests {
             // buffer row (`buffer_peer_shard` / `peer_buffers`).
             engine.update_latest_primary_peers(Set::from_iter_dedup([sender_pk.clone()]));
 
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(
                 inner,
                 coding_config_for_participants(participants.len() as u16),
@@ -5171,7 +5178,7 @@ mod tests {
             engine.start((sender_handle, receiver_handle));
 
             let coding_config = coding_config_for_participants(epoch0_set.len() as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
@@ -5325,7 +5332,7 @@ mod tests {
             engine.start((evicted_sender, evicted_receiver));
 
             let coding_config = coding_config_for_participants(num_peers as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
@@ -5419,7 +5426,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));

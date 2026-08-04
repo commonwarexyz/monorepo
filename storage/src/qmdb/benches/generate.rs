@@ -4,21 +4,21 @@
 //! variants (fixed-value, variable-value) and the keyless variant.
 
 use crate::common::{
-    define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value, make_var_value,
-    open_keyless_db, Digest,
+    Digest, define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value,
+    make_var_value, open_keyless_db,
 };
 use commonware_macros::boxed;
 use commonware_runtime::{
+    Supervisor as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context},
-    Supervisor as _,
 };
 use commonware_storage::{
-    merkle::{mmb, mmr, Family},
+    merkle::{Family, mmb, mmr},
     qmdb::any::traits::DbAny,
 };
 use commonware_utils::TestRng;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use rand::Rng;
 use std::time::{Duration, Instant};
 
@@ -31,15 +31,15 @@ const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
 /// destroy).
 #[boxed]
 async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
-    mut db: C,
+    db: C,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
     make_value: impl Fn(&mut TestRng) -> C::Value,
 ) -> Duration {
     let start = Instant::now();
-    gen_random_kv::<F, _>(
-        &mut db,
+    let db = gen_random_kv::<F, _>(
+        db,
         elements,
         operations,
         Some(commit_frequency),
@@ -50,8 +50,9 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
         make_value,
     )
     .await;
-    db.prune(db.sync_boundary()).await.unwrap();
-    db.sync().await.unwrap();
+    let boundary = db.sync_boundary();
+    let db = db.prune(boundary).await.unwrap();
+    let db = db.sync().await.unwrap();
     let elapsed = start.elapsed();
     db.destroy().await.unwrap();
     elapsed
@@ -215,14 +216,14 @@ fn bench_keyless_generate(c: &mut Criterion) {
                                         let merkleized = batch
                                             .merkleize(&db, None, db.inactivity_floor_loc())
                                             .await;
-                                        db.apply_batch(merkleized).await.unwrap();
+                                        (db, _) = db.apply_batch(merkleized).await.unwrap();
                                         batch = db.new_batch();
                                     }
                                 }
                                 let merkleized =
                                     batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
-                                db.apply_batch(merkleized).await.unwrap();
-                                db.sync().await.unwrap();
+                                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                                let db = db.sync().await.unwrap();
 
                                 total += start.elapsed();
                                 db.destroy().await.unwrap();

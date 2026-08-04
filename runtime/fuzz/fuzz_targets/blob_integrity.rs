@@ -16,10 +16,11 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
+    Blob, Buf, Error, Runner, Storage, WriteOptions,
     buffer::paged::{CacheRef, Writer},
-    deterministic, Blob, Buf, Error, Runner, Storage,
+    deterministic,
 };
-use commonware_utils::{NZUsize, NZU16};
+use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 /// CRC record size.
@@ -144,7 +145,11 @@ fn fuzz(input: FuzzInput) {
             .expect("cannot read byte to corrupt")
             .coalesce();
         let corrupted_byte = byte_buf.as_ref()[0] ^ (1 << corrupt_bit);
-        blob.write_at(corrupt_offset, vec![corrupted_byte])
+        blob.write_at(
+            corrupt_offset,
+            vec![corrupted_byte],
+            WriteOptions::default(),
+        )
             .await
             .expect("cannot write corrupted byte");
         blob.sync().await.expect("cannot sync corruption");

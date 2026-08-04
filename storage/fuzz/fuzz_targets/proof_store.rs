@@ -2,10 +2,10 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::Encode as _;
-use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_storage::merkle::{
-    self, mmb, mmr, verification::ProofStore, Bagging::BackwardFold, Family as MerkleFamily,
-    Location, Position, Proof,
+    self, Bagging::BackwardFold, Family as MerkleFamily, Location, Position, Proof, mmb, mmr,
+    verification::ProofStore,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;

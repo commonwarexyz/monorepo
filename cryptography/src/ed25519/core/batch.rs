@@ -37,8 +37,8 @@
 //!
 //! [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
 
-use super::{msm, point, Error, Signature, VerificationKey, VerificationKeyBytes};
-use crate::transcript::{Summary, Transcript};
+use super::{Error, Signature, VerificationKey, VerificationKeyBytes, msm, point};
+use crate::transcript::{Summary, Transcript, Version};
 use ahash::RandomState;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -48,7 +48,7 @@ use commonware_utils::union_unique;
 use curve25519_dalek::scalar::Scalar;
 use hashbrown::HashMap;
 use rand_core::{CryptoRng, Rng};
-use sha2::{digest::Update, Sha512};
+use sha2::{Sha512, digest::Update};
 
 const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";
 
@@ -232,7 +232,7 @@ impl Verifier {
         n: usize,
         seed: Summary,
     ) -> Result<Prepared, Error> {
-        let mut rng = Transcript::resume(seed).noise(NOISE_BATCH_VERIFY);
+        let mut rng = Transcript::resume(seed, Version::V1).noise(NOISE_BATCH_VERIFY);
         let items: Vec<_> = items.collect();
 
         // Check the s values and draw the randomizers.
@@ -312,7 +312,7 @@ impl Verifier {
 mod tests {
     use super::{super::SigningKey, *};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, NZUsize};
+    use commonware_utils::{NZUsize, test_rng};
     use rand::RngExt as _;
 
     /// Generate `signers` keys with `per_signer` signed messages each.

@@ -8,7 +8,8 @@ use crate::simulate::{
     processed::ProcessedHeight,
     property::Property,
 };
-use commonware_cryptography::{ed25519, PublicKey};
+use commonware_consensus::types::{Epoch, Round, View};
+use commonware_cryptography::{PublicKey, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::deterministic;
@@ -21,12 +22,20 @@ use single_db_app::SingleDbEngine;
 use std::time::Duration;
 
 mod common;
+pub(crate) mod fixtures;
 pub(crate) mod mocks;
 mod multi_db_app;
 mod properties;
 mod single_db_app;
 
 const NUM_VALIDATORS: u32 = 5;
+
+fn delay_first<P: PublicKey>(participants: &[P], view: u64) -> Crash<P> {
+    Crash::DelayRound {
+        participants: vec![participants[0].clone()],
+        round: Round::new(Epoch::zero(), View::new(view)),
+    }
+}
 
 #[test_group("slow")]
 #[test_traced("DEBUG")]
@@ -368,9 +377,10 @@ where
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    let delay = delay_first(&engine.participants(), 5);
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Delay { count: 1, after: 5 })
+        .crash(delay)
         .exit_condition(ProcessedHeightAtLeast::new(20))
         .property(BlockAgreementAtHeight::new(20))
         .run()
@@ -414,12 +424,10 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    let delay = delay_first(&engine.participants(), 80);
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Delay {
-            count: 1,
-            after: 80,
-        })
+        .crash(delay)
         .exit_condition(ProcessedHeightAtLeast::new(150))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(150))
@@ -542,13 +550,27 @@ where
 
     PlanBuilder::new(engine)
         .seeds(0..5)
+        // Slow the links so views take long enough that the run spans many
+        // full-cluster outages before reaching the exit height.
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::from_millis(5),
+            success_rate: 1.0,
+        })
         .crash(Crash::Random {
-            frequency: Duration::from_millis(1750),
+            // A full-cluster crash discards all in-flight votes, and a
+            // restarted node that replayed its own proposal waits out the
+            // full certification_timeout before nullifying. Keep frequency -
+            // downtime comfortably above certification_timeout (plus replay
+            // and vote exchange) so the cluster can assemble a certificate
+            // between outages; otherwise the run livelocks, never completing
+            // a view.
+            frequency: Duration::from_millis(5000),
             downtime: Duration::from_millis(500),
             count: total,
         })
-        .exit_condition(ProcessedHeightAtLeast::new(100))
-        .property(BlockAgreementAtHeight::new(100))
+        .exit_condition(ProcessedHeightAtLeast::new(300))
+        .property(BlockAgreementAtHeight::new(300))
         .run()
         .unwrap();
 }
@@ -562,12 +584,10 @@ where
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
     let seeds = 0..5;
+    let delay = delay_first(&engine.participants(), 80);
     let r1 = PlanBuilder::new(engine.clone())
         .seeds(seeds.clone())
-        .crash(Crash::Delay {
-            count: 1,
-            after: 80,
-        })
+        .crash(delay.clone())
         .exit_condition(ProcessedHeightAtLeast::new(100))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(100))
@@ -575,10 +595,7 @@ where
         .unwrap();
     let r2 = PlanBuilder::new(engine)
         .seeds(seeds.clone())
-        .crash(Crash::Delay {
-            count: 1,
-            after: 80,
-        })
+        .crash(delay)
         .exit_condition(ProcessedHeightAtLeast::new(100))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(100))
@@ -600,12 +617,10 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    let delay = delay_first(&engine.participants(), 80);
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Delay {
-            count: 1,
-            after: 80,
-        })
+        .crash(delay)
         .crash(Crash::Random {
             frequency: Duration::from_secs(3),
             downtime: Duration::from_secs(1),
@@ -626,12 +641,10 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    let delay = delay_first(&engine.participants(), 30);
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Delay {
-            count: 1,
-            after: 30,
-        })
+        .crash(delay)
         .link(link)
         .exit_condition(ProcessedHeightAtLeast::new(60))
         .property(LateJoinerStateSyncHandoff)
@@ -654,9 +667,9 @@ where
     let late_joiner = engine.participants()[0].clone();
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Delay {
-            count: 1,
-            after: 80,
+        .crash(Crash::DelayRound {
+            participants: vec![late_joiner.clone()],
+            round: Round::new(Epoch::zero(), View::new(80)),
         })
         // Crash the late joiner while it is still catching up through startup
         // state sync, then restart it without clearing any partitions.
@@ -688,9 +701,9 @@ where
     let late_joiner = participants[0].clone();
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Delay {
-            count: 1,
-            after: 20,
+        .crash(Crash::DelayRound {
+            participants: vec![late_joiner.clone()],
+            round: Round::new(Epoch::zero(), View::new(20)),
         })
         .crash(Crash::Schedule(state_sync_partitioned_restart_schedule(
             &participants,

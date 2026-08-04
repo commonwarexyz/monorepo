@@ -94,11 +94,13 @@
 //! - `channel`: A `u32` identifier used to route the message to the correct application handler.
 //! - `message`: The arbitrary application payload as `IoBuf`.
 //!
-//! The size of the `message` bytes must not exceed the configured
-//! `max_message_size`. If it does, the sending operation will panic. Messages can be sent with `priority`, allowing certain
-//! communications to potentially bypass lower-priority messages waiting in send queues across all
-//! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing
-//! and rate limiting.
+//! Sending an application payload larger than the configured `max_message_size` panics.
+//! Framing and transport overhead are added after this check and do not count toward the limit.
+//! Messages can be sent with `priority`, allowing certain communications to potentially bypass
+//! lower-priority messages waiting in send queues across all channels. Each registered logical
+//! channel has one bounded inbound mailbox shared by all peer connections. Inbound rate limiting
+//! is enforced independently for each peer. Authentication identifies the sender, but the network
+//! does not inspect application payload semantics before adding a message to this mailbox.
 //!
 //! ## Compression
 //!
@@ -126,7 +128,9 @@
 //! - `allowed_handshake_rate_per_ip`: The rate limit for handshake attempts originating from a single IP address.
 //! - `allowed_handshake_rate_per_subnet`: The rate limit for handshake attempts originating from a single IP subnet.
 //! - `peer_connection_cooldown`: The per-peer rate limit for inbound and outbound connection reservations, expressed as a minimum cooldown between attempts.
-//! - `rate` (per channel): The rate limit for messages sent on a single channel.
+//! - `rate` (per channel and peer): The same quota is enforced independently for inbound traffic
+//!   from each peer and outbound traffic to each recipient. Aggregate inbound traffic can scale
+//!   with the number of connected peers.
 //!
 //! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
 //! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
@@ -148,9 +152,11 @@
 //! ## Message Delivery
 //!
 //! Outgoing message submissions can be rejected when a peer's send buffer is full, preventing slow
-//! peers from blocking sends to other peers. Incoming messages are dropped when the application's
-//! receive buffer is full, ensuring protocol messages (BitVec, Peers) continue to flow and
-//! connections remain healthy.
+//! peers from blocking sends to other peers. Incoming application messages are enqueued without
+//! waiting. Each channel's registered `backlog` bounds one mailbox shared by all peers. When it is
+//! full, the arriving message is dropped and queued messages remain. This allows protocol messages
+//! (BitVec, Peers) to continue flowing, but provides no per-peer reservation or fairness. See
+//! [`Network::register`] for sizing guidance.
 //!
 //! # Example
 //!
@@ -216,7 +222,7 @@
 //!         Set::try_from([signer.public_key(), peer1, peer2, peer3]).unwrap(),
 //!     );
 //!
-//!     // Register some channel
+//!     // Register a channel with a shared backlog sized for the aggregate peer burst
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
 //!     let (mut sender, receiver) = network.register(
 //!         0,
@@ -236,23 +242,13 @@
 //! ```
 
 mod actors;
-mod channels;
 mod config;
 mod metrics;
 mod network;
 mod types;
 
-use thiserror::Error;
-
-/// Errors that can occur when interacting with the network.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("network closed")]
-    NetworkClosed,
-}
-
+pub use crate::authenticated::channels::{Error, Receiver, Sender};
 pub use actors::tracker::Oracle;
-pub use channels::{Receiver, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
@@ -260,21 +256,22 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{
-        authenticated::{
-            discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
-            relay::Relay,
-        },
         CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
         Sender,
+        authenticated::{
+            channels,
+            relay::Relay,
+            router::{Actor as RouterActor, Config as RouterConfig},
+        },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::{ed25519, Signer as _};
+    use commonware_cryptography::{Signer as _, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock, Handle,
-        IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
+        BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
+        Spawner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks, tokio,
     };
-    use commonware_utils::{channel::mpsc, hostname, ordered::Set, NZUsize, TryCollect, NZU32};
+    use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
     use rand_core::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
@@ -635,6 +632,21 @@ mod tests {
 
             // Ensure no message rate limiting occurred
             assert_no_rate_limiting(&context.encode());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "maximum frame size overflow")]
+    fn test_max_message_size_overflow_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                u32::MAX,
+            );
+            let _ = Network::new(context.child("network"), config);
         });
     }
 

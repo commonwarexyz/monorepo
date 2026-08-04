@@ -18,8 +18,10 @@
 //!
 //! The [`CertificateScheme::is_attributable()`] associated function signals whether evidence can be safely
 //! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
-//! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
-//! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
+//! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). To
+//! observe all exported activity, process all messages passed through the [`crate::Reporter`] interface (note that reports
+//! are not exhaustive: votes below the activity window are dropped without being reported, see
+//! [`crate::simplex::types::Activity`]).
 //!
 //! # BLS12-381 Threshold Variants
 //!
@@ -32,23 +34,25 @@
 //!   vote signatures and per-round seed signatures. The seed can be used for randomness (e.g.,
 //!   leader election, timelock encryption).
 //!
-//! **Security Warning for VRF Usage**: It is **not safe** to use a round's randomness to drive
-//! execution in that same round. A malicious leader can selectively distribute blocks to gain
-//! early visibility of the randomness output, then choose nullification if the outcome is
-//! unfavorable. Applications should employ a "commit-then-reveal" pattern by binding randomness
-//! requests in finalized blocks **before** the reveal occurs (e.g., `draw(view+100)`).
+//! **Security Warning for VRF Usage**: Each round's seed partial signs only the round and is
+//! carried by every vote type, so the `f` Byzantine participants of a `3f+1` committee can recover
+//! the seed once any `f+1` honest participants have voted (even for conflicting proposals), before
+//! the round resolves and without any certificate forming. A malicious leader can use this early
+//! knowledge to front-run the outcome. Applications should employ a "commit-then-reveal" pattern
+//! by binding randomness requests in finalized blocks **before** the reveal occurs (e.g.,
+//! `draw(view+100)`). See [`bls12381_threshold::vrf`] for details.
 
 use crate::simplex::types::Subject;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{
+    Digest,
     certificate::{
         Namespace as CertificateNamespace, Scheme as CertificateScheme,
         Subject as CertificateSubject, Verifier,
     },
-    Digest,
 };
-use commonware_utils::union;
+use commonware_utils::{N3f1, union};
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
@@ -113,31 +117,31 @@ impl<'a, D: Digest> CertificateSubject for Subject<'a, D> {
 
 /// Marker trait for certificate verifiers compatible with `simplex`.
 ///
-/// This trait binds a [`Verifier`] to the [`Subject`] subject type
-/// used by the simplex protocol. It is automatically implemented for any verifier whose subject
-/// type matches `Subject<'a, D>`.
+/// This trait binds a [`Verifier`] to the [`Subject`] subject type and [`N3f1`]
+/// fault model used by the simplex protocol. It is automatically implemented
+/// for any compatible verifier.
 pub trait CertificateVerifier<D: Digest>:
-    for<'a> Verifier<Subject<'a, D> = Subject<'a, D>>
+    for<'a> Verifier<Subject<'a, D> = Subject<'a, D>, Faults = N3f1>
 {
 }
 
 impl<D: Digest, S> CertificateVerifier<D> for S where
-    S: for<'a> Verifier<Subject<'a, D> = Subject<'a, D>>
+    S: for<'a> Verifier<Subject<'a, D> = Subject<'a, D>, Faults = N3f1>
 {
 }
 
 /// Marker trait for signing schemes compatible with `simplex`.
 ///
-/// This trait binds a [`CertificateScheme`] to the [`Subject`] subject type
-/// used by the simplex protocol. It is automatically implemented for any scheme
-/// whose subject type matches `Subject<'a, D>`.
+/// This trait binds a [`CertificateScheme`] to the [`Subject`] subject type and
+/// [`N3f1`] fault model used by the simplex protocol. It is automatically
+/// implemented for any compatible scheme.
 pub trait Scheme<D: Digest>:
     CertificateVerifier<D> + for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
 {
 }
 
 impl<D: Digest, S> Scheme<D> for S where
-    S: for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
+    S: CertificateVerifier<D> + for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
 {
 }
 

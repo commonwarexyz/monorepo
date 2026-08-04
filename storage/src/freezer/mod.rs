@@ -191,14 +191,14 @@
 //!         table_replay_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         codec_config: (),
 //!     };
-//!     let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context, cfg, None).await.unwrap();
+//!     let freezer = Freezer::<_, FixedBytes<32>, i32>::init(context, cfg, None).await.unwrap();
 //!
 //!     // Put a key-value pair
 //!     let key = FixedBytes::new([1u8; 32]);
-//!     freezer.put(key.clone(), 42).await.unwrap();
+//!     let (freezer, _cursor) = freezer.put(key.clone(), 42).await.unwrap();
 //!
 //!     // Sync to disk
-//!     freezer.sync().await.unwrap();
+//!     let (freezer, _checkpoint) = freezer.sync().await.unwrap();
 //!
 //!     // Get the value
 //!     let value = freezer.get(Identifier::Key(&key)).await.unwrap().unwrap();
@@ -209,7 +209,7 @@
 //! });
 //! ```
 
-#[cfg(test)]
+#[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 mod storage;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -287,8 +287,10 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics as _, Runner, Storage, Supervisor as _};
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
+    use commonware_runtime::{
+        Blob, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+    };
+    use commonware_utils::{NZU16, NZUsize, sequence::FixedBytes};
     use rand::{Rng, RngExt as _};
     use std::num::NonZeroU16;
 
@@ -329,7 +331,7 @@ mod tests {
                 table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
-            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                 context.child("storage"),
                 cfg.clone(),
                 None,
@@ -348,7 +350,7 @@ mod tests {
             assert!(value.is_none());
 
             // Put the key-data pair
-            freezer
+            let (freezer, _) = freezer
                 .put(key.clone(), data)
                 .await
                 .expect("Failed to put data");
@@ -380,6 +382,58 @@ mod tests {
     #[test_traced]
     fn test_put_get_compression() {
         test_put_get(Some(3));
+    }
+
+    #[test_traced]
+    fn test_has() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the freezer
+            let cfg = Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
+                table_partition: "test-table".into(),
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
+                table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
+                codec_config: (),
+            };
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("storage"), cfg, None)
+                    .await
+                    .expect("Failed to initialize freezer");
+
+            // Absent key
+            let key = test_key("testkey");
+            assert!(!freezer.has(&key).await.expect("Failed to check key"));
+
+            // Present key
+            let (freezer, _) = freezer
+                .put(key.clone(), 42)
+                .await
+                .expect("Failed to put data");
+            assert!(freezer.has(&key).await.expect("Failed to check key"));
+
+            // A different key remains absent
+            assert!(
+                !freezer
+                    .has(&test_key("otherkey"))
+                    .await
+                    .expect("Failed to check key")
+            );
+
+            // Existence checks are counted as has, never as gets
+            let buffer = context.encode();
+            assert!(buffer.contains("has_total 3"), "{}", buffer);
+            assert!(buffer.contains("gets_total 0"), "{}", buffer);
+        });
     }
 
     #[test_traced]
@@ -421,7 +475,7 @@ mod tests {
             ];
 
             for (key, data) in &keys {
-                freezer
+                (freezer, _) = freezer
                     .put(key.clone(), *data)
                     .await
                     .expect("Failed to put data");
@@ -481,14 +535,14 @@ mod tests {
             ];
 
             for (key, data) in &keys {
-                freezer
+                (freezer, _) = freezer
                     .put(key.clone(), *data)
                     .await
                     .expect("Failed to put data");
             }
 
             // Sync to disk
-            freezer.sync().await.expect("Failed to sync");
+            let (freezer, _) = freezer.sync().await.expect("Failed to sync");
 
             // Retrieve all keys and verify they can still be found
             for (key, data) in &keys {
@@ -545,7 +599,7 @@ mod tests {
                 ];
 
                 for (key, data) in &keys {
-                    freezer
+                    (freezer, _) = freezer
                         .put(key.clone(), *data)
                         .await
                         .expect("Failed to put data");
@@ -605,7 +659,7 @@ mod tests {
 
             // First, create some committed data and close the freezer
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
@@ -613,24 +667,24 @@ mod tests {
                 .await
                 .expect("Failed to initialize freezer");
 
-                freezer
+                let (freezer, _) = freezer
                     .put(test_key("committed1"), 1)
                     .await
                     .expect("Failed to put data");
-                freezer
+                let (freezer, _) = freezer
                     .put(test_key("committed2"), 2)
                     .await
                     .expect("Failed to put data");
 
                 // Sync to ensure data is committed
-                freezer.sync().await.expect("Failed to sync");
+                let (freezer, _) = freezer.sync().await.expect("Failed to sync");
 
                 // Add more data but don't sync (simulating crash)
-                freezer
+                let (freezer, _) = freezer
                     .put(test_key("uncommitted1"), 3)
                     .await
                     .expect("Failed to put data");
-                freezer
+                let (freezer, _) = freezer
                     .put(test_key("uncommitted2"), 4)
                     .await
                     .expect("Failed to put data");
@@ -707,7 +761,7 @@ mod tests {
                 codec_config: (),
             };
             {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
@@ -715,11 +769,11 @@ mod tests {
                 .await
                 .expect("Failed to initialize freezer");
 
-                freezer
+                let (freezer, _) = freezer
                     .put(test_key("destroy1"), 1)
                     .await
                     .expect("Failed to put data");
-                freezer
+                let (freezer, _) = freezer
                     .put(test_key("destroy2"), 2)
                     .await
                     .expect("Failed to put data");
@@ -739,16 +793,20 @@ mod tests {
                 .expect("Failed to initialize freezer");
 
                 // Should not find any data
-                assert!(freezer
-                    .get(Identifier::Key(&test_key("destroy1")))
-                    .await
-                    .unwrap()
-                    .is_none());
-                assert!(freezer
-                    .get(Identifier::Key(&test_key("destroy2")))
-                    .await
-                    .unwrap()
-                    .is_none());
+                assert!(
+                    freezer
+                        .get(Identifier::Key(&test_key("destroy1")))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(
+                    freezer
+                        .get(Identifier::Key(&test_key("destroy2")))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
             }
         });
     }
@@ -775,7 +833,7 @@ mod tests {
                 codec_config: (),
             };
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
@@ -783,8 +841,8 @@ mod tests {
                 .await
                 .expect("Failed to initialize freezer");
 
-                freezer.put(test_key("key1"), 42).await.unwrap();
-                freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), 42).await.unwrap();
+                let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
 
@@ -792,7 +850,9 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Write incomplete table entry (only 10 bytes instead of 24)
-                blob.write_at_sync(0, vec![0xFF; 10]).await.unwrap();
+                blob.write_at(0, vec![0xFF; 10], WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reopen and verify it handles the corruption
@@ -839,7 +899,7 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
@@ -847,8 +907,8 @@ mod tests {
                 .await
                 .expect("Failed to initialize freezer");
 
-                freezer.put(test_key("key1"), 42).await.unwrap();
-                freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), 42).await.unwrap();
+                let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
 
@@ -860,7 +920,9 @@ mod tests {
                 let mut corrupted = entry_data.coalesce();
                 // Corrupt the CRC (last 4 bytes of the entry)
                 corrupted.as_mut()[20] ^= 0xFF;
-                blob.write_at_sync(0, corrupted).await.unwrap();
+                blob.write_at(0, corrupted, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reopen and verify it handles invalid CRC
@@ -907,7 +969,7 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
@@ -915,8 +977,8 @@ mod tests {
                 .await
                 .expect("Failed to initialize freezer");
 
-                freezer.put(test_key("key1"), 42).await.unwrap();
-                freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), 42).await.unwrap();
+                let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
 
@@ -924,7 +986,7 @@ mod tests {
             {
                 let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
-                blob.write_at_sync(size, hex!("0xdeadbeef").to_vec())
+                blob.write_at(size, hex!("0xdeadbeef").to_vec(), WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -949,10 +1011,9 @@ mod tests {
                 );
 
                 // And write new data
-                let mut freezer_mut = freezer;
-                freezer_mut.put(test_key("key2"), 43).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key2"), 43).await.unwrap();
                 assert_eq!(
-                    freezer_mut
+                    freezer
                         .get(Identifier::Key(&test_key("key2")))
                         .await
                         .unwrap(),
@@ -996,8 +1057,8 @@ mod tests {
                 keys.push((key.clone(), i));
 
                 // Force sync to ensure resize occurs ASAP
-                freezer.put(key, i).await.expect("Failed to put data");
-                freezer.sync().await.expect("Failed to sync");
+                (freezer, _) = freezer.put(key, i).await.expect("Failed to put data");
+                (freezer, _) = freezer.sync().await.expect("Failed to sync");
             }
 
             // Verify all keys can still be found after multiple resizes
@@ -1067,35 +1128,35 @@ mod tests {
 
             // Insert keys to trigger resize
             // key0 -> entry 0, key2 -> entry 1
-            freezer.put(test_key("key0"), 0).await.unwrap();
-            freezer.put(test_key("key2"), 1).await.unwrap();
-            freezer.sync().await.unwrap(); // should start resize
+            (freezer, _) = freezer.put(test_key("key0"), 0).await.unwrap();
+            (freezer, _) = freezer.put(test_key("key2"), 1).await.unwrap();
+            (freezer, _) = freezer.sync().await.unwrap(); // should start resize
 
             // Verify resize started
             assert!(freezer.resizing().is_some());
 
             // Insert during resize (to first entry)
             // key6 -> entry 0
-            freezer.put(test_key("key6"), 2).await.unwrap();
+            (freezer, _) = freezer.put(test_key("key6"), 2).await.unwrap();
             assert!(context.encode().contains("unnecessary_writes_total 1"));
             assert_eq!(freezer.resizable(), 3);
 
             // Insert another key (to unmodified entry)
             // key3 -> entry 1
-            freezer.put(test_key("key3"), 3).await.unwrap();
+            (freezer, _) = freezer.put(test_key("key3"), 3).await.unwrap();
             assert!(context.encode().contains("unnecessary_writes_total 1"));
             assert_eq!(freezer.resizable(), 3);
 
             // Verify resize completed
-            freezer.sync().await.unwrap();
+            (freezer, _) = freezer.sync().await.unwrap();
             assert!(freezer.resizing().is_none());
             assert_eq!(freezer.resizable(), 2);
 
             // More inserts
             // key4 -> entry 1, key7 -> entry 0
-            freezer.put(test_key("key4"), 4).await.unwrap();
-            freezer.put(test_key("key7"), 5).await.unwrap();
-            freezer.sync().await.unwrap();
+            (freezer, _) = freezer.put(test_key("key4"), 4).await.unwrap();
+            (freezer, _) = freezer.put(test_key("key7"), 5).await.unwrap();
+            (freezer, _) = freezer.sync().await.unwrap();
 
             // Another resize should've started
             assert!(freezer.resizing().is_some());
@@ -1111,7 +1172,7 @@ mod tests {
 
             // Sync until resize completes
             while freezer.resizing().is_some() {
-                freezer.sync().await.unwrap();
+                (freezer, _) = freezer.sync().await.unwrap();
             }
 
             // Ensure no entries are considered resizable
@@ -1141,7 +1202,7 @@ mod tests {
 
             // Create freezer and then shutdown uncleanly
             let checkpoint = {
-                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                     context.child("first"),
                     cfg.clone(),
                     None,
@@ -1151,9 +1212,9 @@ mod tests {
 
                 // Insert keys to trigger resize
                 // key0 -> entry 0, key2 -> entry 1
-                freezer.put(test_key("key0"), 0).await.unwrap();
-                freezer.put(test_key("key2"), 1).await.unwrap();
-                let checkpoint = freezer.sync().await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), 0).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key2"), 1).await.unwrap();
+                let (freezer, checkpoint) = freezer.sync().await.unwrap();
 
                 // Verify resize started
                 assert!(freezer.resizing().is_some());
@@ -1173,12 +1234,12 @@ mod tests {
             assert_eq!(freezer.resizing(), None);
 
             // Verify resize restarts from the checkpointed table.
-            freezer.sync().await.unwrap();
+            (freezer, _) = freezer.sync().await.unwrap();
             assert_eq!(freezer.resizing(), Some(1));
 
             // Run until resize completes
             while freezer.resizing().is_some() {
-                freezer.sync().await.unwrap();
+                (freezer, _) = freezer.sync().await.unwrap();
             }
 
             // Ensure no entries are considered resizable
@@ -1227,7 +1288,7 @@ mod tests {
                 let value = FixedBytes::<256>::new(value);
 
                 // Store the key-value pair
-                freezer
+                (freezer, _) = freezer
                     .put(key.clone(), value.clone())
                     .await
                     .expect("Failed to put data");
@@ -1235,12 +1296,12 @@ mod tests {
 
                 // Randomly sync to test resizing
                 if context.random_bool(0.1) {
-                    freezer.sync().await.expect("Failed to sync");
+                    (freezer, _) = freezer.sync().await.expect("Failed to sync");
                 }
             }
 
             // Sync data
-            freezer.sync().await.expect("Failed to sync");
+            (freezer, _) = freezer.sync().await.expect("Failed to sync");
 
             // Verify all pairs can be retrieved
             for (key, value) in &pairs {
@@ -1254,11 +1315,13 @@ mod tests {
 
             // Test get() on all keys
             for (key, _) in &pairs {
-                assert!(freezer
-                    .get(Identifier::Key(key))
-                    .await
-                    .expect("Failed to check key")
-                    .is_some());
+                assert!(
+                    freezer
+                        .get(Identifier::Key(key))
+                        .await
+                        .expect("Failed to check key")
+                        .is_some()
+                );
             }
 
             // Check some non-existent keys
@@ -1266,11 +1329,13 @@ mod tests {
                 let mut key = [0u8; 96];
                 context.fill_bytes(&mut key);
                 let key = FixedBytes::<96>::new(key);
-                assert!(freezer
-                    .get(Identifier::Key(&key))
-                    .await
-                    .expect("Failed to check key")
-                    .is_none());
+                assert!(
+                    freezer
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to check key")
+                        .is_none()
+                );
             }
 
             // Close the freezer
@@ -1305,12 +1370,12 @@ mod tests {
                 context.fill_bytes(&mut value);
                 let value = FixedBytes::<256>::new(value);
 
-                freezer.put(key, value).await.expect("Failed to put data");
+                (freezer, _) = freezer.put(key, value).await.expect("Failed to put data");
             }
 
             // Multiple syncs to test epoch progression
             for _ in 0..3 {
-                freezer.sync().await.expect("Failed to sync");
+                (freezer, _) = freezer.sync().await.expect("Failed to sync");
 
                 // Add a few more entries between syncs
                 for _ in 0..5 {
@@ -1322,7 +1387,7 @@ mod tests {
                     context.fill_bytes(&mut value);
                     let value = FixedBytes::<256>::new(value);
 
-                    freezer.put(key, value).await.expect("Failed to put data");
+                    (freezer, _) = freezer.put(key, value).await.expect("Failed to put data");
                 }
             }
 
@@ -1363,7 +1428,7 @@ mod tests {
                 table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
-            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                 context.child("storage"),
                 cfg.clone(),
                 None,
@@ -1373,15 +1438,15 @@ mod tests {
 
             let key = test_key("key1");
 
-            freezer
+            let (freezer, _) = freezer
                 .put(key.clone(), 1)
                 .await
                 .expect("Failed to put data");
-            freezer
+            let (freezer, _) = freezer
                 .put(key.clone(), 2)
                 .await
                 .expect("Failed to put data");
-            freezer.sync().await.expect("Failed to sync");
+            let (freezer, _) = freezer.sync().await.expect("Failed to sync");
             assert_eq!(
                 freezer
                     .get(Identifier::Key(&key))

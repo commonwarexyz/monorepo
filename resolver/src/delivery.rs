@@ -6,10 +6,10 @@
 //! while validation was in progress. This module owns that lifecycle without
 //! making assumptions about how data is fetched.
 
-use crate::{Consumer, Delivery};
+use crate::{Consumer, Delivery, Outcome};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
-use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
+use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
 
 /// Completed consumer validation for a delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,8 +20,8 @@ pub struct Completion<K, S, Context = ()> {
     /// Key and subscribers that were passed to the consumer.
     pub delivery: Delivery<K, S>,
 
-    /// Whether the consumer accepted the response as valid for the key.
-    pub valid: bool,
+    /// Consumer disposition for the delivered response.
+    pub outcome: Outcome,
 }
 
 // Cached response that can be redelivered after the consumer accepts it.
@@ -212,8 +212,8 @@ where
 
     /// Drop the cached response without removing the tracked key.
     ///
-    /// Use this after a consumer rejects a response and the resolver wants to
-    /// retry the same key with different bytes or metadata.
+    /// Use this when a response is invalid or does not satisfy every delivered
+    /// subscriber and the resolver wants to retry the key.
     pub fn discard_response(&mut self, key: &Con::Key) {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.response = None;
@@ -266,18 +266,20 @@ where
                 completion: Completion {
                     context,
                     delivery: completed,
-                    valid: receiver.await.unwrap_or(false),
+                    outcome: receiver.await.map(Into::into).unwrap_or(Outcome::Invalid),
                 },
             }
         });
         let entry = self.entries.get_mut(&key).expect("delivery entry");
-        assert!(entry
-            .delivery
-            .replace(ActiveDelivery {
-                generation,
-                _aborter: aborter,
-            })
-            .is_none());
+        assert!(
+            entry
+                .delivery
+                .replace(ActiveDelivery {
+                    generation,
+                    _aborter: aborter,
+                })
+                .is_none()
+        );
     }
 }
 
@@ -301,7 +303,7 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey};
     use bytes::Bytes;
-    use commonware_runtime::{deterministic::Runner, Runner as _};
+    use commonware_runtime::{Runner as _, deterministic::Runner};
     use commonware_utils::{
         channel::{fallible::FallibleExt, mpsc, oneshot},
         non_empty_vec,
@@ -332,6 +334,7 @@ mod tests {
         type Key = MockKey;
         type Value = Bytes;
         type Subscriber = ();
+        type Outcome = bool;
 
         fn deliver(
             &mut self,
@@ -379,7 +382,7 @@ mod tests {
                 .expect("delivery should complete");
             assert_eq!(completed.context, 9);
             assert_eq!(completed.delivery.key, key);
-            assert!(completed.valid);
+            assert_eq!(completed.outcome, Outcome::Complete);
 
             let (delivered_key, delivered_value) = events.recv().await.unwrap();
             assert_eq!(delivered_key, key);
@@ -432,7 +435,7 @@ mod tests {
                 .expect("new delivery should complete");
             assert_eq!(completed.context, 2);
             assert_eq!(completed.delivery.key, key);
-            assert!(completed.valid);
+            assert_eq!(completed.outcome, Outcome::Complete);
         });
     }
 
@@ -452,7 +455,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert!(completed.valid);
+            assert_eq!(completed.outcome, Outcome::Complete);
             tracker.accept_response(&key);
             assert!(tracker.response_accepted(&key));
 
@@ -463,7 +466,7 @@ mod tests {
                 .expect("redelivery should complete");
             assert_eq!(redelivered.context, 3);
             assert_eq!(redelivered.delivery.key, key);
-            assert!(redelivered.valid);
+            assert_eq!(redelivered.outcome, Outcome::Complete);
 
             let first = events.recv().await.unwrap();
             let second = events.recv().await.unwrap();
@@ -487,7 +490,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert!(completed.valid);
+            assert_eq!(completed.outcome, Outcome::Complete);
 
             tracker.redeliver(delivery(key));
         });
@@ -508,7 +511,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("rejected delivery should complete");
-            assert!(!rejected.valid);
+            assert_eq!(rejected.outcome, Outcome::Invalid);
 
             tracker.discard_response(&key);
             assert!(!tracker.response_accepted(&key));
@@ -519,7 +522,7 @@ mod tests {
                 .await
                 .expect("accepted delivery should complete");
             assert_eq!(accepted.context, 2);
-            assert!(accepted.valid);
+            assert_eq!(accepted.outcome, Outcome::Complete);
         });
     }
 }

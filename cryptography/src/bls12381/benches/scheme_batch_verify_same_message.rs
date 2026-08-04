@@ -1,8 +1,8 @@
-use commonware_cryptography::{bls12381, BatchVerifier, Signer as _};
+use commonware_cryptography::{BatchVerifier, Signer as _, bls12381};
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{test_rng, NZUsize, TestRng};
-use criterion::{criterion_group, BatchSize, Criterion};
+use commonware_utils::{NZUsize, TestRng, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
 

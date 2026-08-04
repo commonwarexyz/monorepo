@@ -16,32 +16,33 @@
 //! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly, no trusted
 //!   setup required, and widely supported by hardware security modules. Unlike ed25519, does not
 //!   benefit from batch verification. Certificates contain individual signatures from each signer.
-//!
-//! - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
-//!   can be aggregated into a single multi-signature for compact certificates while preserving
-//!   attribution (signer indices are stored alongside the aggregated signature).
-//!
-//! - [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
-//!   certificates that are constant-size regardless of committee size. Requires a trusted
-//!   setup (distributed key generation) and cannot attribute signatures to individual signers.
-//!
+#![cfg_attr(
+    feature = "bls12381",
+    doc = "
+- [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
+  can be aggregated into a single multi-signature for compact certificates while preserving
+  attribution (signer indices are stored alongside the aggregated signature). Callers must verify
+  a proof of possession for every BLS signing key before constructing the scheme.
+
+- [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
+  certificates that are constant-size regardless of committee size. Requires a trusted
+  setup (distributed key generation) and cannot attribute signatures to individual signers.
+"
+)]
 //! # Attributable Schemes and Fault Evidence
 //!
 //! Signing schemes differ in whether per-participant activities can be used as evidence of
 //! either liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`secp256r1`], [`bls12381_multisig`]): Individual
-//!   signatures can be presented to some third party as evidence of either liveness or of
-//!   committing a fault.  Certificates contain signer indices alongside individual signatures,
-//!   enabling secure per-participant activity tracking and conflict detection.
+//! - **Attributable Schemes**: Individual signatures can be presented to some third party as
+//!   evidence of either liveness or of committing a fault. Certificates contain signer indices
+//!   alongside individual signatures, enabling secure per-participant activity tracking and
+//!   conflict detection.
 //!
-//! - **Non-Attributable Schemes** ([`bls12381_threshold`]): Individual signatures cannot be
-//!   presented to some third party as evidence of either liveness or of committing a fault
-//!   because they can be forged by other players (often after some quorum of partial signatures
-//!   are collected). With [`bls12381_threshold`], possession of any `t` valid partial signatures
-//!   can be used to forge a partial signature for any other player. Because peer connections are
-//!   authenticated, evidence can be used locally (as it must be sent by said participant) but
-//!   cannot be used by an external observer.
+//! - **Non-Attributable Schemes**: Individual signatures cannot be presented to some third party
+//!   as evidence because they can be forged after collecting a quorum of partial signatures.
+//!   Authenticated peer connections allow this evidence to be used locally, but not by an external
+//!   observer.
 //!
 //! The [`Scheme::is_attributable()`] associated function signals whether evidence can be safely
 //! exposed to third parties.
@@ -52,26 +53,29 @@
 //! is used for assigning a unique order to the participant set and authenticating connections
 //! whereas the signing key is used for producing and verifying signatures/certificates.
 //!
-//! This flexibility is supported because some cryptographic schemes are only performant when
-//! used in batch verification (like [bls12381_multisig]) and/or are refreshed frequently
-//! (like [bls12381_threshold]). Refer to [ed25519] for an example of a scheme that uses the
-//! same key for both purposes.
+#![cfg_attr(
+    feature = "bls12381",
+    doc = "Some cryptographic schemes are only performant when used in batch verification (like
+[`bls12381_multisig`]) and/or are refreshed frequently (like [`bls12381_threshold`])."
+)]
+//! Refer to [ed25519] for an example of a scheme that uses the same key for both purposes.
 
+#[cfg(feature = "bls12381")]
+pub use crate::bls12381::certificate::{
+    multisig as bls12381_multisig, threshold as bls12381_threshold,
+};
+pub use crate::ed25519::certificate as ed25519;
 #[commonware_macros::stability(ALPHA)]
 pub use crate::secp256r1::certificate as secp256r1;
-pub use crate::{
-    bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
-    ed25519::certificate as ed25519,
-};
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    types::lazy::Lazy, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write,
+    Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write, types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
+use commonware_utils::{Faults, Participant, bitmap::BitMap, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -190,13 +194,17 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// Subject type for certificate verification.
     type Subject<'a, D: Digest>: Subject;
 
+    /// Fault model used to compute certificate quorums.
+    type Faults: Faults;
+
     /// Public key type for participant identity used to order and index the participant set.
     type PublicKey: PublicKey;
+
     /// Certificate assembled from a set of attestations.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
 
     /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -205,11 +213,10 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     ) -> bool
     where
         R: CryptoRng,
-        D: Digest,
-        M: Faults;
+        D: Digest;
 
     /// Verifies a stream of certificates, returning `false` at the first failure.
-    fn verify_certificates<'a, R, D, I, M>(
+    fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -219,10 +226,9 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-        M: Faults,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate::<_, _, M>(rng, subject, certificate, strategy) {
+            if !self.verify_certificate(rng, subject, certificate, strategy) {
                 return false;
             }
         }
@@ -235,7 +241,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// For batchable schemes, attempts batch verification first and bisects
     /// on failure to efficiently identify invalid certificates. For
     /// non-batchable schemes, verifies each certificate individually.
-    fn verify_certificates_bisect<'a, R, D, M>(
+    fn verify_certificates_bisect<'a, R, D>(
         &self,
         rng: &mut R,
         certificates: &[(Self::Subject<'a, D>, &'a Self::Certificate)],
@@ -246,7 +252,6 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         D: Digest,
         Self::Subject<'a, D>: Copy,
         Self::Certificate: 'a,
-        M: Faults,
     {
         let len = certificates.len();
         let mut verified = vec![false; len];
@@ -258,8 +263,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         // since verify_certificates already checks one-by-one.
         if !Self::is_batchable() {
             for (i, (subject, certificate)) in certificates.iter().enumerate() {
-                verified[i] =
-                    self.verify_certificate::<_, _, M>(rng, *subject, certificate, strategy);
+                verified[i] = self.verify_certificate(rng, *subject, certificate, strategy);
             }
             return verified;
         }
@@ -277,11 +281,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         //                    [6..7) pass  [7..8) fail
         let mut stack = vec![(0, len)];
         while let Some((start, end)) = stack.pop() {
-            if self.verify_certificates::<_, D, _, M>(
-                rng,
-                certificates[start..end].iter().copied(),
-                strategy,
-            ) {
+            if self.verify_certificates(rng, certificates[start..end].iter().copied(), strategy) {
                 verified[start..end].fill(true);
             } else if end - start > 1 {
                 let mid = start + (end - start) / 2;
@@ -295,9 +295,8 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
 
     /// Returns whether this scheme benefits from batch verification.
     ///
-    /// Schemes that benefit from batch verification (like [`ed25519`], [`bls12381_multisig`]
-    /// and [`bls12381_threshold`]) should return `true`, allowing callers to optimize by
-    /// deferring verification until multiple signatures are available.
+    /// Schemes that benefit from batch verification should return `true`, allowing callers to
+    /// optimize by deferring verification until multiple signatures are available.
     ///
     /// Schemes that don't benefit from batch verification (like [`secp256r1`]) should
     /// return `false`, indicating that eager per-signature verification is preferred.
@@ -381,15 +380,10 @@ pub trait Scheme: Verifier {
     ///
     /// Callers must not include duplicate attestations from the same signer. Passing duplicates
     /// is undefined behavior, implementations may panic or produce incorrect results.
-    fn assemble<I, M>(
-        &self,
-        attestations: I,
-        strategy: &impl Strategy,
-    ) -> Option<Self::Certificate>
+    fn assemble<I>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
-        M: Faults;
+        I::IntoIter: Send;
 
     /// Returns whether per-participant fault evidence can be safely exposed.
     ///
@@ -434,10 +428,11 @@ impl<S: Scheme> Scoped<S> {
 
 impl<S: Scheme> Verifier for Scoped<S> {
     type Subject<'a, D: Digest> = S::Subject<'a, D>;
+    type Faults = S::Faults;
     type PublicKey = S::PublicKey;
     type Certificate = S::Certificate;
 
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -447,13 +442,12 @@ impl<S: Scheme> Verifier for Scoped<S> {
     where
         R: CryptoRng,
         D: Digest,
-        M: Faults,
     {
         self.scheme
-            .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
+            .verify_certificate(rng, subject, certificate, strategy)
     }
 
-    fn verify_certificates<'a, R, D, I, M>(
+    fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -463,10 +457,8 @@ impl<S: Scheme> Verifier for Scoped<S> {
         R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-        M: Faults,
     {
-        self.scheme
-            .verify_certificates::<_, D, _, M>(rng, certificates, strategy)
+        self.scheme.verify_certificates(rng, certificates, strategy)
     }
 
     fn is_batchable() -> bool {
@@ -556,9 +548,8 @@ impl Signers {
     /// Iterates over signer indices in ascending order.
     pub fn iter(&self) -> impl Iterator<Item = Participant> + '_ {
         self.bitmap
-            .iter()
-            .enumerate()
-            .filter_map(|(index, bit)| bit.then_some(Participant::from_usize(index)))
+            .ones_iter()
+            .map(|index| Participant::from_usize(index as usize))
     }
 }
 
@@ -635,11 +626,11 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519::PrivateKey, sha256::Digest as Sha256Digest, Signer as _};
+    use crate::{Signer as _, ed25519::PrivateKey, sha256::Digest as Sha256Digest};
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect};
+    use commonware_utils::{TryCollect, ordered::Set, test_rng};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     #[test]
@@ -695,6 +686,7 @@ mod tests {
 
     mod ed25519_fixture {
         use crate::{certificate::Subject, impl_certificate_ed25519};
+        use commonware_utils::N3f1;
 
         /// Test subject for certificate verification tests.
         #[derive(Copy, Clone, Debug)]
@@ -715,7 +707,7 @@ mod tests {
         }
 
         // Use the macro to generate the test scheme
-        impl_certificate_ed25519!(TestSubject, Vec<u8>);
+        impl_certificate_ed25519!(TestSubject, Vec<u8>, N3f1);
     }
 
     const NAMESPACE: &[u8] = b"test-bisect";
@@ -731,7 +723,7 @@ mod tests {
             .filter_map(|s| s.sign::<Sha256Digest>(TestSubject { message }))
             .collect();
         schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("assembly failed")
     }
 
@@ -755,11 +747,8 @@ mod tests {
     fn test_bisect_empty() {
         let mut rng = test_rng();
         let (_, verifier) = setup_ed25519(4);
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &[],
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &[], &Sequential);
         assert!(result.is_empty());
     }
 
@@ -770,11 +759,8 @@ mod tests {
         let cert = make_certificate(&schemes, MESSAGE);
         let good = TestSubject { message: MESSAGE };
         let pairs: Vec<_> = (0..5).map(|_| (good, &cert)).collect();
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, vec![true; 5]);
     }
 
@@ -798,11 +784,8 @@ mod tests {
             (bad, &cert),
         ];
         let expected = vec![true, false, true, false, true, true, false, false];
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, expected);
     }
 
@@ -815,11 +798,8 @@ mod tests {
             message: BAD_MESSAGE,
         };
         let pairs: Vec<_> = (0..4).map(|_| (bad, &cert)).collect();
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, vec![false; 4]);
     }
 
@@ -829,11 +809,8 @@ mod tests {
         let (schemes, verifier) = setup_ed25519(4);
         let cert = make_certificate(&schemes, MESSAGE);
         let pairs = vec![(TestSubject { message: MESSAGE }, &cert)];
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, vec![true]);
     }
 
@@ -848,11 +825,8 @@ mod tests {
             },
             &cert,
         )];
-        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-            &mut rng,
-            &pairs,
-            &Sequential,
-        );
+        let result =
+            verifier.verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &pairs, &Sequential);
         assert_eq!(result, vec![false]);
     }
 
@@ -867,20 +841,20 @@ mod tests {
         let as_scheme = Scoped::scheme(Arc::new(schemes[0].clone()));
 
         // Both scopes verify a valid certificate through the `Verifier` impl.
-        assert!(as_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(as_verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             subject,
             &cert,
             &Sequential,
         ));
-        assert!(as_scheme.verify_certificate::<_, Sha256Digest, N3f1>(
+        assert!(as_scheme.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             subject,
             &cert,
             &Sequential,
         ));
         let pairs = [(subject, &cert)];
-        assert!(as_verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+        assert!(as_verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
             pairs.iter().copied(),
             &Sequential,

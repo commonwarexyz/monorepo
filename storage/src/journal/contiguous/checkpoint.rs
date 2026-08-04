@@ -27,10 +27,11 @@
 //! more durable data than the checkpoint claims, never less.
 
 use crate::{
+    Context,
     journal::Error,
     metadata::{Config as MetadataConfig, Metadata},
-    Context,
 };
+use commonware_runtime::Handle;
 use commonware_utils::sequence::VecU64;
 
 /// Key for the mid-blob pruning boundary. Absent when the boundary is blob-aligned (it is then
@@ -84,11 +85,11 @@ impl<E: Context> Checkpoint<E> {
 
     /// Durably record the boundary and watermark, writing only entries that changed.
     pub(super) async fn persist(
-        &mut self,
+        mut self,
         items_per_blob: u64,
         boundary: u64,
         watermark: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<Self, Error> {
         // A blob-aligned boundary is derived from the oldest blob, so the entry is only kept
         // while the boundary is mid-blob.
         if boundary.is_multiple_of(items_per_blob) {
@@ -106,6 +107,24 @@ impl<E: Context> Checkpoint<E> {
         self.sync().await
     }
 
+    /// Begin raising the watermark to `watermark`, returning a completion handle. A `watermark`
+    /// at or below the current one is ignored, returning a resolved handle.
+    /// A started advance's failure leaves the raised value staged: later advances at or below
+    /// it are ignored, and the next checkpoint write observes the failure and fails.
+    /// Invariant: all items below `watermark` are durable.
+    pub(super) async fn start_watermark_sync(
+        mut self,
+        watermark: u64,
+    ) -> Result<(Self, Handle<()>), Error> {
+        if matches!(self.watermark(), Some(current) if current >= watermark) {
+            return Ok((self, Handle::ready(Ok(()))));
+        }
+        self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
+        let (metadata, handle) = self.metadata.start_sync().await?;
+        self.metadata = metadata;
+        Ok((self, handle))
+    }
+
     /// Lower the watermark to at most `limit`, returning whether it changed. Called before
     /// blob state moves backward so the persisted watermark never exceeds surviving data.
     /// The caller syncs.
@@ -120,7 +139,7 @@ impl<E: Context> Checkpoint<E> {
     }
 
     /// Durably record the intent to clear to `target`, lowering the watermark first.
-    pub(super) async fn stage_clear(&mut self, target: u64) -> Result<(), Error> {
+    pub(super) async fn stage_clear(mut self, target: u64) -> Result<Self, Error> {
         self.lower_watermark(target);
         self.metadata.put(CLEAR_TARGET_KEY, target.into());
         self.sync().await
@@ -129,18 +148,18 @@ impl<E: Context> Checkpoint<E> {
     /// Durably complete a clear to `target`: drop the intent and record `target` as both the
     /// boundary and the watermark.
     pub(super) async fn finish_clear(
-        &mut self,
+        mut self,
         items_per_blob: u64,
         target: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<Self, Error> {
         self.metadata.remove(&CLEAR_TARGET_KEY);
         self.persist(items_per_blob, target, target).await
     }
 
     /// Make staged entries durable.
-    pub(super) async fn sync(&mut self) -> Result<(), Error> {
-        self.metadata.sync().await?;
-        Ok(())
+    pub(super) async fn sync(mut self) -> Result<Self, Error> {
+        self.metadata = self.metadata.sync().await?;
+        Ok(self)
     }
 
     /// Remove the checkpoint's partition.
@@ -154,7 +173,7 @@ impl<E: Context> Checkpoint<E> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     /// Direct-injection helpers used by tests (here and in the fixed journal) to plant states
     /// the production API never produces: invalid or absent watermarks, a corrupt clear intent,
@@ -198,7 +217,7 @@ mod tests {
             assert!(!checkpoint.lower_watermark(5));
             assert_eq!(checkpoint.watermark(), None);
 
-            checkpoint.persist(10, 0, 8).await.unwrap();
+            checkpoint = checkpoint.persist(10, 0, 8).await.unwrap();
             // Equal and higher limits are not lowerings.
             assert!(!checkpoint.lower_watermark(8));
             assert!(!checkpoint.lower_watermark(12));
@@ -214,7 +233,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             {
-                let mut checkpoint = Checkpoint::open(context.child("a"), "rt").await.unwrap();
+                let checkpoint = Checkpoint::open(context.child("a"), "rt").await.unwrap();
                 // A mid-blob boundary is kept; the watermark is recorded.
                 checkpoint.persist(10, 13, 25).await.unwrap();
             }
@@ -232,12 +251,12 @@ mod tests {
             let mut checkpoint = Checkpoint::open(context, "align").await.unwrap();
 
             // A mid-blob boundary is recorded as a hint.
-            checkpoint.persist(10, 13, 0).await.unwrap();
+            checkpoint = checkpoint.persist(10, 13, 0).await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), Some(13));
 
             // A later blob-aligned boundary drops the stale hint (it is derived from the
             // oldest blob).
-            checkpoint.persist(10, 20, 0).await.unwrap();
+            checkpoint = checkpoint.persist(10, 20, 0).await.unwrap();
             assert_eq!(checkpoint.boundary_hint(), None);
         });
     }
@@ -248,15 +267,15 @@ mod tests {
         executor.start(|context| async move {
             {
                 let mut checkpoint = Checkpoint::open(context.child("a"), "clear").await.unwrap();
-                checkpoint.persist(10, 0, 30).await.unwrap();
+                checkpoint = checkpoint.persist(10, 0, 30).await.unwrap();
                 // Staging records the intent and lowers the watermark to the target.
-                checkpoint.stage_clear(20).await.unwrap();
+                checkpoint = checkpoint.stage_clear(20).await.unwrap();
                 assert_eq!(checkpoint.clear_target(), Some(20));
                 assert_eq!(checkpoint.watermark(), Some(20));
             }
             // A crash after staging leaves the intent durable.
             {
-                let mut checkpoint = Checkpoint::open(context.child("b"), "clear").await.unwrap();
+                let checkpoint = Checkpoint::open(context.child("b"), "clear").await.unwrap();
                 assert_eq!(checkpoint.clear_target(), Some(20));
                 // Completing drops the intent and records the target as boundary and watermark.
                 checkpoint.finish_clear(10, 20).await.unwrap();
@@ -274,10 +293,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut checkpoint = Checkpoint::open(context, "sc").await.unwrap();
-            checkpoint.persist(10, 0, 5).await.unwrap();
+            checkpoint = checkpoint.persist(10, 0, 5).await.unwrap();
 
             // Target above the current watermark: the intent is recorded but the watermark holds.
-            checkpoint.stage_clear(9).await.unwrap();
+            checkpoint = checkpoint.stage_clear(9).await.unwrap();
             assert_eq!(checkpoint.clear_target(), Some(9));
             assert_eq!(checkpoint.watermark(), Some(5));
         });

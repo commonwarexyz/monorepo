@@ -2,19 +2,19 @@
 //!
 //! For variable-size values, use [super::variable] instead.
 
-use super::{operation::Operation as BaseOperation, Config as BaseConfig, Immutable};
+use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
+    Context,
     journal::{
         authenticated,
         contiguous::fixed::{self, Config as JournalConfig},
     },
     merkle::Family,
     qmdb::{
-        any::{value::FixedEncoding, FixedValue},
         Error, ROOT_BAGGING,
+        any::{FixedValue, value::FixedEncoding},
     },
     translator::Translator,
-    Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -53,7 +53,14 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(journal, context, cfg.translator, cfg.init_cache_size).await
+        Self::init_from_journal(
+            journal,
+            context,
+            cfg.translator,
+            cfg.init_buffer,
+            cfg.init_cache_size,
+        )
+        .await
     }
 }
 
@@ -71,18 +78,23 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
 mod tests {
     use super::*;
     use crate::{
-        merkle::{full::Config as MmrConfig, mmb, mmr},
+        merkle::{Location, full::Config as MmrConfig, mmb, mmr},
         qmdb::immutable::test,
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
+        BufferPooler, Metrics, Runner as _, Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        reschedule,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
+    use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
@@ -107,6 +119,7 @@ mod tests {
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
         }
     }
 
@@ -135,10 +148,252 @@ mod tests {
         CompactDb::init(context, cfg).await.unwrap()
     }
 
+    /// An immutable db over a delayed-sync storage backend.
+    type DelayedDb = Db<
+        mmr::Family,
+        DelayedSyncContext<deterministic::Context>,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        Sequential,
+    >;
+
+    /// Open a [DelayedDb] whose blob syncs park on `pending`.
+    ///
+    /// Init durably persists the recovered database, so while syncs park the returned future
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The journal
+    /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
+    /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
+    fn open_delayed_db(
+        context: &deterministic::Context,
+        label: &'static str,
+        suffix: &str,
+        pending: &PendingSyncs,
+    ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
+        let mut cfg = config(suffix, context);
+        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        cfg.log.items_per_blob = NZU64!(1000);
+        cfg.log.page_cache = page_cache.clone();
+        cfg.merkle_config.items_per_blob = NZU64!(1000);
+        cfg.merkle_config.page_cache = page_cache;
+        DelayedDb::init(
+            DelayedSyncContext {
+                inner: context.child(label),
+                pending: pending.clone(),
+            },
+            cfg,
+        )
+    }
+
+    /// Apply a single-key batch writing `key -> value` with inactivity floor `floor`.
+    async fn apply_set(
+        db: DelayedDb,
+        key: Digest,
+        value: Digest,
+        floor: Location<mmr::Family>,
+    ) -> DelayedDb {
+        let batch = db
+            .new_batch()
+            .set(key, value)
+            .merkleize(&db, None, floor)
+            .await;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        db
+    }
+
+    /// A sync handle must not block database use while the backend sync is pending.
+    #[test_traced]
+    fn test_fixed_start_sync_overlaps_work() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "start-sync-overlap", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let key0 = Sha256::fill(1u8);
+            let value0 = Sha256::fill(2u8);
+            let floor = db.inactivity_floor_loc();
+            db = apply_set(db, key0, value0, floor).await;
+
+            let starts_before = pending.starts();
+            let entered_before = pending.entered();
+            let completions_before = pending.completions();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
+            assert_eq!(pending.completions(), completions_before);
+
+            // Observe the sync while the database keeps working.
+            let waiter = ctx
+                .child("await_sync")
+                .spawn(|_| async move { handle.await.unwrap() });
+            while pending.entered() == entered_before {
+                reschedule().await;
+            }
+
+            // Reads and applies complete before the sync does.
+            assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+            let key1 = Sha256::fill(3u8);
+            let value1 = Sha256::fill(4u8);
+            let floor = db.inactivity_floor_loc();
+            db = apply_set(db, key1, value1, floor).await;
+            assert_eq!(
+                pending.completions(),
+                completions_before,
+                "the database made progress while the sync was still in flight"
+            );
+
+            pending.unblock();
+            waiter.await.unwrap();
+
+            // The mid-sync batch is durable after the next start_sync completes.
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = open_delayed_db(&ctx, "reopen", "start-sync-overlap", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
+    /// returned handle and the next durability operation.
+    #[test_traced]
+    fn test_fixed_start_sync_failure_propagates() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // Pass syncs through so opening the database doesn't park.
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-fail", &pending)
+                .await
+                .unwrap();
+            let floor = db.inactivity_floor_loc();
+            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), floor).await;
+
+            // Arm all future syncs to resolve to an injected error.
+            pending.arm_fail();
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(
+                handle.await.is_err(),
+                "the sync handle surfaces the failure"
+            );
+            let starts_before = pending.starts();
+            // A failed mutable method consumes the database per the failures-are-fatal contract.
+            assert!(
+                db.commit().await.is_err(),
+                "the next durability op surfaces the failed in-flight sync"
+            );
+            assert_eq!(
+                pending.starts(),
+                starts_before,
+                "the surfaced error is the retained failure, not a fresh sync's"
+            );
+        });
+    }
+
+    /// State persisted via an awaited start_sync handle is recovered on reopen.
+    #[test_traced]
+    fn test_fixed_start_sync_recovery() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-recovery", &pending)
+                .await
+                .unwrap();
+            let key = Sha256::fill(1u8);
+            let value = Sha256::fill(2u8);
+            let floor = db.inactivity_floor_loc();
+            db = apply_set(db, key, value, floor).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = open_delayed_db(&ctx, "reopen", "start-sync-recovery", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pruning drains the in-flight sync before mutating storage.
+    #[test_traced]
+    fn test_fixed_start_sync_prune_waits() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "start-sync-prune", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            // Two batches: the second declares floor 2 so the prune below is non-trivial.
+            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
+            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(2)).await;
+
+            let starts_before = pending.starts();
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+            assert!(pending.starts() > starts_before);
+
+            let floor = db.inactivity_floor_loc();
+            assert!(*floor > 0);
+            let db = {
+                let mut prune = std::pin::pin!(db.prune(floor));
+                assert!(
+                    prune.as_mut().now_or_never().is_none(),
+                    "prune proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                prune.await.unwrap()
+            };
+            handle.await.unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding drains the in-flight sync before mutating storage.
+    #[test_traced]
+    fn test_fixed_start_sync_rewind_waits() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(&ctx, "delayed", "start-sync-rewind", &pending);
+            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
+            db = drive_pending_syncs(&pending, db.commit()).await.unwrap();
+            let committed_root = db.root();
+            let committed_size = db.bounds().end;
+            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(0)).await;
+
+            let handle;
+            (db, handle) = db.start_sync().await.unwrap();
+
+            let db = {
+                let mut rewind = std::pin::pin!(db.rewind(committed_size));
+                assert!(
+                    rewind.as_mut().now_or_never().is_none(),
+                    "rewind proceeded while the started sync was pending"
+                );
+                pending.unblock();
+                rewind.await.unwrap()
+            };
+            handle.await.unwrap();
+            assert_eq!(db.root(), committed_root);
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_immutable_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
+            let db = open_db::<mmr::Family>(ctx.child("db")).await;
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
             let floor = db.inactivity_floor_loc();
@@ -147,12 +402,14 @@ mod tests {
                 .set(key, value)
                 .merkleize(&db, None, floor)
                 .await;
-            db.apply_batch(batch).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
-            db.commit().await.unwrap();
-            db.sync().await.unwrap();
-            db.prune(crate::merkle::Location::new(0)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            let (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let _db = db.prune(crate::merkle::Location::new(0)).await.unwrap();
 
             let metrics = ctx.encode();
             for expected in [
@@ -168,6 +425,7 @@ mod tests {
                 "db_operations_applied_total 2",
                 "db_commit_calls_total 1",
                 "db_sync_calls_total 1",
+                "db_start_sync_calls_total 1",
                 "db_prune_calls_total 1",
                 "db_get_duration_count 1",
                 "db_get_many_duration_count 1",
@@ -206,15 +464,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn assert_db_futures_are_send(
-        db: &mut Db<
-            mmr::Family,
-            deterministic::Context,
-            Digest,
-            Digest,
-            Sha256,
-            TwoCap,
-            Sequential,
-        >,
+        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
         key: Digest,
         loc: crate::merkle::mmr::Location,
     ) {
@@ -222,6 +472,13 @@ mod tests {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_rewind_is_send(
+        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+        loc: crate::merkle::mmr::Location,
+    ) {
         is_send(db.rewind(loc));
     }
 
@@ -299,6 +556,18 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_prune(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_fixed_prune_after_uncommitted_apply_batch_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_prune_after_uncommitted_apply_batch_recovery(
+                ctx,
+                open::<mmr::Family>,
+            )
+            .await;
         });
     }
 
@@ -384,8 +653,8 @@ mod tests {
 
     #[boxed]
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
-        let mut db = open_db::<F>(ctx.child("db")).await;
-        let mut compact = open_compact::<F>(ctx.child("compact")).await;
+        let db = open_db::<F>(ctx.child("db")).await;
+        let compact = open_compact::<F>(ctx.child("compact")).await;
         assert_eq!(db.root(), compact.root());
 
         let k1 = Sha256::fill(1u8);
@@ -410,10 +679,10 @@ mod tests {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        db.apply_batch(retained).await.unwrap();
-        compact.apply_batch(compact_batch).unwrap();
-        db.commit().await.unwrap();
-        compact.sync().await.unwrap();
+        let (db, _) = db.apply_batch(retained).await.unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let db = db.commit().await.unwrap();
+        let compact = compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata));

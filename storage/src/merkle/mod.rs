@@ -35,7 +35,7 @@ pub use location::{Location, LocationRangeExt};
 pub use position::Position;
 #[cfg(test)]
 pub(crate) use proof::build_range_proof;
-pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
+pub use proof::{MAX_PROOF_DIGESTS_PER_ELEMENT, Proof};
 pub use read::Readable;
 use thiserror::Error;
 
@@ -99,10 +99,10 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     ///
     /// A peak is considered entirely inactive if all of its leaves strictly precede the
     /// `inactivity_floor`. These peaks can be safely bagged forward into the `grafted_root`.
-    fn inactive_peaks(size: Position<Self>, inactivity_floor: Location<Self>) -> usize {
+    fn inactive_peaks(size: Location<Self>, inactivity_floor: Location<Self>) -> usize {
         let mut inactive_count = 0;
         let mut leaf_capacity_sum = 0u64;
-        for (_, height) in Self::peaks(size) {
+        for (_, height) in Self::peaks(Self::location_to_position(size)) {
             let capacity = 1u64.checked_shl(height).expect("height excessively large");
             leaf_capacity_sum = leaf_capacity_sum
                 .checked_add(capacity)

@@ -27,6 +27,12 @@ commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub mod utils;
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
+    /// A shared in-flight sync result. Detached observers of the same completion: dropping one
+    /// neither cancels the sync nor consumes its result.
+    pub(crate) type SyncCompletion = futures::future::Shared<
+        futures::future::BoxFuture<'static, Result<(), commonware_runtime::Error>>,
+    >;
+
     pub mod archive;
     pub mod freezer;
     pub mod index;
@@ -123,11 +129,11 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     {
     }
     impl<
-            T: commonware_runtime::BufferPooler
-                + commonware_runtime::Storage
-                + commonware_runtime::Clock
-                + commonware_runtime::Metrics,
-        > Context for T
+        T: commonware_runtime::BufferPooler
+            + commonware_runtime::Storage
+            + commonware_runtime::Clock
+            + commonware_runtime::Metrics,
+    > Context for T
     {
     }
 });

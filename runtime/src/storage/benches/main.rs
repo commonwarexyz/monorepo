@@ -22,7 +22,7 @@ use crate::{
     filesystem::{cleanup_root, prepare_root},
     workload::run_benchmark,
 };
-use commonware_runtime::{tokio, Runner as _};
+use commonware_runtime::{Runner as _, tokio};
 
 fn main() -> Result<()> {
     let mut cfg = Config::parse();

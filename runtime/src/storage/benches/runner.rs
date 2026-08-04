@@ -5,8 +5,8 @@ use crate::{
     error::Result,
     report::Stats,
 };
-use commonware_runtime::{Blob, IoBufMut, IoBufs};
-use rand::{rngs::SmallRng, RngExt as _, SeedableRng};
+use commonware_runtime::{Blob, IoBufMut, IoBufs, WriteOptions};
+use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::time::Instant;
 
 /// Operations between deadline checks.
@@ -102,18 +102,19 @@ pub async fn run_write_loop(
     while should_continue(deadline, stats.ops) {
         let offset = next_block() * io_size;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.write_at(offset, payload.clone()).await?;
+        blob.write_at(offset, payload.clone(), WriteOptions::default())
+            .await?;
 
         // Record latency before sync so percentiles reflect pure write cost.
         stats.record(io_size, started.map(|s| s.elapsed()));
 
         after_write(offset + io_size);
         writes_since_sync += 1;
-        if let SyncMode::Every(every) = sync_mode {
-            if writes_since_sync == every {
-                blob.sync().await?;
-                writes_since_sync = 0;
-            }
+        if let SyncMode::Every(every) = sync_mode
+            && writes_since_sync == every
+        {
+            blob.sync().await?;
+            writes_since_sync = 0;
         }
     }
 
@@ -143,11 +144,13 @@ pub async fn run_sync_write_loop(
         let started = should_sample_latency(stats.ops).then(Instant::now);
         match sync_method {
             SyncMethod::WriteThenSync => {
-                blob.write_at(offset, payload.clone()).await?;
+                blob.write_at(offset, payload.clone(), WriteOptions::default())
+                    .await?;
                 blob.sync().await?;
             }
-            SyncMethod::WriteAtSync => {
-                blob.write_at_sync(offset, payload.clone()).await?;
+            SyncMethod::WriteAndSync => {
+                blob.write_at(offset, payload.clone(), WriteOptions::SYNC)
+                    .await?;
             }
         }
         stats.record(io_size, started.map(|s| s.elapsed()));

@@ -3,8 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::{
-    modulo, union, union_unique, Faults, N3f1, NZDuration, NZUsize, NonZeroDuration, NZU16, NZU32,
-    NZU64, NZU8,
+    Faults, N3f1, NZDuration, NZU8, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration, modulo, union,
+    union_unique,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;

@@ -17,7 +17,6 @@ workspace = true
 ahash = { workspace = true, features = ["no-rng"] }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
-cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 commonware-formatting = { workspace = true, default-features = false }
 commonware-macros.workspace = true
@@ -60,7 +59,7 @@ commonware-macros.workspace = true
 criterion.workspace = true
 num-bigint = { workspace = true, default-features = false }
 proptest.workspace = true
-roaring = "0.10.12"
+roaring = "0.11.4"
 rstest.workspace = true
 
 [features]

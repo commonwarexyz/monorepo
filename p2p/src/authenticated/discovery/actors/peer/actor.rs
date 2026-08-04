@@ -1,21 +1,21 @@
 use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
+    channels::{self, Channels},
     data::EncodedData,
     discovery::{
         actors::tracker,
-        channels::{self, Channels},
         metrics,
         types::{self, InfoVerifier},
     },
-    relay::{recv_prioritized, try_recv, Message as RelayMessage, Prioritized, Relay},
+    relay::{Message as RelayMessage, Prioritized, Relay, recv_prioritized, try_recv},
 };
 use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, telemetry::metrics::CounterFamily, BufferPooler, Clock, Handle, IoBufs,
-    Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    iobuf::EncodeExt, telemetry::metrics::CounterFamily,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
@@ -344,13 +344,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         }
                     };
                     self.received_messages.get_or_create(&metric).inc();
-                    if let Some(rate_limiter) = rate_limiter {
-                        if let Err(wait_until) = rate_limiter.check() {
+                    if let Some(rate_limiter) = rate_limiter
+                        && let Err(wait_until) = rate_limiter.check() {
                             self.rate_limited.get_or_create(&metric).inc();
                             let wait_duration = wait_until.wait_time_from(context.now());
                             context.sleep(wait_duration).await;
                         }
-                    }
 
                     match msg {
                         types::Payload::Data(data) => {
@@ -402,21 +401,18 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::discovery::{
-        actors::{router, tracker},
-        channels::Channels,
-    };
+    use crate::authenticated::{discovery::actors::tracker, router};
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        deterministic, mocks, telemetry::metrics::MetricsExt as _, BufferPooler, IoBuf, Runner,
-        Spawner, Supervisor as _,
+        BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
+        telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{bitmap::BitMap, NZUsize, SystemTimeExt};
+    use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,

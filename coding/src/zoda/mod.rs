@@ -118,8 +118,8 @@ use crate::{Config, PhasedScheme, ValidatingScheme};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
-    transcript::{Summary, Transcript},
     Digest, Hasher,
+    transcript::{Summary, Transcript, Version},
 };
 use commonware_math::{
     fields::goldilocks::F,
@@ -180,11 +180,12 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
 }
 
 fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
-    let mut h = H::new();
+    let mut h = H::default();
     for x in row {
         h.update(&x.to_le_bytes());
     }
-    h.finalize()
+    let (_, digest) = h.finalize();
+    digest
 }
 
 mod topology;
@@ -390,7 +391,7 @@ impl<D: Digest> CheckingData<D> {
         checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
-        let mut transcript = Transcript::new(NAMESPACE);
+        let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
@@ -398,7 +399,7 @@ impl<D: Digest> CheckingData<D> {
         if *commitment != expected_commitment {
             return Err(Error::InvalidShard);
         }
-        let mut transcript = Transcript::resume(expected_commitment);
+        let mut transcript = Transcript::resume(expected_commitment, Version::V1);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
             return Err(Error::InvalidShard);
@@ -456,10 +457,9 @@ impl<D: Digest> CheckingData<D> {
             .collect();
 
         // Verify the multi-proof
-        let mut hasher = H::new();
         if weak_shard
             .inclusion_proof
-            .verify_multi_inclusion(&mut hasher, &proof_elements, &self.root)
+            .verify_multi_inclusion::<H>(&proof_elements, &self.root)
             .is_err()
         {
             return Err(Error::InvalidWeakShard);
@@ -498,10 +498,17 @@ pub enum Error {
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
 
-#[derive(Clone, Copy)]
 pub struct Zoda<H> {
     _marker: PhantomData<H>,
 }
+
+impl<H> Clone for Zoda<H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<H> Copy for Zoda<H> {}
 
 impl<H> std::fmt::Debug for Zoda<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -551,14 +558,14 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         let root = bmt.root();
 
         // Step 4: Commit to the root, and the size of the data.
-        let mut transcript = Transcript::new(NAMESPACE);
+        let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
         let commitment = transcript.summarize();
 
         // Step 5: Generate a checking matrix and checksum with the commitment.
-        let mut transcript = Transcript::resume(commitment);
+        let mut transcript = Transcript::resume(commitment, Version::V1);
         let checking_matrix = checking_matrix(&transcript, &topology);
         let checksum = Arc::new(data.mul(&checking_matrix));
         // Bind index sampling to this checksum to prevent follower-specific malleability.

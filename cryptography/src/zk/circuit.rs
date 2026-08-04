@@ -485,7 +485,7 @@ impl<'ctx, F: Clone> Var<'ctx, F> {
             (VarInner::Native(a), VarInner::Native(b)) => {
                 return Self {
                     inner: VarInner::Native(combine(&a, b)),
-                }
+                };
             }
             (VarInner::Native(ref a), &VarInner::Circuit { ctx, idx: b_idx })
             | (VarInner::Circuit { ctx, idx: b_idx }, &VarInner::Native(ref a)) => {
@@ -599,7 +599,7 @@ impl<'ctx, F: Field> Div<&Self> for Var<'ctx, F> {
             (VarInner::Native(a), VarInner::Native(b)) => {
                 return Self {
                     inner: VarInner::Native(a.clone() * &b.inv()),
-                }
+                };
             }
             (VarInner::Circuit { ctx, .. }, _) | (_, VarInner::Circuit { ctx, .. }) => ctx,
         };

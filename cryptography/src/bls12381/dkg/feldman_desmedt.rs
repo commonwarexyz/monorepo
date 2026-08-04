@@ -300,13 +300,13 @@
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 
 use crate::{
+    BatchVerifier, PublicKey, Secret, Signer,
     bls12381::primitives::{
         group::{Private, Scalar, ScalarReadCfg, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
-    transcript::{Summary, Transcript},
-    BatchVerifier, PublicKey, Secret, Signer,
+    transcript::{Summary, Transcript, Version},
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
@@ -317,8 +317,8 @@ use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
+    Faults, NZU32, Participant, TryCollect,
     ordered::{Map, Quorum, Set},
-    Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRng;
@@ -329,6 +329,10 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG";
 const SIG_ACK: &[u8] = b"ack";
 const SIG_LOG: &[u8] = b"log";
 const NOISE_PRE_VERIFY: &[u8] = b"pre_verify";
+
+// Feldman satisfies V0's fixed-schema requirements: its application namespace is fixed, and every
+// later packet has a canonical encoding at a fixed position.
+const TRANSCRIPT_VERSION: Version = Version::V0;
 
 /// The error type for the DKG protocol.
 ///
@@ -675,7 +679,8 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// Create a new [`Info`].
     ///
     /// `namespace` must be provided to isolate different applications
-    /// performing DKGs from each other.
+    /// performing DKGs from each other. It must remain fixed across all rounds,
+    /// epochs, restarts, and participants in the protocol's lifetime.
     /// `round` should be a counter, always incrementing, even for failed DKGs.
     /// `previous` should be the result of the previous successful DKG.
     /// `dealers` should be the list of public keys for the dealers. This MUST
@@ -708,7 +713,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             }
         }
         let summary = {
-            let mut transcript = Transcript::new(NAMESPACE);
+            let mut transcript = Transcript::new(NAMESPACE, TRANSCRIPT_VERSION);
             transcript
                 .commit(namespace)
                 .commit(round.encode())
@@ -1288,7 +1293,7 @@ where
 }
 
 fn transcript_for_round<V: Variant, P: PublicKey>(info: &Info<V, P>) -> Transcript {
-    Transcript::resume(info.summary)
+    Transcript::resume(info.summary, TRANSCRIPT_VERSION)
 }
 
 fn transcript_for_ack<V: Variant, P: PublicKey>(
@@ -1357,7 +1362,8 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         // and also introduces a slow path if any dealer has a bad sig. This slow
         // path can easily be exercised by an adversary.
         strategy.map_collect_vec(checks, |(dealer, log, seed)| {
-            let mut local_rng = Transcript::resume(seed).noise(NOISE_PRE_VERIFY);
+            let mut local_rng =
+                Transcript::resume(seed, TRANSCRIPT_VERSION).noise(NOISE_PRE_VERIFY);
             let valid =
                 info.check_dealer_log::<M, B>(&mut local_rng, strategy, transcript, &dealer, log);
             (dealer, valid)
@@ -1955,11 +1961,12 @@ pub fn deal_anonymous<V: Variant, M: Faults>(
 mod test_plan {
     use super::*;
     use crate::{
+        PublicKey,
         bls12381::primitives::{
             ops::{self, threshold},
             variant::Variant,
         },
-        ed25519, PublicKey,
+        ed25519,
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
@@ -1999,7 +2006,7 @@ mod test_plan {
             let mut summary_bs = info.summary.encode_mut();
             let modified = apply_mask(&mut summary_bs, &self.info_summary);
             let summary = Summary::read(&mut summary_bs)?;
-            Ok((modified, Transcript::resume(summary)))
+            Ok((modified, Transcript::resume(summary, TRANSCRIPT_VERSION)))
         }
 
         fn transcript_for_player_ack<V: Variant, P: PublicKey>(
@@ -2786,7 +2793,10 @@ mod test_plan {
                 for player in player_set.iter() {
                     let expected = expected_reveals.get(player).copied().unwrap_or(0) > max_faults;
                     let actual = observer_output.revealed().position(player).is_some();
-                    assert_eq!(expected, actual, "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})");
+                    assert_eq!(
+                        expected, actual,
+                        "Unexpected outcome for player {player:?} (expected={expected}, actual={actual})"
+                    );
                 }
 
                 // Finalize each player
@@ -2847,7 +2857,7 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum::<N3f1>();
-                let threshold_sig = threshold::recover::<V, _, N3f1>(
+                let threshold_sig = threshold::recover(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                     &Sequential,
@@ -3020,7 +3030,7 @@ mod test {
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_invariants::minifuzz;
-    use commonware_utils::{test_rng, Faults, N3f1, TestRng};
+    use commonware_utils::{Faults, N3f1, TestRng, test_rng};
     use core::num::NonZeroI32;
 
     const PRE_VERIFY_DEALERS: usize = 8;
@@ -3403,25 +3413,31 @@ mod test {
 
     #[test]
     fn invalid_checkpoint_configs_fail_validation() {
-        assert!(Plan::new(NZU32!(4))
-            .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .resume_missing_dealer_msg_fails(1, 2),
-            )
-            .validate()
-            .is_err());
-        assert!(Plan::new(NZU32!(4))
-            .with(
-                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
-                    .bad_reveal(1, 0)
-                    .resume_missing_dealer_msg_fails(2, 1),
-            )
-            .validate()
-            .is_err());
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).crash_resume_player(4, 2))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(
+                    Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                        .resume_missing_dealer_msg_fails(1, 2),
+                )
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Plan::new(NZU32!(4))
+                .with(
+                    Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                        .bad_reveal(1, 0)
+                        .resume_missing_dealer_msg_fails(2, 1),
+                )
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
@@ -3794,8 +3810,61 @@ mod test {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_conformance::Conformance;
+
+        struct FeldmanTranscript;
+
+        impl Conformance for FeldmanTranscript {
+            async fn commit(seed: u64) -> Vec<u8> {
+                const APPLICATION_NAMESPACE: &[u8] =
+                    b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_CONFORMANCE";
+                let dealer_sk = ed25519::PrivateKey::from_seed(11);
+                let dealer_pk = dealer_sk.public_key();
+                let player_sk = ed25519::PrivateKey::from_seed(22);
+                let player_pk = player_sk.public_key();
+                let dealers: Set<ed25519::PublicKey> = vec![dealer_pk.clone()].try_into().unwrap();
+                let players: Set<ed25519::PublicKey> = vec![player_pk].try_into().unwrap();
+                let info = Info::<MinPk, _>::new::<N3f1>(
+                    APPLICATION_NAMESPACE,
+                    seed,
+                    None,
+                    Mode::default(),
+                    dealers,
+                    players,
+                )
+                .unwrap();
+
+                let (_, pub_msg, _) = Dealer::start::<N3f1>(
+                    &mut TestRng::new(seed),
+                    info.clone(),
+                    dealer_sk.clone(),
+                    None,
+                )
+                .unwrap();
+
+                let round_transcript = transcript_for_round(&info);
+                let ack = transcript_for_ack(&round_transcript, &dealer_pk, &pub_msg);
+                let ack_summary = ack.summarize();
+                let ack_signature = ack.sign(&player_sk);
+
+                let log = DealerLog {
+                    pub_msg,
+                    results: DealerResult::TooManyReveals,
+                };
+                let log_summary = transcript_for_log(&info, &log).summarize();
+                let signed_log = SignedDealerLog::sign(&dealer_sk, &info, log);
+
+                let mut output = info.summary.encode().to_vec();
+                output.extend(ack_summary.encode());
+                output.extend(ack_signature.encode());
+                output.extend(log_summary.encode());
+                output.extend(signed_log.encode());
+                output
+            }
+        }
 
         commonware_conformance::conformance_tests! {
+            FeldmanTranscript => 16,
             CodecConformance<Output<MinPk, ed25519::PublicKey>>,
             CodecConformance<DealerPubMsg<MinPk>>,
             CodecConformance<DealerPrivMsg>,

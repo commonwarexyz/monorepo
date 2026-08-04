@@ -1,22 +1,22 @@
 //! Benchmarks for applying already-merkleized QMDB batches.
 
 use crate::common::{
-    any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db, AnyOFixP256Db, AnyUFixDb,
-    Digest, ImmFixDb, CHUNK_SIZE, PAGE_CACHE_SIZE,
+    AnyOFixP256Db, AnyUFixDb, CHUNK_SIZE, Digest, ImmFixDb, PAGE_CACHE_SIZE, any_fix_cfg_full,
+    any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
 use commonware_runtime::{
+    Supervisor,
     benchmarks::{context, tokio},
     tokio::{Config, Context},
-    Supervisor,
 };
 use commonware_storage::{
     merkle::mmb::Family as Mmb,
     qmdb::any::traits::{BatchableDb, UnmerkleizedBatch},
 };
-use commonware_utils::{TestRng, NZU64};
-use criterion::{criterion_group, Criterion};
+use commonware_utils::{NZU64, NZUsize, TestRng};
+use criterion::{Criterion, criterion_group};
 use rand::Rng;
 use std::{
     num::NonZeroU64,
@@ -43,7 +43,7 @@ fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
 ) -> D::Batch {
     for _ in 0..updates {
         let idx = rng.next_u64() % NUM_KEYS;
-        let key = Sha256::hash(&idx.to_be_bytes());
+        let key = Sha256::hash(&[&idx.to_be_bytes()]);
         batch = batch.write(key, Some(make_fixed_value(rng)));
     }
     batch
@@ -60,15 +60,15 @@ async fn open_db(ctx: &Context) -> Db {
 
 #[boxed]
 async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
-    let mut db = open_db(ctx).await;
-    seed_db(&mut db, NUM_KEYS).await;
+    let db = open_db(ctx).await;
+    let db = seed_db(db, NUM_KEYS).await;
 
     let mut rng = TestRng::new(7);
     let batch = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let batch = batch.merkleize(&db, None).await.unwrap();
 
     let start = Instant::now();
-    db.apply_batch(batch).await.unwrap();
+    let (db, _) = db.apply_batch(batch).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -78,7 +78,7 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
 async fn open_ord_db(ctx: &Context) -> ODb {
     ODb::init(
         ctx.child("storage"),
-        any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
+        any_fix_cfg_full(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1)),
     )
     .await
     .unwrap()
@@ -86,15 +86,15 @@ async fn open_ord_db(ctx: &Context) -> ODb {
 
 #[boxed]
 async fn bench_ord_direct_apply(ctx: &Context, updates: u64) -> Duration {
-    let mut db = open_ord_db(ctx).await;
-    seed_db(&mut db, NUM_KEYS).await;
+    let db = open_ord_db(ctx).await;
+    let db = seed_db(db, NUM_KEYS).await;
 
     let mut rng = TestRng::new(7);
     let batch = write_updates::<ODb>(db.new_batch(), updates, &mut rng);
     let batch = batch.merkleize(&db, None).await.unwrap();
 
     let start = Instant::now();
-    db.apply_batch(batch).await.unwrap();
+    let (db, _) = db.apply_batch(batch).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -103,8 +103,8 @@ async fn bench_ord_direct_apply(ctx: &Context, updates: u64) -> Duration {
 
 #[boxed]
 async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> Duration {
-    let mut db = open_db(ctx).await;
-    seed_db(&mut db, NUM_KEYS).await;
+    let db = open_db(ctx).await;
+    let db = seed_db(db, NUM_KEYS).await;
 
     let mut rng = TestRng::new(7);
     let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
@@ -114,7 +114,7 @@ async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> D
     let child = child.merkleize(&db, None).await.unwrap();
 
     let start = Instant::now();
-    db.apply_batch(child).await.unwrap();
+    let (db, _) = db.apply_batch(child).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -123,8 +123,8 @@ async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> D
 
 #[boxed]
 async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Duration {
-    let mut db = open_db(ctx).await;
-    seed_db(&mut db, NUM_KEYS).await;
+    let db = open_db(ctx).await;
+    let db = seed_db(db, NUM_KEYS).await;
 
     let mut rng = TestRng::new(7);
     let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
@@ -133,10 +133,10 @@ async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Dur
     let child = write_updates::<Db>(parent.new_batch(), updates, &mut rng);
     let child = child.merkleize(&db, None).await.unwrap();
 
-    db.apply_batch(parent).await.unwrap();
+    let (db, _) = db.apply_batch(parent).await.unwrap();
 
     let start = Instant::now();
-    db.apply_batch(child).await.unwrap();
+    let (db, _) = db.apply_batch(child).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -146,8 +146,8 @@ async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Dur
 // 1 committed + 1 uncommitted ancestor: apply A, then apply C (whose chain is [B, A]).
 #[boxed]
 async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) -> Duration {
-    let mut db = open_db(ctx).await;
-    seed_db(&mut db, NUM_KEYS).await;
+    let db = open_db(ctx).await;
+    let db = seed_db(db, NUM_KEYS).await;
 
     let mut rng = TestRng::new(7);
     let a = write_updates::<Db>(db.new_batch(), updates, &mut rng);
@@ -159,10 +159,10 @@ async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) ->
     let c = write_updates::<Db>(b.new_batch(), updates, &mut rng);
     let c = c.merkleize(&db, None).await.unwrap();
 
-    db.apply_batch(a).await.unwrap();
+    let (db, _) = db.apply_batch(a).await.unwrap();
 
     let start = Instant::now();
-    db.apply_batch(c).await.unwrap();
+    let (db, _) = db.apply_batch(c).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -172,8 +172,8 @@ async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) ->
 // 2 uncommitted ancestors: apply C directly without applying A or B.
 #[boxed]
 async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration {
-    let mut db = open_db(ctx).await;
-    seed_db(&mut db, NUM_KEYS).await;
+    let db = open_db(ctx).await;
+    let db = seed_db(db, NUM_KEYS).await;
 
     let mut rng = TestRng::new(7);
     let a = write_updates::<Db>(db.new_batch(), updates, &mut rng);
@@ -189,7 +189,7 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
     drop(b);
 
     let start = Instant::now();
-    db.apply_batch(c).await.unwrap();
+    let (db, _) = db.apply_batch(c).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -197,17 +197,18 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
 }
 
 // Immutable databases are insert-only, so every batch writes fresh keys drawn from `counter`.
-async fn seed_imm_db(db: &mut ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng) {
+#[boxed]
+async fn seed_imm_db(db: ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng) -> ImmDb {
     let mut batch = db.new_batch();
     for _ in 0..keys {
-        let key = Sha256::hash(&counter.to_be_bytes());
+        let key = Sha256::hash(&[&counter.to_be_bytes()]);
         *counter += 1;
         batch = batch.set(key, make_fixed_value(rng));
     }
     let floor = db.inactivity_floor_loc();
-    let batch = batch.merkleize(db, None, floor).await;
-    db.apply_batch(batch).await.unwrap();
-    db.commit().await.unwrap();
+    let batch = batch.merkleize(&db, None, floor).await;
+    let (db, _) = db.apply_batch(batch).await.unwrap();
+    db.commit().await.unwrap()
 }
 
 async fn open_imm_db(ctx: &Context) -> ImmDb {
@@ -218,14 +219,14 @@ async fn open_imm_db(ctx: &Context) -> ImmDb {
 
 #[boxed]
 async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
-    let mut db = open_imm_db(ctx).await;
+    let db = open_imm_db(ctx).await;
     let mut rng = TestRng::new(7);
     let mut counter = 0u64;
-    seed_imm_db(&mut db, NUM_KEYS, &mut counter, &mut rng).await;
+    let db = seed_imm_db(db, NUM_KEYS, &mut counter, &mut rng).await;
 
     let mut batch = db.new_batch();
     for _ in 0..updates {
-        let key = Sha256::hash(&counter.to_be_bytes());
+        let key = Sha256::hash(&[&counter.to_be_bytes()]);
         counter += 1;
         batch = batch.set(key, make_fixed_value(&mut rng));
     }
@@ -233,7 +234,7 @@ async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let batch = batch.merkleize(&db, None, floor).await;
 
     let start = Instant::now();
-    db.apply_batch(batch).await.unwrap();
+    let (db, _) = db.apply_batch(batch).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -242,15 +243,15 @@ async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
 
 #[boxed]
 async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> Duration {
-    let mut db = open_imm_db(ctx).await;
+    let db = open_imm_db(ctx).await;
     let mut rng = TestRng::new(7);
     let mut counter = 0u64;
-    seed_imm_db(&mut db, NUM_KEYS, &mut counter, &mut rng).await;
+    let db = seed_imm_db(db, NUM_KEYS, &mut counter, &mut rng).await;
     let floor = db.inactivity_floor_loc();
 
     let mut parent = db.new_batch();
     for _ in 0..updates {
-        let key = Sha256::hash(&counter.to_be_bytes());
+        let key = Sha256::hash(&[&counter.to_be_bytes()]);
         counter += 1;
         parent = parent.set(key, make_fixed_value(&mut rng));
     }
@@ -258,14 +259,14 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
 
     let mut child = parent.new_batch();
     for _ in 0..updates {
-        let key = Sha256::hash(&counter.to_be_bytes());
+        let key = Sha256::hash(&[&counter.to_be_bytes()]);
         counter += 1;
         child = child.set(key, make_fixed_value(&mut rng));
     }
     let child = child.merkleize(&db, None, floor).await;
 
     let start = Instant::now();
-    db.apply_batch(child).await.unwrap();
+    let (db, _) = db.apply_batch(child).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();

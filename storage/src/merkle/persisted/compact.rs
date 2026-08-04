@@ -11,10 +11,9 @@
 //! reset to a snapshot; after that they are no longer readable.
 
 use crate::merkle::{
-    batch,
+    Error, Family, Location, batch,
     hasher::Hasher,
     mem::{Config as MemConfig, Mem},
-    Error, Family, Location,
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
@@ -133,6 +132,24 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         Arc::make_mut(&mut *self.inner.write()).prune_all();
     }
 
+    /// Hash `element` and append it as a single leaf, mutating in place.
+    ///
+    /// The batch is built under a read lock and applied under a write lock, so the caller
+    /// must have exclusive ownership of the db.
+    pub(crate) fn append_leaf(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        element: &[u8],
+    ) -> Result<(), Error<F>> {
+        let batch = {
+            let inner = self.inner.read();
+            UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
+                .add(hasher, element)
+                .merkleize(&inner, hasher)
+        };
+        Arc::make_mut(&mut *self.inner.write()).apply_batch(&batch)
+    }
+
     /// Return the root digest of the current state.
     pub fn root(
         &self,
@@ -191,7 +208,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold};
+    use crate::merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
 
@@ -225,7 +242,7 @@ mod tests {
         append(&mut merkle, &[b"a", b"b", b"c"]);
         let root = merkle.root(&hasher, 0).unwrap();
         let leaves = merkle.leaves();
-        let pins = pinned_nodes(&merkle);
+        let pinned_nodes = pinned_nodes(&merkle);
 
         // Pruning to the frontier does not change the root.
         merkle.prune_to_frontier();
@@ -234,7 +251,7 @@ mod tests {
         // A fresh tree reset to the snapshot reproduces the same state.
         let mut restored = TestMerkle::<F>::new(Sequential);
         append(&mut restored, &[b"x"]);
-        restored.reset_to(leaves, pins.clone()).unwrap();
+        restored.reset_to(leaves, pinned_nodes.clone()).unwrap();
         assert_eq!(restored.root(&hasher, 0).unwrap(), root);
         assert_eq!(restored.leaves(), leaves);
 
@@ -247,7 +264,8 @@ mod tests {
         );
 
         // from_compact_state builds the same tree as reset_to.
-        let from_state = TestMerkle::<F>::from_compact_state(Sequential, leaves, pins).unwrap();
+        let from_state =
+            TestMerkle::<F>::from_compact_state(Sequential, leaves, pinned_nodes).unwrap();
         assert_eq!(from_state.root(&hasher, 0).unwrap(), root);
     }
 
@@ -267,14 +285,14 @@ mod tests {
         append(&mut merkle, &[b"a", b"b"]);
         let leaves = merkle.leaves();
 
-        // Wrong pin count.
+        // Wrong pinned-node count.
         assert!(matches!(
             merkle.reset_to(leaves, vec![]),
             Err(Error::InvalidPinnedNodes)
         ));
 
         // Leaf count beyond the family maximum.
-        let too_many = Location::new(mmr::Family::MAX_LEAVES.as_u64() + 1);
+        let too_many = mmr::Family::MAX_LEAVES + 1;
         assert!(matches!(
             merkle.reset_to(too_many, vec![]),
             Err(Error::LocationOverflow(loc)) if loc == too_many

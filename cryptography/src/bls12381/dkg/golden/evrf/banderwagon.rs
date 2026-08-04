@@ -37,10 +37,10 @@
 
 pub use crate::banderwagon::{F, G};
 use crate::{
-    banderwagon::{scalar_bits_le, GVar},
-    bls12381::primitives::group::{Scalar, DST},
+    banderwagon::{GVar, scalar_bits_le},
+    bls12381::primitives::group::{DST, Scalar},
     zk::{
-        bulletproofs::circuit::{zkc_to_circuit, zkc_to_circuit_and_witness, Circuit, Witness},
+        bulletproofs::circuit::{Circuit, Witness, zkc_to_circuit, zkc_to_circuit_and_witness},
         circuit::{self as zk, BoolVar, Var},
     },
 };
@@ -213,8 +213,8 @@ mod tests {
     use super::*;
     use crate::{
         bls12381::primitives::group::G1,
-        transcript::Transcript,
-        zk::bulletproofs::circuit::{prove, verify, Setup},
+        transcript::{Transcript, Version},
+        zk::bulletproofs::circuit::{Setup, prove, verify},
     };
     use commonware_macros::test_group;
     use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
@@ -389,7 +389,7 @@ mod tests {
         let setup = Setup::hashed(TEST_DST, lg_len, G1::generator());
         let claim = witness.claim(&setup);
 
-        let mut prover_t = Transcript::new(TEST_DST);
+        let mut prover_t = Transcript::new(TEST_DST, Version::V1);
         let proof = prove(
             &mut rng,
             &mut prover_t,
@@ -401,7 +401,7 @@ mod tests {
         )
         .expect("proving should succeed");
 
-        let mut verifier_t = Transcript::new(TEST_DST);
+        let mut verifier_t = Transcript::new(TEST_DST, Version::V1);
         let verified = setup
             .eval(
                 |vs| {

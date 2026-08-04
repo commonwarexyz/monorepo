@@ -17,7 +17,7 @@ use super::IoBuf;
 use crate::iobuf::pool::{BufferPoolThreadCache, SizeClassLease};
 use bytes::Bytes;
 use std::{
-    alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
+    alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
     mem::ManuallyDrop,
     ops::{Bound, RangeBounds},
     ptr::NonNull,
@@ -830,14 +830,11 @@ impl BufMut<PooledBacking> {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::{
-            cache_line_size, page_size, pool::BufferPoolThreadCacheConfig, BufferPool,
-            BufferPoolConfig,
-        },
+        iobuf::{BufferPool, BufferPoolConfig, cache_line_size, page_size},
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
-    use commonware_utils::{NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize};
     use std::ops::Bound;
 
     fn test_pool(config: BufferPoolConfig) -> BufferPool {
@@ -846,16 +843,14 @@ mod tests {
     }
 
     fn test_config(min_size: usize, max_size: usize, max_per_class: u32) -> BufferPoolConfig {
-        BufferPoolConfig {
-            pool_min_size: 0,
-            min_size: NZUsize!(min_size),
-            max_size: NZUsize!(max_size),
-            max_per_class: NZU32!(max_per_class),
-            parallelism: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
-            prefill: false,
-            alignment: NZUsize!(page_size()),
-        }
+        BufferPoolConfig::for_network()
+            .with_pool_min_size(0)
+            .with_size_class_range(
+                NZUsize!(min_size),
+                NZUsize!(max_size),
+                NZU32!(max_per_class),
+            )
+            .with_alignment(NZUsize!(page_size()))
     }
 
     #[test]
