@@ -302,16 +302,23 @@ where
     phase: CommitmentPhase<B, C, H, P>,
 }
 
+/// Whether a commitment already has an owned lifecycle record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommitmentPresence {
+    /// No record exists for the commitment.
     Absent,
+    /// The commitment is accumulating or validating shards.
     Reconstructing,
+    /// The commitment has an available block.
     Cached,
 }
 
+/// Why a commitment is eligible for retirement.
 #[derive(Clone, Copy)]
 enum RetirementReason {
+    /// Durable progress explicitly retired the commitment.
     Exact,
+    /// The commitment's last observation is covered by the durable round floor.
     Floor,
 }
 
@@ -322,6 +329,7 @@ where
     H: Hasher,
     P: PublicKey,
 {
+    /// Creates a record that is reconstructing a commitment observed at `round`.
     const fn reconstructing(round: Round, reconstruction: ReconstructionState<P, C, H>) -> Self {
         Self {
             round,
@@ -329,6 +337,7 @@ where
         }
     }
 
+    /// Creates a record for a block already available at `round`.
     const fn cached(round: Round, block: Arc<CodedBlock<B, C, H>>) -> Self {
         Self {
             round,
@@ -339,10 +348,12 @@ where
         }
     }
 
+    /// Returns the latest valid observation round.
     const fn round(&self) -> Round {
         self.round
     }
 
+    /// Ensures that `round` uses the epoch that owns this commitment record.
     fn validate_epoch(&self, round: Round) -> Result<(), Epoch> {
         let existing_epoch = self.round.epoch();
         if existing_epoch != round.epoch() {
@@ -351,12 +362,14 @@ where
         Ok(())
     }
 
+    /// Records a same-epoch observation without moving the retention round backward.
     fn observe(&mut self, round: Round) -> Result<(), Epoch> {
         self.validate_epoch(round)?;
         self.round = self.round.max(round);
         Ok(())
     }
 
+    /// Returns the cached block, if available.
     const fn block(&self) -> Option<&Arc<CodedBlock<B, C, H>>> {
         match &self.phase {
             CommitmentPhase::Reconstructing(_) => None,
@@ -364,6 +377,7 @@ where
         }
     }
 
+    /// Returns shard reconstruction state retained for the commitment, if any.
     const fn reconstruction(&self) -> Option<&ReconstructionState<P, C, H>> {
         match &self.phase {
             CommitmentPhase::Reconstructing(reconstruction) => Some(reconstruction),
@@ -371,6 +385,7 @@ where
         }
     }
 
+    /// Returns mutable shard reconstruction state retained for the commitment, if any.
     const fn reconstruction_mut(&mut self) -> Option<&mut ReconstructionState<P, C, H>> {
         match &mut self.phase {
             CommitmentPhase::Reconstructing(reconstruction) => Some(reconstruction),
@@ -378,6 +393,9 @@ where
         }
     }
 
+    /// Caches `block` while preserving reconstruction state needed for shard readiness.
+    ///
+    /// If a block is already cached, retains and returns the existing instance.
     fn install_block(&mut self, block: Arc<CodedBlock<B, C, H>>) -> Arc<CodedBlock<B, C, H>> {
         let previous = std::mem::replace(
             &mut self.phase,
