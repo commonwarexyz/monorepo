@@ -211,7 +211,11 @@ impl<S: crate::Storage> crate::Blob for Blob<S> {
             if state.map.len() + missing.len() > super::format::MAX_MAPPED_SLOTS {
                 return Err(Error::OffsetOverflow);
             }
-            let chunks = shared.allocator.lock().allocate(missing.len());
+            let chunks = if missing.is_empty() {
+                Vec::new()
+            } else {
+                shared.allocator.lock().allocate(missing.len())
+            };
             for (&slot, &chunk) in missing.iter().zip(&chunks) {
                 state.map.insert(slot, chunk);
                 state.staged_mappings.push((slot, chunk));

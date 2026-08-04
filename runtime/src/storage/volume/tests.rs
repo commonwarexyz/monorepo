@@ -935,6 +935,119 @@ async fn test_rejects_unjournalable_inputs() {
     assert_eq!(blob.read_at(0, 2).await.unwrap().coalesce().as_ref(), b"ok");
 }
 
+/// Head-to-head timings on the paths the volume exists for, against the plain per-file
+/// backend on real files. Run explicitly:
+/// `cargo test -p commonware-runtime --release --lib storage::volume::tests::bench -- --ignored --nocapture`
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
+mod bench {
+    use super::*;
+    use crate::{
+        BufferPool, BufferPoolConfig,
+        storage::tokio::{Config as TokioConfig, Storage as TokioStorage},
+        telemetry::metrics::Registry,
+    };
+    use std::time::Instant;
+
+    fn tokio_storage() -> (TokioStorage, std::path::PathBuf) {
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let dir = std::env::temp_dir().join(format!(
+            "volume_bench_{}_{}",
+            std::process::id(),
+            rand::RngExt::random::<u64>(&mut commonware_utils::sys_rng())
+        ));
+        (
+            TokioStorage::new(TokioConfig::new(dir.clone(), 2 << 20), pool),
+            dir,
+        )
+    }
+
+    async fn create_churn<S: crate::Storage>(storage: &S, partition: &str) -> f64 {
+        let start = Instant::now();
+        for i in 0..200u32 {
+            let (blob, _) = storage.open(partition, &i.to_be_bytes()).await.unwrap();
+            blob.write_at(0, vec![0x55; 1024], WriteOptions::default())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+        }
+        start.elapsed().as_secs_f64()
+    }
+
+    async fn group_sync<S: crate::Storage>(storage: &S, partition: &str) -> f64 {
+        let mut blobs = Vec::new();
+        for i in 0..16u32 {
+            let (blob, _) = storage.open(partition, &i.to_be_bytes()).await.unwrap();
+            blobs.push(blob);
+        }
+        let start = Instant::now();
+        for round in 0..50u64 {
+            for blob in &blobs {
+                blob.write_at(round * 4096, vec![0x66; 4096], WriteOptions::default())
+                    .await
+                    .unwrap();
+            }
+            futures::future::join_all(blobs.iter().map(|blob| blob.sync()))
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+        }
+        start.elapsed().as_secs_f64()
+    }
+
+    async fn append_sync<S: crate::Storage>(storage: &S, partition: &str) -> f64 {
+        let (blob, _) = storage.open(partition, b"log").await.unwrap();
+        let start = Instant::now();
+        for round in 0..200u64 {
+            blob.write_at(round * 1024, vec![0x77; 1024], WriteOptions::default())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+        }
+        start.elapsed().as_secs_f64()
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn compare_backends() {
+        let (inner, dir) = tokio_storage();
+        let tasks = Tasks::default();
+        let volume = Storage::new(inner.clone(), tasks.spawn(), Config::default());
+
+        // (name, per-file seconds, volume seconds, operations)
+        let mut rows = Vec::new();
+        rows.push((
+            "create+write+sync x200",
+            create_churn(&inner, "churn-file").await,
+            create_churn(&volume, "churn-vol").await,
+            200.0,
+        ));
+        rows.push((
+            "16-wide sync x50",
+            group_sync(&inner, "group-file").await,
+            group_sync(&volume, "group-vol").await,
+            50.0,
+        ));
+        rows.push((
+            "append+sync x200",
+            append_sync(&inner, "log-file").await,
+            append_sync(&volume, "log-vol").await,
+            200.0,
+        ));
+
+        for (name, file, volume, ops) in rows {
+            eprintln!(
+                "{name}: per-file {:.1} ms/op, volume {:.1} ms/op ({:.2}x)",
+                file * 1000.0 / ops,
+                volume * 1000.0 / ops,
+                file / volume,
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 mod suite {
     use super::*;
     use crate::{
