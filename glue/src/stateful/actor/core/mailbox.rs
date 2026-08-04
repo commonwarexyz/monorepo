@@ -78,7 +78,7 @@ where
     /// A request to verify a block.
     Verify {
         span: Span,
-        context: (E, A::Context),
+        context: A::Context,
         ancestry: BoxedAncestry<A::Block>,
         verification: Verification,
     },
@@ -280,12 +280,13 @@ where
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         // Actor availability cannot override the application's decision.
+        let (_, context) = context;
         let (response, receiver) = oneshot::channel();
         let superseded = self.verifications.begin();
         let span = info_span!(
             "stateful.mailbox.verify",
-            epoch = context.1.epoch().traced(),
-            view = context.1.view().traced()
+            epoch = context.epoch().traced(),
+            view = context.view().traced()
         );
         let _ = self.sender.enqueue(Message::Verify {
             span,

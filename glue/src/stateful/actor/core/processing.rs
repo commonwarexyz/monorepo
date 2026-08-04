@@ -68,7 +68,7 @@ where
     pub(super) processor: Processor<E, A>,
 
     /// Verify requests collected before the processor became available.
-    pub(super) initial_verifications: Vec<VerificationRequest<E, A>>,
+    pub(super) initial_verifications: Vec<VerificationRequest<A::Context, A::Block>>,
 
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
@@ -778,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn verification_preserves_request_attributes() {
+    fn verification_uses_stateful_attributes_and_consensus_round() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (gate, started, release) = application_gate();
             let observed_contexts = Arc::new(Mutex::new(Vec::new()));
@@ -788,17 +788,23 @@ mod tests {
                 verify_valid: true,
                 observed_contexts: observed_contexts.clone(),
             };
+            let stateful_context = context
+                .child("stateful")
+                .with_attribute("owner", "stateful");
             let (mut mailbox, _marshal, actor) =
-                spawn_gated_application(&context, "verify-attributes", app).await;
+                spawn_gated_application(&stateful_context, "verify-attributes", app).await;
 
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
+            let block_context = block.context();
+            let expected_round = block_context.round.to_string();
             let request_context = context
                 .child("request")
                 .with_attribute("round", "request-round")
+                .with_attribute("owner", "request")
                 .with_attribute("shard", 4);
             let mut verify = Box::pin(mailbox.verify(
-                (request_context, block.context()),
+                (request_context, block_context),
                 ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -810,8 +816,8 @@ mod tests {
                 assert_eq!(
                     observed[0].attributes,
                     vec![
-                        ("round".to_string(), "request-round".to_string()),
-                        ("shard".to_string(), "4".to_string()),
+                        ("owner".to_string(), "stateful".to_string()),
+                        ("round".to_string(), expected_round),
                     ]
                 );
             }

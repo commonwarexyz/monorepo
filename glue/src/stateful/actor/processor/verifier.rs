@@ -75,7 +75,7 @@ where
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
-        (runtime_context, consensus_context): (E, A::Context),
+        consensus_context: A::Context,
         ancestry: impl Ancestry<A::Block>,
         progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
@@ -145,7 +145,8 @@ where
         progress.verifying(block_digest, parent.digest, consensus_context.round());
         let result = self
             .verify_with_application(
-                (runtime_context, consensus_context),
+                context,
+                consensus_context,
                 block,
                 parent,
                 ancestry,
@@ -287,7 +288,8 @@ where
 
     async fn verify_with_application(
         &mut self,
-        (runtime_context, consensus_context): (E, A::Context),
+        context: &E,
+        consensus_context: A::Context,
         block: Arc<A::Block>,
         parent: PreparedParent<A, E>,
         ancestry: impl Ancestry<A::Block>,
@@ -303,7 +305,7 @@ where
             verification,
             self.app.verify(
                 (
-                    runtime_context.child("verify_attempt"),
+                    context.child("application").child("verify_attempt"),
                     consensus_context.clone(),
                 ),
                 ancestry,

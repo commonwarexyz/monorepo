@@ -49,10 +49,6 @@ impl Supervisor for DummyMetrics {
         Self
     }
 
-    fn with_attributes_from(self, _: &Self) -> Self {
-        Self
-    }
-
     fn name(&self) -> Name {
         Name::default()
     }

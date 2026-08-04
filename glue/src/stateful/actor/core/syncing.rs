@@ -28,8 +28,6 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::{Instrument as _, debug, error, info_span};
 
-type HeldVerifyRequest<E, A> = VerificationRequest<E, A>;
-
 /// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
     Covered(B, Deferred),
@@ -77,7 +75,7 @@ where
     pub(super) syncer: syncer::Mailbox<E, A>,
 
     /// Verify requests held while syncing.
-    pub(super) held_verify_requests: Vec<HeldVerifyRequest<E, A>>,
+    pub(super) held_verify_requests: Vec<VerificationRequest<A::Context, A::Block>>,
 
     /// Open subscriptions to the synced databases.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
