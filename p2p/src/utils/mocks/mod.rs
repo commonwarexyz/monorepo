@@ -26,6 +26,10 @@ impl Supervisor for Metrics {
     fn with_attribute(self, _key: &'static str, _value: impl std::fmt::Display) -> Self {
         self
     }
+
+    fn with_attributes_from(self, _source: &Self) -> Self {
+        self
+    }
 }
 
 impl RuntimeMetrics for Metrics {

@@ -261,12 +261,7 @@ stability_scope!(BETA {
         /// Existing attributes with the same key are replaced. The context's
         /// label and supervision-tree position remain unchanged.
         #[must_use]
-        fn with_attributes_from(self, _source: &Self) -> Self
-        where
-            Self: Sized,
-        {
-            self
-        }
+        fn with_attributes_from(self, source: &Self) -> Self;
     }
 
     /// Interface that any task scheduler must implement to spawn tasks.
