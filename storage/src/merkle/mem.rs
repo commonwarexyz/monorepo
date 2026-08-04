@@ -401,7 +401,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
         if self.size() < batch.ancestor_base_size {
             return Err(Error::AncestorDropped {
-                expected: batch.ancestor_base_size,
+                expected: batch.size(),
                 actual: self.size(),
             });
         }
@@ -1134,7 +1134,10 @@ mod tests {
 
         let result = mem.apply_batch(&c);
         assert!(
-            matches!(result, Err(Error::AncestorDropped { .. })),
+            matches!(
+                result,
+                Err(Error::AncestorDropped { expected, .. }) if expected == c.size()
+            ),
             "expected AncestorDropped, got {result:?}"
         );
     }

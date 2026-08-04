@@ -554,8 +554,8 @@ where
         let committed_leaves = self.journal.bounds().end;
         if committed_leaves < batch.ancestor_base_leaves {
             return Err(merkle::Error::AncestorDropped {
-                expected: Position::<F>::try_from(Location::new(batch.ancestor_base_leaves))?,
-                actual: Position::<F>::try_from(Location::new(committed_leaves))?,
+                expected: batch.inner.size(),
+                actual: merkle_size,
             }
             .into());
         }
@@ -3475,7 +3475,8 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(super::Error::Merkle(merkle::Error::AncestorDropped { .. }))
+                Err(super::Error::Merkle(merkle::Error::AncestorDropped { expected, .. }))
+                    if expected == c.inner.size()
             ),
             "expected AncestorDropped, got {result:?}"
         );
