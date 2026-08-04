@@ -83,6 +83,8 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 /// Sends arbitrary bytes over one registered channel.
 ///
 /// The channel's quota is shared across clones and enforced independently for each recipient.
+/// All registered channels share one outbound router mailbox. A channel's configured backlog adds
+/// to that mailbox's capacity but does not reserve capacity exclusively for the channel.
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
 }
@@ -190,12 +192,8 @@ impl<P: PublicKey> Channels<P> {
     }
 
     pub(super) fn outbound_mailbox_size(&self, base: NonZeroUsize) -> NonZeroUsize {
-        NonZeroUsize::new(
-            base.get()
-                .checked_add(self.outbound_backlog)
-                .expect("router mailbox capacity overflow"),
-        )
-        .unwrap()
+        base.checked_add(self.outbound_backlog)
+            .expect("router mailbox capacity overflow")
     }
 
     pub(super) fn bind(&self, mailbox: super::router::Mailbox<P>) {
@@ -293,6 +291,18 @@ mod tests {
                 .unwrap()
                 .send(IoBuf::from(b"overflow"), false);
             assert_eq!(feedback, Unreliable::Rejected);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "router mailbox capacity overflow")]
+    fn outbound_mailbox_size_panics_on_overflow() {
+        deterministic::Runner::default().start(|context| async move {
+            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let mut channels = Channels::<PublicKey>::new(messenger, 1024);
+            channels.outbound_backlog = 1;
+
+            channels.outbound_mailbox_size(NonZeroUsize::new(usize::MAX).unwrap());
         });
     }
 

@@ -101,13 +101,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
-    /// * `backlog` - Capacity of the channel's single bounded inbound mailbox.
+    /// * `backlog` - Capacity of the channel's bounded inbound mailbox and its contribution to the
+    ///   shared outbound router mailbox.
     ///
     /// # Backpressure
     ///
-    /// All peer connections share the inbound mailbox. Enqueueing never waits for capacity. When
-    /// the mailbox is full, the arriving message is dropped and queued messages remain. There is no
-    /// per-peer reservation or fairness.
+    /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for
+    /// capacity. When the mailbox is full, the arriving message is dropped and queued messages
+    /// remain. There is no per-peer reservation or fairness.
     ///
     /// A synchronized burst can contribute up to `rate.burst_size()` messages per connected peer.
     /// To absorb one full burst from every peer, use
@@ -116,8 +117,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// account for expected receiver stalls and ensure its drain rate can sustain aggregate ingress.
     /// No finite backlog can absorb sustained ingress above the drain rate.
     ///
-    /// The queued payloads can consume roughly `backlog * max_message_size` bytes, in addition to
-    /// queue and allocator overhead.
+    /// Outbound send invocations from all channels share one router mailbox. When the network
+    /// starts, its capacity is [`Config::mailbox_size`] plus the sum of all registered backlogs.
+    /// This capacity is pooled rather than reserved per channel, and each send uses one slot
+    /// regardless of its number of recipients.
+    ///
+    /// For memory budgeting, the inbound queue can retain roughly `backlog * max_message_size`
+    /// bytes, and this backlog also adds the same number of slots to the shared outbound queue, in
+    /// addition to queue and allocator overhead.
     ///
     /// # Returns
     ///
@@ -144,6 +151,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
+    /// Registered senders are bound to the outbound router during this call; submissions made
+    /// before it return [`Feedback::Closed`](commonware_actor::Feedback::Closed).
     pub fn start(mut self) -> Handle<()> {
         let (router, router_mailbox, _) = router::Actor::new(
             self.context.child("router"),

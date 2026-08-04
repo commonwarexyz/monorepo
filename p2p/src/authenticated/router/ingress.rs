@@ -176,12 +176,13 @@ impl<P: PublicKey> Messenger<P> {
         message: IoBufs,
         priority: bool,
     ) -> Unreliable<Feedback> {
-        // Encode the data frame once for all recipients
-        let encoded = EncodedData::new(&self.pool, channel, message);
-
         let Some(mailbox) = self.state.mailbox.get() else {
             return Unreliable::new(Feedback::Closed);
         };
+
+        // Encode the data frame once for all recipients
+        let encoded = EncodedData::new(&self.pool, channel, message);
+
         mailbox.0.enqueue(Message::Content {
             recipients,
             encoded,
