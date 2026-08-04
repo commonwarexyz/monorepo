@@ -7,7 +7,7 @@ use crate::{
     Block,
     marshal::{
         ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, Mailbox, Variant},
+        core::{Buffer, CommitmentFallback, Mailbox, RetentionUpdate, Variant},
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
@@ -110,7 +110,7 @@ where
         self.subscribe_by_digest(commitment)
     }
 
-    fn finalized(&self, _round: Round, _commitments: Vec<B::Digest>) {
+    fn retire(&self, _update: RetentionUpdate<B::Digest>) {
         // Standard's cache is already bounded and evicted per authenticated sender.
     }
 

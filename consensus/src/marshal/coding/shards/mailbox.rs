@@ -2,7 +2,7 @@
 
 use crate::{
     CertifiableBlock,
-    marshal::coding::types::CodedBlock,
+    marshal::{coding::types::CodedBlock, core::RetentionUpdate},
     types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -96,11 +96,9 @@ where
     },
     /// A request to retire cached blocks and reconstruction state after durable application
     /// progress.
-    Prune {
-        /// The inclusive observation-round retirement floor.
-        round: Round,
-        /// Commitments to retire regardless of observation round.
-        commitments: Vec<Commitment>,
+    Retire {
+        /// The atomic retention update.
+        update: RetentionUpdate<Commitment>,
     },
 }
 
@@ -122,7 +120,7 @@ where
             Self::Proposed { .. }
             | Self::Discovered { .. }
             | Self::Notarized { .. }
-            | Self::Prune { .. } => false,
+            | Self::Retire { .. } => false,
         }
     }
 }
@@ -256,6 +254,9 @@ where
 
     /// Inform the engine that a [`Commitment`] was notarized.
     ///
+    /// `round` MUST come from a trusted consensus observation, and its epoch
+    /// MUST be validated for `commitment`.
+    ///
     /// This is the leaderless reconstruction signal used by certification. It
     /// lets the engine drain sender-indexed gossip shards from its peer buffers
     /// for the commitment. Leader-specific validation and assigned shard
@@ -334,14 +335,14 @@ where
 
     /// Retire cached blocks and reconstruction state after durable application progress.
     ///
-    /// Entries last observed at or before `round` are eligible for retirement.
-    /// Entries matching `commitments` are eligible regardless of observation round.
+    /// Entries last observed at or before [`RetentionUpdate::round_floor`] are eligible for
+    /// retirement. Entries in [`RetentionUpdate::exact_retirements`] are eligible regardless of
+    /// observation round.
     ///
     /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
-    /// close only for entries named in `commitments`; other block subscriptions remain open for
-    /// local ingress. Digest subscriptions remain open, and later consensus notifications may
-    /// recreate state.
-    pub fn prune(&self, round: Round, commitments: Vec<Commitment>) {
-        let _ = self.sender.enqueue(Message::Prune { round, commitments });
+    /// close only for exact retirements; other block subscriptions remain open for local ingress.
+    /// Digest subscriptions remain open, and later consensus notifications may recreate state.
+    pub fn retire(&self, update: RetentionUpdate<Commitment>) {
+        let _ = self.sender.enqueue(Message::Retire { update });
     }
 }

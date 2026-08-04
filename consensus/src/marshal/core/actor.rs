@@ -1,5 +1,5 @@
 use super::{
-    Buffer, Variant,
+    Buffer, RetentionUpdate, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
@@ -576,7 +576,10 @@ where
 
         // The round is an inclusive floor; retire every exact commitment even if sparse
         // certificates leave it above that floor.
-        buffer.finalized(processed_round, processed_commitments);
+        buffer.retire(RetentionUpdate {
+            round_floor: processed_round,
+            exact_retirements: processed_commitments,
+        });
 
         // Refill the application dispatch pipeline.
         self.try_dispatch_blocks(application).await
@@ -1309,7 +1312,10 @@ where
                 .update_processed_round_floor(height, finalization.round(), resolver)
                 .await;
             let commitments = self.take_superseded_ack_commitments();
-            buffer.finalized(self.floor.round(), commitments);
+            buffer.retire(RetentionUpdate {
+                round_floor: self.floor.round(),
+                exact_retirements: commitments,
+            });
             let repaired;
             (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
             if repaired {
@@ -1363,7 +1369,10 @@ where
         // The active floor retires round-bound entries and every commitment whose
         // acknowledgement it superseded.
         let commitments = self.take_superseded_ack_commitments();
-        buffer.finalized(self.floor.round(), commitments);
+        buffer.retire(RetentionUpdate {
+            round_floor: self.floor.round(),
+            exact_retirements: commitments,
+        });
 
         // The floor is durable, so cache/finalized data below it can be pruned.
         self = self.prune_after_floor(height).await;
