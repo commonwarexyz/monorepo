@@ -416,6 +416,13 @@ impl Executor {
         now
     }
 
+    /// Ensure the runtime has not reached its configured deadline.
+    fn assert_deadline(&self, current: SystemTime) {
+        if self.deadline.is_some_and(|deadline| current >= deadline) {
+            panic!("runtime timeout");
+        }
+    }
+
     /// When idle, jump directly to the next actionable time.
     ///
     /// When built with the `external` feature, never skip ahead (to ensure we poll all pending tasks
@@ -457,36 +464,25 @@ impl Executor {
         }
     }
 
-    /// Wake sleepers until a task is ready or no alarms remain.
+    /// Wake sleepers until the runtime can make progress.
     ///
     /// Canceling a polled sleep leaves its alarm registered until its deadline. If that alarm
     /// wakes no task, continue to later deadlines before deciding the runtime has stalled.
-    fn wake_until_ready_or_empty(&self, mut current: SystemTime) {
+    ///
+    /// When built with the `external` feature, the passage of time is sufficient to continue.
+    fn wake_until_progress(&self, mut current: SystemTime) {
         loop {
             current = self.skip_idle_time(current);
-            if self.deadline.is_some_and(|deadline| current >= deadline) {
-                panic!("runtime timeout");
-            }
+            self.assert_deadline(current);
             self.wake_ready_sleepers(current);
 
-            if cfg!(feature = "external")
-                || self.tasks.ready() != 0
-                || self.sleeping.lock().is_empty()
-            {
+            if cfg!(feature = "external") || self.tasks.ready() != 0 {
                 return;
             }
+            if self.sleeping.lock().is_empty() {
+                panic!("runtime stalled");
+            }
         }
-    }
-
-    /// Ensure the runtime is making progress.
-    ///
-    /// When built with the `external` feature, always poll pending tasks after the passage of time.
-    fn assert_liveness(&self) {
-        if cfg!(feature = "external") || self.tasks.ready() != 0 {
-            return;
-        }
-
-        panic!("runtime stalled");
     }
 }
 
@@ -591,15 +587,8 @@ impl Runner {
         let result = catch_unwind(AssertUnwindSafe(|| {
             loop {
                 // Ensure we have not exceeded our deadline
-                {
-                    let current = executor.time.lock();
-                    if let Some(deadline) = executor.deadline
-                        && *current >= deadline
-                    {
-                        drop(current);
-                        panic!("runtime timeout");
-                    }
-                }
+                let current = *executor.time.lock();
+                executor.assert_deadline(current);
 
                 // Drain all ready tasks
                 let mut queue = executor.tasks.drain();
@@ -685,10 +674,9 @@ impl Runner {
                     break output;
                 }
 
-                // Advance time and wake sleepers until a task is ready or no alarms remain
+                // Advance time and wake sleepers until the runtime can make progress
                 let current = executor.advance_time();
-                executor.wake_until_ready_or_empty(current);
-                executor.assert_liveness();
+                executor.wake_until_progress(current);
 
                 // Record that we completed another iteration of the event loop.
                 executor.metrics.iterations.inc();
