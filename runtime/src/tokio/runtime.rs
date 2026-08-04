@@ -8,6 +8,15 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "volume-storage")]
 use crate::storage::volume::{Config as VolumeStorageConfig, Storage as VolumeStorage};
+#[cfg(feature = "wal-storage")]
+use crate::storage::wal::{Config as WalStorageConfig, Fs as WalFs, Storage as WalStorage};
+
+#[cfg(all(feature = "wal-storage", feature = "volume-storage"))]
+compile_error!("wal-storage and volume-storage are mutually exclusive");
+#[cfg(all(feature = "wal-storage", feature = "iouring-storage"))]
+compile_error!("wal-storage performs its own file I/O and excludes iouring-storage");
+#[cfg(all(feature = "wal-storage", not(unix)))]
+compile_error!("wal-storage requires unix");
 use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
     Spawner as _, StreamOf, Supervisor as _, child_label,
@@ -442,7 +451,25 @@ impl crate::Runner for Runner {
             }
         }
         cfg_if::cfg_if! {
-            if #[cfg(feature = "volume-storage")] {
+            if #[cfg(feature = "wal-storage")] {
+                // The WAL backend performs its own file I/O; the per-file backend
+                // constructed above goes unused.
+                let _ = inner_storage;
+                let spawner = runtime.handle().clone();
+                let mut creation_seed = [0u8; 16];
+                sys_rng().fill_bytes(&mut creation_seed);
+                let storage = MeteredStorage::new(
+                    WalStorage::new(
+                        WalFs::new(self.cfg.storage_directory.clone())
+                            .expect("storage directory is usable"),
+                        std::sync::Arc::new(move |future| {
+                            spawner.spawn(future);
+                        }),
+                        WalStorageConfig { creation_seed },
+                    ),
+                    &mut runtime_registry,
+                );
+            } else if #[cfg(feature = "volume-storage")] {
                 let spawner = runtime.handle().clone();
                 let storage = MeteredStorage::new(
                     VolumeStorage::new(
@@ -539,11 +566,14 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
         type InnerStorage = IoUringStorage;
     } else {
+        #[cfg_attr(feature = "wal-storage", allow(dead_code))]
         type InnerStorage = TokioStorage;
     }
 }
 cfg_if::cfg_if! {
-    if #[cfg(feature = "volume-storage")] {
+    if #[cfg(feature = "wal-storage")] {
+        type Storage = MeteredStorage<WalStorage<WalFs>>;
+    } else if #[cfg(feature = "volume-storage")] {
         type Storage = MeteredStorage<VolumeStorage<InnerStorage>>;
     } else {
         type Storage = MeteredStorage<InnerStorage>;

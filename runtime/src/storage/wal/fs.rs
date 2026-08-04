@@ -6,18 +6,43 @@ use crate::{Error, IoBufs};
 use std::{fs, io, os::unix::fs::FileExt as _, path::PathBuf, sync::Arc};
 use tokio::task;
 
-/// A [Medium] over a real filesystem rooted at one directory.
+/// A [Medium] over a real filesystem rooted at one directory. Holds an exclusive
+/// advisory lock on the directory for its lifetime: two processes sharing one storage
+/// directory would race each other's WALs.
 #[derive(Clone)]
 pub struct Fs {
     root: Arc<PathBuf>,
+    /// Keeps the flock held until the last clone drops.
+    _lock: Arc<fs::File>,
 }
 
 impl Fs {
-    /// Uses `root` (created if absent) as the storage directory.
+    /// Uses `root` (created if absent) as the storage directory, taking its lock.
     pub fn new(root: PathBuf) -> Result<Self, Error> {
         fs::create_dir_all(&root).map_err(map_io)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(".wal.lock"))
+            .map_err(map_io)?;
+        // SAFETY: `lock` owns a valid fd that outlives the call; `flock` takes only
+        // that fd, performs no memory access, and returns -1 on error.
+        let held = unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&lock),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        } == 0;
+        if !held {
+            return Err(map_io(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "storage directory is locked by another process",
+            )));
+        }
         Ok(Self {
             root: Arc::new(root),
+            _lock: Arc::new(lock),
         })
     }
 

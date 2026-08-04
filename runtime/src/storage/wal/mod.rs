@@ -547,6 +547,66 @@ impl<M: Medium> Storage<M> {
         }
     }
 
+    /// Extracts a partition from WAL management, the inverse of adoption: every
+    /// atomic row's overlay is materialized into its file and the file clamped to
+    /// the committed length (so the file alone is the whole truth), then the WAL is
+    /// durably deleted. The files stand alone afterwards, readable by the per-file
+    /// backends; reopening the partition through this backend re-adopts them as
+    /// ordinary blobs (atomicity is a property of WAL management, not of files;
+    /// promote to restore it).
+    ///
+    /// Nothing may operate on the partition concurrently.
+    pub async fn extract(&self, partition: &str) -> Result<(), crate::Error> {
+        super::validate_partition_name(partition)?;
+        let Some(committer) = self.family(partition, false).await? else {
+            return Err(crate::Error::PartitionMissing(partition.to_string()));
+        };
+        // Exclude new operations; in-flight ones were the caller's to drain.
+        self.families.lock().remove(partition);
+
+        let rows: Vec<(Vec<u8>, catalog::Row)> = committer.shared().read(|catalog| {
+            catalog
+                .scan(partition)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|name| {
+                    catalog
+                        .get(partition, &name)
+                        .cloned()
+                        .map(|row| (name, row))
+                })
+                .collect()
+        });
+        for (name, row) in rows {
+            let Kind::Atomic {
+                committed,
+                trusted,
+                overlay,
+            } = row.kind
+            else {
+                continue;
+            };
+            let filename = hex(&name);
+            let (file, data_offset) = self
+                .open_atomic_file(partition, &name, &filename, row.version, trusted)
+                .await?;
+            if !overlay.is_empty() {
+                file.write_at(data_offset + trusted, overlay).await?;
+            }
+            // Rewound blobs may have dead bytes past the committed length; the
+            // per-file backends would surface them, so clamp.
+            file.set_len(data_offset + committed).await?;
+            file.sync().await?;
+        }
+        self.medium.sync_dir(partition).await?;
+
+        self.medium
+            .remove(WAL_DIR, &Self::wal_name(partition))
+            .await?;
+        self.medium.sync_dir(WAL_DIR).await?;
+        Ok(())
+    }
+
     /// Promotes an ordinary blob to atomic, adopting its current content as the
     /// committed (and trusted) state. The file and its dentry chain are barriered
     /// before the record asserting them is journaled (rule M). Ordinary handles
@@ -821,6 +881,42 @@ mod tests {
         assert_eq!(size, 100);
         let bytes = blob.read_at(0, 100).await.unwrap().coalesce();
         assert_eq!(bytes.as_ref(), &[1u8; 100][..]);
+    }
+
+    /// Extraction materializes overlays and clamps rewound files, so atomic content
+    /// survives WAL deletion; re-adoption then reproduces it exactly.
+    #[tokio::test]
+    async fn extraction_materializes_atomic_state() {
+        let sim = Sim::new(11);
+        let storage = wal_storage(&sim);
+        let (blob, _, _) = storage
+            .open_atomic_versioned("p", b"a", 0..=0)
+            .await
+            .unwrap();
+        // Bulk base, rewind (file now longer than committed), inline tail (bytes
+        // only in the WAL): extraction must handle all three shapes.
+        blob.append(vec![0xAA; 100 << 10]).unwrap();
+        blob.publish().await.unwrap();
+        blob.rewind(1000).unwrap();
+        blob.append(vec![0xBB; 100]).unwrap();
+        blob.publish().await.unwrap();
+        storage.extract("p").await.unwrap();
+
+        // Re-adopt: the file alone carries the committed state, as an ordinary
+        // blob (atomicity is a property of WAL management, not of the file; promote
+        // to get it back).
+        let storage = wal_storage(&sim);
+        let (blob, size) = storage.open("p", b"a").await.unwrap();
+        assert_eq!(size, 1100);
+        let bytes = blob.read_at(990, 20).await.unwrap().coalesce();
+        assert_eq!(&bytes.as_ref()[..10], &[0xAA; 10][..]);
+        assert_eq!(&bytes.as_ref()[10..], &[0xBB; 10][..]);
+        storage.promote("p", b"a").await.unwrap();
+        let (_, committed, _) = storage
+            .open_atomic_versioned("p", b"a", 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(committed, 1100);
     }
 
     /// The plan's centerpiece scenario: rewind below the trusted length, then
