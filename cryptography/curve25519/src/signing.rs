@@ -4,7 +4,7 @@ mod error;
 mod msm;
 mod scalar;
 
-use crate::simplified::{Backend, GAffine, GAffineVec, LANES, WithBackend, with_backend};
+use crate::simplified::{Backend, GAffine, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::Strategy;
@@ -38,8 +38,7 @@ commonware_macros::stability_scope!(ALPHA {
         /// non-canonical `y` encodings (`y >= p`) are accepted; only encodings with no
         /// corresponding curve point are rejected.
         pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, Error> {
-            let point = with_backend(DecompressPoint(bytes))
-                .ok_or(Error::InvalidVerificationKey)?;
+            let point = GAffine::decompress(&bytes).ok_or(Error::InvalidVerificationKey)?;
             Ok(Self { bytes, point })
         }
 
@@ -54,34 +53,24 @@ commonware_macros::stability_scope!(ALPHA {
         /// (rather than the cofactorless `sB = kA + R`), so this agrees with [`verify_batch`] on
         /// every input, including small-order `A`/`R` components.
         pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), Error> {
-            with_backend(VerifyOne {
-                key: self,
-                message,
-                signature,
-            })
+            self.verify_with(message, signature)
         }
 
-        fn verify_with<B: Backend>(
+        fn verify_with(
             &self,
-            backend: B,
             message: &[u8],
             signature: &Signature,
         ) -> Result<(), Error> {
             let s = Scalar::from_canonical_bytes(&signature.s).ok_or(Error::NonCanonicalScalar)?;
-            let r = GAffine::decompress(backend, &signature.r).ok_or(Error::InvalidSignature)?;
+            let r = GAffine::decompress(&signature.r).ok_or(Error::InvalidSignature)?;
 
             let digest = sha512(&[&signature.r, &self.bytes, message]);
             let k = Scalar::from_bytes_mod_order_wide(&digest);
 
-            let sb = GAffineVec::splat(GAffine::BASEPOINT)
-                .to_extended(backend)
-                .scalar_mul(backend, s.bits_be());
-            let ka = GAffineVec::splat(self.point)
-                .to_extended(backend)
-                .scalar_mul(backend, k.bits_be());
-            let r = GAffineVec::splat(r).to_extended(backend);
-            let check = backend.g_add(sb, backend.g_add(ka, r).negate(backend));
-            if check.mul_by_cofactor(backend).to_lanes()[0].is_identity() {
+            let sb = GAffine::BASEPOINT.to_extended().scalar_mul(s.bits_be());
+            let ka = self.point.to_extended().scalar_mul(k.bits_be());
+            let check = sb.add(ka.add_mixed(r).negate());
+            if check.mul_by_cofactor().is_identity() {
                 Ok(())
             } else {
                 Err(Error::VerificationFailed)
@@ -89,30 +78,6 @@ commonware_macros::stability_scope!(ALPHA {
         }
     }
 });
-
-struct DecompressPoint([u8; 32]);
-
-impl WithBackend for DecompressPoint {
-    type Output = Option<GAffine>;
-
-    fn call<B: Backend>(self, backend: B) -> Self::Output {
-        GAffine::decompress(backend, &self.0)
-    }
-}
-
-struct VerifyOne<'a> {
-    key: &'a VerifyingKey,
-    message: &'a [u8],
-    signature: &'a Signature,
-}
-
-impl WithBackend for VerifyOne<'_> {
-    type Output = Result<(), Error>;
-
-    fn call<B: Backend>(self, backend: B) -> Self::Output {
-        self.key.verify_with(backend, self.message, self.signature)
-    }
-}
 
 commonware_macros::stability_scope!(ALPHA {
     /// An Ed25519 signature.
@@ -452,10 +417,7 @@ fn verify_batch_inner<B: Backend>(
         chunks.push(basepoint.as_slice());
         msm::multiscalar_mul(backend, &chunks, width, strategy)
     };
-    crate::simplified::GVec::splat(result)
-        .mul_by_cofactor(backend)
-        .to_lanes()[0]
-        .is_identity()
+    result.mul_by_cofactor().is_identity()
 }
 
 struct VerifyBatchCall<'a, 'b, R, S> {
