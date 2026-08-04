@@ -6510,7 +6510,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_round_floor_does_not_restore_unacknowledged_anchor() {
+    fn test_standard_round_floor_restores_unacknowledged_anchor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -6586,24 +6586,14 @@ mod tests {
                     .await,
                 "barrier verification should be processed"
             );
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "round-bound fetch before anchor ack",
-                || {
-                    resolver.fetches().len() > fetches_before
-                        && resolver.fetches().iter().any(|fetch| {
-                            matches!(
-                                fetch.key,
-                                handler::Key::Notarized { round } if round == floor_round
-                            )
-                        })
-                },
-            )
-            .await;
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "durable floor round must suppress round-bound fetches after restart"
+            );
             assert!(
                 matches!(subscription.try_recv(), Err(TryRecvError::Empty)),
-                "unacknowledged anchor round must remain subscribable after restart"
+                "durable floor round must preserve local subscriptions after restart"
             );
         });
     }
