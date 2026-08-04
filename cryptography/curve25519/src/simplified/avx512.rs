@@ -17,7 +17,7 @@ const SUB_BIAS: [u64; 5] = [
 ];
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
-const EDWARDS_D2: FVec = F::EDWARDS_D2.splat();
+const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
 
 /// The AVX-512 backend token.
 ///
