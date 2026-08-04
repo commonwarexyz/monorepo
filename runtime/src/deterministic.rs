@@ -472,10 +472,14 @@ impl Executor {
     /// When built with the `external` feature, the passage of time is sufficient to continue.
     fn wake_until_progress(&self, mut current: SystemTime) {
         loop {
+            // Move to the next actionable time. Check the runtime deadline before waking sleepers
+            // so timeout takes precedence over work scheduled at the deadline.
             current = self.skip_idle_time(current);
             self.assert_deadline(current);
             self.wake_ready_sleepers(current);
 
+            // Continue once external work or a woken task can make progress. Without either,
+            // another alarm is the runtime's only remaining source of progress.
             if cfg!(feature = "external") || self.tasks.ready() != 0 {
                 return;
             }
