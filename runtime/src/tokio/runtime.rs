@@ -6,6 +6,8 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+#[cfg(feature = "volume-storage")]
+use crate::storage::volume::{Config as VolumeStorageConfig, Storage as VolumeStorage};
 use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
     Spawner as _, StreamOf, Supervisor as _, child_label,
@@ -420,29 +422,40 @@ impl crate::Runner for Runner {
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
+                let inner_storage = IoUringStorage::start(
+                    IoUringConfig {
+                        storage_directory: self.cfg.storage_directory.clone(),
+                        iouring_config: Default::default(),
+                        thread_stack_size: self.cfg.thread_stack_size,
+                    },
+                    &mut iouring_registry,
+                    storage_buffer_pool.clone(),
+                );
+            } else {
+                let inner_storage = TokioStorage::new(
+                    TokioStorageConfig::new(
+                        self.cfg.storage_directory.clone(),
+                        self.cfg.maximum_buffer_size,
+                    ),
+                    storage_buffer_pool.clone(),
+                );
+            }
+        }
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "volume-storage")] {
+                let spawner = runtime.handle().clone();
                 let storage = MeteredStorage::new(
-                    IoUringStorage::start(
-                        IoUringConfig {
-                            storage_directory: self.cfg.storage_directory.clone(),
-                            iouring_config: Default::default(),
-                            thread_stack_size: self.cfg.thread_stack_size,
-                        },
-                        &mut iouring_registry,
-                        storage_buffer_pool.clone(),
+                    VolumeStorage::new(
+                        inner_storage,
+                        std::sync::Arc::new(move |future| {
+                            spawner.spawn(future);
+                        }),
+                        VolumeStorageConfig::default(),
                     ),
                     &mut runtime_registry,
                 );
             } else {
-                let storage = MeteredStorage::new(
-                    TokioStorage::new(
-                        TokioStorageConfig::new(
-                            self.cfg.storage_directory.clone(),
-                            self.cfg.maximum_buffer_size,
-                        ),
-                        storage_buffer_pool.clone(),
-                    ),
-                    &mut runtime_registry,
-                );
+                let storage = MeteredStorage::new(inner_storage, &mut runtime_registry);
             }
         }
 
@@ -524,9 +537,16 @@ impl crate::Runner for Runner {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
-        type Storage = MeteredStorage<IoUringStorage>;
+        type InnerStorage = IoUringStorage;
     } else {
-        type Storage = MeteredStorage<TokioStorage>;
+        type InnerStorage = TokioStorage;
+    }
+}
+cfg_if::cfg_if! {
+    if #[cfg(feature = "volume-storage")] {
+        type Storage = MeteredStorage<VolumeStorage<InnerStorage>>;
+    } else {
+        type Storage = MeteredStorage<InnerStorage>;
     }
 }
 

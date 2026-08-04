@@ -49,6 +49,10 @@ stability_scope!(ALPHA {
     pub mod audited;
     pub mod faulty;
     pub mod memory;
+    // Always compiled (and tested) so every platform exercises it; only the tokio
+    // runtime's use of it is feature-gated.
+    #[cfg_attr(not(feature = "volume-storage"), allow(dead_code))]
+    pub mod volume;
 });
 stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
     pub mod iouring;
