@@ -1177,6 +1177,61 @@ mod tests {
         assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
     }
 
+    /// A retained overwrite-only ancestor must not be skipped after an earlier
+    /// committed ancestor is dropped, even though it does not change the size.
+    fn apply_batch_after_committed_ancestor_dropped_with_overwrite<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = build_raw::<F>(&hasher, 10);
+
+        let a = {
+            let mut batch = mem.new_batch();
+            for i in 100u64..105 {
+                batch = batch.add(&hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mem, &hasher)
+        };
+        let b = a
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"updated-0")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+
+        mem.apply_batch(&a).unwrap();
+        drop(a);
+
+        // Update a different peak so C's own overwrites do not carry B's
+        // updated peak into the Mem if B is incorrectly skipped.
+        let c = b
+            .new_batch()
+            .update_leaf(&hasher, Location::new(9), b"updated-9")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+
+        assert_eq!(c.ancestor_appended.len(), 1);
+        assert!(c.ancestor_appended[0].is_empty());
+        assert_eq!(c.ancestor_base_size, mem.size());
+
+        drop(b);
+        mem.apply_batch(&c).unwrap();
+
+        let mut reference = build_raw::<F>(&hasher, 10);
+        let expected = {
+            let mut batch = reference.new_batch();
+            for i in 100u64..105 {
+                batch = batch.add(&hasher, &i.to_be_bytes());
+            }
+            batch
+                .update_leaf(&hasher, Location::new(0), b"updated-0")
+                .unwrap()
+                .update_leaf(&hasher, Location::new(9), b"updated-9")
+                .unwrap()
+                .merkleize(&reference, &hasher)
+        };
+        reference.apply_batch(&expected).unwrap();
+
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+    }
+
     /// Overwrite-only ancestor B must not be skipped when applying C after A.
     fn apply_batch_overwrite_only_ancestor<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
@@ -1336,6 +1391,10 @@ mod tests {
         apply_batch_after_committed_ancestor_dropped::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_apply_batch_after_committed_ancestor_dropped_with_overwrite() {
+        apply_batch_after_committed_ancestor_dropped_with_overwrite::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
     }
@@ -1437,6 +1496,10 @@ mod tests {
     #[test]
     fn mmb_apply_batch_after_committed_ancestor_dropped() {
         apply_batch_after_committed_ancestor_dropped::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_after_committed_ancestor_dropped_with_overwrite() {
+        apply_batch_after_committed_ancestor_dropped_with_overwrite::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_apply_batch_overwrite_only_ancestor() {
