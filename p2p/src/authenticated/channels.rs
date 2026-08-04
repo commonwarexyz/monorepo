@@ -175,6 +175,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: u32,
+    outbound_backlog: usize,
     receivers: BTreeMap<Channel, (Quota, mailbox::UnreliableSender<Inbound<P>>)>,
 }
 
@@ -183,8 +184,22 @@ impl<P: PublicKey> Channels<P> {
         Self {
             messenger,
             max_size,
+            outbound_backlog: 0,
             receivers: BTreeMap::new(),
         }
+    }
+
+    pub(super) fn outbound_mailbox_size(&self, base: NonZeroUsize) -> NonZeroUsize {
+        NonZeroUsize::new(
+            base.get()
+                .checked_add(self.outbound_backlog)
+                .expect("router mailbox capacity overflow"),
+        )
+        .unwrap()
+    }
+
+    pub(super) fn bind(&self, mailbox: super::router::Mailbox<P>) {
+        self.messenger.bind(mailbox);
     }
 
     pub fn register<C: Clock + Metrics>(
@@ -195,10 +210,16 @@ impl<P: PublicKey> Channels<P> {
         context: C,
     ) -> (Sender<P, C>, Receiver<P>) {
         let backlog = NonZeroUsize::new(backlog).expect("message backlog must be non-zero");
-        let (sender, receiver) = mailbox::new_unreliable(context.child("mailbox"), backlog);
-        if self.receivers.insert(channel, (rate, sender)).is_some() {
+        if self.receivers.contains_key(&channel) {
             panic!("duplicate channel registration: {channel}");
         }
+        self.outbound_backlog = self
+            .outbound_backlog
+            .checked_add(backlog.get())
+            .expect("router mailbox capacity overflow");
+        let (sender, receiver) = mailbox::new_unreliable(context.child("mailbox"), backlog);
+        let previous = self.receivers.insert(channel, (rate, sender));
+        assert!(previous.is_none());
         (
             Sender::new(
                 channel,
@@ -219,13 +240,60 @@ impl<P: PublicKey> Channels<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZU32;
+    use crate::{
+        CheckedSender as _, LimitedSender as _,
+        authenticated::router::{self, Actor},
+    };
+    use commonware_cryptography::{
+        Signer as _,
+        ed25519::{PrivateKey, PublicKey},
+    };
+    use commonware_runtime::{
+        BufferPooler as _, IoBuf, Runner as _, Supervisor as _, deterministic,
+    };
+    use commonware_utils::{NZU32, NZUsize};
 
     #[test]
     fn backlog_aggregates_peers() {
         let rate = Quota::per_second(NZU32!(128));
 
         assert_eq!(backlog(7, rate), 896);
+    }
+
+    #[test]
+    fn registered_backlogs_size_shared_outbound_mailbox() {
+        deterministic::Runner::default().start(|context| async move {
+            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let mut channels = Channels::new(messenger, 1024);
+            let quota = Quota::per_second(NZU32!(100));
+            let (mut first, _) = channels.register(1, quota, 2, context.child("first"));
+            let (mut second, _) = channels.register(2, quota, 2, context.child("second"));
+            let capacity = channels.outbound_mailbox_size(NZUsize!(2));
+            let (_router, mailbox, _) = Actor::<_, PublicKey>::new(
+                context.child("router"),
+                router::Config {
+                    mailbox_size: capacity,
+                },
+            );
+            channels.bind(mailbox);
+            let peer = PrivateKey::from_seed(1).public_key();
+
+            for sender in [&mut first, &mut second] {
+                for _ in 0..2 {
+                    let feedback = sender
+                        .check(Recipients::One(peer.clone()))
+                        .unwrap()
+                        .send(IoBuf::from(b"message"), false);
+                    assert!(feedback.accepted());
+                }
+            }
+
+            let feedback = first
+                .check(Recipients::One(peer))
+                .unwrap()
+                .send(IoBuf::from(b"overflow"), false);
+            assert_eq!(feedback, Unreliable::Rejected);
+        });
     }
 
     #[test]

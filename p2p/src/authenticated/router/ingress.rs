@@ -12,8 +12,13 @@ use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     NZUsize,
     channel::{oneshot, ring},
+    sync::Mutex,
 };
-use std::{collections::VecDeque, fmt};
+use std::{
+    collections::VecDeque,
+    fmt,
+    sync::{Arc, OnceLock},
+};
 
 /// Messages that can be processed by the router.
 pub enum Message<P: PublicKey> {
@@ -96,17 +101,68 @@ impl<P: PublicKey> Mailbox<P> {
 }
 
 /// Sends messages containing content to the router to send to peers.
-#[derive(Clone, Debug)]
+struct MessengerState<P: PublicKey> {
+    mailbox: OnceLock<Mailbox<P>>,
+    subscriptions: Mutex<Vec<ring::Sender<Vec<P>>>>,
+}
+
+impl<P: PublicKey> MessengerState<P> {
+    fn new() -> Self {
+        Self {
+            mailbox: OnceLock::new(),
+            subscriptions: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn bind(&self, mailbox: Mailbox<P>) {
+        let mut subscriptions = self.subscriptions.lock();
+        assert!(
+            self.mailbox.set(mailbox).is_ok(),
+            "router messenger already bound"
+        );
+        let mailbox = self.mailbox.get().unwrap();
+        for sender in subscriptions.drain(..) {
+            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Messenger<P: PublicKey> {
     pool: BufferPool,
-    sender: Mailbox<P>,
+    state: Arc<MessengerState<P>>,
+}
+
+impl<P: PublicKey> fmt::Debug for Messenger<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Messenger")
+            .field("bound", &self.state.mailbox.get().is_some())
+            .field(
+                "pending_subscriptions",
+                &self.state.subscriptions.lock().len(),
+            )
+            .finish()
+    }
 }
 
 impl<P: PublicKey> Messenger<P> {
     /// Returns a new [Messenger] with the given sender.
     /// (The router has the corresponding receiver.)
-    pub const fn new(pool: BufferPool, sender: Mailbox<P>) -> Self {
-        Self { pool, sender }
+    pub fn new(pool: BufferPool, sender: Mailbox<P>) -> Self {
+        let messenger = Self::unbound(pool);
+        messenger.bind(sender);
+        messenger
+    }
+
+    pub(in crate::authenticated) fn unbound(pool: BufferPool) -> Self {
+        Self {
+            pool,
+            state: Arc::new(MessengerState::new()),
+        }
+    }
+
+    pub(in crate::authenticated) fn bind(&self, mailbox: Mailbox<P>) {
+        self.state.bind(mailbox);
     }
 
     /// Sends a message to the given `recipients`.
@@ -123,7 +179,10 @@ impl<P: PublicKey> Messenger<P> {
         // Encode the data frame once for all recipients
         let encoded = EncodedData::new(&self.pool, channel, message);
 
-        self.sender.0.enqueue(Message::Content {
+        let Some(mailbox) = self.state.mailbox.get() else {
+            return Unreliable::new(Feedback::Closed);
+        };
+        mailbox.0.enqueue(Message::Content {
             recipients,
             encoded,
             priority,
@@ -136,7 +195,18 @@ impl<P: PublicKey> Connected for Messenger<P> {
 
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (sender, receiver) = ring::channel(NZUsize!(1));
-        let _ = self.sender.0.enqueue(Message::SubscribePeers { sender });
+        if let Some(mailbox) = self.state.mailbox.get() {
+            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+            return receiver;
+        }
+
+        let mut subscriptions = self.state.subscriptions.lock();
+        if let Some(mailbox) = self.state.mailbox.get() {
+            drop(subscriptions);
+            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+        } else {
+            subscriptions.push(sender);
+        }
         receiver
     }
 }

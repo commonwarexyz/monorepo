@@ -35,8 +35,6 @@ pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Me
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
     tracker_mailbox: tracker::Mailbox<C::PublicKey>,
-    router: router::Actor<E, C::PublicKey>,
-    router_mailbox: router::Mailbox<C::PublicKey>,
     listener: listener::Updates,
 }
 
@@ -77,12 +75,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let (router, router_mailbox, messenger) = router::Actor::new(
-            context.child("router"),
-            router::Config {
-                mailbox_size: cfg.mailbox_size,
-            },
-        );
+        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
         let channels = Channels::new(messenger, cfg.max_message_size);
 
         (
@@ -94,8 +87,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 channels,
                 tracker,
                 tracker_mailbox,
-                router,
-                router_mailbox,
                 listener,
             },
             oracle,
@@ -154,15 +145,28 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+        let (router, router_mailbox, _) = router::Actor::new(
+            self.context.child("router"),
+            router::Config {
+                mailbox_size: self
+                    .channels
+                    .outbound_mailbox_size(self.cfg.mailbox_size),
+            },
+        );
+        self.channels.bind(router_mailbox.clone());
+        spawn_cell!(self.context, self.run(router, router_mailbox))
     }
 
-    async fn run(self) {
+    async fn run(
+        self,
+        router: router::Actor<E, C::PublicKey>,
+        router_mailbox: router::Mailbox<C::PublicKey>,
+    ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
 
         // Start router
-        let mut router_task = self.router.start(self.channels);
+        let mut router_task = router.start(self.channels);
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
@@ -174,7 +178,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             },
         );
         let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
+            spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
         // Start listener
         let stream_cfg = StreamConfig {
