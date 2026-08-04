@@ -11,7 +11,7 @@ use commonware_parallel::Strategy;
 pub use error::Error;
 use msm::Term;
 use rand_core::CryptoRng;
-use scalar::Scalar;
+pub(crate) use scalar::Scalar;
 use sha2::{Digest, Sha512};
 
 /// Computes `SHA-512(parts[0] || parts[1] || ...)`, the Ed25519 challenge hash `H(R || A || M)`.
@@ -23,61 +23,55 @@ fn sha512(parts: &[&[u8]]) -> [u8; 64] {
     hasher.finalize().into()
 }
 
-commonware_macros::stability_scope!(ALPHA {
-    /// An Ed25519 verification (public) key.
-    #[derive(Copy, Clone, Debug)]
-    pub struct VerifyingKey {
-        bytes: [u8; 32],
-        point: GAffine,
+/// An Ed25519 verification (public) key.
+#[derive(Copy, Clone, Debug)]
+pub struct VerifyingKey {
+    bytes: [u8; 32],
+    point: GAffine,
+}
+
+impl VerifyingKey {
+    /// Decodes and validates a 32-byte verification key encoding.
+    ///
+    /// Following [ZIP215](https://github.com/zcash/zips/blob/master/zip-0215.rst),
+    /// non-canonical `y` encodings (`y >= p`) are accepted; only encodings with no
+    /// corresponding curve point are rejected.
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, Error> {
+        let point = GAffine::decompress(&bytes).ok_or(Error::InvalidVerificationKey)?;
+        Ok(Self { bytes, point })
     }
 
-    impl VerifyingKey {
-        /// Decodes and validates a 32-byte verification key encoding.
-        ///
-        /// Following [ZIP215](https://github.com/zcash/zips/blob/master/zip-0215.rst),
-        /// non-canonical `y` encodings (`y >= p`) are accepted; only encodings with no
-        /// corresponding curve point are rejected.
-        pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, Error> {
-            let point = GAffine::decompress(&bytes).ok_or(Error::InvalidVerificationKey)?;
-            Ok(Self { bytes, point })
-        }
+    /// Returns the byte encoding of this verification key.
+    pub const fn to_bytes(&self) -> [u8; 32] {
+        self.bytes
+    }
 
-        /// Returns the byte encoding of this verification key.
-        pub const fn to_bytes(&self) -> [u8; 32] {
-            self.bytes
-        }
+    /// Verifies `signature` over `message`.
+    ///
+    /// This uses the cofactored, ZIP215-style verification equation `[8](sB - kA - R) = 0`
+    /// (rather than the cofactorless `sB = kA + R`), so this agrees with [`verify_batch`] on
+    /// every input, including small-order `A`/`R` components.
+    pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), Error> {
+        self.verify_with(message, signature)
+    }
 
-        /// Verifies `signature` over `message`.
-        ///
-        /// This uses the cofactored, ZIP215-style verification equation `[8](sB - kA - R) = 0`
-        /// (rather than the cofactorless `sB = kA + R`), so this agrees with [`verify_batch`] on
-        /// every input, including small-order `A`/`R` components.
-        pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), Error> {
-            self.verify_with(message, signature)
-        }
+    fn verify_with(&self, message: &[u8], signature: &Signature) -> Result<(), Error> {
+        let s = Scalar::from_canonical_bytes(&signature.s).ok_or(Error::NonCanonicalScalar)?;
+        let r = GAffine::decompress(&signature.r).ok_or(Error::InvalidSignature)?;
 
-        fn verify_with(
-            &self,
-            message: &[u8],
-            signature: &Signature,
-        ) -> Result<(), Error> {
-            let s = Scalar::from_canonical_bytes(&signature.s).ok_or(Error::NonCanonicalScalar)?;
-            let r = GAffine::decompress(&signature.r).ok_or(Error::InvalidSignature)?;
+        let digest = sha512(&[&signature.r, &self.bytes, message]);
+        let k = Scalar::from_bytes_mod_order_wide(&digest);
 
-            let digest = sha512(&[&signature.r, &self.bytes, message]);
-            let k = Scalar::from_bytes_mod_order_wide(&digest);
-
-            let sb = GAffine::BASEPOINT.to_extended().scalar_mul(s.bits_be());
-            let ka = self.point.to_extended().scalar_mul(k.bits_be());
-            let check = sb.add(ka.add_mixed(r).negate());
-            if check.mul_by_cofactor().is_identity() {
-                Ok(())
-            } else {
-                Err(Error::VerificationFailed)
-            }
+        let sb = GAffine::BASEPOINT.to_extended().scalar_mul(s.bits_be());
+        let ka = self.point.to_extended().scalar_mul(k.bits_be());
+        let check = sb.add(ka.add_mixed(r).negate());
+        if check.mul_by_cofactor().is_identity() {
+            Ok(())
+        } else {
+            Err(Error::VerificationFailed)
         }
     }
-});
+}
 
 commonware_macros::stability_scope!(ALPHA {
     /// An Ed25519 signature.
