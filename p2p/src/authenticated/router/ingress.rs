@@ -224,6 +224,23 @@ mod tests {
     };
 
     #[test]
+    fn test_unbound_messenger_rejects_content() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
+
+            assert_eq!(
+                format!("{messenger:?}"),
+                "Messenger { bound: false, pending_subscriptions: 0 }"
+            );
+            assert_eq!(
+                messenger.content(Recipients::All, 7, IoBuf::from(b"message").into(), false),
+                Unreliable::new(Feedback::Closed)
+            );
+        });
+    }
+
+    #[test]
     fn test_overflow_rejects_content_but_retains_control() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

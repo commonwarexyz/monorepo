@@ -168,9 +168,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let (router, router_mailbox, _) = router::Actor::new(
             self.context.child("router"),
             router::Config {
-                mailbox_size: self
-                    .channels
-                    .outbound_mailbox_size(self.cfg.mailbox_size),
+                mailbox_size: self.channels.outbound_mailbox_size(self.cfg.mailbox_size),
             },
         );
         self.channels.bind(router_mailbox.clone());
@@ -200,8 +198,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 info_verifier: self.info_verifier,
             },
         );
-        let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), router_mailbox);
+        let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
         // Start listener
         let stream_cfg = StreamConfig {
