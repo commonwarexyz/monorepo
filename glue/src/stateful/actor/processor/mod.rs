@@ -167,6 +167,7 @@ where
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
     finalizing: Option<Anchor<PendingDigest<A, E>>>,
+    finalizing_batch_secured: bool,
     finalizing_compatible: HashSet<PendingDigest<A, E>>,
 }
 
@@ -573,6 +574,7 @@ where
                     pending: BTreeMap::new(),
                     last_processed,
                     finalizing: None,
+                    finalizing_batch_secured: false,
                     finalizing_compatible: HashSet::new(),
                 })),
                 metrics,
@@ -1137,6 +1139,7 @@ where
             state.finalizing.replace(anchor).is_none(),
             "finalization must be serialized",
         );
+        assert!(!state.finalizing_batch_secured);
         assert!(state.finalizing_compatible.is_empty());
         state.finalizing_compatible = compatible;
     }
@@ -1149,6 +1152,8 @@ where
     fn prune_pending_for_finalization(&self) {
         let mut state = self.state.lock();
         assert!(state.finalizing.is_some(), "finalization must be active");
+        assert!(!state.finalizing_batch_secured);
+        state.finalizing_batch_secured = true;
         let ExecutionState {
             pending,
             finalizing_compatible,
@@ -1167,6 +1172,8 @@ where
     fn finish_finalization(&self, finalized: Anchor<PendingDigest<A, E>>) {
         let mut state = self.state.lock();
         assert_eq!(state.finalizing.take(), Some(finalized));
+        assert!(state.finalizing_batch_secured);
+        state.finalizing_batch_secured = false;
         state.finalizing_compatible.clear();
         state.last_processed = finalized;
     }
@@ -1297,11 +1304,18 @@ where
             if let Some(entry) = state.pending.get(parent) {
                 return Ok(A::Databases::fork_batches(&entry.merkleized));
             }
-            if state.last_processed.digest != *parent {
+            let finalizing_parent = state.finalizing_batch_secured
+                && state
+                    .finalizing
+                    .is_some_and(|finalizing| finalizing.digest == *parent);
+            if state.last_processed.digest != *parent && !finalizing_parent {
                 return Err(PrepareBatchesError::Invalid);
             }
         }
 
+        // The database finalization writer is polled before retained verification work resumes.
+        // Its lock therefore makes this batch fork observe the secured winner after the winner's
+        // pending entry has been consumed.
         Ok(self.databases.new_batches().await)
     }
 
@@ -1468,6 +1482,19 @@ where
                 break;
             }
 
+            let cursor_height = cursor.height();
+            if cursor_height <= last_processed.height {
+                warn!(
+                    ?target_digest,
+                    cursor = ?cursor.digest(),
+                    current_height = cursor_height.get(),
+                    last_processed_height = last_processed.height.get(),
+                    last_processed = ?last_processed.digest,
+                    "rebuild_pending reached stale ancestry at or below processed height"
+                );
+                return Err(PrepareBatchesError::Invalid);
+            }
+
             let Some(parent) =
                 await_or_cancel(cancellation, provider.clone().subscribe_parent(&cursor)).await
             else {
@@ -1483,7 +1510,6 @@ where
                 return Err(PrepareBatchesError::Incomplete);
             };
 
-            let cursor_height = cursor.height();
             if parent.digest() != cursor.parent() || parent.height().next() != cursor_height {
                 warn!(
                     ?target_digest,
@@ -1493,18 +1519,6 @@ where
                     parent_height = parent.height().get(),
                     expected_parent = ?cursor.parent(),
                     "rebuild_pending received non-contiguous ancestry"
-                );
-                return Err(PrepareBatchesError::Invalid);
-            }
-
-            if cursor_height <= last_processed.height {
-                warn!(
-                    ?target_digest,
-                    cursor = ?cursor.digest(),
-                    current_height = cursor_height.get(),
-                    last_processed_height = last_processed.height.get(),
-                    last_processed = ?last_processed.digest,
-                    "rebuild_pending reached stale ancestry below processed height"
                 );
                 return Err(PrepareBatchesError::Invalid);
             }
@@ -1607,7 +1621,7 @@ where
 mod tests {
     use super::{
         Applied, PrepareBatchesError, Processor, Prune, Pruning, ReplayClaim, ReplayFlights,
-        ReplayTracking, fetch_ancestor,
+        ReplayTracking, VerificationProgress, fetch_ancestor,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -1648,6 +1662,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     type TestContext = ConsensusContext<Digest, ed25519::PublicKey>;
@@ -2507,6 +2522,101 @@ mod tests {
     }
 
     #[test]
+    fn execution_descendant_replay_survives_finalized_parent_removal() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let parent = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let (child, _) = harness.build_child(&parent, View::new(2)).await;
+
+            let (owner_gate, owner_started, mut owner_release) = apply_gate();
+            let (retry_gate, retry_started, retry_release) = apply_gate();
+            harness.processor.app.apply_probe = Some(ApplicationProbe::new(
+                child.digest(),
+                [owner_gate, retry_gate],
+            ));
+            let (finalized_gate, finalized_started, finalized_release) = apply_gate();
+            harness.processor.app.finalized_probe =
+                Some(ApplicationProbe::new(parent.digest(), [finalized_gate]));
+
+            let execution = harness.processor.execution.clone();
+            let replays = harness.processor.replays.clone();
+            let mut owner_app = harness.processor.app.clone();
+            let mut waiter_app = harness.processor.app.clone();
+            let replay_context = harness.context_cell.as_present();
+            let owner_progress = VerificationProgress::default();
+            let waiter_progress = VerificationProgress::default();
+            let (mut owner_cancellation, owner_alive) = oneshot::channel::<()>();
+            let (mut waiter_cancellation, _waiter_alive) = oneshot::channel::<()>();
+
+            let mut owner = Box::pin(execution.replay_block_shared(
+                &mut owner_app,
+                replay_context,
+                child.digest(),
+                Arc::new(child.clone()),
+                &mut owner_cancellation,
+                ReplayTracking {
+                    flights: &replays,
+                    progress: Some(&owner_progress),
+                },
+            ));
+            assert!(futures::poll!(&mut owner).is_pending());
+            owner_started.await.expect("replay owner should start");
+
+            let mut waiter = Box::pin(execution.replay_block_shared(
+                &mut waiter_app,
+                replay_context,
+                child.digest(),
+                Arc::new(child.clone()),
+                &mut waiter_cancellation,
+                ReplayTracking {
+                    flights: &replays,
+                    progress: Some(&waiter_progress),
+                },
+            ));
+            assert!(futures::poll!(&mut waiter).is_pending());
+            let boundary = harness.processor.finalization_boundary(&parent);
+            assert!(boundary.retains(&owner_progress));
+            assert!(boundary.retains(&waiter_progress));
+
+            let mut finalize = Box::pin(
+                harness
+                    .processor
+                    .finalize(harness.context_cell.as_present(), &parent),
+            );
+            assert!(futures::poll!(&mut finalize).is_pending());
+            finalized_started
+                .await
+                .expect("finalized hook should start");
+
+            drop(owner_alive);
+            assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
+            owner_release.closed().await;
+
+            select! {
+                result = &mut waiter => {
+                    panic!("retained replay failed after owner cancellation: {result:?}");
+                },
+                result = retry_started => {
+                    result.expect("retained replay should restart from finalized state");
+                },
+            }
+            retry_release
+                .send(())
+                .expect("retried replay should remain active");
+            assert_eq!(waiter.await, Ok(()));
+
+            finalized_release
+                .send(())
+                .expect("finalized hook should remain active");
+            let Applied { barrier, .. } = finalize
+                .await
+                .expect("finalized block should be newly applied");
+            assert!(barrier.durable().await, "finalize flush must complete");
+        });
+    }
+
+    #[test]
     fn execution_rejects_late_losing_fork_publication() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context).await;
@@ -2913,8 +3023,8 @@ mod tests {
             let fetches_after = harness.provider.fetches();
             assert_eq!(
                 fetches_after.saturating_sub(fetches_before),
-                1,
-                "stale ancestry should be rejected after a single fetch",
+                0,
+                "stale ancestry should be rejected before fetching its parent",
             );
         });
     }

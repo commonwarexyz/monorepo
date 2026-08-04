@@ -1332,8 +1332,14 @@ mod tests {
                     panic!("winning block was not acknowledged");
                 },
             }
-            assert!(poll!(&mut verify_child).is_pending());
-            drop(verify_child);
+            select! {
+                valid = &mut verify_child => {
+                    assert!(!valid, "verification on a finalized-away fork must fail");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("incompatible verification retry did not resolve");
+                },
+            }
             actor.abort();
         });
     }
