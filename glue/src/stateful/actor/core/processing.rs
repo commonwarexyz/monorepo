@@ -19,7 +19,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{AttributeContext, Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{channel::fallible::OneshotExt, futures::Pool};
 use futures::{
     FutureExt as _,
@@ -47,7 +47,7 @@ fn complete(pending: &mut BTreeSet<Height>, (height, durable): (Height, bool)) -
 
 pub(super) struct Processing<E, A, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + AttributeContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -77,7 +77,7 @@ where
 
 impl<E, A, S, V> Processing<E, A, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + AttributeContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -208,12 +208,12 @@ where
                                     }) => verifications.schedule(
                                         actor_context.child("verify"),
                                         verifier.clone(),
-                                        VerificationRequest {
+                                        VerificationRequest::new(
                                             span,
                                             context,
                                             ancestry,
                                             verification,
-                                        },
+                                        ),
                                     ),
                                     Some(message) => {
                                         // Only verification may overtake an active proposal. The
@@ -242,12 +242,12 @@ where
                     verifications.schedule(
                         self.context.as_present().child("verify"),
                         self.processor.verifier(),
-                        VerificationRequest {
+                        VerificationRequest::new(
                             span,
                             context,
                             ancestry,
                             verification,
-                        },
+                        ),
                     );
                 }
                 Step::Message(Message::Finalized {
@@ -512,6 +512,7 @@ mod tests {
         gate_height: Height,
         apply_calls: Arc<AtomicUsize>,
         verify_calls: Arc<AtomicUsize>,
+        observed_contexts: Arc<Mutex<Vec<Name>>>,
     }
 
     impl Application<deterministic::Context> for ReplayGatedApp {
@@ -542,11 +543,12 @@ mod tests {
 
         async fn verify(
             &mut self,
-            _context: (deterministic::Context, Self::Context),
+            context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             self.verify_calls.fetch_add(1, Ordering::SeqCst);
+            self.observed_contexts.lock().push(context.0.name());
             let gate = self.verify_gate.lock().take();
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
@@ -1306,6 +1308,7 @@ mod tests {
                 gate_height: finalized.height(),
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
+                observed_contexts: Arc::default(),
             };
             let processor = Processor::new(
                 app,
@@ -1401,6 +1404,7 @@ mod tests {
                 gate_height: parent.height(),
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
+                observed_contexts: Arc::default(),
             };
             let processor = Processor::new(
                 app,
@@ -1499,6 +1503,7 @@ mod tests {
                 gate_height: finalized.height(),
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
+                observed_contexts: Arc::default(),
             };
             let processor = Processor::new(
                 app,
@@ -1559,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn next_finalization_retries_replay_of_previous_anchor() {
+    fn next_finalization_retry_preserves_request_attributes() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let first = TestBlock::child(&genesis, 1);
@@ -1581,6 +1586,7 @@ mod tests {
             let (replay_gate, replay_started, replay_release) = application_gate();
             let apply_calls = Arc::new(AtomicUsize::new(0));
             let verify_calls = Arc::new(AtomicUsize::new(0));
+            let observed_contexts = Arc::new(Mutex::new(Vec::new()));
             let app = ReplayGatedApp {
                 gates: Arc::new(Mutex::new(VecDeque::from([replay_gate]))),
                 verify_gate: Arc::new(Mutex::new(None)),
@@ -1588,6 +1594,7 @@ mod tests {
                 gate_height: first.height(),
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
+                observed_contexts: observed_contexts.clone(),
             };
             let processor = Processor::new(
                 app,
@@ -1610,8 +1617,11 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.start());
 
             let mut child_verifier = mailbox.clone();
+            let child_context = context
+                .child("verify_child")
+                .with_attribute("request", "child");
             let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), child.context()),
+                (child_context, child.context()),
                 ancestry::from_iter([Arc::new(child), Arc::new(second.clone())]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
@@ -1652,6 +1662,14 @@ mod tests {
             );
             assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
             assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                observed_contexts
+                    .lock()
+                    .last()
+                    .expect("retry should reach application verification")
+                    .attributes,
+                vec![("request".to_string(), "child".to_string())],
+            );
         });
     }
 
@@ -1685,6 +1703,7 @@ mod tests {
                 gate_height: parent.height(),
                 apply_calls: apply_calls.clone(),
                 verify_calls: verify_calls.clone(),
+                observed_contexts: Arc::default(),
             };
             let control = FlushControl::default();
             let databases = Shared::new("prune-replay", TestDb::gated(control.clone()));

@@ -697,18 +697,26 @@ impl crate::Supervisor for Context {
         self
     }
 
-    fn with_attributes_from(mut self, source: &Self) -> Self {
-        for (key, value) in &source.attributes {
-            add_attribute(&mut self.attributes, key, value);
-        }
-        self
-    }
-
     fn name(&self) -> Name {
         Name {
             label: self.name.clone(),
             attributes: self.attributes.clone(),
         }
+    }
+}
+
+impl crate::AttributeContext for Context {
+    type Snapshot = Vec<(String, String)>;
+
+    fn attribute_snapshot(&self) -> Self::Snapshot {
+        self.attributes.clone()
+    }
+
+    fn with_attribute_snapshot(mut self, snapshot: &Self::Snapshot) -> Self {
+        for (key, value) in snapshot {
+            add_attribute(&mut self.attributes, key, value);
+        }
+        self
     }
 }
 

@@ -11,7 +11,7 @@ use commonware_consensus::marshal::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{AttributeContext, Clock, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
 use rand_core::Rng;
@@ -21,18 +21,40 @@ use tracing::{Instrument as _, Span, info_span};
 /// Verification work retained across actor state transitions.
 pub(super) struct Request<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + AttributeContext,
     A: Application<E>,
 {
     pub(super) span: Span,
-    pub(super) context: (E, A::Context),
+    attributes: E::Snapshot,
+    pub(super) context: A::Context,
     pub(super) ancestry: BoxedAncestry<A::Block>,
     pub(super) verification: Verification,
 }
 
+impl<E, A> Request<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock + AttributeContext,
+    A: Application<E>,
+{
+    pub(super) fn new(
+        span: Span,
+        (runtime_context, context): (E, A::Context),
+        ancestry: BoxedAncestry<A::Block>,
+        verification: Verification,
+    ) -> Self {
+        Self {
+            span,
+            attributes: runtime_context.attribute_snapshot(),
+            context,
+            ancestry,
+            verification,
+        }
+    }
+}
+
 enum JobResult<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + AttributeContext,
     A: Application<E>,
 {
     Finished { id: u64 },
@@ -41,7 +63,7 @@ where
 
 impl<E, A> JobResult<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + AttributeContext,
     A: Application<E>,
 {
     const fn id(&self) -> u64 {
@@ -59,7 +81,7 @@ struct JobControl<D: Copy> {
 /// Owns independently-polled certification requests and their cancellation handles.
 pub(super) struct Handler<E, A, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + AttributeContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -72,7 +94,7 @@ where
 
 impl<E, A, S, V> Handler<E, A, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + AttributeContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -123,8 +145,8 @@ where
                 let attempt_context = (
                     actor_context
                         .child("application")
-                        .with_attributes_from(&request.context.0),
-                    request.context.1.clone(),
+                        .with_attribute_snapshot(&request.attributes),
+                    request.context.clone(),
                 );
                 let result = select! {
                     _ = invalidated => None,

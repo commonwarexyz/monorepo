@@ -21,7 +21,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
+use commonware_runtime::{AttributeContext, ContextCell, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
@@ -49,7 +49,7 @@ pub(super) struct PendingFinalization<B> {
 /// Serves application requests while coordinating state sync and its handoff.
 pub(super) struct Syncing<E, A, S, V, R>
 where
-    E: Rng + Spawner + Context,
+    E: Rng + Spawner + Context + AttributeContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -104,7 +104,7 @@ where
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
 where
-    E: Rng + Spawner + Context,
+    E: Rng + Spawner + Context + AttributeContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -158,12 +158,12 @@ where
                     let process = info_span!(parent: &span, "stateful.actor.hold_verify");
                     self.held_verify_requests
                         .retain(|request| !request.verification.is_cancelled());
-                    self.held_verify_requests.push(VerificationRequest {
+                    self.held_verify_requests.push(VerificationRequest::new(
                         span,
                         context,
                         ancestry,
                         verification,
-                    });
+                    ));
                     process.in_scope(|| {
                         debug!(
                             held_verify_requests = self.held_verify_requests.len(),
@@ -447,7 +447,10 @@ mod tests {
 
     struct TestHarness<E>
     where
-        E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
+        E: rand_core::Rng
+            + commonware_runtime::Spawner
+            + commonware_storage::Context
+            + commonware_runtime::AttributeContext,
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant, NoopResolver>,
     }
@@ -533,7 +536,10 @@ mod tests {
 
     impl<E> TestHarness<E>
     where
-        E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
+        E: rand_core::Rng
+            + commonware_runtime::Spawner
+            + commonware_storage::Context
+            + commonware_runtime::AttributeContext,
     {
         async fn new_syncing_on(
             context: deterministic::Context,

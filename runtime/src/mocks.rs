@@ -1,8 +1,8 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
-    Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor, WriteOptions,
+    AttributeContext, Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs,
+    IoBufsMut, Metrics, Name, Spawner, Storage, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -424,10 +424,18 @@ macro_rules! forward_context {
                     $field: self.$field,
                 }
             }
+        }
 
-            fn with_attributes_from(self, source: &Self) -> Self {
+        impl<E: AttributeContext> AttributeContext for $wrapper<E> {
+            type Snapshot = E::Snapshot;
+
+            fn attribute_snapshot(&self) -> Self::Snapshot {
+                self.inner.attribute_snapshot()
+            }
+
+            fn with_attribute_snapshot(self, snapshot: &Self::Snapshot) -> Self {
                 Self {
-                    inner: self.inner.with_attributes_from(&source.inner),
+                    inner: self.inner.with_attribute_snapshot(snapshot),
                     $field: self.$field,
                 }
             }
