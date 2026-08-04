@@ -53,6 +53,9 @@ stability_scope!(ALPHA {
     // runtime's use of it is feature-gated.
     #[cfg_attr(not(feature = "volume-storage"), allow(dead_code))]
     pub mod volume;
+    // Built bottom-up; nothing consumes it until its `Storage` implementation lands.
+    #[allow(dead_code)]
+    pub mod wal;
 });
 stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
     pub mod iouring;
