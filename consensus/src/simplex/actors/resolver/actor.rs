@@ -174,6 +174,10 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
+            // It is possible that a voter proposes some block before the certificate(s) that back
+            // it reach the resolver, allowing an external request to arrive in the meantime. We
+            // accept this unlikely race, which requires the resolver to lag well behind the voter,
+            // rather than block broadcast on an acknowledgment here.
             Some(message) = self.mailbox_receiver.recv() else break => {
                 let span = info_span!(
                     parent: message.span(),
