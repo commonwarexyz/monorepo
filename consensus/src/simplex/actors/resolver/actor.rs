@@ -947,10 +947,10 @@ mod tests {
         });
     }
 
-    /// A valid notarization with pending certification does not prevent a
+    /// A valid notarization that does not settle the ask does not prevent a
     /// different peer from supplying the requested nullification.
     #[test_async]
-    async fn pending_certification_does_not_block_nullification_fetch() {
+    async fn ambiguous_notarization_does_not_block_nullification_fetch() {
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1076,8 +1076,8 @@ mod tests {
             let notarized = requested.next();
             let notarization = build_notarization(&schemes, &verifier, EPOCH, notarized);
             first_responder_mailbox.updated(Certificate::Notarization(notarization.clone()));
-            // Model the Byzantine peer as willing to serve this notarization.
-            // Honest certification at the requester may still reject it.
+            // Certifying the notarization makes it the responder's floor, so
+            // the responder answers a lower-view request with it.
             first_responder_mailbox.certified(notarization.round(), true);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, requested);
             nullification_holder_mailbox.updated(Certificate::Nullification(nullification.clone()));
@@ -1085,7 +1085,7 @@ mod tests {
 
             // A later nullification exposes a gap and starts an unrestricted
             // background fetch. The only connected peer answers with a valid
-            // notarization, whose resolver verdict waits for certification.
+            // notarization that does not settle the nullification ask.
             requester_mailbox.updated(Certificate::Nullification(build_nullification(
                 &schemes, &verifier, EPOCH, notarized,
             )));
@@ -1127,10 +1127,10 @@ mod tests {
                 .unwrap();
             context.sleep(Duration::from_millis(10)).await;
 
-            // A proposal objection for the same view attaches another
-            // subscriber. Certification remains pending, but the valid
-            // notarization must release the network slot so another peer can
-            // supply the nullification that this proposal actually needs.
+            // A targeted ancestry ask for the same view attaches another
+            // subscriber. The ambiguous notarization answer released the
+            // network slot, so another peer can supply the nullification
+            // this proposal actually needs.
             requester_mailbox.resolve(
                 View::new(3),
                 requested,
@@ -1142,7 +1142,7 @@ mod tests {
                     message.expect("voter mailbox closed")
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("pending certification blocked ancestry repair");
+                    panic!("ambiguous notarization answer blocked ancestry repair");
                 },
             };
             assert!(matches!(
@@ -1657,6 +1657,61 @@ mod tests {
                 participants[0].clone(),
             );
             assert_eq!(resolver.targeted().len(), targeted);
+        });
+    }
+
+    #[test_async]
+    async fn tombstoned_notarization_delivery_completes_without_recording() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, mut voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(6);
+
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(notarization.clone()),
+            );
+            actor.certified(&mut resolver, view, false);
+
+            // Replaying the failed notarization is not new evidence: the voter
+            // is not re-notified and the payload is not re-cached. The failed
+            // verdict settles the ask, so the fetch still completes.
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view,
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
+                        .encode(),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert!(!actor.notarization_responses.contains_key(&view));
+            drop(voter);
+            assert!(voter_rx.recv().await.is_none());
+
+            // Finalization is the tombstone's retirement boundary.
+            actor.updated(
+                &mut resolver,
+                Certificate::Finalization(build_finalization(
+                    &schemes,
+                    &verifier,
+                    EPOCH,
+                    view.next(),
+                )),
+            );
+            assert!(actor.failed_certifications.is_empty());
         });
     }
 

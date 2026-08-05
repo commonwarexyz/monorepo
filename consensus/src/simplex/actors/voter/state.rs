@@ -3708,9 +3708,10 @@ mod tests {
                         && target == expected_leader
             ));
 
-            // The leader's preferred notarization is already known and does not
-            // provide the nullification this proposal needs. It must neither permit a
-            // vote nor create a request loop in the same round.
+            // The leader's preferred notarization is already known and does
+            // not provide the nullification this proposal needs. It must
+            // neither permit a vote nor create a request loop in the same
+            // round.
             let (added, _) = state.add_notarization(notarization);
             assert!(!added);
             assert!(matches!(state.try_verify(), Verify::Wait));
@@ -3754,9 +3755,9 @@ mod tests {
                         && view == parent_view
             ));
 
-            // The leader's preferred covering nullification does not certify the
-            // named parent, so it must neither permit a
-            // vote nor create a same-round request loop.
+            // The leader's preferred covering nullification does not certify
+            // the named parent, so it must neither permit a vote nor create a
+            // same-round request loop.
             assert!(!state.add_nullification(nullification_1));
             assert!(matches!(state.try_verify(), Verify::Wait));
         });
