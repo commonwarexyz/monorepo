@@ -66,6 +66,9 @@ where
         span: Span,
         block: Arc<A::Block>,
         acknowledgement: Deferred,
+        /// Re-enqueues invalidated verifications behind work accepted while
+        /// finalization or pruning was active.
+        retry_mailbox: Arc<dyn Fn(Self) + Send + Sync>,
     },
 
     /// Requests the attached database set.
@@ -74,6 +77,13 @@ where
     /// serving stateful actor, or immediately if that has already happened.
     SubscribeDatabases {
         response: oneshot::Sender<A::Databases>,
+    },
+
+    /// Test-only work that remains active while verification jobs are driven.
+    #[cfg(test)]
+    DriveVerifications {
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
     },
 }
 
@@ -88,6 +98,8 @@ where
             Self::Verify { verification, .. } => verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
+            #[cfg(test)]
+            Self::DriveVerifications { .. } => false,
         }
     }
 }
@@ -158,6 +170,7 @@ where
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
+    retry_mailbox: Arc<dyn Fn(Message<E, A>) + Send + Sync>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -168,6 +181,7 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            retry_mailbox: self.retry_mailbox.clone(),
         }
     }
 }
@@ -178,8 +192,15 @@ where
     A: Application<E>,
 {
     /// Create a mailbox from the send half of the actor's message channel.
-    pub(crate) const fn new(sender: Sender<Message<E, A>>) -> Self {
-        Self { sender }
+    pub(crate) fn new(sender: Sender<Message<E, A>>) -> Self {
+        let retry_sender = sender.clone();
+        let retry_mailbox = Arc::new(move |message| {
+            let _ = retry_sender.enqueue(message);
+        });
+        Self {
+            sender,
+            retry_mailbox,
+        }
     }
 }
 
@@ -291,6 +312,7 @@ where
                     span,
                     block,
                     acknowledgement: acknowledgement.into(),
+                    retry_mailbox: self.retry_mailbox.clone(),
                 }
             }
         };

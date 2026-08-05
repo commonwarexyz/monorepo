@@ -172,6 +172,7 @@ where
                     span,
                     block,
                     acknowledgement,
+                    ..
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
                     let handoffs;
@@ -190,6 +191,11 @@ where
                     if !response.is_closed() {
                         self.database_subscribers.push(response);
                     }
+                }
+                #[cfg(test)]
+                Message::DriveVerifications { started, release } => {
+                    started.send_lossy(());
+                    let _ = release.await;
                 }
             },
         }

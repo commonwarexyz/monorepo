@@ -190,7 +190,8 @@ impl<DB> Shared<DB> {
     where
         DB: ManagedDb<E>,
     {
-        self.read_locked().await.new_batch::<E>()
+        let database = self.read_locked().await;
+        DB::new_batch(database.batch_context())
     }
 }
 
@@ -251,12 +252,11 @@ pub struct ReadLocked<DB> {
 }
 
 impl<DB> ReadLocked<DB> {
-    fn new_batch<E>(self) -> <DB as ManagedDb<E>>::Unmerkleized
-    where
-        DB: ManagedDb<E>,
-    {
-        let Self { database, shared } = self;
-        DB::new_batch(database.as_ref().expect(DB_LOST_MSG), shared)
+    fn batch_context(&self) -> BatchContext<'_, DB> {
+        BatchContext {
+            database: self,
+            shared: self.shared.clone(),
+        }
     }
 }
 
@@ -265,6 +265,23 @@ impl<DB> Deref for ReadLocked<DB> {
 
     fn deref(&self) -> &DB {
         self.database.as_ref().expect(DB_LOST_MSG)
+    }
+}
+
+/// Origin-bound database access for synchronous batch construction.
+///
+/// Only [`DatabaseSet`] can create this capability. Its borrow prevents a
+/// [`ManagedDb`] implementation from retaining the set's read lock in the
+/// returned batch.
+pub struct BatchContext<'a, DB> {
+    database: &'a DB,
+    shared: Shared<DB>,
+}
+
+impl<'a, DB> BatchContext<'a, DB> {
+    /// Split the capability into applied state and its matching shared handle.
+    pub fn into_parts(self) -> (&'a DB, Shared<DB>) {
+        (self.database, self.shared)
     }
 }
 
@@ -338,8 +355,8 @@ pub trait Merkleized: Sized + Send + Sync {
 /// Implementations create new batches from applied state and apply finalized
 /// batches back to storage, deferring each batch's flush to a returned handle.
 ///
-/// [`new_batch`](Self::new_batch) receives `Shared<Self>` so batch
-/// types can keep read-through access to applied state.
+/// [`new_batch`](Self::new_batch) consumes origin-bound read access so batch
+/// types can snapshot applied state and retain the matching [`Shared`] handle.
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
 /// work across runtimes that satisfy the bounds.
@@ -383,12 +400,21 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// This must match [`sync_target`](Self::sync_target) after opening an empty partition.
     fn initial_sync_target() -> Self::SyncTarget;
 
-    /// Create a new unmerkleized batch rooted at the locked database's applied
-    /// state.
+    /// Create a new unmerkleized batch rooted at the read-locked database's
+    /// applied state.
     ///
-    /// The `shared` parameter allows batch types to retain read-through access
-    /// after the caller releases `database`'s read lock.
-    fn new_batch(database: &Self, shared: Shared<Self>) -> Self::Unmerkleized;
+    /// This method must return without retaining `database`, releasing its read
+    /// lock before the batch performs any lazy read-through work. Batch types
+    /// can retain the matching handle returned by [`BatchContext::into_parts`].
+    ///
+    /// ```compile_fail
+    /// use commonware_glue::stateful::db::{ManagedDb, Shared};
+    ///
+    /// fn mismatched<E, T: ManagedDb<E>>(database: &T, other: Shared<T>) {
+    ///     let _ = <T as ManagedDb<E>>::new_batch(database, other);
+    /// }
+    /// ```
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized;
 
     /// Return true if a merkleized batch matches a sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
@@ -762,7 +788,7 @@ impl<E: Send + Sync + 'static, T: ManagedDb<E> + 'static> DatabaseSet<E> for Sha
     }
 
     fn new_batches(database: Self::ReadLocked) -> Self::Unmerkleized {
-        database.new_batch::<E>()
+        T::new_batch(database.batch_context())
     }
 
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -1002,7 +1028,7 @@ macro_rules! impl_database_set {
             }
 
             fn new_batches(databases: Self::ReadLocked) -> Self::Unmerkleized {
-                ($(databases.$idx.new_batch::<E>(),)+)
+                ($($T::new_batch(databases.$idx.batch_context()),)+)
             }
 
             fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -1973,9 +1999,9 @@ impl_attachable_resolver_set!(
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, AttachableResolver, AttachableResolverSet, Barrier, CoordinatorAction,
-        CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Shared, StateSyncDb,
-        StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
+        CoordinatorAction, CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb,
+        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -2433,7 +2459,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2465,7 +2491,7 @@ mod tests {
             unreachable!("CountingRewindDb is constructed directly in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2499,7 +2525,7 @@ mod tests {
             Ok(Self { prune_count })
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2604,7 +2630,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2691,7 +2717,7 @@ mod tests {
             unreachable!("BlockingFinalizeDb is constructed directly in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2734,7 +2760,7 @@ mod tests {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2772,7 +2798,7 @@ mod tests {
             )
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2806,7 +2832,7 @@ mod tests {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2840,7 +2866,7 @@ mod tests {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2874,7 +2900,7 @@ mod tests {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2908,7 +2934,7 @@ mod tests {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2942,7 +2968,7 @@ mod tests {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2976,7 +3002,7 @@ mod tests {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3010,7 +3036,7 @@ mod tests {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3048,7 +3074,7 @@ mod tests {
             )
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3191,7 +3217,7 @@ mod tests {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 

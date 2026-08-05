@@ -45,6 +45,34 @@ fn complete(pending: &mut BTreeSet<Height>, (height, durable): (Height, bool)) -
     durable
 }
 
+fn requeue_verifications<E, A>(
+    mailbox: &(dyn Fn(Message<E, A>) + Send + Sync),
+    requests: Vec<VerificationRequest<E, A>>,
+) where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    // FIFO puts each retry behind work accepted while the mutation ran and
+    // ahead of later arrivals, without waiting for the mailbox to become idle.
+    for VerificationRequest {
+        span,
+        context,
+        ancestry,
+        verification,
+    } in requests
+    {
+        if verification.is_cancelled() {
+            continue;
+        }
+        mailbox(Message::Verify {
+            span,
+            context,
+            ancestry,
+            verification,
+        });
+    }
+}
+
 pub(super) struct Processing<E, A, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -86,7 +114,6 @@ where
     pub async fn start(mut self) {
         let mut pending_prune = None;
         let mut deferred_message = None;
-        let mut deferred_retries = Vec::<VerificationRequest<E, A>>::new();
         let mut verifications = Verifications::new(self.marshal.clone());
         for request in std::mem::take(&mut self.deferred_verifications) {
             verifications.schedule(self.processor.verifier(), request);
@@ -109,14 +136,13 @@ where
                     }
                 }
 
-                // Verification results and mutation retries must not overtake
-                // finalization work that may invalidate them.
+                // Verification results must not overtake finalization work
+                // that may invalidate them.
                 let finalization_deferred = matches!(
                     deferred_message.as_ref(),
                     Some(Message::Finalized { .. }),
                 );
-                let retries_deferred = !deferred_retries.is_empty();
-                if !finalization_deferred && !retries_deferred {
+                if !finalization_deferred {
                     verifications.complete_ready();
                 }
 
@@ -129,14 +155,6 @@ where
                         // A message is ready: handle it now, regardless of any queued prune.
                         Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
                         Err(TryRecvError::Empty) => {
-                            for request in std::mem::take(&mut deferred_retries) {
-                                if !request.verification.is_cancelled() {
-                                    verifications.schedule(self.processor.verifier(), request);
-                                }
-                            }
-                            if retries_deferred {
-                                verifications.complete_ready();
-                            }
                             match pending_prune.take() {
                                 // No message, but a prune is queued: run it.
                                 Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
@@ -275,6 +293,7 @@ where
                     span,
                     block,
                     acknowledgement,
+                    retry_mailbox,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
@@ -331,7 +350,7 @@ where
                                 (height, durable)
                             });
                             if let Some(prune) = prune {
-                                pending_prune = Some(prune);
+                                pending_prune = Some((prune, retry_mailbox.clone()));
                             }
                         }
                         .instrument(process)
@@ -339,13 +358,26 @@ where
                         for verification in reject {
                             verification.respond(false);
                         }
-                        deferred_retries.extend(retry);
+                        requeue_verifications(retry_mailbox.as_ref(), retry);
                     }
                 }
                 Step::Message(Message::SubscribeDatabases { response }) => {
                     response.send_lossy(self.processor.databases().clone());
                 }
-                Step::Prune(prune) => {
+                #[cfg(test)]
+                Step::Message(Message::DriveVerifications {
+                    started,
+                    mut release,
+                }) => {
+                    started.send_lossy(());
+                    loop {
+                        select! {
+                            _ = &mut release => break,
+                            _ = verifications.next_completed() => {},
+                        }
+                    }
+                }
+                Step::Prune((prune, retry_mailbox)) => {
                     // The prune target must be durable, but later blocks remain available in
                     // marshal for replay and do not delay maintenance.
                     while pending_syncs
@@ -369,7 +401,7 @@ where
                     prune
                         .run(self.processor.databases(), &self.marshal)
                         .await;
-                    deferred_retries.extend(retry);
+                    requeue_verifications(retry_mailbox.as_ref(), retry);
                 }
             },
         }
@@ -2130,6 +2162,7 @@ mod tests {
                 Some(pruning),
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let retry_sender = sender.clone();
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
@@ -2171,11 +2204,42 @@ mod tests {
 
             let (acknowledgement, winner_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+
+            let (first_started, first_started_rx) = oneshot::channel();
+            let (first_release, first_release_rx) = oneshot::channel();
+            let _ = retry_sender.enqueue(Message::DriveVerifications {
+                started: first_started,
+                release: first_release_rx,
+            });
             prune_release.send(()).expect("prune should remain active");
 
-            assert!(
-                !verify.await,
-                "prune retry must observe the queued finalization",
+            first_started_rx
+                .await
+                .expect("queued work should follow finalization");
+            let (second_started, second_started_rx) = oneshot::channel();
+            let (second_release, second_release_rx) = oneshot::channel();
+            let _ = retry_sender.enqueue(Message::DriveVerifications {
+                started: second_started,
+                release: second_release_rx,
+            });
+            first_release
+                .send(())
+                .expect("queued work should remain active");
+            second_started_rx
+                .await
+                .expect("later work should start after the retry boundary");
+
+            let result = select! {
+                valid = &mut verify => Some(valid),
+                _ = context.sleep(Duration::from_millis(100)) => None,
+            };
+            second_release
+                .send(())
+                .expect("later work should remain active");
+            assert_eq!(
+                result,
+                Some(false),
+                "later arrivals must not starve a prune retry",
             );
             assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
             assert_eq!(control.pruned.lock().as_slice(), [1]);

@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -125,7 +125,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
+    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 

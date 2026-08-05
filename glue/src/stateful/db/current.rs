@@ -7,7 +7,7 @@
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, Read as CodecRead};
@@ -514,7 +514,8 @@ where
         )
     }
 
-    fn new_batch(database: &Self, shared: Shared<Self>) -> Self::Unmerkleized {
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         CurrentUnmerkleized {
             batch: database.new_batch(),
             db: shared,
@@ -614,7 +615,8 @@ where
         )
     }
 
-    fn new_batch(database: &Self, shared: Shared<Self>) -> Self::Unmerkleized {
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         CurrentUnmerkleized {
             batch: database.new_batch(),
             db: shared,
@@ -792,7 +794,8 @@ where
         )
     }
 
-    fn new_batch(database: &Self, shared: Shared<Self>) -> Self::Unmerkleized {
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         CurrentUnmerkleized {
             batch: database.new_batch(),
             db: shared,
@@ -897,7 +900,8 @@ where
         )
     }
 
-    fn new_batch(database: &Self, shared: Shared<Self>) -> Self::Unmerkleized {
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         CurrentUnmerkleized {
             batch: database.new_batch(),
             db: shared,
