@@ -259,6 +259,10 @@ where
     /// This future is scoped to its caller. Stateful may also cancel and retry
     /// it before finalization or pruning. Cancellation and retry must not
     /// violate invariants or lose durable progress.
+    ///
+    /// Verification may overlap database finalization. Read through the
+    /// provided batches, which snapshot database state without holding the
+    /// database set's locks (see [`db::Shared::read`] for guard discipline).
     fn verify(
         &mut self,
         context: (E, Self::Context),

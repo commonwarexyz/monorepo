@@ -77,7 +77,6 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    A::Context: Clone,
 {
     pub(super) fn new(marshal: MarshalMailbox<S, V>) -> Self {
         Self {

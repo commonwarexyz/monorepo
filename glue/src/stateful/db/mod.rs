@@ -141,6 +141,10 @@ impl<DB> Shared<DB> {
 
     /// Acquire shared read access to the database.
     ///
+    /// The lock is write-preferring: once a writer is queued, new readers wait
+    /// behind it. Holding a guard across an await that acquires this cell
+    /// again therefore deadlocks once a writer arrives in between.
+    ///
     /// # Panics
     ///
     /// Panics if the database was lost by an earlier failed or interrupted mutation.

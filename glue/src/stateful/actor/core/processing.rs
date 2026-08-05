@@ -83,7 +83,6 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    A::Context: Clone,
 {
     pub async fn start(mut self) {
         let mut pending_prune = None;
@@ -370,7 +369,7 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{Processing, skip_finalized_block};
+    use super::{Message, Processing, VerificationRequest, skip_finalized_block};
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::{
@@ -1390,6 +1389,90 @@ mod tests {
                 result.is_some(),
                 "skipped finalization stalled a retained verification",
             );
+        });
+    }
+
+    #[test]
+    fn initial_verifications_resolve_after_handoff() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (gate, started, release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(&mut signing, b"held-verify", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "held-verify",
+                scheme,
+                None,
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+
+            // A verify request arrives while the sync actor still owns the
+            // mailbox, so no loop is draining it yet.
+            let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let held = context.child("held").spawn(move |task_context| {
+                let consensus_context = block.context();
+                async move {
+                    mailbox
+                        .verify(
+                            (task_context, consensus_context),
+                            ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+                        )
+                        .await
+                }
+            });
+            let request = match receiver.recv().await {
+                Some(Message::Verify {
+                    span,
+                    context: request_context,
+                    ancestry,
+                    verification,
+                }) => VerificationRequest {
+                    span,
+                    context: request_context,
+                    ancestry,
+                    verification,
+                },
+                _ => panic!("held verify request must arrive"),
+            };
+
+            // Hand the held request to processing, as the sync actor does on
+            // completion.
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                initial_verifications: vec![request],
+                skip_finalized_until: Some(Height::new(0)),
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            started.await.expect("held verification should start");
+            release
+                .send(())
+                .expect("held verification should remain active");
+            assert!(held.await.expect("held verification should resolve"));
+            actor.abort();
+            drop(marshal.guards);
         });
     }
 

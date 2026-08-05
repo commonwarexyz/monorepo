@@ -67,10 +67,7 @@ pub(super) type Qmdb<E> =
 
 pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
-pub(super) fn qmdb_config(
-    prefix: &str,
-    page_cache: CacheRef,
-) -> FixedConfig<TwoCap, Sequential> {
+pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
     FixedConfig {
         merkle_config: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-mmr-journal"),

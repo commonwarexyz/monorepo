@@ -388,11 +388,17 @@ impl<D: Copy + Ord> Drop for ReplayWaiter<D> {
         if !Arc::ptr_eq(&flight.generation, &self.generation) {
             return;
         }
+
+        // A slot is cleared only by its own waiter's drop and the tail trim
+        // removes only cleared slots, so a live waiter's slot must be present.
         let waiters = &mut flight.waiters;
-        let Some(waiter) = waiters.get_mut(self.slot) else {
-            return;
-        };
-        waiter.take();
+        let waiter = waiters
+            .get_mut(self.slot)
+            .expect("live replay waiter must have a slot");
+        assert!(
+            waiter.take().is_some(),
+            "live replay waiter slot must hold its sender",
+        );
         while waiters.last().is_some_and(Option::is_none) {
             waiters.pop();
         }
@@ -409,7 +415,11 @@ struct ReplayOwner<D: Copy + Ord> {
 
 impl<D: Copy + Ord> ReplayOwner<D> {
     fn finish(mut self, result: ReplayResult) {
-        debug_assert_ne!(result, Err(PrepareBatchesError::Cancelled));
+        assert_ne!(
+            result,
+            Err(PrepareBatchesError::Cancelled),
+            "cancellation must drop the replay owner without a result",
+        );
         self.result = Some(result);
     }
 }
@@ -915,6 +925,11 @@ where
             }
         };
 
+        // Retained verifications fork from the secured winner on the promise
+        // that the finalize writer is already queued ahead of their database
+        // reads (see `fork_batches`). Keep securing and the first poll of the
+        // database write in one poll: no await may separate the next two
+        // statements.
         self.execution.prune_pending_for_finalization();
         let barrier = self.execution.databases.finalize(batch).await;
         self.notify_finalized(context, block).await;
@@ -1284,8 +1299,9 @@ where
     /// Ensures parent state exists and forks batches for speculative execution.
     ///
     /// Verification supplies replay tracking to share reconstruction by block
-    /// digest; proposals reconstruct independently. `fork_batches` revalidates
-    /// the parent after reconstruction in case finalization advanced meanwhile.
+    /// digest, while proposals reconstruct independently. `fork_batches`
+    /// revalidates the parent after reconstruction in case finalization
+    /// advanced meanwhile.
     async fn prepare_batches<S, V, C>(
         &self,
         app: &mut A,
@@ -2610,6 +2626,101 @@ mod tests {
                 .await
                 .expect("finalized block should be newly applied");
             assert!(barrier.durable().await, "finalize flush must complete");
+        });
+    }
+
+    #[test]
+    fn execution_finalize_self_applies_after_cancelled_winner_replay() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let (winner, _) = harness.build_child(&genesis, View::new(1)).await;
+
+            let (owner_gate, owner_started, mut owner_release) = apply_gate();
+            let probe = ApplicationProbe::new(winner.digest(), [owner_gate]);
+            harness.processor.app.apply_probe = Some(probe.clone());
+
+            let execution = harness.processor.execution.clone();
+            let replays = harness.processor.replays.clone();
+            let mut owner_app = harness.processor.app.clone();
+            let replay_context = harness.context_cell.as_present();
+            let (mut owner_cancellation, owner_alive) = oneshot::channel::<()>();
+
+            let mut owner = Box::pin(execution.replay_block_shared(
+                &mut owner_app,
+                replay_context,
+                winner.digest(),
+                Arc::new(winner.clone()),
+                &mut owner_cancellation,
+                ReplayTracking {
+                    flights: &replays,
+                    progress: None,
+                },
+            ));
+            assert!(futures::poll!(&mut owner).is_pending());
+            owner_started.await.expect("winner replay should start");
+
+            let mut finalize = Box::pin(
+                harness
+                    .processor
+                    .finalize(harness.context_cell.as_present(), &winner),
+            );
+            assert!(
+                futures::poll!(&mut finalize).is_pending(),
+                "finalization should wait on the active winner replay",
+            );
+
+            drop(owner_alive);
+            assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
+            owner_release.closed().await;
+
+            let Applied { barrier, .. } = finalize
+                .await
+                .expect("finalized block should be newly applied");
+            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_eq!(
+                probe.calls(),
+                2,
+                "finalization must replay the winner itself after the owner cancels",
+            );
+            assert_eq!(harness.processor.last_processed().digest, winner.digest());
+            assert!(harness.processor.replays_idle());
+        });
+    }
+
+    #[test]
+    fn execution_finalize_self_applies_after_invalid_winner_replay() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let (winner, _) = harness.build_child(&genesis, View::new(1)).await;
+
+            let owner = match harness
+                .processor
+                .execution
+                .claim_replay(&harness.processor.replays, winner.digest())
+            {
+                ReplayClaim::Owner(owner) => owner,
+                _ => panic!("winner replay claim should own the flight"),
+            };
+
+            let mut finalize = Box::pin(
+                harness
+                    .processor
+                    .finalize(harness.context_cell.as_present(), &winner),
+            );
+            assert!(
+                futures::poll!(&mut finalize).is_pending(),
+                "finalization should wait on the active winner replay",
+            );
+
+            owner.finish(Err(PrepareBatchesError::Invalid));
+            let Applied { barrier, .. } = finalize
+                .await
+                .expect("finalized block should be newly applied");
+            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_eq!(harness.processor.last_processed().digest, winner.digest());
+            assert!(harness.processor.replays_idle());
         });
     }
 

@@ -204,6 +204,7 @@ where
                     ?block_digest,
                     "verification request waiting on incomplete processed-block ancestry"
                 );
+
                 // Incomplete ancestry is not an invalid verdict. Keep the job
                 // parked until its caller leaves.
                 verification.cancelled().await;
@@ -237,6 +238,7 @@ where
                     ?block_digest,
                     "verification request waiting on incomplete parent ancestry"
                 );
+
                 // As with incomplete candidate ancestry, only cancellation or
                 // actor-driven invalidation should release this pending request.
                 verification.cancelled().await;
@@ -356,6 +358,7 @@ where
             parent = %parent.digest,
         )
         .entered();
+
         // Application output is adversarial until it matches the commitments
         // carried by the candidate block. Never cache it before this check.
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {

@@ -108,7 +108,6 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    A::Context: Clone,
 {
     pub async fn start(mut self) {
         select_loop! {
