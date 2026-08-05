@@ -5,7 +5,7 @@ use colored::Colorize;
 use commonware_cryptography::{Signer, ed25519};
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::{
-    simulated::{Config, Link, Network, Receiver, Sender},
+    simulated::{Config, Link, MAX_SIZE, Network, Receiver, Sender},
     utils::codec::{WrappedReceiver, WrappedSender, wrap},
 };
 use commonware_runtime::{
@@ -37,6 +37,14 @@ const DEFAULT_CHANNEL: u64 = 0;
 
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
+
+const fn network_config() -> Config {
+    Config {
+        max_size: MAX_SIZE,
+        disconnect_on_block: true,
+        tracked_peer_sets: NZUsize!(1),
+    }
+}
 
 /// The message type
 type Message = Vec<u8>;
@@ -311,11 +319,7 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
 
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
-        Config {
-            max_size: u32::MAX,
-            disconnect_on_block: true,
-            tracked_peer_sets: NZUsize!(1),
-        },
+        network_config(),
         peer_addresses.iter().map(|(k, _)| k.clone()),
     )
     .await;
@@ -897,5 +901,18 @@ fn print_aggregated_regional_statistics(observations: &Observations, line_num: u
             "    [all] mean: {overall_mean:.2}ms (stdv: {overall_std:.2}ms) | median: {overall_median:.2}ms"
         );
         println!("{}", stat_line.white());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_configuration_accepts_max_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let _ = Network::<_, ed25519::PublicKey>::new(context, network_config());
+        });
     }
 }
