@@ -6,11 +6,9 @@ pub mod voter;
 
 /// What a resolver request wants, and what retires it.
 ///
-/// This is local bookkeeping and is never encoded. The wire key names only a
-/// view, so a responder cannot tell which certificate was asked for and may
-/// answer with one that does not settle the request. Keeping the ask local
-/// is what lets the requester recognize that case (see
-/// [resolver::Actor::settled]).
+/// The wire key names only a view, so a responder cannot tell which certificate was
+/// asked for and may answer with one that does not settle the request. Keeping the
+/// ask local lets the requester recognize that case (see [resolver::Actor::settled]).
 ///
 /// Only three of the four combinations occur: background repair always wants a
 /// nullification, while proposal ancestry wants either kind.
