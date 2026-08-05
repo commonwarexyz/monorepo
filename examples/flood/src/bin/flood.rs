@@ -13,13 +13,12 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_utils::{NZU32, TryCollect, ordered::Set, union};
+use commonware_utils::{TryCollect, ordered::Set, union};
 use futures::future::try_join_all;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroU32,
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -148,15 +147,9 @@ fn main() {
         // Provide authorized peers
         oracle.track(0, peer_keys.clone());
 
-        // Divide the configured aggregate backlog across peers while retaining an effectively
-        // unlimited refill rate. Rounding up preserves at least the requested capacity.
-        let per_peer_backlog = config.message_backlog.div_ceil(max_peers.get());
-        let burst = u32::try_from(per_peer_backlog)
-            .ok()
-            .and_then(NonZeroU32::new)
-            .expect("message backlog must be non-zero and fit in a u32");
+        // Register the flood channel with a per-peer message rate
         let (mut flood_sender, mut flood_receiver) =
-            network.register(0, Quota::per_second(NZU32!(u32::MAX)).allow_burst(burst));
+            network.register(0, Quota::per_second(config.message_rate));
 
         // Create network
         let p2p = network.start();
