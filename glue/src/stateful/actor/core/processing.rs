@@ -86,6 +86,7 @@ where
     pub async fn start(mut self) {
         let mut pending_prune = None;
         let mut deferred_message = None;
+        let mut deferred_prune_retries = Vec::<VerificationRequest<E, A>>::new();
         let mut verifications = Verifications::new(self.marshal.clone());
         for request in std::mem::take(&mut self.deferred_verifications) {
             verifications.schedule(self.processor.verifier(), request);
@@ -98,8 +99,6 @@ where
         select_loop! {
             self.context,
             on_start => {
-                verifications.complete_ready();
-
                 // Observe every already-completed flush (releasing its marshal
                 // acknowledgement) before taking the next unit of work, so
                 // acknowledgements keep flowing even while the mailbox is
@@ -110,6 +109,15 @@ where
                     }
                 }
 
+                let finalization_deferred = matches!(
+                    deferred_message.as_ref(),
+                    Some(Message::Finalized { .. }),
+                );
+                let prune_retries_deferred = !deferred_prune_retries.is_empty();
+                if !finalization_deferred && !prune_retries_deferred {
+                    verifications.complete_ready();
+                }
+
                 // Pruning is non-critical work. We only run it when the mailbox is idle, and
                 // it is never raced against the mailbox due to its internal lock acquisition.
                 // If a message is ready, it is always processed immediately.
@@ -118,35 +126,45 @@ where
                     None => match self.mailbox.try_recv() {
                         // A message is ready: handle it now, regardless of any queued prune.
                         Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
-                        Err(TryRecvError::Empty) => match pending_prune.take() {
-                            // No message, but a prune is queued: run it.
-                            Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
-                            // No message and nothing to prune: wait on the mailbox, driving flush
-                            // completions while idle.
-                            None => {
-                                let mailbox = &mut self.mailbox;
-                                let syncs = &mut syncs;
-                                let pending_syncs = &mut pending_syncs;
-                                let verifications = &mut verifications;
-                                Either::Right(async move {
-                                    loop {
-                                        select! {
-                                            message = mailbox.recv() => {
-                                                break message.map(Step::Message);
-                                            },
-                                            completion = syncs.next_completed() => {
-                                                if !complete(pending_syncs, completion) {
-                                                    return None;
-                                                }
-                                            },
-                                            _ = verifications.next_completed() => {
-                                                continue;
-                                            },
-                                        }
-                                    }
-                                })
+                        Err(TryRecvError::Empty) => {
+                            for request in std::mem::take(&mut deferred_prune_retries) {
+                                if !request.verification.is_cancelled() {
+                                    verifications.schedule(self.processor.verifier(), request);
+                                }
                             }
-                        },
+                            if prune_retries_deferred {
+                                verifications.complete_ready();
+                            }
+                            match pending_prune.take() {
+                                // No message, but a prune is queued: run it.
+                                Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
+                                // No message and nothing to prune: wait on the mailbox, driving flush
+                                // completions while idle.
+                                None => {
+                                    let mailbox = &mut self.mailbox;
+                                    let syncs = &mut syncs;
+                                    let pending_syncs = &mut pending_syncs;
+                                    let verifications = &mut verifications;
+                                    Either::Right(async move {
+                                        loop {
+                                            select! {
+                                                message = mailbox.recv() => {
+                                                    break message.map(Step::Message);
+                                                },
+                                                completion = syncs.next_completed() => {
+                                                    if !complete(pending_syncs, completion) {
+                                                        return None;
+                                                    }
+                                                },
+                                                _ = verifications.next_completed() => {
+                                                    continue;
+                                                },
+                                            }
+                                        }
+                                    })
+                                }
+                            }
+                        }
                         Err(TryRecvError::Disconnected) => {
                             debug!("mailbox closed, stopping processing");
                             return;
@@ -189,11 +207,11 @@ where
                         .instrument(process);
                     futures::pin_mut!(proposal);
                     let mut receive_messages = true;
+                    let mut verification_fenced = false;
                     loop {
                         if receive_messages {
                             select! {
                                 _ = &mut proposal => break,
-                                _ = verifications.next_completed() => {},
                                 message = self.mailbox.recv() => match message {
                                     Some(Message::Verify {
                                         span,
@@ -210,6 +228,10 @@ where
                                         },
                                     ),
                                     Some(message) => {
+                                        verification_fenced = matches!(
+                                            message,
+                                            Message::Finalized { .. },
+                                        );
                                         // Only verification may overtake an active proposal. The
                                         // first other message is a FIFO barrier, so later
                                         // verifications must not cross it.
@@ -218,7 +240,11 @@ where
                                     }
                                     None => receive_messages = false,
                                 },
+                                _ = verifications.next_completed() => {},
                             }
+                        } else if verification_fenced {
+                            (&mut proposal).await;
+                            break;
                         } else {
                             select! {
                                 _ = &mut proposal => break,
@@ -343,9 +369,7 @@ where
                     prune
                         .run(self.processor.databases_mut(), &self.marshal)
                         .await;
-                    for request in retry {
-                        verifications.schedule(self.processor.verifier(), request);
-                    }
+                    deferred_prune_retries.extend(retry);
                 }
             },
         }
@@ -376,7 +400,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::Shared,
+        db::{DatabaseSet, Shared},
         tests::{
             fixtures,
             mocks::{
@@ -561,7 +585,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            _databases: &Self::Databases,
+            _readers: &<Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
             let gate = self.finalized_gate.lock().take();
             if let Some(mut gate) = gate {
@@ -1078,6 +1102,88 @@ mod tests {
                 .send(())
                 .expect("proposal should remain active");
             assert!(proposal.await.is_none());
+            actor.abort();
+        });
+    }
+
+    #[test]
+    fn deferred_finalization_fences_proposal_time_verification() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (parent_gate, parent_started, parent_release) = application_gate();
+            let (child_gate, child_started, child_release) = application_gate();
+            let (proposal_gate, proposal_started, proposal_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([parent_gate, child_gate]))),
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let (mut mailbox, _marshal, actor) =
+                spawn_gated_application(&context, "proposal-finalization", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let winner = TestBlock::child(&genesis, 1);
+            let losing_parent = TestBlock::child(&genesis, 2);
+            let losing_child = TestBlock::child(&losing_parent, 3);
+
+            let mut parent_verifier = mailbox.clone();
+            let mut verify_parent = Box::pin(parent_verifier.verify(
+                (context.child("verify_parent"), losing_parent.context()),
+                ancestry::from_iter([Arc::new(losing_parent.clone()), Arc::new(genesis.clone())]),
+            ));
+            assert!(poll!(&mut verify_parent).is_pending());
+            parent_started
+                .await
+                .expect("losing parent verification should start");
+            parent_release
+                .send(())
+                .expect("losing parent verification should remain active");
+            assert!(verify_parent.await);
+
+            let mut proposer = mailbox.clone();
+            let mut proposal = Box::pin(proposer.propose(
+                (
+                    context.child("propose"),
+                    TestBlock::child(&genesis, 4).context(),
+                ),
+                ancestry::from_iter([Arc::new(genesis)]),
+                (),
+            ));
+            assert!(poll!(&mut proposal).is_pending());
+            proposal_started.await.expect("proposal should start");
+
+            let mut child_verifier = mailbox.clone();
+            let mut verify_child = Box::pin(child_verifier.verify(
+                (context.child("verify_child"), losing_child.context()),
+                ancestry::from_iter([Arc::new(losing_child), Arc::new(losing_parent)]),
+            ));
+            assert!(poll!(&mut verify_child).is_pending());
+            child_started
+                .await
+                .expect("losing child verification should start");
+
+            let (acknowledgement, mut waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(poll!(&mut waiter).is_pending());
+
+            child_release
+                .send(())
+                .expect("losing child verification should remain active");
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                poll!(&mut verify_child).is_pending(),
+                "verification must not publish after observing finalization",
+            );
+
+            proposal_release
+                .send(())
+                .expect("proposal should remain active");
+            assert!(proposal.await.is_none());
+            waiter
+                .await
+                .expect("conflicting finalized block should be acknowledged");
+            assert!(!verify_child.await);
             actor.abort();
         });
     }
@@ -1878,6 +1984,120 @@ mod tests {
             waiter2.await.expect("newer block should be acknowledged");
             actor.abort();
             marshal.abort();
+        });
+    }
+
+    #[test]
+    fn prune_retries_wait_for_queued_finalization() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block1 = TestBlock::child(&genesis, 1);
+            let block2 = TestBlock::child(&block1, 2);
+            let losing = TestBlock::child(&block2, 3);
+            let winner = TestBlock::child(&block2, 4);
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(&mut signing, b"prune-retry", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "prune-retry",
+                scheme,
+                None,
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let (verify_gate, verify_started, mut verify_release) = application_gate();
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::default(),
+                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
+                finalized_gate: Arc::default(),
+                gate_height: Height::new(u64::MAX),
+                apply_calls: Arc::new(AtomicUsize::new(0)),
+                verify_calls: verify_calls.clone(),
+            };
+            let control = FlushControl::default();
+            let (prune_started, prune_release) = control.gate_prune();
+            let databases = Shared::new("prune-retry", TestDb::gated(control.clone()));
+            let pruning = Pruning::build(
+                PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                },
+                1,
+                0,
+            );
+            let processor = Processor::new(
+                app,
+                databases,
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                Some(pruning),
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), losing.context()),
+                ancestry::from_iter([Arc::new(losing), Arc::new(block2)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            verify_started
+                .await
+                .expect("verification should start before pruning");
+
+            while control.flushes.lock().len() < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            control
+                .flushes
+                .lock()
+                .remove(0)
+                .send(Ok(()))
+                .expect("target flush should remain pending");
+            waiter1.await.expect("target block should be acknowledged");
+            prune_started.await.expect("prune should start");
+            verify_release.closed().await;
+
+            let (acknowledgement, winner_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            prune_release.send(()).expect("prune should remain active");
+
+            assert!(
+                !verify.await,
+                "prune retry must observe the queued finalization",
+            );
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(control.pruned.lock().as_slice(), [1]);
+
+            while control.flushes.lock().len() < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            for release in control.flushes.lock().drain(..) {
+                release
+                    .send(Ok(()))
+                    .expect("finalize flush should remain pending");
+            }
+            waiter2.await.expect("block 2 should be acknowledged");
+            winner_waiter.await.expect("winner should be acknowledged");
+            actor.abort();
+            drop(marshal.guards);
         });
     }
 

@@ -949,11 +949,12 @@ where
     /// Notify the application that marshal delivered a finalized block already
     /// reflected in the database set.
     pub(super) async fn notify_finalized(&mut self, context: &E, block: &A::Block) {
+        let readers = self.execution.databases.readers();
         self.app
             .finalized(
                 (context.child("finalized"), block.context()),
                 block,
-                &self.execution.databases,
+                &readers,
             )
             .await;
     }
@@ -1894,7 +1895,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            databases: &Self::Databases,
+            readers: &<Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
             if let Some(probe) = &self.finalized_probe {
                 probe.call(block.digest()).await;
@@ -1902,7 +1903,7 @@ mod tests {
             let Some(observer) = self.finalized_observer.clone() else {
                 return;
             };
-            let db = databases.read().await;
+            let db = readers.read().await;
             let value = db
                 .get(&height_key(block.height()))
                 .await
@@ -2592,6 +2593,100 @@ mod tests {
                 .await
                 .expect("finalized block should be newly applied");
             assert!(barrier.durable().await, "finalize flush must complete");
+        });
+    }
+
+    #[test]
+    fn finalized_reader_preserves_retained_replay_base() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut harness, finalized_values) =
+                Harness::new_with_finalized_observer(context).await;
+            let genesis = Block::genesis();
+            let parent = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let (child, _) = harness.build_child(&parent, View::new(2)).await;
+
+            let (owner_gate, owner_started, mut owner_release) = apply_gate();
+            let (retry_gate, retry_started, retry_release) = apply_gate();
+            harness.processor.app.apply_probe = Some(ApplicationProbe::new(
+                child.digest(),
+                [owner_gate, retry_gate],
+            ));
+            let (finalized_gate, finalized_started, finalized_release) = apply_gate();
+            harness.processor.app.finalized_probe =
+                Some(ApplicationProbe::new(parent.digest(), [finalized_gate]));
+
+            let execution = harness.processor.execution.clone();
+            let replays = harness.processor.replays.clone();
+            let mut owner_app = harness.processor.app.clone();
+            let mut waiter_app = harness.processor.app.clone();
+            let replay_context = harness.context_cell.as_present();
+            let owner_progress = VerificationProgress::default();
+            let waiter_progress = VerificationProgress::default();
+            let (mut owner_cancellation, owner_alive) = oneshot::channel::<()>();
+            let (mut waiter_cancellation, _waiter_alive) = oneshot::channel::<()>();
+
+            let mut owner = Box::pin(execution.replay_block_shared(
+                &mut owner_app,
+                replay_context,
+                child.digest(),
+                Arc::new(child.clone()),
+                &mut owner_cancellation,
+                ReplayTracking {
+                    flights: &replays,
+                    progress: Some(&owner_progress),
+                },
+            ));
+            assert!(futures::poll!(&mut owner).is_pending());
+            owner_started.await.expect("replay owner should start");
+
+            let mut waiter = Box::pin(execution.replay_block_shared(
+                &mut waiter_app,
+                replay_context,
+                child.digest(),
+                Arc::new(child),
+                &mut waiter_cancellation,
+                ReplayTracking {
+                    flights: &replays,
+                    progress: Some(&waiter_progress),
+                },
+            ));
+            assert!(futures::poll!(&mut waiter).is_pending());
+
+            let mut finalize = Box::pin(
+                harness
+                    .processor
+                    .finalize(harness.context_cell.as_present(), &parent),
+            );
+            assert!(futures::poll!(&mut finalize).is_pending());
+            finalized_started
+                .await
+                .expect("finalized hook should start");
+
+            drop(owner_alive);
+            assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
+            owner_release.closed().await;
+            select! {
+                result = &mut waiter => {
+                    panic!("retained replay failed after owner cancellation: {result:?}");
+                },
+                result = retry_started => {
+                    result.expect("retained replay should restart from finalized state");
+                },
+            }
+
+            finalized_release
+                .send(())
+                .expect("finalized hook should remain active");
+            let Applied { barrier, .. } = finalize
+                .await
+                .expect("finalized block should be newly applied");
+            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_eq!(finalized_values.lock().as_slice(), [1]);
+
+            retry_release
+                .send(())
+                .expect("retried replay should remain active");
+            assert_eq!(waiter.await, Ok(()));
         });
     }
 

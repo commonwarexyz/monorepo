@@ -170,6 +170,38 @@ impl<DB> Shared<DB> {
     }
 }
 
+/// Read-only access to a database managed by [`Stateful`](super::Stateful).
+///
+/// Unlike [`Shared`], this handle cannot acquire a write slot or construct and
+/// finalize batches. Applications receive readers in
+/// [`Application::finalized`](super::Application::finalized) so observing
+/// finalized state cannot invalidate concurrent speculative batches.
+///
+/// ```compile_fail
+/// use commonware_glue::stateful::db::Reader;
+///
+/// async fn mutate<DB>(reader: Reader<DB>) {
+///     let _ = reader.write().await;
+/// }
+/// ```
+pub struct Reader<DB>(Shared<DB>);
+
+impl<DB> Clone for Reader<DB> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<DB> Reader<DB> {
+    /// Acquire shared read access to the database.
+    ///
+    /// The guard follows the same write-preferring lock discipline as
+    /// [`Shared::read`].
+    pub async fn read(&self) -> ReadGuard<'_, DB> {
+        self.0.read().await
+    }
+}
+
 /// Shared read access to a [`Shared`] database.
 pub struct ReadGuard<'a, DB>(AsyncRwLockReadGuard<'a, DB>);
 
@@ -435,6 +467,13 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Tuple of [`ManagedDb::Merkleized`] for every database in the set.
     type Merkleized: Send + Sync;
 
+    /// Read-only handles for observing the applied database state.
+    ///
+    /// Implementations must not expose mutation capabilities through this
+    /// type. In particular, readers must not construct, finalize, prune, or
+    /// rewind database batches.
+    type Readers: Clone + Send + Sync + 'static;
+
     /// Configuration needed to construct every database in the set.
     ///
     /// - Single database sets use that database's [`ManagedDb::Config`].
@@ -466,6 +505,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Return true if merkleized batches match the sync targets.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
+
+    /// Return read-only handles for every database in the set.
+    fn readers(&self) -> Self::Readers;
 
     /// Apply each merkleized batch's changeset and begin persisting it.
     ///
@@ -637,6 +679,7 @@ where
 impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     type Unmerkleized = T::Unmerkleized;
     type Merkleized = T::Merkleized;
+    type Readers = Reader<T>;
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
 
@@ -661,6 +704,10 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
 
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool {
         T::matches_sync_target(batches, targets)
+    }
+
+    fn readers(&self) -> Self::Readers {
+        Reader(self.clone())
     }
 
     async fn finalize(&self, batches: Self::Merkleized) -> Barrier {
@@ -862,6 +909,7 @@ macro_rules! impl_database_set {
         {
             type Unmerkleized = ($($T::Unmerkleized,)+);
             type Merkleized = ($($T::Merkleized,)+);
+            type Readers = ($(Reader<$T>,)+);
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
 
@@ -900,6 +948,10 @@ macro_rules! impl_database_set {
 
             fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool {
                 $($T::matches_sync_target(&batches.$idx, &targets.$idx))&&+
+            }
+
+            fn readers(&self) -> Self::Readers {
+                ($(Reader(self.$idx.clone()),)+)
             }
 
             async fn finalize(&self, batches: Self::Merkleized) -> Barrier {

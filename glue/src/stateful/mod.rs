@@ -147,8 +147,8 @@ pub struct Input<Upstream, Provider> {
 /// concurrently. Implementors should treat `Application` as a stateless,
 /// deterministic state machine: given the same method inputs and database
 /// state, every clone must produce the same state-transition result. Mutable
-/// state that affects those results must live in the provided database batches
-/// or database set.
+/// state that affects those results must live in the database batches provided
+/// to proposal, verification, and replay methods.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -314,8 +314,10 @@ where
     /// reported or applied during handoff. Applications must derive synchronized state from the
     /// database set rather than rely on receiving every peer-state-sync finalization here.
     ///
-    /// This hook may overlap verification of blocks built on the newly finalized block or one of
-    /// its retained descendants.
+    /// This hook receives read-only database handles and may overlap verification
+    /// of blocks built on the newly finalized block or one of its retained
+    /// descendants. Result-affecting mutations must be made through normal block
+    /// execution, not from this observer.
     ///
     /// For blocks that are reported, this is an at-least-once notification inherited from
     /// marshal's reporter stream: a crash after this hook runs but before the block's flush and
@@ -323,12 +325,12 @@ where
     ///
     /// # Panics
     ///
-    /// Implementations should panic if post-finalization maintenance fails.
+    /// Implementations should panic if observing finalized state fails.
     fn finalized(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _databases: &Self::Databases,
+        _readers: &<Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = ()> + Send {
         async {}
     }
