@@ -67,7 +67,8 @@ where
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
-    /// Verify requests collected before the processor became available.
+    /// Live verify requests held during state sync and scheduled when
+    /// processing starts.
     pub(super) initial_verifications: Vec<VerificationRequest<E, A>>,
 
     /// Finalized marshal blocks at or below this height were already reflected

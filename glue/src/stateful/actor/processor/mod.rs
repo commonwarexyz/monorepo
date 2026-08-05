@@ -69,13 +69,16 @@ type ReplayResult = Result<(), PrepareBatchesError>;
 type ReplayWaiterSlots = Vec<Option<oneshot::Sender<ReplayResult>>>;
 type ReplayRegistry<D> = Arc<Mutex<BTreeMap<D, ReplayFlight>>>;
 
+/// Identity that prevents stale handles from modifying a replacement replay.
 struct ReplayGeneration;
 
+/// One in-progress replay and the requests waiting for its result.
 struct ReplayFlight {
     generation: Arc<ReplayGeneration>,
     waiters: ReplayWaiterSlots,
 }
 
+/// Last observed phase used to classify live verification across finalization.
 #[derive(Clone, Copy)]
 enum VerificationPhase<D> {
     Acquiring,
@@ -210,7 +213,9 @@ where
 
 /// Speculative state shared by independently-polled verification jobs.
 ///
-/// The finalization fields form one state machine:
+/// Live verification may continue while finalization changes the applied
+/// database base. The finalization fields fence which results may publish
+/// across that transition and form one state machine:
 /// - Idle: `finalizing` is `None`, the batch is not secured, and the compatible
 ///   set is empty.
 /// - Acquiring: `finalizing` is set and the batch is not secured. The exact
@@ -225,13 +230,19 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
+    /// Merkleized state for unfinalized blocks.
     pending: PendingMap<A, E>,
+    /// Latest canonical anchor whose finalization hook has completed.
     last_processed: Anchor<PendingDigest<A, E>>,
+    /// Winner currently being applied, if finalization is active.
     finalizing: Option<Anchor<PendingDigest<A, E>>>,
+    /// Whether finalization has taken or reconstructed the winner's batch.
     finalizing_batch_secured: bool,
+    /// Winner and descendants allowed to publish during finalization.
     finalizing_compatible: HashSet<PendingDigest<A, E>>,
 }
 
+/// Returns the winner and pending descendants whose state survives finalization.
 fn compatible_pending<A, E>(
     state: &ExecutionState<A, E>,
     finalized_digest: PendingDigest<A, E>,
@@ -359,6 +370,7 @@ where
     Missing,
 }
 
+/// Registration that removes its own waiter slot when dropped.
 struct ReplayWaiter<D: Copy + Ord> {
     flights: ReplayFlights<D>,
     digest: D,
@@ -387,6 +399,7 @@ impl<D: Copy + Ord> Drop for ReplayWaiter<D> {
     }
 }
 
+/// Replay owner that removes its generation and notifies waiters when dropped.
 struct ReplayOwner<D: Copy + Ord> {
     flights: ReplayFlights<D>,
     digest: D,
@@ -949,6 +962,7 @@ where
         self.state.lock().last_processed
     }
 
+    /// Starts the publication fence for a serialized finalization.
     fn begin_finalization(&self, anchor: Anchor<PendingDigest<A, E>>) {
         let mut state = self.state.lock();
         let compatible = compatible_pending(&state, anchor.digest, anchor.round);
@@ -1072,6 +1086,11 @@ where
         true
     }
 
+    /// Takes a cached winner batch or waits for an active replay producing it.
+    ///
+    /// Replay completion only tells the caller to check the cache again: the
+    /// owner publishes before notifying its waiters. Execution state is always
+    /// locked before the replay registry when both are inspected.
     fn take_finalization_batch(
         &self,
         replays: &ReplayFlights<PendingDigest<A, E>>,
@@ -1089,6 +1108,10 @@ where
         FinalizationBatch::Wait(replays.waiter(digest, flight))
     }
 
+    /// Reuses known state, joins an active replay, or claims replay ownership.
+    ///
+    /// The state-before-registry lock order prevents a replay registration from
+    /// racing publication of the same digest.
     fn claim_replay(
         &self,
         replays: &ReplayFlights<PendingDigest<A, E>>,
@@ -1149,6 +1172,10 @@ where
         Ok(self.databases.new_batches().await)
     }
 
+    /// Replays one certified block and caches its commitment-matching state.
+    ///
+    /// Cancellation publishes nothing. A commitment mismatch or a publication
+    /// rejected by the finalization fence makes the ancestry invalid.
     async fn replay_block<C>(
         &self,
         app: &mut A,
@@ -1197,6 +1224,11 @@ where
             .ok_or(PrepareBatchesError::Invalid)
     }
 
+    /// Replays one block while sharing completed work with concurrent requests.
+    ///
+    /// One owner executes the block and broadcasts each terminal result. A
+    /// cancelled owner drops the flight without a result, closing its waiter
+    /// channels so live requests loop and claim a new generation.
     async fn replay_block_shared<C>(
         &self,
         app: &mut A,
@@ -1249,6 +1281,11 @@ where
         }
     }
 
+    /// Ensures parent state exists and forks batches for speculative execution.
+    ///
+    /// Verification supplies replay tracking to share reconstruction by block
+    /// digest; proposals reconstruct independently. `fork_batches` revalidates
+    /// the parent after reconstruction in case finalization advanced meanwhile.
     async fn prepare_batches<S, V, C>(
         &self,
         app: &mut A,
@@ -1281,6 +1318,10 @@ where
     }
 
     /// Rebuilds missing ancestry through `target`.
+    ///
+    /// The backward walk stops only at pending state or the applied anchor and
+    /// rejects stale or non-contiguous ancestry. Blocks are then replayed in
+    /// ancestor order, with commitments checked before each cache insertion.
     async fn rebuild_pending<P, C>(
         &self,
         app: &mut A,

@@ -115,7 +115,7 @@ where
                 let ancestry = request.ancestry.clone();
                 let result = select! {
                     _ = invalidated => None,
-                    result = verifier.verify(
+                    result = verifier.run(
                         &request.context.0,
                         marshal,
                         request.context.1.clone(),

@@ -16,27 +16,40 @@ use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{debug, info_span, warn};
 
+/// Parent-relative database batches passed to application verification.
 type Unmerkleized<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Unmerkleized;
 
+/// Result of comparing a candidate with the applied canonical chain.
 enum ProcessedBlock {
+    /// The candidate is above the applied anchor and still requires execution.
     Continue,
+    /// The candidate is already on the applied canonical chain.
     Accepted,
+    /// The candidate conflicts with the applied canonical chain.
     Rejected,
+    /// The check ended without a verdict because its request was cancelled.
     Cancelled,
 }
 
+/// Failure to prepare the parent state needed for verification.
 enum PrepareFailure {
+    /// The supplied ancestry is provably invalid.
     Invalid,
+    /// Preparation ended without a verdict because its request was cancelled.
     Cancelled,
 }
 
+/// A candidate's parent and forked batches, ready for application verification.
 struct PreparedParent<A, E>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
+    /// Parent block consumed while preparing the candidate's state.
     block: Arc<A::Block>,
+    /// Digest of `block`.
     digest: PendingDigest<A, E>,
+    /// Batches forked from the parent's speculative or applied state.
     batches: Unmerkleized<A, E>,
 }
 
@@ -70,8 +83,9 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Verifies one request while allowing unrelated requests to be polled.
-    pub(in crate::stateful::actor) async fn verify<S, V>(
+    /// Runs one verification request while allowing unrelated requests to be
+    /// polled.
+    pub(in crate::stateful::actor) async fn run<S, V>(
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
@@ -144,7 +158,7 @@ where
 
         progress.verifying(block_digest, parent.digest, consensus_context.round());
         let result = self
-            .verify_with_application(
+            .verify(
                 context,
                 consensus_context,
                 block,
@@ -159,6 +173,8 @@ where
         result
     }
 
+    /// Classifies a candidate at or below the applied height without
+    /// re-executing it.
     async fn check_processed<S, V>(
         &mut self,
         marshal: MarshalMailbox<S, V>,
@@ -199,6 +215,7 @@ where
         }
     }
 
+    /// Reconstructs and forks the candidate's parent state.
     async fn prepare_parent<S, V>(
         &mut self,
         context: &E,
@@ -286,7 +303,8 @@ where
         })
     }
 
-    async fn verify_with_application(
+    /// Executes application verification and publishes commitment-matching state.
+    async fn verify(
         &mut self,
         context: &E,
         consensus_context: A::Context,

@@ -62,12 +62,15 @@ use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// The QMDB database type used by the single-db e2e tests.
-type Qmdb<E> =
+pub(super) type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
 pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
-fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
+pub(super) fn qmdb_config(
+    prefix: &str,
+    page_cache: CacheRef,
+) -> FixedConfig<TwoCap, Sequential> {
     FixedConfig {
         merkle_config: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-mmr-journal"),
@@ -93,11 +96,11 @@ fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequen
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Block {
-    context: Context<sha256::Digest, ed25519::PublicKey>,
-    parent: sha256::Digest,
-    height: Height,
-    state_root: sha256::Digest,
-    range: NonEmptyRange<Location>,
+    pub(super) context: Context<sha256::Digest, ed25519::PublicKey>,
+    pub(super) parent: sha256::Digest,
+    pub(super) height: Height,
+    pub(super) state_root: sha256::Digest,
+    pub(super) range: NonEmptyRange<Location>,
 }
 
 impl Write for Block {
@@ -163,7 +166,7 @@ impl CertifiableBlock for Block {
 }
 
 impl Block {
-    fn genesis(state_root: sha256::Digest, range: NonEmptyRange<Location>) -> Self {
+    pub(super) fn genesis(state_root: sha256::Digest, range: NonEmptyRange<Location>) -> Self {
         Self {
             context: Context {
                 round: Round::new(Epoch::zero(), View::zero()),
@@ -180,17 +183,17 @@ impl Block {
 
 /// A stateful application that increments a counter each block.
 #[derive(Clone)]
-struct App {
+pub(super) struct App {
     genesis: Block,
 }
 
 impl App {
-    fn new(genesis: Block) -> Self {
+    pub(super) fn new(genesis: Block) -> Self {
         Self { genesis }
     }
 
     /// Execute a block: increment "counter" and write `height -> height_val`.
-    async fn execute<E: Rng + Spawner + StorageContext>(
+    pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
@@ -625,276 +628,5 @@ impl EngineDefinition for SingleDbEngine {
 
     fn start(engine: Self::Engine) -> Handle<()> {
         engine
-    }
-}
-
-#[cfg(test)]
-mod certification_tests {
-    use super::*;
-    use crate::stateful::db::AttachableResolver;
-    use commonware_actor::Feedback;
-    use commonware_consensus::{
-        CertifiableAutomaton as _, Reporter,
-        marshal::{self, resolver::handler},
-    };
-    use commonware_macros::select;
-    use commonware_resolver::{Fetch, Resolver as MarshalResolver, TargetedResolver};
-    use commonware_runtime::{Clock as _, Runner as _};
-    use commonware_storage::qmdb::sync::{FeedbackTx, Request, Response, Source as QmdbSource};
-    use commonware_utils::{Acknowledgement as _, vec::NonEmptyVec};
-    use std::{convert::Infallible, future::Future};
-
-    #[derive(Clone)]
-    struct NoopQmdbResolver;
-
-    impl QmdbSource for NoopQmdbResolver {
-        type Family = mmr::Family;
-        type Digest = sha256::Digest;
-        type Op = fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
-        type Error = Infallible;
-
-        fn serve<'a>(
-            &'a self,
-            _request: Request<Self::Family>,
-        ) -> impl Future<
-            Output = Result<
-                (Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx),
-                Self::Error,
-            >,
-        > + Send
-        + 'a {
-            std::future::pending()
-        }
-    }
-
-    impl AttachableResolver<Qmdb<deterministic::Context>> for NoopQmdbResolver {
-        async fn attach_database(&self, _db: Shared<Qmdb<deterministic::Context>>) {}
-    }
-
-    #[derive(Clone)]
-    struct NoopMarshalResolver;
-
-    #[derive(Clone)]
-    struct NoopMarshalApplication;
-
-    impl Reporter for NoopMarshalApplication {
-        type Activity = marshal::Update<Block>;
-
-        fn report(&mut self, activity: Self::Activity) -> Feedback {
-            if let marshal::Update::Block(_, acknowledgement) = activity {
-                acknowledgement.acknowledge();
-            }
-            Feedback::Ok
-        }
-    }
-
-    impl MarshalResolver for NoopMarshalResolver {
-        type Key = handler::Key<sha256::Digest>;
-        type Subscriber = handler::Annotation;
-
-        fn fetch<F>(&mut self, _fetch: F) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn fetch_all<F>(&mut self, _fetches: Vec<F>) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-    }
-
-    impl TargetedResolver for NoopMarshalResolver {
-        type PublicKey = ed25519::PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            _fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-    }
-
-    async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, Vec<Block>) {
-        let initial_target =
-            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
-        let genesis = Block::genesis(initial_target.root, initial_target.range);
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
-        let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
-            context.child("chain_builder"),
-            qmdb_config("certify-chain-builder", page_cache),
-        )
-        .await;
-        let mut batches = databases.new_batches().await;
-        let mut parent = genesis.clone();
-        let mut chain = Vec::with_capacity(blocks as usize);
-        // QMDB descendants retain uncommitted ancestry by weak reference after
-        // merkleization, so keep the complete speculative chain alive here.
-        let mut speculative = Vec::with_capacity(blocks as usize);
-
-        for height in 1..=blocks {
-            let height = Height::new(height);
-            let merkleized = App::execute(height, batches).await;
-            let bounds = merkleized.bounds();
-            let block = Block {
-                context: Context {
-                    round: Round::new(Epoch::zero(), View::new(height.get())),
-                    leader: ed25519::PrivateKey::from_seed(0).public_key(),
-                    parent: (parent.context.round.view(), parent.digest()),
-                },
-                parent: parent.digest(),
-                height,
-                state_root: merkleized.root(),
-                range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            };
-            speculative.push(merkleized);
-            batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::fork_batches(
-                speculative.last().expect("speculative batch missing"),
-            );
-            parent = block.clone();
-            chain.push(block);
-        }
-
-        (genesis, chain)
-    }
-
-    #[test]
-    fn out_of_order_certifications_complete_on_qmdb() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (genesis, blocks) = build_chain(&context, 6).await;
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut signing_context = context.child("signing");
-            let fixture = scheme_mocks::fixture(
-                &mut signing_context,
-                b"_COMMONWARE_GLUE_QMDB_OUT_OF_ORDER_CERTIFY",
-                1,
-            );
-            let provider = ConstantProvider::new(fixture.schemes[0].clone());
-            let finalizations_by_height = prunable::Archive::init(
-                context.child("finalizations_by_height"),
-                archive_config(
-                    "certify-qmdb-marshal",
-                    "finalizations",
-                    page_cache.clone(),
-                    (),
-                ),
-            )
-            .await
-            .expect("failed to initialize finalizations archive");
-            let finalized_blocks = prunable::Archive::init(
-                context.child("finalized_blocks"),
-                archive_config("certify-qmdb-marshal", "blocks", page_cache.clone(), ()),
-            )
-            .await
-            .expect("failed to initialize blocks archive");
-            let (marshal_actor, marshal, floor) =
-                MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
-                    context.child("marshal"),
-                    finalizations_by_height,
-                    finalized_blocks,
-                    marshal::Config {
-                        provider,
-                        epocher: FixedEpocher::new(EPOCH_LENGTH),
-                        start: marshal::Start::Genesis(genesis.clone()),
-                        partition_prefix: "certify-qmdb-marshal".to_string(),
-                        mailbox_size: NZUsize!(8),
-                        view_retention: ViewDelta::new(10),
-                        prunable_items_per_section: NZU64!(10),
-                        page_cache: page_cache.clone(),
-                        replay_buffer: IO_BUFFER_SIZE,
-                        key_write_buffer: IO_BUFFER_SIZE,
-                        value_write_buffer: IO_BUFFER_SIZE,
-                        block_codec_config: (),
-                        max_repair: NZUsize!(10),
-                        max_pending_acks: NZUsize!(1),
-                        strategy: Sequential,
-                    },
-                )
-                .await;
-            let (resolver_receiver, _resolver_handler) =
-                handler::init(context.child("marshal_resolver"), NZUsize!(8));
-            let marshal_actor = marshal_actor.start_unbuffered(
-                NoopMarshalApplication,
-                (resolver_receiver, NoopMarshalResolver),
-            );
-
-            let plan = SyncPlan::init(&context, "certify-qmdb-stateful".to_string()).await;
-            let (stateful, stateful_mailbox) = StatefulActor::init(
-                context.child("stateful"),
-                StatefulConfig {
-                    application: App::new(genesis),
-                    db_config: qmdb_config("certify-qmdb-stateful", page_cache),
-                    provider: (),
-                    marshal: (marshal.clone(), floor),
-                    mailbox_size: NZUsize!(1),
-                    plan,
-                    resolvers: NoopQmdbResolver,
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
-                    },
-                    prune_config: None,
-                },
-            );
-            let stateful_actor = stateful.start();
-            let _databases = stateful_mailbox.subscribe_databases().await;
-
-            for block in &blocks {
-                assert!(marshal.verified(block.context.round, block.clone()).await);
-            }
-
-            let mut deferred = Deferred::new(
-                context.child("deferred"),
-                stateful_mailbox,
-                marshal,
-                FixedEpocher::new(EPOCH_LENGTH),
-            );
-            let mut certifications = Vec::with_capacity(blocks.len());
-            for index in [5, 1, 4, 0, 3, 2] {
-                let block = &blocks[index];
-                certifications.push(deferred.certify(block.context.round, block.digest()).await);
-            }
-
-            select! {
-                results = futures::future::join_all(certifications) => {
-                    assert_eq!(results.len(), blocks.len());
-                    for result in results {
-                        assert!(result.expect("certification result missing"));
-                    }
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("out-of-order QMDB certifications did not all complete");
-                },
-            }
-
-            stateful_actor.abort();
-            marshal_actor.abort();
-            let _ = stateful_actor.await;
-            let _ = marshal_actor.await;
-        });
     }
 }
