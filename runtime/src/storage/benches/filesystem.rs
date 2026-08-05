@@ -7,7 +7,7 @@ use crate::{
 use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use commonware_formatting::hex;
-use commonware_runtime::{AtomicBlob, AtomicStorage, Blob, IoBuf, IoBufs, Storage, WriteOptions};
+use commonware_runtime::{AtomicBlob, AtomicStorage, Blob, IoBuf, IoBufs, Storage};
 use rand::Rng;
 use std::{
     fs, io,
@@ -32,12 +32,12 @@ pub const fn backend_name() -> &'static str {
 
 /// Protocol used by blobs opened through [`AtomicStorage`].
 pub const fn atomic_protocol() -> &'static str {
-    "uno_r12_append_root_64b_tag"
+    "uno_r13_append_root_64b_tag"
 }
 
 /// Protocol used to publish prepared roots as one multi-blob decision.
 pub const fn atomic_batch_protocol() -> &'static str {
-    "uno_r14_append_linked_participant_witness_64b_tag"
+    "uno_r13_root_l14_linked_participant_witness_64b_tag"
 }
 
 /// On-disk footprint of the benchmark blob after the timed workload.
@@ -264,8 +264,7 @@ pub async fn prepare_filled_blob<S: Storage>(
         let len = ((file_size - offset) as usize).min(DEFAULT_FILL_CHUNK_SIZE);
         let mut payload = vec![0u8; len];
         rng.fill_bytes(&mut payload);
-        blob.write_at(offset, payload, WriteOptions::default())
-            .await?;
+        blob.write_at(offset, payload).await?;
         offset += len as u64;
     }
     blob.sync().await?;
@@ -294,5 +293,24 @@ pub fn random_write_payload(rng: &mut impl Rng, io_size: usize, shape: WriteShap
                 .collect::<Vec<_>>();
             IoBufs::from(chunks)
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::{atomic_batch_protocol, atomic_protocol};
+
+    #[test]
+    fn atomic_protocol_reports_r13_root() {
+        assert_eq!(atomic_protocol(), "uno_r13_append_root_64b_tag");
+    }
+
+    #[test]
+    fn atomic_batch_protocol_reports_r13_root_and_l14_link() {
+        assert_eq!(
+            atomic_batch_protocol(),
+            "uno_r13_root_l14_linked_participant_witness_64b_tag"
+        );
     }
 }

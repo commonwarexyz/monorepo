@@ -52,7 +52,11 @@ mod tests {
             let (blob, _) = context
                 .open("storage-conformance", &seed.to_be_bytes())
                 .await?;
-            blob.write_at(0, vec![seed as u8, 1, 2, 3], WriteOptions::default())
+            blob.write_at_with_options(
+                0,
+                vec![seed as u8, 1, 2, 3],
+                WriteOptions::default(),
+            )
                 .await?;
             blob.sync().await
         }
@@ -67,7 +71,11 @@ mod tests {
             let (blob, _) = context
                 .open("storage-conformance", &seed.to_be_bytes())
                 .await?;
-            blob.write_at(0, vec![seed as u8, 4, 5, 6], WriteOptions::default())
+            blob.write_at_with_options(
+                0,
+                vec![seed as u8, 4, 5, 6],
+                WriteOptions::default(),
+            )
                 .await?;
             blob.sync().await
         }

@@ -1169,13 +1169,9 @@ mod tests {
             let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
             let offset = physical_page_size + 7;
             let byte = blob.read_at(offset, 1).await.unwrap().coalesce();
-            blob.write_at(
-                offset,
-                vec![byte.as_ref()[0] ^ 0xFF],
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
+            blob.write_at(offset, vec![byte.as_ref()[0] ^ 0xFF])
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
 
             assert_eq!(
@@ -1217,9 +1213,7 @@ mod tests {
             // state as if the extension never reached disk.
             writer.append(&data[20..]).await.unwrap();
             writer.sync().await.unwrap();
-            blob.write_at(0, stale, WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(0, stale).await.unwrap();
             blob.sync().await.unwrap();
 
             assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 20);
@@ -2780,9 +2774,7 @@ mod tests {
             append.sync().await.unwrap();
             drop(append);
 
-            blob.write_at(blob.size(), b"junk", WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(blob.size(), b"junk").await.unwrap();
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
@@ -2985,7 +2977,21 @@ mod tests {
             self.inner.read_at_buf(offset, len, bufs).await
         }
 
-        async fn write_at(
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.write_at_with_options(offset, bufs, WriteOptions::default())
+                .await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+                .await
+        }
+
+        async fn write_at_with_options(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
@@ -3006,7 +3012,7 @@ mod tests {
                 self.failed_write_len.store(bytes.len(), Ordering::SeqCst);
                 let partial_len = self.partial_len.min(bytes.len());
                 self.inner
-                    .write_at(offset, bytes.slice(..partial_len), options)
+                    .write_at_with_options(offset, bytes.slice(..partial_len), options)
                     .await?;
                 if !options.contains(WriteOptions::SYNC) {
                     self.inner.sync().await?;
@@ -3016,7 +3022,9 @@ mod tests {
                 ));
             }
 
-            self.inner.write_at(offset, bufs, options).await
+            self.inner
+                .write_at_with_options(offset, bufs, options)
+                .await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -3055,7 +3063,21 @@ mod tests {
             self.inner.read_at_buf(offset, len, bufs).await
         }
 
-        async fn write_at(
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.write_at_with_options(offset, bufs, WriteOptions::default())
+                .await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+                .await
+        }
+
+        async fn write_at_with_options(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
@@ -3063,7 +3085,10 @@ mod tests {
         ) -> Result<(), Error> {
             let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
             if write != self.fail_on {
-                return self.inner.write_at(offset, bufs, options).await;
+                return self
+                    .inner
+                    .write_at_with_options(offset, bufs, options)
+                    .await;
             }
 
             let bytes = bufs.into().coalesce();
@@ -3078,14 +3103,14 @@ mod tests {
             let write_options = options.without(WriteOptions::SYNC);
 
             self.inner
-                .write_at(
+                .write_at_with_options(
                     offset,
                     bytes.slice(..self.durable_payload_len),
                     write_options,
                 )
                 .await?;
             self.inner
-                .write_at(footer_offset, bytes.slice(footer_start..), write_options)
+                .write_at_with_options(footer_offset, bytes.slice(footer_start..), write_options)
                 .await?;
             self.inner.sync().await?;
 
@@ -3251,13 +3276,27 @@ mod tests {
             self.inner.read_at_buf(offset, len, bufs).await
         }
 
-        async fn write_at(
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn write_at_with_options(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
             options: WriteOptions,
         ) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs, options).await
+            self.inner
+                .write_at_with_options(offset, bufs, options)
+                .await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -3432,7 +3471,7 @@ mod tests {
                 .into();
 
             // === Step 3: Mangle slot 0 (non-authoritative) ===
-            blob.write_at(slot0_offset, DUMMY_MARKER.to_vec(), WriteOptions::default())
+            blob.write_at(slot0_offset, DUMMY_MARKER.to_vec())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -3570,7 +3609,7 @@ mod tests {
                 .into();
 
             // === Step 4: Mangle slot 1 (non-authoritative) ===
-            blob.write_at(slot1_offset, DUMMY_MARKER.to_vec(), WriteOptions::default())
+            blob.write_at(slot1_offset, DUMMY_MARKER.to_vec())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -3678,9 +3717,7 @@ mod tests {
                 .into();
 
             // Mangle bytes 25-30 (safely in the padding area, after our 20 bytes of data)
-            blob.write_at(25, DUMMY_MARKER.to_vec(), WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(25, DUMMY_MARKER.to_vec()).await.unwrap();
             blob.sync().await.unwrap();
 
             // === Step 3: Extend to 40 bytes ===
@@ -3781,7 +3818,7 @@ mod tests {
                 .into();
 
             // Mangle slot 0 (non-authoritative)
-            blob.write_at(slot0_offset, DUMMY_MARKER.to_vec(), WriteOptions::default())
+            blob.write_at(slot0_offset, DUMMY_MARKER.to_vec())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -3930,13 +3967,9 @@ mod tests {
 
             // === Step 3: Corrupt ONLY crc2 (not len2) ===
             // crc2 is 4 bytes at offset PAGE_SIZE + 8
-            blob.write_at(
-                crc2_offset,
-                vec![0xDE, 0xAD, 0xBE, 0xEF],
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
+            blob.write_at(crc2_offset, vec![0xDE, 0xAD, 0xBE, 0xEF])
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
 
             // Verify corruption: len2 should still be 30, but crc2 is now garbage
@@ -4075,13 +4108,9 @@ mod tests {
             drop(append);
 
             // === Step 4: Corrupt page 0's primary CRC (slot 1's crc2) ===
-            blob.write_at(
-                page0_crc2_offset,
-                vec![0xDE, 0xAD, 0xBE, 0xEF],
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
+            blob.write_at(page0_crc2_offset, vec![0xDE, 0xAD, 0xBE, 0xEF])
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
 
             // Verify corruption: page 0's slot 1 still has len=103 but bad CRC
@@ -4175,13 +4204,9 @@ mod tests {
 
             // Page 1 CRC record is at the end of the second physical page.
             let page1_crc_offset = (physical_page_size * 2 - CHECKSUM_SIZE as usize) as u64;
-            blob.write_at(
-                page1_crc_offset,
-                vec![0xFF; CHECKSUM_SIZE as usize],
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
+            blob.write_at(page1_crc_offset, vec![0xFF; CHECKSUM_SIZE as usize])
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
 
             // Open the blob - Writer::new() validates the LAST page (page 2), which is still valid.
@@ -4630,7 +4655,7 @@ mod tests {
             // the cached footer stale. A torn phase-1 shrink write must preserve that validated
             // fallback slot.
             let slot0_offset = PAGE_SIZE.get() as u64;
-            blob.write_at(slot0_offset, DUMMY_MARKER.to_vec(), WriteOptions::default())
+            blob.write_at(slot0_offset, DUMMY_MARKER.to_vec())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -5009,7 +5034,7 @@ mod tests {
                 0x00, 0x00, // len2 = 0
                 0x00, 0x00, 0x00, 0x00, // crc2 = 0
             ];
-            blob.write_at(crc_offset, bad_crc_record.to_vec(), WriteOptions::default())
+            blob.write_at(crc_offset, bad_crc_record.to_vec())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -5076,7 +5101,7 @@ mod tests {
                 0x02, 0x00, // len2 = 512 (> 103)
                 0xCA, 0xFE, 0xBA, 0xBE, // crc2 (garbage)
             ];
-            blob.write_at(crc_offset, bad_crc_record.to_vec(), WriteOptions::default())
+            blob.write_at(crc_offset, bad_crc_record.to_vec())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();

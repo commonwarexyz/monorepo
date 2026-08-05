@@ -1488,7 +1488,7 @@ mod tests {
                 .expect("Failed to open index blob");
             assert_eq!(size, 5 * physical_page);
             index_blob
-                .write_at(
+                .write_at_with_options(
                     2 * physical_page + TestEntry::SIZE as u64,
                     vec![0xFF; 12],
                     WriteOptions::SYNC,
@@ -1504,11 +1504,11 @@ mod tests {
                 .await
                 .expect("Failed to open values blob");
             values_blob
-                .write_at(60, vec![0xFF; 20], WriteOptions::SYNC)
+                .write_at_with_options(60, vec![0xFF; 20], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt value");
             values_blob
-                .write_at(80, vec![0xFF; 20], WriteOptions::SYNC)
+                .write_at_with_options(80, vec![0xFF; 20], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt value");
             drop(values_blob);
@@ -2009,7 +2009,7 @@ mod tests {
             // Last page CRC starts at offset 160 - 12 = 148
             assert_eq!(size, 160);
             let last_page_crc_offset = size - 12;
-            blob.write_at(last_page_crc_offset, vec![0xFF; 12], WriteOptions::SYNC)
+            blob.write_at_with_options(last_page_crc_offset, vec![0xFF; 12], WriteOptions::SYNC)
                 .await
                 .expect("Failed to corrupt");
             drop(blob);
@@ -3490,7 +3490,7 @@ mod tests {
 
             // Write 100 bytes of garbage (simulating partial/failed value write)
             let garbage = vec![0xDE; 100];
-            blob.write_at(size, garbage, WriteOptions::SYNC)
+            blob.write_at_with_options(size, garbage, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write garbage");
             drop(blob);
@@ -3603,7 +3603,7 @@ mod tests {
             // Write the complete physical page: entry_data + crc_record
             let mut page = entry_data;
             page.extend_from_slice(&crc_record);
-            blob.write_at(0, page, WriteOptions::SYNC)
+            blob.write_at_with_options(0, page, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write corrupted page");
             drop(blob);

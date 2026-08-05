@@ -60,17 +60,17 @@ use crate::{
     atomic_api::{IntegrityBoundary, IntegrityScheme, IntegrityToken, IntegrityUnit},
     storage::ATOMIC_BLOB_TAG_LEN,
 };
-commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+commonware_macros::stability_scope!(ALPHA, cfg(unix) {
     use crate::storage::{Header, Layout};
     use std::os::unix::fs::MetadataExt as _;
 });
 use commonware_cryptography::{Crc32, Hasher as _};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 use commonware_formatting::hex;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd as _;
 use std::{io, ops::Range};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
@@ -79,7 +79,7 @@ use std::{
     path::Path,
 };
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 std::thread_local! {
     static TRACKED_READ_BYTES: std::cell::Cell<Option<u64>> = const {
         std::cell::Cell::new(None)
@@ -89,7 +89,7 @@ std::thread_local! {
     };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1214,7 +1214,7 @@ const LEGACY_ROOT_MAGICS: [[u8; 8]; 10] = [
     *b"CWUNOM12",
     *b"CWUNOT12",
 ];
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 const CREATION_PREFIX: &str = ".commonware-uno-create-";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_LOG_ROOT";
 const BATCH_WITNESS_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_BATCH_WITNESS";
@@ -1236,7 +1236,7 @@ pub(super) const BACKGROUND_PREFLUSH_INTERVAL: u64 =
 const PAYLOAD_CHECKSUM_READ_LEN: usize = 64 * 1024;
 const INTEGRITY_CHECKSUM_LEN: usize = std::mem::size_of::<u32>();
 #[commonware_macros::stability(ALPHA)]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 const MIGRATION_COPY_LEN: usize = 1024 * 1024;
 #[cfg(all(target_os = "linux", feature = "iouring-storage"))]
 const MIN_WRITEBACK_HINT_LEN: u64 = 64 * 1024;
@@ -1351,7 +1351,7 @@ fn checksum(parts: &[&[u8]]) -> u32 {
     hasher.finalize().1.as_u32()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 fn read_exact_at(file: &File, mut offset: u64, mut out: &mut [u8]) -> io::Result<()> {
     while !out.is_empty() {
         let read = match file.read_at(out, offset) {
@@ -1377,7 +1377,7 @@ fn read_exact_at(file: &File, mut offset: u64, mut out: &mut [u8]) -> io::Result
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn track_read_bytes<T>(operation: impl FnOnce() -> T) -> (T, u64) {
     TRACKED_READ_BYTES.with(|tracked| {
         assert!(tracked.replace(Some(0)).is_none());
@@ -1387,7 +1387,7 @@ pub(super) fn track_read_bytes<T>(operation: impl FnOnce() -> T) -> (T, u64) {
     (result, bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn track_durable_writes<T>(operation: impl FnOnce() -> T) -> (T, Vec<(u64, usize)>) {
     TRACKED_DURABLE_WRITES.with(|tracked| {
         assert!(tracked.borrow_mut().replace(Vec::new()).is_none());
@@ -1667,7 +1667,7 @@ impl State {
         }
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), test))]
+    #[cfg(all(test, unix))]
     pub(super) fn recover(file: &File, data_offset: u64) -> io::Result<Self> {
         if data_offset < ROOT_OFFSETS[1] + ROOT_SLOT_LEN {
             return Err(invalid_input(
@@ -2611,7 +2611,7 @@ fn decode_batch_witness(slot: &[u8]) -> Option<(usize, &[u8])> {
     (stored_checksum == expected_checksum).then_some((witness_offset, witness))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 fn read_root_slot(
     file: &File,
     root_offset: u64,
@@ -2732,7 +2732,7 @@ fn candidate_root_is_delete_transition(installed: &[u8; ROOT_LEN], candidate: &C
         )
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 fn embedded_batch_candidates_with_materialized(
     file: &File,
     data_offset: u64,
@@ -2818,7 +2818,7 @@ fn embedded_batch_candidates_with_materialized(
 }
 
 /// Discover intact embedded witnesses even when their root header was torn during installation.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn embedded_batch_witnesses(
     file: &File,
     data_offset: u64,
@@ -2855,7 +2855,7 @@ pub(crate) fn embedded_batch_witnesses(
 ///
 /// Unresolved-candidate selection ignores these stale witnesses. A separate transfer pass uses
 /// them to make dependent peers independently recoverable before this witness is reused or removed.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn materialized_batch_candidates(
     file: &File,
     data_offset: u64,
@@ -2880,7 +2880,7 @@ pub(crate) fn materialized_batch_candidates(
 }
 
 /// Verify that an exact witness remains beside a known batch candidate's root transition.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn candidate_has_embedded_batch_witness(
     file: &File,
     candidate: &Candidate,
@@ -2935,7 +2935,7 @@ pub(crate) fn candidate_has_embedded_batch_witness(
 }
 
 /// Return whether a candidate's exact committed header is installed in its generation slot.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn candidate_is_committed(file: &File, candidate: &Candidate) -> io::Result<bool> {
     let Some(prepared) = decode_prepared_root(&candidate.prepared_root) else {
         return Ok(false);
@@ -2957,7 +2957,7 @@ pub(crate) fn candidate_is_committed(file: &File, candidate: &Candidate) -> io::
 
 /// Return whether a batch candidate's exact materialized header is installed.
 #[cfg_attr(not(test), allow(dead_code))]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn candidate_is_materialized(file: &File, candidate: &Candidate) -> io::Result<bool> {
     let Some(materialized_root) = candidate_materialized_root(candidate) else {
         return Ok(false);
@@ -2972,7 +2972,7 @@ pub(crate) fn candidate_is_materialized(file: &File, candidate: &Candidate) -> i
 }
 
 /// Return whether a batch candidate's exact independently recoverable tombstone is installed.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn candidate_is_tombstoned(file: &File, candidate: &Candidate) -> io::Result<bool> {
     let Some(tombstone_root) = candidate_tombstone_root(candidate) else {
         return Ok(false);
@@ -2987,7 +2987,7 @@ pub(crate) fn candidate_is_tombstoned(file: &File, candidate: &Candidate) -> io:
 }
 
 /// Validate and durably publish a batch candidate as independently recoverable.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn materialize_candidate(
     file: &File,
     data_offset: u64,
@@ -3001,7 +3001,7 @@ pub(crate) fn materialize_candidate(
 }
 
 /// Validate and durably replace a prepared candidate with a payload-preserving tombstone.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn materialize_tombstone_candidate(
     file: &File,
     data_offset: u64,
@@ -3093,7 +3093,7 @@ fn recover_root(
 }
 
 /// Write a small publication record and make that write durable before returning.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     let tracked_write = (offset, bytes.len());
@@ -3159,7 +3159,7 @@ pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Re
 /// A prepared root is deliberately invisible to ordinary blob recovery. An exact durable batch
 /// witness supplies the prepared and committed headers, allowing validation to accept any
 /// bytewise prefix-independent transition between those headers.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 fn validate_candidate_transition(
     file: &File,
     data_offset: u64,
@@ -3201,7 +3201,7 @@ fn validate_candidate_transition(
     Ok(metadata)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn validate_candidate(
     file: &File,
     data_offset: u64,
@@ -3210,7 +3210,7 @@ pub(super) fn validate_candidate(
     validate_candidate_transition(file, data_offset, candidate, false)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn validate_delete_candidate(
     file: &File,
     data_offset: u64,
@@ -3220,7 +3220,7 @@ pub(super) fn validate_delete_candidate(
 }
 
 /// Verify a bounded speculative payload suffix without publishing its candidate root.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn validate_payload_checksum(
     file: &File,
     data_offset: u64,
@@ -3278,7 +3278,7 @@ pub(super) fn validate_payload_checksum(
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 fn creation_path(live_path: &Path) -> io::Result<std::path::PathBuf> {
     let file_name = live_path
         .file_name()
@@ -3288,7 +3288,7 @@ fn creation_path(live_path: &Path) -> io::Result<std::path::PathBuf> {
     Ok(live_path.with_file_name(staging_name))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn is_creation_file_name(name: &OsStr) -> bool {
     name.as_encoded_bytes()
         .starts_with(CREATION_PREFIX.as_bytes())
@@ -3299,7 +3299,7 @@ pub(super) fn is_creation_file_name(name: &OsStr) -> bool {
 /// The live name is published only after its complete header is durable. A crash can therefore
 /// leave either no live name or a parseable V2 file, without broadening legacy torn-header
 /// recovery to cover the larger V2 header region.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn create_live(
     root: &Path,
     _partition: &str,
@@ -3333,7 +3333,7 @@ pub(super) fn create_live(
 /// An ordinary same-directory rename then publishes the replacement atomically. The caller must
 /// serialize namespace operations and prevent concurrent mutation through other source handles.
 #[commonware_macros::stability(ALPHA)]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn migrate_live(
     root: &Path,
     partition: &str,
@@ -3448,7 +3448,7 @@ pub(super) fn migrate_live(
 
 /// Persist a same-directory live-name update after its target inode is durable.
 #[commonware_macros::stability(ALPHA)]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 fn sync_live_directories(root: &Path, live_path: &Path) -> io::Result<()> {
     let parent = live_path
         .parent()
@@ -3459,7 +3459,7 @@ fn sync_live_directories(root: &Path, live_path: &Path) -> io::Result<()> {
 }
 
 /// Discard a V2 creation inode left before publication.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn discard(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
     let live_path = root.join(partition).join(hex(name));
     let creation_path = creation_path(&live_path)?;
@@ -3476,7 +3476,7 @@ pub(super) fn discard(root: &Path, partition: &str, name: &[u8]) -> io::Result<(
 }
 
 /// V2 state is contained in the live inode, so partition removal needs no sidecar cleanup.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) const fn discard_partition(_root: &Path, _partition: &str) -> io::Result<()> {
     Ok(())
 }

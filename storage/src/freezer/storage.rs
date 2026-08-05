@@ -478,7 +478,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
             );
             *entry = Entry::new_empty();
             let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
-            blob.write_at(entry_offset, zero_buf, WriteOptions::default())
+            blob.write_at_with_options(entry_offset, zero_buf, WriteOptions::default())
                 .await?;
             Ok(true)
         } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
@@ -615,7 +615,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
         // Write the new entry
         table
-            .write_at(
+            .write_at_with_options(
                 table_offset + start,
                 update.encode_with_pool_mut(pooler.storage_buffer_pool()),
                 WriteOptions::default(),
@@ -1044,11 +1044,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let writes = writes.freeze();
         let old_write = self
             .table
-            .write_at(read_offset, writes.clone(), WriteOptions::default());
+            .write_at_with_options(read_offset, writes.clone(), WriteOptions::default());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
         let new_write = self
             .table
-            .write_at(new_offset, writes, WriteOptions::default());
+            .write_at_with_options(new_offset, writes, WriteOptions::default());
         try_join(old_write, new_write).await?;
 
         // Update progress
@@ -1396,7 +1396,7 @@ mod tests {
                 corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
                 // Corrupt CRC of second slot (last 4 bytes of second slot)
                 corrupted.as_mut()[Entry::FULL_SIZE - 4] ^= 0xFF;
-                blob.write_at(0, corrupted, WriteOptions::SYNC)
+                blob.write_at_with_options(0, corrupted, WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -1738,7 +1738,7 @@ mod tests {
                 let byte = blob.read_at(len - 1, 1).await.unwrap();
                 let mut corrupted = byte.coalesce();
                 corrupted.as_mut()[0] ^= 0xFF;
-                blob.write_at(len - 1, corrupted, WriteOptions::SYNC)
+                blob.write_at_with_options(len - 1, corrupted, WriteOptions::SYNC)
                     .await
                     .unwrap();
             }

@@ -415,11 +415,14 @@ impl crate::Runner for Runner {
                 self.cfg.storage_directory.display()
             );
         }
-        if let Err(e) = crate::storage::batch::recover(&self.cfg.storage_directory) {
-            panic!(
-                "failed to recover storage namespace at startup ({}): {e}",
-                self.cfg.storage_directory.display()
-            );
+        #[cfg(unix)]
+        {
+            if let Err(e) = crate::storage::batch::recover(&self.cfg.storage_directory) {
+                panic!(
+                    "failed to recover storage namespace at startup ({}): {e}",
+                    self.cfg.storage_directory.display()
+                );
+            }
         }
 
         // Initialize storage
@@ -841,6 +844,7 @@ impl crate::Storage for Context {
     }
 }
 
+#[cfg(unix)]
 #[stability(ALPHA)]
 impl crate::BatchStorage for Context {
     async fn start_apply(

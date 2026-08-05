@@ -35,7 +35,7 @@ pub(crate) enum Operation {
     },
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 impl Operation {
     fn partition(&self) -> &str {
         match self {
@@ -261,7 +261,7 @@ pub(crate) fn canonicalize_operations(operations: Vec<Operation>) -> Result<Vec<
 }
 });
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(super) fn is_canonical_operations(operations: &[Operation]) -> Result<bool, Error> {
     let mut previous: Option<&Operation> = None;
     for operation in operations {
@@ -379,17 +379,17 @@ mod tests {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 mod coordinator;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(in crate::storage) use coordinator::prepare_single_publish;
-#[cfg(not(target_arch = "wasm32"))]
-commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+#[cfg(unix)]
+commonware_macros::stability_scope!(ALPHA, cfg(unix) {
     pub(crate) use coordinator::preflight_embedded;
     pub(crate) use coordinator::{Participant, preflight, prepare_embedded, supports_speculation};
 });
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) use coordinator::{
     EmbeddedBatch, can_supersede_embedded, materialize_embedded, recover, recover_embedded,
     recover_named_embedded, recover_notifying, recover_partition_embedded,

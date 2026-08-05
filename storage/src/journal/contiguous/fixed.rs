@@ -2259,7 +2259,7 @@ mod tests {
                 .await
                 .expect("Failed to open legacy blob");
             legacy_blob
-                .write_at(0, vec![0u8; 1], WriteOptions::SYNC)
+                .write_at_with_options(0, vec![0u8; 1], WriteOptions::SYNC)
                 .await
                 .expect("Failed to write legacy blob");
 
@@ -2268,7 +2268,7 @@ mod tests {
                 .await
                 .expect("Failed to open new blob");
             new_blob
-                .write_at(0, vec![0u8; 1], WriteOptions::SYNC)
+                .write_at_with_options(0, vec![0u8; 1], WriteOptions::SYNC)
                 .await
                 .expect("Failed to write new blob");
 
@@ -2291,7 +2291,7 @@ mod tests {
                 .await
                 .expect("Failed to open legacy blob");
             legacy_blob
-                .write_at(0, vec![0u8; 1], WriteOptions::SYNC)
+                .write_at_with_options(0, vec![0u8; 1], WriteOptions::SYNC)
                 .await
                 .expect("Failed to write legacy blob");
 
@@ -2586,7 +2586,7 @@ mod tests {
                 .expect("Failed to open blob");
             // Write junk bytes.
             let bad_bytes = 123456789u32;
-            blob.write_at(1, bad_bytes.to_be_bytes().to_vec(), WriteOptions::SYNC)
+            blob.write_at_with_options(1, bad_bytes.to_be_bytes().to_vec(), WriteOptions::SYNC)
                 .await
                 .expect("Failed to write bad bytes");
 
@@ -2650,7 +2650,7 @@ mod tests {
                 .open(&blob_partition(&cfg), &1u64.to_be_bytes())
                 .await
                 .unwrap();
-            blob.write_at(1, 123456789u32.to_be_bytes().to_vec(), WriteOptions::SYNC)
+            blob.write_at_with_options(1, 123456789u32.to_be_bytes().to_vec(), WriteOptions::SYNC)
                 .await
                 .unwrap();
 
@@ -3440,7 +3440,7 @@ mod tests {
                 .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(
+            blob.write_at_with_options(
                 size,
                 vec![0u8; PAGE_SIZE.get() as usize * 3],
                 WriteOptions::SYNC,
@@ -5294,7 +5294,7 @@ mod tests {
             // This name would fail `Partition::open_all` if init tried to parse stale blobs before
             // honoring the clear intent.
             let (blob, _) = context.open(&blob_part, b"not-u64").await.unwrap();
-            blob.write_at(0, vec![1, 2, 3], WriteOptions::SYNC)
+            blob.write_at_with_options(0, vec![1, 2, 3], WriteOptions::SYNC)
                 .await
                 .unwrap();
             drop(blob);

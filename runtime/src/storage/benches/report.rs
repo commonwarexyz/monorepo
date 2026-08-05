@@ -1,11 +1,21 @@
 //! Statistics collection and reporting.
 
 use crate::{
-    config::{Config, Workload},
+    config::{Config, IntegrityMode, Workload},
     filesystem::{FileMetrics, backend_name},
 };
 use serde_json::json;
 use std::time::Duration;
+
+fn integrity_report_fields(cfg: &Config) -> (Option<String>, Option<u32>) {
+    (
+        cfg.workload
+            .is_atomic()
+            .then(|| cfg.integrity_mode.to_string()),
+        (cfg.workload.is_atomic() && cfg.integrity_mode == IntegrityMode::Chunked)
+            .then(|| cfg.chunk_data_size()),
+    )
+}
 
 /// Aggregated stats for one worker stream.
 #[derive(Default)]
@@ -354,6 +364,7 @@ impl Report {
 
     /// Print a concise human-readable report.
     pub fn print_human(&self, cfg: &Config) {
+        let (integrity_mode, chunk_data_size) = integrity_report_fields(cfg);
         println!(
             "backend={} workload={} elapsed_s={:.3} hot_elapsed_s={:.3} frontier_sync_s={}",
             backend_name(),
@@ -377,12 +388,12 @@ impl Report {
             cfg.seed,
             cfg.output,
         );
-        if cfg.workload.is_atomic() {
-            println!(
-                "integrity_mode={} chunk_data_size={}",
-                cfg.integrity_mode,
-                cfg.chunk_data_size()
-            );
+        if let Some(integrity_mode) = integrity_mode {
+            if let Some(chunk_data_size) = chunk_data_size {
+                println!("integrity_mode={integrity_mode} chunk_data_size={chunk_data_size}");
+            } else {
+                println!("integrity_mode={integrity_mode}");
+            }
         }
 
         if let Some(file_size) = cfg.file_size {
@@ -471,6 +482,7 @@ impl Report {
     pub fn print_json(&self, cfg: &Config) {
         let is_group = cfg.workload.is_multi_blob_append();
         let is_atomic_batch = cfg.workload == Workload::WriteAtomicBatchAppend;
+        let (integrity_mode, chunk_data_size) = integrity_report_fields(cfg);
         let paired_baseline = self.paired.as_ref().map(|paired| {
             json!({
                 "ordinary_operation_latency": "all_blob_syncs",
@@ -486,8 +498,7 @@ impl Report {
             "duration_seconds": cfg.operations.is_none().then(|| cfg.duration().as_secs()),
             "operations_per_worker": cfg.operations,
             "io_size": cfg.io_size(),
-            "integrity_mode": cfg.workload.is_atomic().then(|| cfg.integrity_mode.to_string()),
-            "chunk_data_size": cfg.workload.is_atomic().then(|| cfg.chunk_data_size()),
+            "integrity_mode": integrity_mode,
             "blobs": is_group.then(|| cfg.blobs()),
             "appends_per_batch": is_group.then(|| cfg.appends_per_batch()),
             "bytes_per_op": is_group.then(|| {
@@ -556,11 +567,51 @@ impl Report {
                 "all_participants"
             }),
         });
+        if let Some(chunk_data_size) = chunk_data_size {
+            json.as_object_mut()
+                .expect("benchmark report must serialize as an object")
+                .insert("chunk_data_size".into(), json!(chunk_data_size));
+        }
         if let Some(paired_baseline) = paired_baseline {
             json.as_object_mut()
                 .expect("benchmark report must serialize as an object")
                 .insert("paired_baseline".into(), paired_baseline);
         }
         println!("{json}");
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn atomic_config(integrity_mode: &str) -> Config {
+        Config::try_parse_from([
+            "storage_bench",
+            "--workload",
+            "write_atomic_append",
+            "--integrity-mode",
+            integrity_mode,
+            "--operations",
+            "1",
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn reports_chunk_data_size_only_for_chunked_integrity() {
+        for mode in ["none", "variable"] {
+            assert_eq!(
+                integrity_report_fields(&atomic_config(mode)),
+                (Some(mode.to_string()), None)
+            );
+        }
+
+        assert_eq!(
+            integrity_report_fields(&atomic_config("chunked")),
+            (Some("chunked".into()), Some(4092))
+        );
     }
 }

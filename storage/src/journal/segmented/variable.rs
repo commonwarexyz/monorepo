@@ -1271,7 +1271,7 @@ mod tests {
             let mut incomplete_data = Vec::new();
             UInt(u32::MAX).write(&mut incomplete_data);
             incomplete_data.truncate(1);
-            blob.write_at(0, incomplete_data, WriteOptions::SYNC)
+            blob.write_at_with_options(0, incomplete_data, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write incomplete data");
 
@@ -1586,7 +1586,7 @@ mod tests {
             UInt(item_size).write(&mut buf); // Varint encoding
             let data = [2u8; 5];
             BufMut::put_slice(&mut buf, &data);
-            blob.write_at(0, buf, WriteOptions::SYNC)
+            blob.write_at_with_options(0, buf, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write incomplete item");
 
@@ -1643,7 +1643,7 @@ mod tests {
             let mut buf = Vec::new();
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
-            blob.write_at(0, buf, WriteOptions::SYNC)
+            blob.write_at_with_options(0, buf, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write item without checksum");
 
@@ -1704,7 +1704,7 @@ mod tests {
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
             buf.put_u32(incorrect_checksum);
-            blob.write_at(0, buf, WriteOptions::SYNC)
+            blob.write_at_with_options(0, buf, WriteOptions::SYNC)
                 .await
                 .expect("Failed to write item with bad checksum");
 
@@ -1931,7 +1931,7 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(blob_size, vec![0u8; 16], WriteOptions::SYNC)
+            blob.write_at_with_options(blob_size, vec![0u8; 16], WriteOptions::SYNC)
                 .await
                 .expect("Failed to add extra data");
 
@@ -2448,7 +2448,7 @@ mod tests {
 
             // Write incomplete varint: 0xFF has continuation bit set, needs more bytes
             // This creates 2 trailing bytes that cannot form a valid item
-            blob.write_at(physical_size_before, vec![0xFF, 0xFF], WriteOptions::SYNC)
+            blob.write_at_with_options(physical_size_before, vec![0xFF, 0xFF], WriteOptions::SYNC)
                 .await
                 .unwrap();
 

@@ -18,7 +18,7 @@ use std::num::NonZeroUsize;
 /// ```
 /// use commonware_utils::NZUsize;
 /// use commonware_runtime::{
-///     Blob, BufferPooler, Error, Runner, Storage, WriteOptions, buffer::Read, deterministic,
+///     Blob, BufferPooler, Error, Runner, Storage, buffer::Read, deterministic,
 /// };
 ///
 /// let executor = deterministic::Runner::default();
@@ -27,7 +27,7 @@ use std::num::NonZeroUsize;
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
 ///     let data = b"Hello, world! This is a test.".to_vec();
 ///     let size = data.len() as u64;
-///     blob.write_at(0, data, WriteOptions::default())
+///     blob.write_at(0, data)
 ///         .await
 ///         .expect("unable to write data");
 ///

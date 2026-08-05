@@ -203,7 +203,21 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -216,7 +230,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(offset.to_be_bytes());
             hasher.update_bufs(&bufs);
         });
-        self.inner.write_at(offset, bufs, options).await
+        self.inner
+            .write_at_with_options(offset, bufs, options)
+            .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -475,12 +491,9 @@ mod tests {
 
         let (blob1, _) = storage1.open("partition", b"blob").await.unwrap();
         let (blob2, _) = storage2.open("partition", b"blob").await.unwrap();
-        blob1
-            .write_at(0, b"data", WriteOptions::default())
-            .await
-            .unwrap();
+        blob1.write_at(0, b"data").await.unwrap();
         blob2
-            .write_at(0, b"data", WriteOptions::SYNC | WriteOptions::DONT_CACHE)
+            .write_at_with_options(0, b"data", WriteOptions::SYNC | WriteOptions::DONT_CACHE)
             .await
             .unwrap();
 
@@ -609,14 +622,8 @@ mod tests {
 
         let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
-        blob1
-            .write_at(0, b"hello world", WriteOptions::default())
-            .await
-            .unwrap();
-        blob2
-            .write_at(0, b"hello world", WriteOptions::default())
-            .await
-            .unwrap();
+        blob1.write_at(0, b"hello world").await.unwrap();
+        blob2.write_at(0, b"hello world").await.unwrap();
 
         // `start_sync` must record an auditor event, so the state advances.
         let before = auditor1.state();
@@ -653,14 +660,8 @@ mod tests {
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
-        blob1
-            .write_at(0, b"hello world", WriteOptions::default())
-            .await
-            .unwrap();
-        blob2
-            .write_at(0, b"hello world", WriteOptions::default())
-            .await
-            .unwrap();
+        blob1.write_at(0, b"hello world").await.unwrap();
+        blob2.write_at(0, b"hello world").await.unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
@@ -769,6 +770,24 @@ mod tests {
         }
 
         async fn write_at(
+            &self,
+            _offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at_with_options(_offset, bufs, WriteOptions::default())
+                .await
+        }
+
+        async fn write_at_sync(
+            &self,
+            _offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at_with_options(_offset, bufs, WriteOptions::SYNC)
+                .await
+        }
+
+        async fn write_at_with_options(
             &self,
             _offset: u64,
             bufs: impl Into<IoBufs> + Send,
@@ -912,14 +931,12 @@ mod tests {
                 IoBuf::from(b"d".to_vec()),
             ])
         };
-        blob.write_at(0, chunked(), WriteOptions::default())
-            .await
-            .unwrap();
-        blob.write_at(0, chunked(), WriteOptions::SYNC)
-            .await
-            .unwrap();
+        blob.write_at(0, chunked()).await.unwrap();
+        blob.write_at_sync(0, chunked()).await.unwrap();
         let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
-        blob.write_at(0, chunked(), options).await.unwrap();
+        blob.write_at_with_options(0, chunked(), options)
+            .await
+            .unwrap();
         assert_eq!(blob.append(chunked()).await.unwrap(), 7);
         blob.rewind(5).await.unwrap();
 

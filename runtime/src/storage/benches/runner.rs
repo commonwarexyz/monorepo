@@ -214,7 +214,7 @@ pub async fn run_write_loop(
     while should_continue(limit, stats.ops) {
         let offset = next_block() * io_size;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        blob.write_at(offset, payload.clone(), policy.options)
+        blob.write_at_with_options(offset, payload.clone(), policy.options)
             .await?;
 
         // Record latency before sync so percentiles reflect pure write cost.
@@ -260,12 +260,12 @@ pub async fn run_sync_write_loop(
         let started = should_sample_latency(stats.ops).then(Instant::now);
         match sync_method {
             SyncMethod::WriteThenSync => {
-                blob.write_at(offset, payload.clone(), WriteOptions::default())
+                blob.write_at_with_options(offset, payload.clone(), WriteOptions::default())
                     .await?;
                 blob.sync().await?;
             }
             SyncMethod::WriteAtSync => {
-                blob.write_at(offset, payload.clone(), WriteOptions::SYNC)
+                blob.write_at_with_options(offset, payload.clone(), WriteOptions::SYNC)
                     .await?;
             }
         }
@@ -599,7 +599,7 @@ async fn write_ordinary_blob_group(
         .map(|blob| {
             let payload = payload.clone();
             async move {
-                blob.write_at(offset, payload, WriteOptions::default())
+                blob.write_at_with_options(offset, payload, WriteOptions::default())
                     .await
             }
         })

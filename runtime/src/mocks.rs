@@ -644,17 +644,34 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
         if !options.contains(WriteOptions::SYNC) || !self.pending.tracking() {
-            return self.inner.write_at(offset, bufs, options).await;
+            return self
+                .inner
+                .write_at_with_options(offset, bufs, options)
+                .await;
         }
         self.inner
-            .write_at(offset, bufs, options.without(WriteOptions::SYNC))
+            .write_at_with_options(offset, bufs, options.without(WriteOptions::SYNC))
             .await?;
         self.sync().await
     }
@@ -1078,14 +1095,30 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
         self.faults.check()?;
-        self.inner.write_at(offset, bufs, options).await?;
+        self.inner
+            .write_at_with_options(offset, bufs, options)
+            .await?;
         self.faults.note();
         Ok(())
     }
@@ -1297,13 +1330,29 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs, options).await
+        self.inner
+            .write_at_with_options(offset, bufs, options)
+            .await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -1424,10 +1473,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let inner = test_memory_storage();
             let (source, _) = inner.open("migrate_delayed", b"blob").await.unwrap();
-            source
-                .write_at(0, b"contents", WriteOptions::SYNC)
-                .await
-                .unwrap();
+            source.write_at_sync(0, b"contents").await.unwrap();
             drop(source);
 
             let pending = PendingSyncs::default();
@@ -1463,10 +1509,7 @@ mod tests {
         deterministic::Runner::default().start(|_| async move {
             let inner = test_memory_storage();
             let (source, _) = inner.open("migrate_faulty", b"blob").await.unwrap();
-            source
-                .write_at(0, b"contents", WriteOptions::SYNC)
-                .await
-                .unwrap();
+            source.write_at_sync(0, b"contents").await.unwrap();
             drop(source);
 
             let storage = SyncFaultContext {

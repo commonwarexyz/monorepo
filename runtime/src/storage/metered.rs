@@ -245,6 +245,20 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs).await
     }
 
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
     #[tracing::instrument(
         name = "runtime.storage.blob.write_at",
         level = "info",
@@ -255,7 +269,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             options = options.0.traced(),
         )
     )]
-    async fn write_at(
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -269,7 +283,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             self.metrics.storage_syncs.inc();
         }
         Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at(offset, bufs, options).await
+        self.inner
+            .write_at_with_options(offset, bufs, options)
+            .await
     }
 
     #[tracing::instrument(
@@ -395,11 +411,23 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
     }
 
     async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
-        self.inner.read_integrity_tail().await
+        let tail = self.inner.read_integrity_tail().await?;
+        if let Some((_, data)) = &tail {
+            self.metrics.storage_reads.inc();
+            self.metrics
+                .storage_read_bytes
+                .inc_by(data.remaining() as u64);
+        }
+        Ok(tail)
     }
 
     async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
-        self.inner.read_integrity(unit).await
+        let data = self.inner.read_integrity(unit).await?;
+        self.metrics.storage_reads.inc();
+        self.metrics
+            .storage_read_bytes
+            .inc_by(data.remaining() as u64);
+        Ok(data)
     }
 
     #[tracing::instrument(
@@ -450,7 +478,7 @@ impl<B: AtomicBlob> AtomicBlob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob, BufferPool, BufferPoolConfig, Storage as _, WriteOptions,
+        Blob, BufferPool, BufferPoolConfig, Storage as _,
         storage::{
             memory::Storage as MemoryStorage,
             tests::{
@@ -534,9 +562,7 @@ mod tests {
         );
 
         // Write data to the blob
-        blob.write_at(0, b"hello world", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"hello world").await.unwrap();
         let writes = storage.metrics.storage_writes.get();
         let write_bytes = storage.metrics.storage_write_bytes.get();
         assert_eq!(
@@ -571,9 +597,7 @@ mod tests {
         );
 
         // Write and sync in a single call
-        blob.write_at(11, b" again", WriteOptions::SYNC)
-            .await
-            .unwrap();
+        blob.write_at_sync(11, b" again").await.unwrap();
         assert_eq!(
             storage.metrics.storage_writes.get(),
             2,
@@ -602,6 +626,40 @@ mod tests {
             open_blobs_after_drop, 0,
             "open_blobs metric was not decremented after dropping the blob"
         );
+    }
+
+    #[tokio::test]
+    async fn test_metered_integrity_reads_increment_metrics() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+        let (blob, _) = storage.open_atomic("partition", b"blob").await.unwrap();
+
+        let token = blob.integrity_snapshot().await.unwrap().token;
+        let append = blob
+            .append_integrity(token, b"complete", crate::IntegrityBoundary::Complete, None)
+            .await
+            .unwrap();
+        blob.append_integrity(
+            append.token,
+            b"tail",
+            crate::IntegrityBoundary::Continue,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let complete = blob
+            .read_integrity(crate::IntegrityUnit { offset: 0, len: 8 })
+            .await
+            .unwrap();
+        assert_eq!(complete.coalesce(), b"complete");
+        let (tail_unit, tail) = blob.read_integrity_tail().await.unwrap().unwrap();
+        assert_eq!(tail_unit, crate::IntegrityUnit { offset: 12, len: 4 });
+        assert_eq!(tail.coalesce(), b"tail");
+
+        assert_eq!(storage.metrics.storage_reads.get(), 2);
+        assert_eq!(storage.metrics.storage_read_bytes.get(), 12);
     }
 
     #[tokio::test]
@@ -650,9 +708,7 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
-        blob.write_at(0, b"hello world", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"hello world").await.unwrap();
 
         blob.start_sync().await.await.unwrap();
         assert_eq!(
@@ -732,13 +788,8 @@ mod tests {
         );
 
         // Use the clones for some operations to verify they share metrics
-        blob.write_at(0, b"hello", WriteOptions::default())
-            .await
-            .unwrap();
-        clone1
-            .write_at(5, b"world", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"hello").await.unwrap();
+        clone1.write_at(5, b"world").await.unwrap();
         let _ = clone1.read_at(0, 10).await.unwrap();
         let _ = clone2.read_at(0, 10).await.unwrap();
 

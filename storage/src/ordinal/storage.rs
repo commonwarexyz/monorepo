@@ -189,7 +189,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 let mut modified = false;
                 for bit_index in 0..(*size / record_size) {
                     if bit_index >= bits.len() || !bits.get(bit_index) {
-                        blob.write_at(
+                        blob.write_at_with_options(
                             bit_index * record_size,
                             empty.clone(),
                             WriteOptions::default(),

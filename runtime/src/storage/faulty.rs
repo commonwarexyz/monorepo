@@ -8,6 +8,7 @@ use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
 use std::{
+    collections::BTreeMap,
     io::Error as IoError,
     sync::{
         Arc,
@@ -244,6 +245,8 @@ impl Oracle {
     }
 }
 
+type PoisonRegistry = Arc<Mutex<BTreeMap<(String, Vec<u8>), Arc<AtomicBool>>>>;
+
 /// A storage wrapper that injects deterministic faults based on configuration.
 ///
 /// Uses a shared RNG for determinism.
@@ -251,6 +254,7 @@ impl Oracle {
 pub struct Storage<S: crate::Storage> {
     inner: S,
     ctx: Oracle,
+    poisoned_generations: PoisonRegistry,
 }
 
 impl<S: crate::Storage> Storage<S> {
@@ -259,6 +263,7 @@ impl<S: crate::Storage> Storage<S> {
         Self {
             inner,
             ctx: Oracle { rng, config },
+            poisoned_generations: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -270,6 +275,26 @@ impl<S: crate::Storage> Storage<S> {
     /// Get access to the fault configuration for dynamic modification.
     pub fn config(&self) -> Arc<RwLock<Config>> {
         self.ctx.config.clone()
+    }
+
+    fn poison_state(&self, partition: &str, name: &[u8]) -> Arc<AtomicBool> {
+        self.poisoned_generations
+            .lock()
+            .entry((partition.into(), name.to_vec()))
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
+    fn forget_generation(&self, partition: &str, name: &[u8]) {
+        self.poisoned_generations
+            .lock()
+            .remove(&(partition.into(), name.to_vec()));
+    }
+
+    fn forget_partition(&self, partition: &str) {
+        self.poisoned_generations
+            .lock()
+            .retain(|(candidate, _), _| candidate != partition);
     }
 }
 
@@ -306,7 +331,12 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         if self.ctx.should_fail(Op::Remove) {
             return Err(injected_io_error().into());
         }
-        self.inner.remove(partition, name).await
+        self.inner.remove(partition, name).await?;
+        match name {
+            Some(name) => self.forget_generation(partition, name),
+            None => self.forget_partition(partition),
+        }
+        Ok(())
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -340,16 +370,22 @@ impl<S: AtomicStorage> AtomicStorage for Storage<S> {
         if self.ctx.should_fail(Op::Open) {
             return Err(injected_io_error().into());
         }
-        self.inner
+        let (blob, len, blob_version) = self
+            .inner
             .open_atomic_versioned(partition, name, versions)
-            .await
-            .map(|(blob, len, blob_version)| {
-                (
-                    Blob::new_atomic(self.ctx.clone(), blob, partition.into(), name.to_vec(), len),
-                    len,
-                    blob_version,
-                )
-            })
+            .await?;
+        Ok((
+            Blob::new_atomic(
+                self.ctx.clone(),
+                blob,
+                partition.into(),
+                name.to_vec(),
+                len,
+                self.poison_state(partition, name),
+            ),
+            len,
+            blob_version,
+        ))
     }
 }
 
@@ -383,8 +419,18 @@ impl<S: BatchStorage> BatchStorage for Storage<S> {
                 BatchOperation::Rewind { blob, len } => Some((blob.size.clone(), *len)),
             })
             .collect();
+        let removed: Vec<_> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                BatchOperation::Remove(blob) => Some((blob.partition.clone(), blob.name.clone())),
+                BatchOperation::Publish(_) | BatchOperation::Rewind { .. } => None,
+            })
+            .collect();
         let operations = crate::storage::batch::map_blobs(operations, |blob| blob.inner);
         let completion = self.inner.start_apply(operations).await?;
+        for (partition, name) in removed {
+            self.forget_generation(&partition, &name);
+        }
         for (size, len) in mutated {
             size.store(len, Ordering::Relaxed);
         }
@@ -423,9 +469,16 @@ impl<B: crate::Blob> Blob<B> {
         }
     }
 
-    fn new_atomic(ctx: Oracle, inner: B, partition: String, name: Vec<u8>, size: u64) -> Self {
+    fn new_atomic(
+        ctx: Oracle,
+        inner: B,
+        partition: String,
+        name: Vec<u8>,
+        size: u64,
+        poisoned: Arc<AtomicBool>,
+    ) -> Self {
         let mut blob = Self::new(ctx, inner, partition, name, size);
-        blob.poisoned = Some(Arc::new(AtomicBool::new(false)));
+        blob.poisoned = Some(poisoned);
         blob
     }
 
@@ -467,7 +520,21 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs.into()).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -486,7 +553,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
                 // Partial write: write some bytes, sync, then fail
                 let bufs = bufs.coalesce().slice(..bytes as usize);
-                self.inner.write_at(offset, bufs, options).await?;
+                self.inner
+                    .write_at_with_options(offset, bufs, options)
+                    .await?;
                 self.poison();
                 if !sync {
                     self.inner.sync().await?;
@@ -500,7 +569,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
         if sync && self.ctx.should_fail(Op::Sync) {
             self.inner
-                .write_at(offset, bufs, options.without(WriteOptions::SYNC))
+                .write_at_with_options(offset, bufs, options.without(WriteOptions::SYNC))
                 .await?;
             self.poison();
             self.size
@@ -508,7 +577,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return Err(injected_io_error().into());
         }
 
-        self.inner.write_at(offset, bufs, options).await?;
+        self.inner
+            .write_at_with_options(offset, bufs, options)
+            .await?;
         self.size
             .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
         Ok(())
@@ -810,12 +881,8 @@ mod tests {
             PostAdmissionFault::PartialResize => Config::default().resize(1.0).partial_resize(1.0),
         };
         match fault {
-            PostAdmissionFault::PartialWrite => {
-                blob.write_at(8, b"mutation", WriteOptions::default()).await
-            }
-            PostAdmissionFault::WriteSync => {
-                blob.write_at(8, b"mutation", WriteOptions::SYNC).await
-            }
+            PostAdmissionFault::PartialWrite => blob.write_at(8, b"mutation").await,
+            PostAdmissionFault::WriteSync => blob.write_at_sync(8, b"mutation").await,
             PostAdmissionFault::PartialResize => blob.resize(0).await,
         }
     }
@@ -835,10 +902,7 @@ mod tests {
         blob: Blob<<MemStorage as AtomicStorage>::AtomicBlob>,
     ) {
         let len = blob.size.load(Ordering::Relaxed);
-        assert_poisoned(
-            "write_at",
-            blob.write_at(len, b"x", WriteOptions::default()).await,
-        );
+        assert_poisoned("write_at", blob.write_at(len, b"x").await);
         assert_poisoned("resize", blob.resize(len).await);
         assert_poisoned("sync", blob.sync().await);
         assert_poisoned("start_sync", blob.start_sync().await.await);
@@ -896,9 +960,7 @@ mod tests {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
 
         assert!(matches!(blob.sync().await, Err(Error::Io(_))));
     }
@@ -908,9 +970,7 @@ mod tests {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
 
         let result = blob.start_sync().await.await;
         assert!(matches!(result, Err(Error::Io(_))));
@@ -923,8 +983,7 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-                .await,
+            blob.write_at(0, b"data".to_vec()).await,
             Err(Error::Io(_))
         ));
     }
@@ -936,7 +995,7 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at(0, b"data".to_vec(), WriteOptions::SYNC).await,
+            blob.write_at_sync(0, b"data".to_vec()).await,
             Err(Error::Io(_))
         ));
     }
@@ -948,7 +1007,7 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
         assert!(matches!(
-            blob.write_at(0, b"data".to_vec(), WriteOptions::SYNC).await,
+            blob.write_at_sync(0, b"data".to_vec()).await,
             Err(Error::Io(_))
         ));
 
@@ -961,13 +1020,9 @@ mod tests {
         let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
 
-        blob.write_at(4, Vec::<u8>::new(), WriteOptions::SYNC)
-            .await
-            .unwrap();
+        blob.write_at_sync(4, Vec::<u8>::new()).await.unwrap();
 
         let (_reopened, size) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0);
@@ -979,9 +1034,7 @@ mod tests {
 
         // Write some data first (no faults)
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
 
         // Enable read faults
@@ -1010,9 +1063,7 @@ mod tests {
 
         // Create a blob first
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
@@ -1077,7 +1128,7 @@ mod tests {
         let inner = MemStorage::new(test_pool());
         let storage = wrap(inner.clone(), 1, Config::default());
         let (blob, _) = storage.open(PARTITION, NAME).await.unwrap();
-        blob.write_at(0, DATA, WriteOptions::SYNC).await.unwrap();
+        blob.write_at_sync(0, DATA).await.unwrap();
         drop(storage);
 
         // A pre-commit failure leaves the ordinary generation in place.
@@ -1143,9 +1194,7 @@ mod tests {
     async fn test_faulty_storage_batch_rewind_bypasses_resize_faults() {
         let h = Harness::new(Config::default());
         let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
-        blob.write_at(0, b"contents", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"contents").await.unwrap();
         blob.sync().await.unwrap();
         *h.config.write() = Config::default().resize(1.0).partial_resize(1.0);
 
@@ -1166,9 +1215,7 @@ mod tests {
         ] {
             let h = Harness::new(Config::default());
             let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
-            blob.write_at(0, b"contents", WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(0, b"contents").await.unwrap();
             *h.config.write() = config;
 
             let result = if append {
@@ -1187,9 +1234,7 @@ mod tests {
     async fn test_faulty_atomic_mutations_forward_data_and_track_size() {
         let h = Harness::new(Config::default());
         let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
-        blob.write_at(0, b"contents", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"contents").await.unwrap();
         let data = IoBufs::from(vec![
             IoBuf::from(b"n".to_vec()),
             IoBuf::from(b"ew".to_vec()),
@@ -1215,9 +1260,7 @@ mod tests {
         ] {
             let h = Harness::new(Config::default());
             let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
-            blob.write_at(0, b"contents", WriteOptions::SYNC)
-                .await
-                .unwrap();
+            blob.write_at_sync(0, b"contents").await.unwrap();
             let peer = blob.clone();
 
             assert!(
@@ -1234,6 +1277,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_faulty_atomic_poison_persists_across_independent_opens() {
+        for fault in [
+            PostAdmissionFault::PartialWrite,
+            PostAdmissionFault::WriteSync,
+            PostAdmissionFault::PartialResize,
+        ] {
+            let h = Harness::new(Config::default());
+            let (blob, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
+            blob.write_at_sync(0, b"contents").await.unwrap();
+
+            assert!(
+                matches!(
+                    inject_post_admission_fault(&blob, &h.config, fault).await,
+                    Err(Error::Io(_))
+                ),
+                "{fault:?} did not return the injected failure"
+            );
+            *h.config.write() = Config::default();
+            drop(blob);
+
+            let (reopened, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
+            assert_atomic_mutations_rejected(&h.storage, reopened).await;
+
+            h.storage.remove("partition", Some(b"name")).await.unwrap();
+            let (fresh, _) = h.storage.open_atomic("partition", b"name").await.unwrap();
+            fresh.write_at_sync(0, b"fresh").await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn test_faulty_ordinary_post_admission_failures_do_not_poison_handle() {
         for fault in [
             PostAdmissionFault::PartialWrite,
@@ -1242,9 +1315,7 @@ mod tests {
         ] {
             let h = Harness::new(Config::default());
             let (blob, _) = h.storage.open("partition", b"name").await.unwrap();
-            blob.write_at(0, b"contents", WriteOptions::SYNC)
-                .await
-                .unwrap();
+            blob.write_at_sync(0, b"contents").await.unwrap();
 
             assert!(
                 matches!(
@@ -1256,9 +1327,7 @@ mod tests {
             *h.config.write() = Config::default();
 
             let len = blob.size.load(Ordering::Relaxed);
-            blob.write_at(len, b"x", WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(len, b"x").await.unwrap();
             blob.resize(len + 1).await.unwrap();
             blob.sync().await.unwrap();
         }
@@ -1272,9 +1341,7 @@ mod tests {
         for i in 0..3 {
             let name = format!("blob{i}");
             let (blob, _) = h.storage.open("partition", name.as_bytes()).await.unwrap();
-            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
         }
 
@@ -1339,9 +1406,7 @@ mod tests {
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let data = b"hello world".to_vec();
-        let result = blob
-            .write_at(0, data.clone(), WriteOptions::default())
-            .await;
+        let result = blob.write_at(0, data.clone()).await;
 
         assert!(matches!(result, Err(Error::Io(_))));
 
@@ -1362,9 +1427,7 @@ mod tests {
         let h = Harness::new(Config::default().write(1.0).partial_write(0.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        let result = blob
-            .write_at(0, b"hello world".to_vec(), WriteOptions::default())
-            .await;
+        let result = blob.write_at(0, b"hello world".to_vec()).await;
 
         assert!(matches!(result, Err(Error::Io(_))));
 
@@ -1380,9 +1443,7 @@ mod tests {
         let h = Harness::new(Config::default().write(1.0).partial_write(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        let result = blob
-            .write_at(0, b"x".to_vec(), WriteOptions::default())
-            .await;
+        let result = blob.write_at(0, b"x".to_vec()).await;
 
         assert!(matches!(result, Err(Error::Io(_))));
 
@@ -1468,9 +1529,7 @@ mod tests {
         let (blob, initial_size) = h.storage.open("partition", b"test").await.unwrap();
         assert_eq!(initial_size, 0);
 
-        blob.write_at(0, vec![0xABu8; 50], WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, vec![0xABu8; 50]).await.unwrap();
         blob.sync().await.unwrap();
 
         let (_, size_after_write) = h.inner.open("partition", b"test").await.unwrap();

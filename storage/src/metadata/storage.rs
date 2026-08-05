@@ -426,7 +426,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                     let info = target.lengths.get(key).expect("key must exist");
                     let start = info.start;
                     let end = start + info.length;
-                    target.blob.write_at(
+                    target.blob.write_at_with_options(
                         start as u64,
                         data.slice(start..end),
                         WriteOptions::default(),
@@ -435,8 +435,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                 .chain([
                     target
                         .blob
-                        .write_at(0, data.slice(0..u64::SIZE), WriteOptions::default()),
-                    target.blob.write_at(
+                        .write_at_with_options(0, data.slice(0..u64::SIZE), WriteOptions::default()),
+                    target.blob.write_at_with_options(
                         checksum_index as u64,
                         data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
                         WriteOptions::default(),
@@ -503,7 +503,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let sync = if pipelined {
             target
                 .blob
-                .write_at(0, next_data.clone(), WriteOptions::default())
+                .write_at_with_options(0, next_data.clone(), WriteOptions::default())
                 .await?;
             if shrinking {
                 target.blob.resize(next_data.len() as u64).await?;
@@ -512,7 +512,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         } else if shrinking {
             target
                 .blob
-                .write_at(0, next_data.clone(), WriteOptions::default())
+                .write_at_with_options(0, next_data.clone(), WriteOptions::default())
                 .await?;
             target.blob.resize(next_data.len() as u64).await?;
             target.blob.sync().await?;
@@ -522,7 +522,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             // durability.
             target
                 .blob
-                .write_at(0, next_data.clone(), WriteOptions::SYNC)
+                .write_at_with_options(0, next_data.clone(), WriteOptions::SYNC)
                 .await?;
             None
         };

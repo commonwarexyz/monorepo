@@ -222,12 +222,15 @@ where
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn prepare_batch_commit(
+    pub(super) async fn prepare_batch_commit(
         &self,
         state: &mut atomic::State,
     ) -> Result<Option<atomic::PreparedCommit>, Error> {
         if !state.is_dirty() {
             return Ok(None);
+        }
+        if state.preflush_requested()? {
+            self.ensure_preflush(state.preflush_target()).await?;
         }
         let mut prepared = state
             .prepare_commit()?
@@ -257,7 +260,7 @@ where
             prepared.attach_batch_witness(witness)?;
         }
         self.backing
-            .write_at(
+            .write_at_with_options(
                 Self::backing_offset(prepared.root_offset)?,
                 prepared.prepared_root.clone(),
                 WriteOptions::default(),
@@ -274,7 +277,7 @@ where
     ) -> Result<(), Error> {
         prepared.attach_batch_witness(witness)?;
         self.backing
-            .write_at(
+            .write_at_with_options(
                 Self::backing_offset(prepared.root_offset)?,
                 prepared.prepared_root.clone(),
                 WriteOptions::SYNC,
@@ -341,7 +344,7 @@ where
         if let Some(previous) = previous {
             let root = atomic::materialized_candidate_root(&previous)?;
             self.backing
-                .write_at(
+                .write_at_with_options(
                     Self::backing_offset(previous.root_offset)?,
                     root.to_vec(),
                     WriteOptions::default(),
@@ -349,7 +352,7 @@ where
                 .await?;
         }
         self.backing
-            .write_at(
+            .write_at_with_options(
                 Self::backing_offset(prepared.root_offset)?,
                 prepared.prepared_root.clone(),
                 WriteOptions::default(),
@@ -358,7 +361,7 @@ where
         self.backing.sync().await?;
         self.state.preflush().record_durable(prepared.raw_len());
         self.backing
-            .write_at(
+            .write_at_with_options(
                 Self::backing_offset(prepared.root_offset)?,
                 prepared.committed_root.to_vec(),
                 WriteOptions::SYNC,
@@ -468,7 +471,7 @@ where
         operation.arm();
         self.core
             .backing
-            .write_at(backing_offset, prepared.data, options)
+            .write_at_with_options(backing_offset, prepared.data, options)
             .await?;
         if let Some(range) = operation.finish_mutation(prepared.mutation, !publish) {
             self.core
@@ -621,6 +624,24 @@ where
     }
 
     async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -886,6 +907,8 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use commonware_utils::sync::Mutex;
+    use futures::{pin_mut, poll};
+    use tokio::sync::Notify;
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -894,6 +917,14 @@ mod tests {
 
     #[derive(Clone)]
     struct InlinePublisher;
+
+    #[derive(Clone)]
+    struct DetachedPublisher;
+
+    struct SyncGate {
+        entered: Notify,
+        release: Notify,
+    }
 
     #[derive(Default)]
     struct Trace {
@@ -905,6 +936,7 @@ mod tests {
     struct RecordingBlob<B> {
         inner: B,
         trace: Arc<Mutex<Trace>>,
+        sync_gate: Option<Arc<SyncGate>>,
     }
 
     impl<B: Blob> Blob for RecordingBlob<B> {
@@ -925,10 +957,28 @@ mod tests {
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at_with_options(offset, bufs, WriteOptions::default())
+                .await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+                .await
+        }
+
+        async fn write_at_with_options(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
             options: WriteOptions,
         ) -> Result<(), Error> {
             self.trace.lock().writes.push((offset, options));
-            self.inner.write_at(offset, bufs, options).await
+            self.inner.write_at_with_options(offset, bufs, options).await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -937,6 +987,10 @@ mod tests {
         }
 
         async fn sync(&self) -> Result<(), Error> {
+            if let Some(gate) = &self.sync_gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             self.inner.sync().await
         }
 
@@ -951,6 +1005,27 @@ mod tests {
     {
         fn spawn(&self, task: Task) -> Result<(), Error> {
             futures::executor::block_on(task);
+            Ok(())
+        }
+
+        async fn publish(
+            &self,
+            core: Arc<Core<B>>,
+            mut state: MutationGuard,
+        ) -> Result<(), Error> {
+            state.arm();
+            core.publish_direct(&mut state).await?;
+            state.finish();
+            Ok(())
+        }
+    }
+
+    impl<B> Publisher<B> for DetachedPublisher
+    where
+        B: Blob,
+    {
+        fn spawn(&self, task: Task) -> Result<(), Error> {
+            drop(tokio::spawn(task));
             Ok(())
         }
 
@@ -1006,6 +1081,7 @@ mod tests {
         let backing = RecordingBlob {
             inner: backing,
             trace: trace.clone(),
+            sync_gate: None,
         };
         (wrap(backing, 4096).await, trace)
     }
@@ -1090,7 +1166,7 @@ mod tests {
         let storage = memory::Storage::new(test_pool());
         let (blob, trace) = recording_blob(&storage, "uno_options").await;
 
-        blob.write_at(0, b"payload", WriteOptions::DONT_CACHE)
+        blob.write_at_with_options(0, b"payload", WriteOptions::DONT_CACHE)
             .await
             .unwrap();
 
@@ -1115,5 +1191,45 @@ mod tests {
 
         assert!(trace.lock().resizes.is_empty());
         assert_eq!(blob.tag().await.unwrap(), tag);
+    }
+
+    #[tokio::test]
+    async fn batch_prepare_waits_for_requested_payload_preflush() {
+        let storage = memory::Storage::new(test_pool());
+        let (backing, len) = crate::Storage::open(&storage, "uno_batch_preflush", b"blob")
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+        backing.resize(4096).await.unwrap();
+        backing.sync().await.unwrap();
+
+        let gate = Arc::new(SyncGate {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let backing = RecordingBlob {
+            inner: backing,
+            trace: Arc::new(Mutex::new(Trace::default())),
+            sync_gate: Some(gate.clone()),
+        };
+        let state = Core::recover(&backing, 4096).await.unwrap();
+        let state = preflush::Context::new(state).unwrap();
+        let core = Core::new(backing, state);
+        let blob = AtomicBlob::new(core.clone(), DetachedPublisher);
+
+        blob.append(vec![0x5a; atomic::BACKGROUND_PREFLUSH_INTERVAL as usize])
+            .await
+            .unwrap();
+        gate.entered.notified().await;
+
+        let mut state = blob.lock_state().await.unwrap();
+        let prepare = core.prepare_batch_commit(&mut state);
+        pin_mut!(prepare);
+        assert!(
+            poll!(prepare.as_mut()).is_pending(),
+            "batch root preparation must wait for its omitted payload prefix to become durable"
+        );
+        gate.release.notify_one();
+        assert!(prepare.await.unwrap().is_some());
     }
 }

@@ -10,6 +10,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
     /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
     ///   crash-durable.
+    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`; it needs admin and is skipped
+    ///   otherwise, so it is **not** crash-durable.
     ///
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
     /// >= 5.8. A missing `dir` is treated as success.
@@ -32,12 +34,56 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     "made storage filesystem durable at startup (syncfs)"
                 );
                 Ok(())
-            } else {
+            } else if #[cfg(unix)] {
                 // SAFETY: `sync` takes no arguments and cannot fail.
                 unsafe { libc::sync() };
                 tracing::debug!(
                     storage_directory = %dir.display(),
                     "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
+                );
+                Ok(())
+            } else if #[cfg(windows)] {
+                // Resolve the volume containing `dir` (e.g. `C:\\...` -> `\\\\.\C:`). `sync_all` on a
+                // volume handle is `FlushFileBuffers`, which flushes every open file on the volume.
+                // Best-effort (see fn docs): opening the volume needs admin, so a failure (or a
+                // non-disk storage path) is logged, not fatal.
+                use std::path::{Component, Prefix};
+                let volume = dir.components().next().and_then(|component| match component {
+                    Component::Prefix(prefix) => match prefix.kind() {
+                        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                            Some(format!(r"\\.\{}:", drive as char))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                });
+                let flushed = volume.as_deref().map(|volume| {
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(volume)
+                        .and_then(|handle| handle.sync_all())
+                });
+                match flushed {
+                    Some(Ok(())) => tracing::debug!(
+                        storage_directory = %dir.display(),
+                        "made storage volume durable at startup (FlushFileBuffers)"
+                    ),
+                    Some(Err(e)) => tracing::debug!(
+                        storage_directory = %dir.display(),
+                        error = %e,
+                        "best-effort volume flush skipped at startup; not crash-durable"
+                    ),
+                    None => tracing::debug!(
+                        storage_directory = %dir.display(),
+                        "unable to guarantee storage durability at startup"
+                    ),
+                }
+                Ok(())
+            } else {
+                tracing::debug!(
+                    storage_directory = %dir.display(),
+                    "no whole-filesystem durable flush on this platform; recovered-data durability not guaranteed"
                 );
                 Ok(())
             }
@@ -62,7 +108,11 @@ stability_scope!(BETA {
     pub mod metered;
 
     #[cfg_attr(
-        any(target_arch = "wasm32", commonware_stability_BETA),
+        any(
+            target_arch = "wasm32",
+            not(unix),
+            commonware_stability_BETA
+        ),
         allow(dead_code)
     )]
     pub(crate) mod atomic;
@@ -71,7 +121,7 @@ stability_scope!(BETA {
     mod generation;
     mod header;
     mod preflush;
-    #[cfg_attr(commonware_stability_BETA, allow(dead_code))]
+    #[cfg_attr(any(not(unix), commonware_stability_BETA), allow(dead_code))]
     mod uno;
     pub(crate) use header::{Header, Layout};
 
@@ -414,7 +464,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(len, 0);
         assert_eq!(version, VERSION);
-        blob.write_at(0, expected.clone(), WriteOptions::default())
+        blob.write_at_with_options(0, expected.clone(), WriteOptions::default())
             .await
             .unwrap();
         let prior = blob.clone();
@@ -451,7 +501,7 @@ pub(crate) mod tests {
         assert_eq!(len, expected.len() as u64 + 4);
         assert_eq!(version, VERSION);
         ordinary
-            .write_at(expected.len() as u64 + 4, b"!", WriteOptions::default())
+            .write_at_with_options(expected.len() as u64 + 4, b"!", WriteOptions::default())
             .await
             .unwrap();
         storage.migrate_atomic(ordinary).await.unwrap();
@@ -532,7 +582,7 @@ pub(crate) mod tests {
     {
         let (stale, _) = storage.open("migrate_atomic_stale", b"blob").await.unwrap();
         stale
-            .write_at(0, b"stale", WriteOptions::SYNC)
+            .write_at_with_options(0, b"stale", WriteOptions::SYNC)
             .await
             .unwrap();
         storage
@@ -541,7 +591,7 @@ pub(crate) mod tests {
             .unwrap();
         let (replacement, _) = storage.open("migrate_atomic_stale", b"blob").await.unwrap();
         replacement
-            .write_at(0, b"replacement", WriteOptions::SYNC)
+            .write_at_with_options(0, b"replacement", WriteOptions::SYNC)
             .await
             .unwrap();
 
@@ -578,7 +628,7 @@ pub(crate) mod tests {
         assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
 
         assert!(
-            blob.write_at(0, b"x", WriteOptions::default())
+            blob.write_at_with_options(0, b"x", WriteOptions::default())
                 .await
                 .is_err()
         );
@@ -650,7 +700,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         foreign_v1
-            .write_at(0, b"foreign-v1", WriteOptions::SYNC)
+            .write_at_with_options(0, b"foreign-v1", WriteOptions::SYNC)
             .await
             .unwrap();
         let readable_v1 = foreign_v1.clone();
@@ -700,7 +750,7 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(0, b"hello world", WriteOptions::default())
+        blob.write_at_with_options(0, b"hello world", WriteOptions::default())
             .await
             .unwrap();
         let read = blob.read_at(0, 11).await.unwrap();
@@ -1399,7 +1449,7 @@ pub(crate) mod tests {
     {
         let (blob, _) = storage.open("read_after_remove", b"by_name").await.unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
-        blob.write_at(0, data.clone(), WriteOptions::default())
+        blob.write_at_with_options(0, data.clone(), WriteOptions::default())
             .await
             .unwrap();
         blob.sync().await.unwrap();
@@ -1431,7 +1481,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).rev().collect();
-        blob.write_at(0, data.clone(), WriteOptions::default())
+        blob.write_at_with_options(0, data.clone(), WriteOptions::default())
             .await
             .unwrap();
         blob.sync().await.unwrap();
@@ -1460,7 +1510,7 @@ pub(crate) mod tests {
             .open("recreate_after_remove", b"name")
             .await
             .unwrap();
-        old.write_at(0, b"old contents", WriteOptions::default())
+        old.write_at_with_options(0, b"old contents", WriteOptions::default())
             .await
             .unwrap();
         old.sync().await.unwrap();
@@ -1476,7 +1526,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(len, 0, "recreated blob must start empty");
-        new.write_at(0, b"new contents", WriteOptions::default())
+        new.write_at_with_options(0, b"new contents", WriteOptions::default())
             .await
             .unwrap();
         new.sync().await.unwrap();
@@ -1502,7 +1552,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
-        blob.write_at(0, data.clone(), WriteOptions::default())
+        blob.write_at_with_options(0, data.clone(), WriteOptions::default())
             .await
             .unwrap();
 
@@ -1539,7 +1589,7 @@ pub(crate) mod tests {
             .unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
         first
-            .write_at(0, data.clone(), WriteOptions::default())
+            .write_at_with_options(0, data.clone(), WriteOptions::default())
             .await
             .unwrap();
         first.sync().await.unwrap();
@@ -1584,7 +1634,7 @@ pub(crate) mod tests {
             let (blob, len) = storage.open(partition, b"name").await.unwrap();
             assert_eq!(len, 0, "each recreation must start empty");
             let data = vec![generation; 32];
-            blob.write_at(0, data.clone(), WriteOptions::default())
+            blob.write_at_with_options(0, data.clone(), WriteOptions::default())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -1595,7 +1645,7 @@ pub(crate) mod tests {
         // Churn the name further with the removed generations still held.
         for _ in 0..5 {
             let (blob, _) = storage.open(partition, b"name").await.unwrap();
-            blob.write_at(0, vec![0xFF; 8], WriteOptions::default())
+            blob.write_at_with_options(0, vec![0xFF; 8], WriteOptions::default())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -1623,14 +1673,14 @@ pub(crate) mod tests {
         let partition = "read_after_remove_partition_multi";
         let (small_a, _) = storage.open(partition, b"a").await.unwrap();
         small_a
-            .write_at(0, b"alpha", WriteOptions::default())
+            .write_at_with_options(0, b"alpha", WriteOptions::default())
             .await
             .unwrap();
         small_a.sync().await.unwrap();
         // Deliberately never synced: partition removal must not lose unsynced bytes either.
         let (small_b, _) = storage.open(partition, b"b").await.unwrap();
         small_b
-            .write_at(0, b"bravo", WriteOptions::default())
+            .write_at_with_options(0, b"bravo", WriteOptions::default())
             .await
             .unwrap();
 
@@ -1638,7 +1688,7 @@ pub(crate) mod tests {
         let (large, _) = storage.open(partition, b"large").await.unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(LARGE_LEN).collect();
         large
-            .write_at(0, data.clone(), WriteOptions::default())
+            .write_at_with_options(0, data.clone(), WriteOptions::default())
             .await
             .unwrap();
         large.sync().await.unwrap();
@@ -1664,7 +1714,7 @@ pub(crate) mod tests {
         let (fresh, len) = storage.open(partition, b"a").await.unwrap();
         assert_eq!(len, 0, "recreated blob must start empty");
         fresh
-            .write_at(0, b"fresh", WriteOptions::default())
+            .write_at_with_options(0, b"fresh", WriteOptions::default())
             .await
             .unwrap();
         fresh.sync().await.unwrap();
@@ -1710,7 +1760,7 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
-        blob.write_at(0, b"concurrent write", WriteOptions::default())
+        blob.write_at_with_options(0, b"concurrent write", WriteOptions::default())
             .await
             .unwrap();
 
@@ -1718,9 +1768,13 @@ pub(crate) mod tests {
         let write_task = tokio::spawn({
             let blob = blob.clone();
             async move {
-                blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default())
-                    .await
-                    .unwrap();
+                blob.write_at_with_options(
+                    0,
+                    IoBuf::from(b"concurrent write"),
+                    WriteOptions::default(),
+                )
+                .await
+                .unwrap();
             }
         });
 
@@ -1748,7 +1802,7 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
-        blob.write_at(0, large_data.clone(), WriteOptions::default())
+        blob.write_at_with_options(0, large_data.clone(), WriteOptions::default())
             .await
             .unwrap();
 
@@ -1769,12 +1823,12 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(0, b"initial data", WriteOptions::default())
+        blob.write_at_with_options(0, b"initial data", WriteOptions::default())
             .await
             .unwrap();
 
         // Overwrite part of the data
-        blob.write_at(8, b"overwrite", WriteOptions::default())
+        blob.write_at_with_options(8, b"overwrite", WriteOptions::default())
             .await
             .unwrap();
 
@@ -1799,7 +1853,7 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write some data
-        blob.write_at(0, b"hello", WriteOptions::default())
+        blob.write_at_with_options(0, b"hello", WriteOptions::default())
             .await
             .unwrap();
 
@@ -1831,7 +1885,7 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write data at a large offset
-        blob.write_at(10_000, b"offset data", WriteOptions::default())
+        blob.write_at_with_options(10_000, b"offset data", WriteOptions::default())
             .await
             .unwrap();
 
@@ -1852,7 +1906,7 @@ pub(crate) mod tests {
             .unwrap();
 
         // Empty writes should be accepted without extending the blob.
-        blob.write_at(1024, Vec::<u8>::new(), WriteOptions::SYNC)
+        blob.write_at_with_options(1024, Vec::<u8>::new(), WriteOptions::SYNC)
             .await
             .unwrap();
         drop(blob);
@@ -1864,10 +1918,10 @@ pub(crate) mod tests {
         assert_eq!(len, 0);
 
         // Non-empty writes must be visible after reopen without a separate sync call.
-        blob.write_at(0, b"hello", WriteOptions::SYNC)
+        blob.write_at_with_options(0, b"hello", WriteOptions::SYNC)
             .await
             .unwrap();
-        blob.write_at(
+        blob.write_at_with_options(
             5,
             vec![IoBuf::from(b" "), IoBuf::from(b"world")],
             WriteOptions::SYNC,
@@ -1896,7 +1950,7 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(0, b"hello world", WriteOptions::default())
+        blob.write_at_with_options(0, b"hello world", WriteOptions::default())
             .await
             .unwrap();
         blob.start_sync().await.await.unwrap();
@@ -1921,12 +1975,12 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(0, b"first", WriteOptions::default())
+        blob.write_at_with_options(0, b"first", WriteOptions::default())
             .await
             .unwrap();
 
         // Append data
-        blob.write_at(5, b"second", WriteOptions::default())
+        blob.write_at_with_options(5, b"second", WriteOptions::default())
             .await
             .unwrap();
 
@@ -1947,7 +2001,7 @@ pub(crate) mod tests {
             let (blob, _) = storage.open(partition, b"test_blob").await.unwrap();
 
             // Write data
-            blob.write_at(0, bufs, options).await.unwrap();
+            blob.write_at_with_options(0, bufs, options).await.unwrap();
 
             // Read back the data
             let read = blob.read_at(0, expected.len()).await.unwrap().coalesce();
@@ -2022,7 +2076,7 @@ pub(crate) mod tests {
         let expected = IoBufs::from(bufs.clone()).coalesce();
 
         // Write vectored data at a large offset
-        blob.write_at(5_000, bufs, WriteOptions::default())
+        blob.write_at_with_options(5_000, bufs, WriteOptions::default())
             .await
             .unwrap();
 
@@ -2053,10 +2107,10 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
-        blob.write_at(0, b"first", WriteOptions::default())
+        blob.write_at_with_options(0, b"first", WriteOptions::default())
             .await
             .unwrap();
-        blob.write_at(10, b"second", WriteOptions::default())
+        blob.write_at_with_options(10, b"second", WriteOptions::default())
             .await
             .unwrap();
 
@@ -2085,7 +2139,7 @@ pub(crate) mod tests {
 
         // Write data in chunks
         for i in 0..num_chunks {
-            blob.write_at(
+            blob.write_at_with_options(
                 (i * chunk_size) as u64,
                 data.clone(),
                 WriteOptions::default(),
@@ -2143,10 +2197,10 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write overlapping data
-        blob.write_at(0, b"overlap", WriteOptions::default())
+        blob.write_at_with_options(0, b"overlap", WriteOptions::default())
             .await
             .unwrap();
-        blob.write_at(4, b"map", WriteOptions::default())
+        blob.write_at_with_options(4, b"map", WriteOptions::default())
             .await
             .unwrap();
 
@@ -2167,7 +2221,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Write some data
-            blob.write_at(0, b"hello world", WriteOptions::default())
+            blob.write_at_with_options(0, b"hello world", WriteOptions::default())
                 .await
                 .unwrap();
 
@@ -2307,7 +2361,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(size, 0);
-        blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
+        blob.write_at_with_options(0, b"hello world".to_vec(), WriteOptions::default())
             .await
             .unwrap();
         blob.sync().await.unwrap();
@@ -2349,7 +2403,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello", WriteOptions::default())
+        blob.write_at_with_options(0, b"hello", WriteOptions::default())
             .await
             .unwrap();
 
@@ -2375,7 +2429,7 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write test data
-        blob.write_at(0, b"hello world", WriteOptions::default())
+        blob.write_at_with_options(0, b"hello world", WriteOptions::default())
             .await
             .unwrap();
 
@@ -2457,7 +2511,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello world", WriteOptions::default())
+        blob.write_at_with_options(0, b"hello world", WriteOptions::default())
             .await
             .unwrap();
 
@@ -2493,7 +2547,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        blob.write_at(0, b"hello world", WriteOptions::default())
+        blob.write_at_with_options(0, b"hello world", WriteOptions::default())
             .await
             .unwrap();
 

@@ -226,13 +226,12 @@ pub struct Config {
     #[arg(long, value_enum, default_value = "none")]
     pub integrity_mode: IntegrityMode,
 
-    /// Data bytes in each fixed-size integrity unit.
+    /// Data bytes in each fixed-size integrity unit. Only valid with chunked integrity.
     #[arg(
         long,
-        default_value_t = DEFAULT_CHUNK_DATA_SIZE,
         value_parser = value_parser!(u32).range(1..)
     )]
-    chunk_data_size: u32,
+    chunk_data_size: Option<u32>,
 
     /// Parallel worker count for steady-state workloads.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
@@ -341,9 +340,12 @@ impl Config {
         }
     }
 
-    /// Data bytes in each fixed-size integrity unit.
+    /// Resolved data bytes in each fixed-size integrity unit.
     pub const fn chunk_data_size(&self) -> u32 {
-        self.chunk_data_size
+        match self.chunk_data_size {
+            Some(chunk_data_size) => chunk_data_size,
+            None => DEFAULT_CHUNK_DATA_SIZE,
+        }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -367,6 +369,9 @@ impl Config {
                 "--integrity-mode is only valid for write_atomic_append or write_atomic_batch_append"
                     .into(),
             );
+        }
+        if self.chunk_data_size.is_some() && self.integrity_mode != IntegrityMode::Chunked {
+            return Err("--chunk-data-size is only valid with --integrity-mode chunked".into());
         }
         if !self.workload.is_multi_blob_append() && self.blobs.is_some() {
             return Err(
@@ -656,12 +661,12 @@ mod tests {
 
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.integrity_mode, IntegrityMode::None);
-        assert_eq!(cfg.chunk_data_size(), DEFAULT_CHUNK_DATA_SIZE);
+        assert!(cfg.chunk_data_size.is_none());
     }
 
     #[test]
-    fn integrity_modes_and_chunk_size_parse_for_atomic_appends() {
-        for mode in ["none", "variable", "chunked"] {
+    fn chunk_data_size_is_scoped_to_chunked_integrity() {
+        for mode in ["none", "variable"] {
             let cfg = Config::try_parse_from([
                 "storage_bench",
                 "--workload",
@@ -675,9 +680,43 @@ mod tests {
             ])
             .unwrap();
 
-            assert!(cfg.validate().is_ok());
-            assert_eq!(cfg.chunk_data_size(), 8192);
+            assert_eq!(
+                cfg.validate(),
+                Err("--chunk-data-size is only valid with --integrity-mode chunked".into())
+            );
         }
+
+        let cfg = Config::try_parse_from([
+            "storage_bench",
+            "--workload",
+            "write_atomic_batch_append",
+            "--integrity-mode",
+            "chunked",
+            "--chunk-data-size",
+            "8192",
+            "--operations",
+            "1",
+        ])
+        .unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.chunk_data_size(), 8192);
+    }
+
+    #[test]
+    fn chunked_integrity_defaults_chunk_data_size() {
+        let cfg = Config::try_parse_from([
+            "storage_bench",
+            "--workload",
+            "write_atomic_append",
+            "--integrity-mode",
+            "chunked",
+            "--operations",
+            "1",
+        ])
+        .unwrap();
+
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.chunk_data_size(), DEFAULT_CHUNK_DATA_SIZE);
     }
 
     #[test]

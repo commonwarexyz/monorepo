@@ -35,7 +35,7 @@ pub(super) async fn corrupt_page(
         "corruption target must be an interior page"
     );
     let byte = blob.read_at(offset, 1).await.unwrap().coalesce();
-    blob.write_at(
+    blob.write_at_with_options(
         offset,
         vec![byte.as_ref()[0] ^ 0xFF],
         WriteOptions::default(),

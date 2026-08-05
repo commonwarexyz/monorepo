@@ -1,8 +1,7 @@
 use super::{Header, Layout};
 use crate::{BufferPool, Error};
-commonware_macros::stability_scope!(ALPHA {
+commonware_macros::stability_scope!(ALPHA, cfg(unix) {
     use crate::{BatchOperation, Handle};
-    #[cfg(unix)]
     use tokio::sync::OwnedMutexGuard as StateGuard;
     use std::collections::BTreeSet;
     use tokio::sync::oneshot;
@@ -14,15 +13,12 @@ use commonware_utils::sync::Mutex as SyncMutex;
 use std::path::Path;
 #[cfg(unix)]
 use std::sync::Weak;
+#[cfg(unix)]
 use std::{
     collections::BTreeMap,
-    ops::RangeInclusive,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
+use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -59,7 +55,7 @@ fn unsupported_atomic(partition: &str, name: &[u8]) -> Error {
     )
 }
 
-commonware_macros::stability_scope!(ALPHA {
+commonware_macros::stability_scope!(ALPHA, cfg(unix) {
 const MAX_BATCH_WORKERS: usize = 32;
 
 fn split_batch_work<T>(items: Vec<T>) -> Vec<Vec<T>> {
@@ -199,6 +195,7 @@ async fn prepare_batch_chunk(
             participant
                 .blob
                 .prepare_batch_commit_unflushed(&mut participant.state)
+                .await
         };
         let preflush = participant
             .prepared
@@ -352,7 +349,9 @@ type V2StateEntry = (Weak<Generation>, Weak<super::preflush::Context>);
 
 struct Namespace {
     lock: Arc<Mutex<()>>,
+    #[cfg(unix)]
     recovery_required: AtomicBool,
+    #[cfg(unix)]
     carried_batch_decision: AtomicBool,
     generations: super::generation::Registry,
     #[cfg(unix)]
@@ -370,6 +369,7 @@ impl Namespace {
         self.generations.generation(partition, name)
     }
 
+    #[cfg(unix)]
     fn is_current(&self, partition: &str, name: &[u8], generation: &Arc<Generation>) -> bool {
         self.generations.is_current(partition, name, generation)
     }
@@ -400,11 +400,6 @@ impl Namespace {
     #[cfg(unix)]
     fn embedded_batch_decision(&self) -> Option<Arc<super::batch::EmbeddedBatch>> {
         self.embedded_batch_decision.lock().clone()
-    }
-
-    #[cfg(not(unix))]
-    const fn embedded_batch_decision(&self) -> Option<Arc<super::batch::EmbeddedBatch>> {
-        None
     }
 
     #[cfg(unix)]
@@ -478,7 +473,13 @@ async fn resolve_header(
                     logical_size,
                     blob_version,
                     data_offset,
-                    Header::atomic_incarnation(&raw),
+                    {
+                        #[cfg(unix)]
+                        let incarnation = Header::atomic_incarnation(&raw);
+                        #[cfg(not(unix))]
+                        let incarnation = None;
+                        incarnation
+                    },
                 )
             },
         ),
@@ -486,6 +487,7 @@ async fn resolve_header(
 }
 
 /// Complete any carried embedded or removal decision while retaining the namespace guard.
+#[cfg(unix)]
 async fn recover_namespace(
     namespace: Arc<Namespace>,
     root: PathBuf,
@@ -539,7 +541,9 @@ impl Storage {
         Self {
             namespace: Arc::new(Namespace {
                 lock: Arc::new(Mutex::new(())),
+                #[cfg(unix)]
                 recovery_required: AtomicBool::new(true),
+                #[cfg(unix)]
                 carried_batch_decision: AtomicBool::new(false),
                 generations: super::generation::Registry::default(),
                 #[cfg(unix)]
@@ -556,16 +560,24 @@ impl Storage {
     /// guard so cancellation cannot expose recovery halfway through.
     async fn lock_recovered(&self) -> Result<OwnedMutexGuard<()>, Error> {
         let guard = self.namespace.lock.clone().lock_owned().await;
-        recover_namespace(
-            self.namespace.clone(),
-            self.cfg.storage_directory.clone(),
-            guard,
-        )
-        .await
+        #[cfg(unix)]
+        {
+            recover_namespace(
+                self.namespace.clone(),
+                self.cfg.storage_directory.clone(),
+                guard,
+            )
+            .await
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(guard)
+        }
     }
 
     /// Lock the namespace while retaining a committed publication decision for direct replacement
     /// by the next batch.
+    #[cfg(unix)]
     #[commonware_macros::stability(ALPHA)]
     async fn lock_batch(
         &self,
@@ -595,6 +607,7 @@ impl Storage {
     }
 
     /// Commit a storage batch from a self-driving worker that owns the namespace guard.
+    #[cfg(unix)]
     #[commonware_macros::stability(ALPHA)]
     async fn start_apply_guarded<F, C, D>(
         &self,
@@ -1124,6 +1137,7 @@ impl Storage {
             return Err(unsupported_atomic(partition, name));
         }
 
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut guard = self.lock_recovered().await?;
         let requested_parent = self.cfg.storage_directory.join(partition);
         fs::create_dir_all(&requested_parent)
@@ -1133,15 +1147,24 @@ impl Storage {
         let stored_partition = if self.namespace.knows_partition(partition) {
             partition.to_string()
         } else {
-            let root = self.cfg.storage_directory.clone();
-            let requested = partition.to_string();
-            let resolution = tokio::task::spawn_blocking(move || {
-                super::batch::resolve_partition_name(&root, &requested)
-            });
-            match resolution.await {
-                Ok(result) => result?,
-                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-                Err(_) => return Err(Error::Closed),
+            #[cfg(unix)]
+            {
+                let root = self.cfg.storage_directory.clone();
+                let requested = partition.to_string();
+                let resolution = tokio::task::spawn_blocking(move || {
+                    super::batch::resolve_partition_name(&root, &requested)
+                });
+                match resolution.await {
+                    Ok(result) => result?,
+                    Err(error) if error.is_panic() => {
+                        std::panic::resume_unwind(error.into_panic())
+                    }
+                    Err(_) => return Err(Error::Closed),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                partition.to_string()
             }
         };
         super::validate_partition_name(&stored_partition)?;
@@ -1281,6 +1304,7 @@ impl Storage {
 
         let raw_len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
         let existing = resolve_header(&mut file, raw_len, &versions, partition, name).await?;
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let (file, guard, (logical_size, blob_version, data_offset, incarnation)) = match existing {
             Some(resolved) => {
                 if require_atomic && resolved.2 != Layout::V2.data_offset() {
@@ -1315,7 +1339,10 @@ impl Storage {
                     Header::create(&versions)
                 };
                 let data_offset = region.len() as u64;
+                #[cfg(unix)]
                 let incarnation = Header::atomic_incarnation(&region);
+                #[cfg(not(unix))]
+                let incarnation = None;
 
                 if require_atomic {
                     #[cfg(unix)]
@@ -1409,7 +1436,10 @@ impl Storage {
         #[cfg(unix)]
         let file = file.into_std().await;
 
+        #[cfg(unix)]
         let mut logical_size = logical_size;
+        #[cfg(not(unix))]
+        let logical_size = logical_size;
         #[cfg(unix)]
         let atomic_state = if data_offset == Layout::V2.data_offset() {
             let state = if let Some(state) = shared_v2 {
@@ -1546,16 +1576,21 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         let _guard = self.lock_recovered().await?;
-        let root = self.cfg.storage_directory.clone();
-        let requested = partition.to_string();
-        let resolution = tokio::task::spawn_blocking(move || {
-            super::batch::resolve_partition_name(&root, &requested)
-        });
-        let stored_partition = match resolution.await {
-            Ok(result) => result?,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(_) => return Err(Error::Closed),
+        #[cfg(unix)]
+        let stored_partition = {
+            let root = self.cfg.storage_directory.clone();
+            let requested = partition.to_string();
+            let resolution = tokio::task::spawn_blocking(move || {
+                super::batch::resolve_partition_name(&root, &requested)
+            });
+            match resolution.await {
+                Ok(result) => result?,
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(_) => return Err(Error::Closed),
+            }
         };
+        #[cfg(not(unix))]
+        let stored_partition = partition.to_string();
         let path = self.cfg.storage_directory.join(&stored_partition);
         #[cfg(unix)]
         {
@@ -1656,6 +1691,7 @@ impl crate::Storage for Storage {
             .await
             .map_err(|_| Error::PartitionMissing(partition.into()))?;
         let mut blobs = Vec::new();
+        #[cfg(unix)]
         let mut removed_creation = false;
         while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
             let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
@@ -1663,12 +1699,15 @@ impl crate::Storage for Storage {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
             let file_name = entry.file_name();
-            if super::atomic::is_creation_file_name(&file_name) {
-                fs::remove_file(entry.path())
-                    .await
-                    .map_err(|_| Error::ReadFailed)?;
-                removed_creation = true;
-                continue;
+            #[cfg(unix)]
+            {
+                if super::atomic::is_creation_file_name(&file_name) {
+                    fs::remove_file(entry.path())
+                        .await
+                        .map_err(|_| Error::ReadFailed)?;
+                    removed_creation = true;
+                    continue;
+                }
             }
             if let Some(name) = file_name.to_str() {
                 // Reject anything that isn't canonical lowercase hex (no `0x`
@@ -1682,8 +1721,11 @@ impl crate::Storage for Storage {
                 blobs.push(decoded);
             }
         }
-        if removed_creation {
-            sync_dir(&self.cfg.storage_directory.join(partition)).await?;
+        #[cfg(unix)]
+        {
+            if removed_creation {
+                sync_dir(&self.cfg.storage_directory.join(partition)).await?;
+            }
         }
         Ok(blobs)
     }
@@ -1772,6 +1814,7 @@ impl crate::AtomicStorage for Storage {
     }
 }
 
+#[cfg(unix)]
 #[commonware_macros::stability(ALPHA)]
 impl crate::BatchStorage for Storage {
     async fn start_apply(
@@ -1792,7 +1835,7 @@ mod tests {
         storage::tests::{run_atomic_blob_tests, run_atomic_storage_tests},
     };
     use crate::{
-        BatchStorage as _, Blob, BufferPoolConfig, Storage as _, WriteOptions,
+        BatchStorage as _, Blob, BufferPoolConfig, Storage as _,
         storage::{
             Layout,
             tests::{run_batch_storage_tests, run_storage_foreign_handle_test, run_storage_tests},
@@ -2220,7 +2263,7 @@ mod tests {
             let payload_len = crate::storage::atomic::BACKGROUND_PREFLUSH_INTERVAL as usize;
             tokio::time::timeout(
                 Duration::from_secs(10),
-                blob.write_at(0, vec![0x5a; payload_len], WriteOptions::SYNC),
+                blob.write_at_sync(0, vec![0x5a; payload_len]),
             )
             .await
             .expect("fused sync deadlocked behind its own queued preflush")
@@ -2378,10 +2421,7 @@ mod tests {
         updated.append(b"pending").await.unwrap();
 
         let (written, _) = storage.open_atomic("partition", b"written").await.unwrap();
-        written
-            .write_at(0, b"sync-write", WriteOptions::SYNC)
-            .await
-            .unwrap();
+        written.write_at_sync(0, b"sync-write").await.unwrap();
         drop((updated, written, storage));
 
         let recovered = Storage::new(config, test_pool());
@@ -2419,7 +2459,7 @@ mod tests {
 
         let (new, len) = storage.open_atomic("partition", b"blob").await.unwrap();
         assert_eq!(len, 0);
-        new.write_at(0, b"new", WriteOptions::SYNC).await.unwrap();
+        new.write_at_sync(0, b"new").await.unwrap();
         assert!(matches!(old.sync().await, Err(Error::BlobMissing(..))));
         drop((old, new, storage));
 
@@ -2487,9 +2527,7 @@ mod tests {
         let storage = Storage::new(config, test_pool());
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
-        blob.write_at(0, b"hello world", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"hello world").await.unwrap();
 
         // Drop the completion receiver immediately.
         drop(blob.start_sync().await);
@@ -2518,7 +2556,7 @@ mod tests {
             .open_atomic("batch_cancel", b"victim")
             .await
             .unwrap();
-        old.write_at(0, b"old", WriteOptions::SYNC).await.unwrap();
+        old.write_at_sync(0, b"old").await.unwrap();
 
         let operations = vec![BatchOperation::Remove(old.clone())];
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -2549,7 +2587,7 @@ mod tests {
         // This open serializes behind the worker and can only recreate the fully removed name.
         let (new, size) = storage.open("batch_cancel", b"victim").await.unwrap();
         assert_eq!(size, 0);
-        new.write_at(0, b"new", WriteOptions::SYNC).await.unwrap();
+        new.write_at_sync(0, b"new").await.unwrap();
         assert_eq!(old.read_at(0, 3).await.unwrap().coalesce(), b"old");
         assert_eq!(new.read_at(0, 3).await.unwrap().coalesce(), b"new");
 
@@ -2566,15 +2604,12 @@ mod tests {
             test_pool(),
         );
         let (old, _) = storage.open_atomic("batch_start", b"victim").await.unwrap();
-        old.write_at(0, b"old", WriteOptions::SYNC).await.unwrap();
+        old.write_at_sync(0, b"old").await.unwrap();
         let (resized, _) = storage
             .open_atomic("batch_resize", b"retained")
             .await
             .unwrap();
-        resized
-            .write_at(0, b"resize", WriteOptions::SYNC)
-            .await
-            .unwrap();
+        resized.write_at_sync(0, b"resize").await.unwrap();
         let victim = storage_directory
             .join("batch_start")
             .join(commonware_formatting::hex(b"victim"));
@@ -2775,9 +2810,7 @@ mod tests {
         let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
         let storage = Storage::new(config.clone(), test_pool());
         let (blob, _) = storage.open("legacy", b"blob").await.unwrap();
-        blob.write_at(0, b"value", WriteOptions::SYNC)
-            .await
-            .unwrap();
+        blob.write_at_sync(0, b"value").await.unwrap();
         drop((blob, storage));
 
         let path = storage_directory.join("legacy").join(hex(b"blob"));
@@ -2960,10 +2993,7 @@ mod tests {
             .unwrap();
         let (replacement, len) = storage.open_atomic("group", b"blob").await.unwrap();
         assert_eq!(len, 0);
-        replacement
-            .write_at(0, b"new", WriteOptions::default())
-            .await
-            .unwrap();
+        replacement.write_at(0, b"new").await.unwrap();
         replacement.sync().await.unwrap();
         drop(replacement);
         drop(storage);
@@ -3020,9 +3050,7 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at the data offset
         let data = b"hello world";
-        blob.write_at(0, data, WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, data).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -3065,9 +3093,7 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(0, b"test data", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"test data").await.unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
@@ -3184,9 +3210,7 @@ mod tests {
             std::fs::write(&path, &state).unwrap();
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 
@@ -3269,9 +3293,7 @@ mod tests {
             // Retry, write data, and confirm it survives reopen.
             let (blob, size) = storage.open("partition", name).await.unwrap();
             assert_eq!(size, 0);
-            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
             let (blob, size) = storage.open("partition", name).await.unwrap();
@@ -3347,9 +3369,7 @@ mod tests {
             blob.read_at(0, payload.len()).await.unwrap().coalesce(),
             payload
         );
-        blob.write_at(size, b"!".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(size, b"!".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 

@@ -50,13 +50,15 @@ fn atomic_read_at_buf(
     Box::pin(crate::Blob::read_at_buf(atomic, offset, len, bufs))
 }
 
-fn atomic_write_at(
+fn atomic_write_at_with_options(
     atomic: &uno::AtomicBlob<Blob, Publisher>,
     offset: u64,
     bufs: IoBufs,
     options: WriteOptions,
 ) -> BoxFuture<'_, Result<(), Error>> {
-    Box::pin(crate::Blob::write_at(atomic, offset, bufs, options))
+    Box::pin(crate::Blob::write_at_with_options(
+        atomic, offset, bufs, options,
+    ))
 }
 
 fn atomic_resize(
@@ -522,14 +524,28 @@ impl crate::Blob for PublicationBlob {
         crate::Blob::read_at(&self.backing, offset, len).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
         let sync = options.contains(WriteOptions::SYNC);
-        crate::Blob::write_at(
+        crate::Blob::write_at_with_options(
             &self.backing,
             offset,
             bufs,
@@ -949,14 +965,12 @@ impl crate::BatchStorage for Storage {
                     core.backing(),
                     uno::Core::<Blob>::backing_offset(commit.root_offset)?,
                     commit.prepared_root.clone(),
-                    WriteOptions::default(),
                 ))??;
                 drive_ready(crate::Blob::sync(core.backing()))??;
                 drive_ready(crate::Blob::write_at(
                     core.backing(),
                     uno::Core::<Blob>::backing_offset(commit.root_offset)?,
                     commit.committed_root.to_vec(),
-                    WriteOptions::default(),
                 ))??;
             }
             if force_truncate[index]
@@ -1124,7 +1138,21 @@ impl crate::Blob for Blob {
         Ok(bufs)
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -1132,7 +1160,7 @@ impl crate::Blob for Blob {
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         if let Some(atomic) = &self.atomic {
-            return atomic_write_at(atomic, offset, bufs, options).await;
+            return atomic_write_at_with_options(atomic, offset, bufs, options).await;
         }
         let sync = options.contains(WriteOptions::SYNC);
         if !bufs.has_remaining() && sync {
@@ -1229,13 +1257,25 @@ impl crate::Blob for AtomicBlob {
         crate::Blob::read_at(&self.inner, offset, len).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        crate::Blob::write_at(&self.inner, offset, bufs).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        crate::Blob::write_at_sync(&self.inner, offset, bufs).await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        crate::Blob::write_at(&self.inner, offset, bufs, options).await
+        crate::Blob::write_at_with_options(&self.inner, offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -1368,19 +1408,14 @@ mod tests {
         let storage = Storage::new(test_pool());
 
         let (plain, _) = storage.open("partition", b"plain").await.unwrap();
-        plain
-            .write_at(8, Vec::<u8>::new(), WriteOptions::default())
-            .await
-            .unwrap();
+        plain.write_at(8, Vec::<u8>::new()).await.unwrap();
         plain.sync().await.unwrap();
         drop(plain);
         let (_, plain_len) = storage.open("partition", b"plain").await.unwrap();
         assert_eq!(plain_len, 8);
 
         let (sync, _) = storage.open("partition", b"sync").await.unwrap();
-        sync.write_at(8, Vec::<u8>::new(), WriteOptions::SYNC)
-            .await
-            .unwrap();
+        sync.write_at_sync(8, Vec::<u8>::new()).await.unwrap();
         drop(sync);
         let (_, sync_len) = storage.open("partition", b"sync").await.unwrap();
         assert_eq!(sync_len, 0);
@@ -1416,10 +1451,7 @@ mod tests {
         assert_eq!(second.read_at(0, 6).await.unwrap().coalesce(), b"abcdef");
         second.resize(4).await.unwrap();
         assert_eq!(first.read_at(0, 4).await.unwrap().coalesce(), b"abcd");
-        first
-            .write_at(4, b"z", WriteOptions::default())
-            .await
-            .unwrap();
+        first.write_at(4, b"z").await.unwrap();
         assert_eq!(second.read_at(0, 5).await.unwrap().coalesce(), b"abcdz");
 
         first.rewind(0).await.unwrap();
@@ -1433,10 +1465,7 @@ mod tests {
         let (reopened, len) = storage.open_atomic("atomic", b"blob").await.unwrap();
         assert_eq!(len, 3);
         assert_eq!(reopened.read_at(0, 3).await.unwrap().coalesce(), b"old");
-        reopened
-            .write_at(3, b"!", WriteOptions::SYNC)
-            .await
-            .unwrap();
+        reopened.write_at_sync(3, b"!").await.unwrap();
         drop(reopened);
 
         let (reopened, len) = storage.open_atomic("atomic", b"blob").await.unwrap();
@@ -1463,7 +1492,7 @@ mod tests {
         blob.rewind(4).await.unwrap();
         assert!(matches!(blob.append(b"z").await, Err(crate::Error::Io(_))));
         assert!(matches!(
-            blob.write_at(4, b"z", WriteOptions::default()).await,
+            blob.write_at(4, b"z").await,
             Err(crate::Error::Io(_))
         ));
         assert!(matches!(blob.resize(5).await, Err(crate::Error::Io(_))));
@@ -1797,9 +1826,7 @@ mod tests {
 
         // Write at logical offset 0 stores at the data offset
         let data = b"hello world";
-        blob.write_at(0, data, WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, data).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw storage layout
@@ -1831,9 +1858,7 @@ mod tests {
         assert_eq!(size, data.len() as u64);
         let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
-        blob.write_at(data.len() as u64, b"!", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(data.len() as u64, b"!").await.unwrap();
         blob.sync().await.unwrap();
         {
             let partitions = storage.partitions.lock();
@@ -1918,18 +1943,12 @@ mod tests {
     async fn test_audit_separates_partition_and_blob_names() {
         let storage_a = Storage::new(test_pool());
         let (blob_a, _) = storage_a.open("a", b"bc").await.unwrap();
-        blob_a
-            .write_at(0, b"d", WriteOptions::default())
-            .await
-            .unwrap();
+        blob_a.write_at(0, b"d").await.unwrap();
         blob_a.sync().await.unwrap();
 
         let storage_b = Storage::new(test_pool());
         let (blob_b, _) = storage_b.open("ab", b"c").await.unwrap();
-        blob_b
-            .write_at(0, b"d", WriteOptions::default())
-            .await
-            .unwrap();
+        blob_b.write_at(0, b"d").await.unwrap();
         blob_b.sync().await.unwrap();
 
         assert_ne!(storage_a.audit(), storage_b.audit());
@@ -1951,9 +1970,7 @@ mod tests {
     async fn test_opening_migrated_atomic_blob_does_not_change_audit() {
         let storage = Storage::new(test_pool());
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-        blob.write_at(0, b"payload", WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"payload").await.unwrap();
         storage.migrate_atomic(blob).await.unwrap();
 
         let before = storage.audit();
@@ -1986,9 +2003,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size, 0);
-            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
-                .await
-                .unwrap();
+            blob.write_at(0, b"data".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 

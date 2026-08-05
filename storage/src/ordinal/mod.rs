@@ -587,7 +587,7 @@ mod tests {
                     .await
                     .unwrap();
                 // Corrupt the CRC by changing a byte
-                blob.write_at(32, vec![0xFF], WriteOptions::SYNC)
+                blob.write_at_with_options(32, vec![0xFF], WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -718,7 +718,7 @@ mod tests {
                     .await
                     .unwrap();
                 // Overwrite second record with partial data (32 bytes instead of 36)
-                blob.write_at(36, vec![0xFF; 32], WriteOptions::SYNC)
+                blob.write_at_with_options(36, vec![0xFF; 32], WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -780,7 +780,7 @@ mod tests {
                     .await
                     .unwrap();
                 // Corrupt some bytes in the value of the first record
-                blob.write_at(10, hex!("0xFFFFFFFF").to_vec(), WriteOptions::SYNC)
+                blob.write_at_with_options(10, hex!("0xFFFFFFFF").to_vec(), WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -832,7 +832,7 @@ mod tests {
                     .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                blob.write_at(32, vec![0xFF], WriteOptions::SYNC)
+                blob.write_at_with_options(32, vec![0xFF], WriteOptions::SYNC)
                     .await
                     .unwrap(); // Corrupt CRC of index 0
 
@@ -841,7 +841,7 @@ mod tests {
                     .open("test-ordinal", &1u64.to_be_bytes())
                     .await
                     .unwrap();
-                blob.write_at(5, vec![0xFF; 4], WriteOptions::SYNC)
+                blob.write_at_with_options(5, vec![0xFF; 4], WriteOptions::SYNC)
                     .await
                     .unwrap(); // Corrupt value of index 10
             }
@@ -903,7 +903,7 @@ mod tests {
                 let invalid_crc = 0xDEADBEEFu32;
                 garbage.extend_from_slice(&invalid_crc.to_be_bytes());
                 assert_eq!(garbage.len(), 36); // Full record size
-                blob.write_at(size, garbage, WriteOptions::SYNC)
+                blob.write_at_with_options(size, garbage, WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -949,13 +949,13 @@ mod tests {
 
                 // Write zeros for several record positions
                 let zeros = vec![0u8; 36 * 5]; // 5 records worth of zeros
-                blob.write_at(0, zeros, WriteOptions::SYNC).await.unwrap();
+                blob.write_at_with_options(0, zeros, WriteOptions::SYNC).await.unwrap();
 
                 // Write a valid record after the zeros
                 let mut valid_record = vec![44u8; 32];
                 let crc = Crc32::checksum(&valid_record);
                 valid_record.extend_from_slice(&crc.to_be_bytes());
-                blob.write_at(36 * 5, valid_record, WriteOptions::SYNC)
+                blob.write_at_with_options(36 * 5, valid_record, WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -2076,7 +2076,7 @@ mod tests {
                     .unwrap();
                 // Corrupt the CRC of record at index 2
                 let offset = 2 * 36 + 32; // 2 * record_size + value_size
-                blob.write_at(offset, vec![0xFF], WriteOptions::SYNC)
+                blob.write_at_with_options(offset, vec![0xFF], WriteOptions::SYNC)
                     .await
                     .unwrap();
             }

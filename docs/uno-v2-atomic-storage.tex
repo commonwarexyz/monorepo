@@ -103,7 +103,7 @@
   {\usebeamerfont{subtitle}\color{Slate}\insertsubtitle\par}
 
   \vspace{0.18cm}
-  {\small\color{Amber}\textbf{Status: opt-in ALPHA API; ordinary Storage and V0/V1 remain unchanged.}\par}
+  {\small\color{Amber}\textbf{Status: opt-in ALPHA API; ordinary V0/V1 formats and legacy Blob calls remain compatible.}\par}
 
   \vfill
   \begin{center}
@@ -1108,7 +1108,7 @@
   \vfill
   \takeaway{The V1-backed wrapper should preserve protocol performance while removing backend duplication; \texttt{none} is the direct check.}
 
-  \note{Each paired seed runs the same logical operation on ordinary and UNO sides. Ordinary performs four 4 MiB writes, starts four file durability operations, and awaits them in parallel. UNO performs four 4 MiB final-offset payload writes and one linked batch publication whose four participant barriers are the same per-file durability operations. There is no coordinator-file barrier. The chunked run uses append_integrity with Chunked(4092); the ordinary baseline remains four raw payload writes, so that ratio includes integrity calculation and footer fanout rather than only wrapper cost. The full command also passes --root /tmp; MODE is none or chunked, and chunked adds --chunk-data-size 4092.}
+  \note{Each paired seed runs the same logical operation on ordinary and UNO sides. Ordinary performs four 4 MiB writes, starts four file durability operations, and awaits them in parallel. UNO performs four 4 MiB final-offset payload writes and one linked batch publication whose four participant barriers are the same per-file durability operations. There is no coordinator-file barrier. The chunked run uses append_integrity with Chunked(4092); the ordinary baseline remains four raw payload writes, so that ratio includes integrity calculation and footer fanout rather than only wrapper cost. MODE is none or chunked, and chunked adds --chunk-data-size 4092. The APFS command uses --root /tmp; the ext4 command uses --root /bench-ext4 on the mounted loopback filesystem.}
 \end{frame}
 
 % Fresh paired benchmark values from the frozen post-CRC-streaming source snapshots.

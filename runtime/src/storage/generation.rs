@@ -88,6 +88,7 @@ impl Registry {
         generation
     }
 
+    #[cfg(unix)]
     pub(super) fn is_current(&self, partition: &str, name: &[u8], generation: &Arc<Token>) -> bool {
         self.state
             .lock()

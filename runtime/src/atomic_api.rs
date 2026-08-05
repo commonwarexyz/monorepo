@@ -14,7 +14,9 @@ pub enum BatchOperation<B> {
     Rewind {
         /// Current atomic blob handle to rewind.
         blob: B,
-        /// New logical blob length in bytes, which cannot exceed its current length.
+        /// New encoded payload length, which cannot exceed its current length.
+        ///
+        /// Completed integrity-unit checksum footers count toward this coordinate.
         len: u64,
     },
 }
@@ -68,8 +70,12 @@ pub trait AtomicStorage: Storage {
         }
     }
 
-    /// Open an existing atomic blob or create a new one, returning its logical length and
+    /// Open an existing atomic blob or create a new one, returning its encoded payload length and
     /// application-owned blob version.
+    ///
+    /// The returned length includes completed integrity-unit checksum footers. Footer-free logical
+    /// coordinates are provided by wrappers such as the checked-page writer rather than raw atomic
+    /// blobs.
     ///
     /// A blob previously created through ordinary [`Storage`] methods is not converted in place.
     /// Implementations return an error rather than rewriting its format implicitly.
@@ -267,8 +273,9 @@ pub struct IntegrityAppend {
 
 /// Opt-in interface for atomic, immediately visible journal mutations.
 ///
-/// On an atomic blob, [`Blob::write_at`] accepts only the current logical tail and [`Blob::resize`]
-/// accepts only a shorter length. Prefer the explicit methods below. Rewinding below the last
+/// On an atomic blob, [`Blob::write_at`] accepts only the current encoded tail and
+/// [`Blob::resize`] accepts only a shorter encoded length. These raw coordinates include completed
+/// integrity-unit checksum footers. Prefer the explicit methods below. Rewinding below the last
 /// synchronized length fences appends until a successful [`Blob::sync`] or completed
 /// [`Blob::start_sync`] publishes the rewind.
 ///
@@ -311,7 +318,7 @@ pub trait AtomicBlob: Blob {
         tag: [u8; ATOMIC_BLOB_TAG_LEN],
     ) -> impl Future<Output = Result<IntegrityToken, Error>> + Send;
 
-    /// Append `data` and return its starting logical offset.
+    /// Append `data` and return its starting encoded payload offset.
     ///
     /// The bytes become immediately visible but require a subsequent successful sync to become
     /// durable. Empty data succeeds without changing the blob. An append after rewinding committed
@@ -365,14 +372,14 @@ pub trait AtomicBlob: Blob {
         unit: IntegrityUnit,
     ) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 
-    /// Rewind the blob to `len`, which must not exceed its current logical length.
+    /// Rewind the blob to encoded payload length `len`, which must not exceed its current length.
     ///
     /// Rewinding only unpublished appends permits immediate reuse of their physical tail.
     /// Rewinding committed bytes becomes durable at the next sync and fences appends until that
     /// sync completes successfully.
     fn rewind(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Rewind to `len` and stage `tag` as one in-memory mutation.
+    /// Rewind to encoded payload length `len` and stage `tag` as one in-memory mutation.
     ///
     /// A concurrent sync observes either both changes or neither change. The rewind and tag still
     /// require a subsequent successful sync to become durable.

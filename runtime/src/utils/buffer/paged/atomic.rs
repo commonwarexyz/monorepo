@@ -387,8 +387,8 @@ impl<B: AtomicBlob> AtomicWriter<B> {
     /// Open an atomic checked-page blob with its exact underlying physical length.
     ///
     /// This derives the logical length in constant time. If a partial page exists, it reads and
-    /// validates only that tail against the root tag. Historical full pages are validated lazily
-    /// when read.
+    /// validates only that tail against the root's dedicated integrity fields. Historical full
+    /// pages are validated lazily when read.
     pub async fn new(
         blob: B,
         mut physical_size: u64,
@@ -783,13 +783,27 @@ mod tests {
             self.inner.read_at(offset, len).await
         }
 
-        async fn write_at(
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn write_at_with_options(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
             options: WriteOptions,
         ) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs, options).await
+            self.inner
+                .write_at_with_options(offset, bufs, options)
+                .await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -1147,11 +1161,7 @@ mod tests {
                 .await
                 .unwrap();
             plain
-                .write_at(
-                    0,
-                    vec![0; PAGE_SIZE.get() as usize],
-                    WriteOptions::default(),
-                )
+                .write_at(0, vec![0; PAGE_SIZE.get() as usize])
                 .await
                 .unwrap();
             plain.sync().await.unwrap();
@@ -1169,10 +1179,7 @@ mod tests {
                 .open("atomic_paged_bad_tail", b"blob")
                 .await
                 .unwrap();
-            plain
-                .write_at(0, b"partial", WriteOptions::default())
-                .await
-                .unwrap();
+            plain.write_at(0, b"partial").await.unwrap();
             plain.sync().await.unwrap();
             context.migrate_atomic(plain).await.unwrap();
             let (blob, physical_size) = context

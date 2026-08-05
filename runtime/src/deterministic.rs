@@ -1799,7 +1799,7 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data, WriteOptions::default())
+            blob.write_at_with_options(0, data, WriteOptions::default())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -1846,7 +1846,7 @@ mod tests {
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data, WriteOptions::default())
+            blob.write_at_with_options(0, data, WriteOptions::default())
                 .await
                 .unwrap();
         });
@@ -1887,7 +1887,8 @@ mod tests {
                 blob.rewind(0).await.unwrap();
                 assert!(matches!(blob.append(b"new").await, Err(Error::Io(_))));
                 assert!(matches!(
-                    blob.write_at(0, b"new", WriteOptions::default()).await,
+                    blob.write_at_with_options(0, b"new", WriteOptions::default())
+                        .await,
                     Err(Error::Io(_))
                 ));
                 blob.sync().await.unwrap();
@@ -1920,7 +1921,7 @@ mod tests {
                 }
                 let (resized, _) = context.open_atomic("batch_resize", b"name").await.unwrap();
                 resized
-                    .write_at(0, b"resize", WriteOptions::default())
+                    .write_at_with_options(0, b"resize", WriteOptions::default())
                     .await
                     .unwrap();
                 resized.sync().await.unwrap();
@@ -1991,7 +1992,9 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(version, VERSION);
-                blob.write_at(0, DATA, WriteOptions::SYNC).await.unwrap();
+                blob.write_at_with_options(0, DATA, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
                 context.migrate_atomic(blob).await
             });
         assert!(matches!(result, Err(Error::Io(_))));
@@ -2391,7 +2394,7 @@ mod tests {
         let (result, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
                 let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
-                blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                blob.write_at_with_options(0, b"data".to_vec(), WriteOptions::default())
                     .await
                     .unwrap();
                 blob.sync().await // This should fail due to fault injection
@@ -2410,7 +2413,7 @@ mod tests {
             assert_eq!(len, 0, "unsynced data should be lost after recovery");
 
             // Now we can write and sync successfully
-            blob.write_at(0, b"recovered".to_vec(), WriteOptions::default())
+            blob.write_at_with_options(0, b"recovered".to_vec(), WriteOptions::default())
                 .await
                 .unwrap();
             blob.sync()
@@ -2430,7 +2433,7 @@ mod tests {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
             // Initially no faults - sync should succeed
-            blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
+            blob.write_at_with_options(0, b"initial".to_vec(), WriteOptions::default())
                 .await
                 .unwrap();
             blob.sync().await.expect("initial sync should succeed");
@@ -2440,7 +2443,7 @@ mod tests {
             storage_fault_cfg.write().sync_rate = Some(1.0);
 
             // Now sync should fail
-            blob.write_at(0, b"updated".to_vec(), WriteOptions::default())
+            blob.write_at_with_options(0, b"updated".to_vec(), WriteOptions::default())
                 .await
                 .unwrap();
             let result = blob.sync().await;
@@ -2520,7 +2523,11 @@ mod tests {
                             if let Ok((blob, _)) = ctx.open("partition", name.as_bytes()).await {
                                 successes += 1;
                                 if blob
-                                    .write_at(0, b"data".to_vec(), WriteOptions::default())
+                                    .write_at_with_options(
+                                        0,
+                                        b"data".to_vec(),
+                                        WriteOptions::default(),
+                                    )
                                     .await
                                     .is_ok()
                                 {

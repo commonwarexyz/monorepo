@@ -12,7 +12,6 @@ use tokio::{
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
-    generation: Arc<super::Generation>,
     // Files must be seeked prior to any read or write operation and are thus
     // not safe to concurrently interact with. If we switched to mapping files
     // we could remove this lock.
@@ -29,12 +28,11 @@ impl Blob {
         file: fs::File,
         pool: BufferPool,
         data_offset: u64,
-        generation: Arc<super::Generation>,
+        _generation: Arc<super::Generation>,
     ) -> Self {
         Self {
             partition,
             name: name.into(),
-            generation,
             file: Arc::new(Mutex::new(file)),
             pool,
             data_offset,
@@ -47,14 +45,6 @@ impl Blob {
 
     pub(super) fn name(&self) -> &[u8] {
         &self.name
-    }
-
-    pub(super) const fn data_offset(&self) -> u64 {
-        self.data_offset
-    }
-
-    pub(super) const fn generation(&self) -> &Arc<super::Generation> {
-        &self.generation
     }
 
     async fn write_at_inner(
@@ -128,7 +118,21 @@ impl crate::Blob for Blob {
         }
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -189,6 +193,22 @@ impl crate::AtomicBlob for Blob {
         Err(super::unsupported_atomic(&self.partition, &self.name))
     }
 
+    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
+    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
+    async fn compare_set_tag(
+        &self,
+        _expected: crate::IntegrityToken,
+        _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
+    ) -> Result<crate::IntegrityToken, Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
     async fn append(&self, _data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
         Err(super::unsupported_atomic(&self.partition, &self.name))
     }
@@ -201,6 +221,24 @@ impl crate::AtomicBlob for Blob {
         Err(super::unsupported_atomic(&self.partition, &self.name))
     }
 
+    async fn append_integrity(
+        &self,
+        _expected: crate::IntegrityToken,
+        _data: impl Into<IoBufs> + Send,
+        _boundary: crate::IntegrityBoundary,
+        _tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityAppend, Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
+    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
+    async fn read_integrity(&self, _unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
     async fn rewind(&self, _len: u64) -> Result<(), Error> {
         Err(super::unsupported_atomic(&self.partition, &self.name))
     }
@@ -210,6 +248,16 @@ impl crate::AtomicBlob for Blob {
         _len: u64,
         _tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<(), Error> {
+        Err(super::unsupported_atomic(&self.partition, &self.name))
+    }
+
+    async fn rewind_integrity(
+        &self,
+        _expected: crate::IntegrityToken,
+        _len: u64,
+        _unit: Option<crate::IntegrityUnit>,
+        _tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
+    ) -> Result<crate::IntegrityToken, Error> {
         Err(super::unsupported_atomic(&self.partition, &self.name))
     }
 }

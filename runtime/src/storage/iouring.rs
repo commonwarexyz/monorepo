@@ -534,6 +534,7 @@ impl Storage {
                                 .map(Some)
                         } else {
                             blob.prepare_batch_commit_unflushed(&mut operation.state)
+                                .await
                         };
                         let preflush = prepared.as_ref().ok().and_then(Option::as_ref).is_some_and(
                             |prepared| match prepared.payload_checksum() {
@@ -1651,7 +1652,21 @@ impl crate::Blob for AtomicBacking {
         self.blob.read_at_buf_v1(offset, len, bufs.into()).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -1773,7 +1788,6 @@ impl uno::Publisher<AtomicBacking> for V2Publisher {
                 .write_at(
                     uno::Core::<AtomicBacking>::backing_offset(candidate.root_offset)?,
                     root.to_vec(),
-                    WriteOptions::default(),
                 )
                 .await?;
         }
@@ -1785,7 +1799,6 @@ impl uno::Publisher<AtomicBacking> for V2Publisher {
             .write_at(
                 uno::Core::<AtomicBacking>::backing_offset(prepared.root_offset)?,
                 prepared.prepared_root.clone(),
-                WriteOptions::default(),
             )
             .await?;
         core.backing().sync().await?;
@@ -1843,11 +1856,11 @@ impl AtomicBlob {
         self.inner.core().rewind_state(state, len, unit).await
     }
 
-    fn prepare_batch_commit_unflushed(
+    async fn prepare_batch_commit_unflushed(
         &self,
         state: &mut V2State,
     ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
-        let prepared = self.inner.core().prepare_batch_commit(state)?;
+        let prepared = self.inner.core().prepare_batch_commit(state).await?;
         if let Some(prepared) = &prepared {
             let start = prepared.payload_start();
             // Begin payload writeback early so the later inode barrier has less dirty data to drain.
@@ -1933,13 +1946,25 @@ impl crate::Blob for AtomicBlob {
         crate::Blob::read_at(&self.inner, offset, len).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        crate::Blob::write_at(&self.inner, offset, bufs).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        crate::Blob::write_at_sync(&self.inner, offset, bufs).await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        crate::Blob::write_at(&self.inner, offset, bufs, options).await
+        crate::Blob::write_at_with_options(&self.inner, offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -2061,7 +2086,21 @@ impl crate::Blob for Blob {
         self.read_at_buf_v1(offset, len, bufs.into()).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -2069,10 +2108,9 @@ impl crate::Blob for Blob {
     ) -> Result<(), Error> {
         if self.atomic.is_some() {
             let atomic = AtomicBlob::from_legacy(self.clone());
-            let future: BoxedFuture<'_, Result<(), Error>> =
-                Box::pin(
-                    async move { crate::Blob::write_at(&atomic, offset, bufs, options).await },
-                );
+            let future: BoxedFuture<'_, Result<(), Error>> = Box::pin(async move {
+                crate::Blob::write_at_with_options(&atomic, offset, bufs, options).await
+            });
             return future.await;
         }
         self.write_at_v1(offset, bufs.into(), options).await
@@ -2283,9 +2321,7 @@ mod tests {
         assert_eq!(blob.read_at(0, 6).await.unwrap().coalesce(), b"stable");
 
         // A tail-positioned V2 SYNC write appends its payload and publishes the complete epoch.
-        blob.write_at(6, b"synced", WriteOptions::SYNC)
-            .await
-            .unwrap();
+        blob.write_at_sync(6, b"synced").await.unwrap();
         drop(blob);
         drop(storage);
         let storage = start_test_storage(storage_directory.clone());
@@ -2630,15 +2666,12 @@ mod tests {
     async fn test_committed_batch_survives_completion_drop() {
         let (storage, storage_directory) = create_test_storage();
         let (old, _) = storage.open_atomic("batch_start", b"victim").await.unwrap();
-        old.write_at(0, b"old", WriteOptions::SYNC).await.unwrap();
+        old.write_at_sync(0, b"old").await.unwrap();
         let (resized, _) = storage
             .open_atomic("batch_resize", b"retained")
             .await
             .unwrap();
-        resized
-            .write_at(0, b"resize", WriteOptions::SYNC)
-            .await
-            .unwrap();
+        resized.write_at_sync(0, b"resize").await.unwrap();
         let victim = storage_directory.join("batch_start").join(hex(b"victim"));
         let operations = vec![
             BatchOperation::Remove(old.clone()),
@@ -2704,9 +2737,7 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at the data offset
         let data = b"hello world";
-        blob.write_at(0, data.to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, data.to_vec()).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -2749,9 +2780,7 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(0, b"test data".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"test data".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
@@ -2907,9 +2936,7 @@ mod tests {
         let mut bufs = crate::IoBufs::default();
         bufs.append(crate::IoBuf::from(vec![0xAAu8; 80]));
         bufs.append(crate::IoBuf::from(vec![0xBBu8; 80]));
-        blob.write_at(0, bufs, WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, bufs).await.unwrap();
         blob.sync().await.unwrap();
 
         // Read back and verify.
@@ -2929,9 +2956,7 @@ mod tests {
         // Persist fewer bytes than the upcoming read requests so the wrapper
         // encounters EOF after the header-adjusted offset has already started reading.
         let (blob, _) = storage.open("partition", b"short").await.unwrap();
-        blob.write_at(0, b"abc".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"abc".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
 
         // The wrapper should surface this as an insufficient-length error instead
@@ -2949,9 +2974,7 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
 
         let (blob, _) = storage.open("partition", b"multichunk").await.unwrap();
-        blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, b"hello world".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
 
         // Use a two-chunk destination so the read path must rebuild the original
@@ -2975,15 +2998,9 @@ mod tests {
         assert_eq!(size, 0);
 
         // Zero-length operations should succeed immediately and preserve the empty blob.
-        blob.write_at(0, IoBufs::default(), WriteOptions::default())
-            .await
-            .unwrap();
-        blob.write_at(0, IoBuf::default(), WriteOptions::default())
-            .await
-            .unwrap();
-        blob.write_at(0, Vec::<u8>::new(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(0, IoBufs::default()).await.unwrap();
+        blob.write_at(0, IoBuf::default()).await.unwrap();
+        blob.write_at(0, Vec::<u8>::new()).await.unwrap();
         let empty = blob.read_at(0, 0).await.unwrap();
         assert!(empty.is_empty());
         let _ = blob
@@ -3176,7 +3193,7 @@ mod tests {
             "offset overflow"
         );
         assert_eq!(
-            blob.write_at(u64::MAX, b"x".to_vec(), WriteOptions::default())
+            blob.write_at(u64::MAX, b"x".to_vec())
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -3225,7 +3242,7 @@ mod tests {
             "read failed"
         );
         assert_eq!(
-            blob.write_at(0, b"x".to_vec(), WriteOptions::default())
+            blob.write_at(0, b"x".to_vec())
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -3503,9 +3520,7 @@ mod tests {
             blob.read_at(0, payload.len()).await.unwrap().coalesce(),
             payload
         );
-        blob.write_at(size, b"!".to_vec(), WriteOptions::default())
-            .await
-            .unwrap();
+        blob.write_at(size, b"!".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 

@@ -653,7 +653,6 @@ impl uno::Publisher<BackingBlob> for V2Publisher {
                 .write_at(
                     uno::Core::<BackingBlob>::backing_offset(candidate.root_offset)?,
                     root.to_vec(),
-                    WriteOptions::default(),
                 )
                 .await?;
         }
@@ -665,7 +664,6 @@ impl uno::Publisher<BackingBlob> for V2Publisher {
             .write_at(
                 uno::Core::<BackingBlob>::backing_offset(prepared.root_offset)?,
                 prepared.prepared_root.clone(),
-                WriteOptions::default(),
             )
             .await?;
         core.backing().sync().await?;
@@ -732,11 +730,11 @@ impl AtomicBlob {
         self.inner.core().rewind_state(state, len, unit).await
     }
 
-    pub(super) fn prepare_batch_commit_unflushed(
+    pub(super) async fn prepare_batch_commit_unflushed(
         &self,
         state: &mut V2State,
     ) -> Result<Option<atomic::PreparedCommit>, Error> {
-        self.inner.core().prepare_batch_commit(state)
+        self.inner.core().prepare_batch_commit(state).await
     }
 
     #[commonware_macros::stability(ALPHA)]
@@ -833,13 +831,25 @@ impl crate::Blob for AtomicBlob {
         crate::Blob::read_at(&self.inner, offset, len).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        crate::Blob::write_at(&self.inner, offset, bufs).await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        crate::Blob::write_at_sync(&self.inner, offset, bufs).await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        crate::Blob::write_at(&self.inner, offset, bufs, options).await
+        crate::Blob::write_at_with_options(&self.inner, offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -952,7 +962,21 @@ impl crate::Blob for Blob {
         self.read_at_buf_v1(offset, len, bufs).await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
@@ -960,7 +984,7 @@ impl crate::Blob for Blob {
     ) -> Result<(), Error> {
         if self.atomic.is_some() {
             let atomic = AtomicBlob::from_legacy(self.clone());
-            return crate::Blob::write_at(&atomic, offset, bufs, options).await;
+            return crate::Blob::write_at_with_options(&atomic, offset, bufs, options).await;
         }
         self.write_at_v1(offset, bufs, options).await
     }
@@ -1006,7 +1030,21 @@ impl crate::Blob for BackingBlob {
             .await
     }
 
-    async fn write_at(
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::default())
+            .await
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at_with_options(offset, bufs, WriteOptions::SYNC)
+            .await
+    }
+
+    async fn write_at_with_options(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
