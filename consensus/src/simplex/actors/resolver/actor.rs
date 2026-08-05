@@ -1205,7 +1205,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn targeted_fetches_drop_only_when_demand_is_satisfied() {
+    async fn targeted_fetches_drop_only_when_ask_is_satisfied() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1618,7 +1618,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn failed_certification_retires_parent_demand_until_finalization() {
+    async fn failed_certification_retires_parent_ask_until_finalization() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1782,7 +1782,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn finalization_completes_every_delivery_demand() {
+    async fn finalization_completes_every_delivery_ask() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
