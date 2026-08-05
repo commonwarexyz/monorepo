@@ -227,6 +227,7 @@ fn fuzz(input: FuzzInput) {
             context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers: NZUsize!(peers.len()),
                 disconnect_on_block: false,
                 tracked_peer_sets: NZUsize!(1),
             },

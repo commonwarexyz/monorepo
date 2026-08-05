@@ -392,6 +392,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         )
     }
 
+    /// Returns the number of distinct remote identities in retained peer sets or persistent
+    /// records. Temporarily blocked peers remain part of this configured total.
+    pub fn peer_count(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|record| record.eligible())
+            .count()
+    }
+
     /// Returns the sharable information for a given peer.
     pub fn info(&self, peer: &C) -> Option<Info<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())

@@ -22,6 +22,10 @@ use tracing::debug;
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
 
+    // ---------- Configuration ----------
+    /// The maximum number of distinct remote peer identities.
+    max_peers: usize,
+
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     ///
@@ -74,6 +78,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         (
             Self {
                 context: ContextCell::new(context),
+                max_peers: cfg.max_peers.get(),
                 receiver,
                 directory,
                 listener: cfg.listener,
@@ -118,6 +123,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let Some(kill_peers) = self.directory.track(index, peers) else {
                     return;
                 };
+                self.assert_peer_count();
 
                 // Kill active peers no longer in any tracked peer set or whose addresses changed.
                 for peer in kill_peers {
@@ -231,6 +237,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             peer.kill();
         }
     }
+
+    fn assert_peer_count(&self) {
+        let peer_count = self.directory.peer_count();
+        assert!(
+            peer_count <= self.max_peers,
+            "peer count exceeds max_peers: {peer_count} > {}",
+            self.max_peers
+        );
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +280,7 @@ mod tests {
             Config {
                 crypto,
                 mailbox_size: NZUsize!(1024),
+                max_peers: NZUsize!(1024),
                 tracked_peer_sets: NZUsize!(2),
                 peer_connection_cooldown: Duration::from_millis(200),
                 allow_private_ips: true,
@@ -317,6 +333,42 @@ mod tests {
                 matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
                 "Unauthorized peer should be killed on Connect"
             );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "peer count exceeds max_peers")]
+    fn test_register_exceeds_max_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let myself = signer.public_key();
+            let (mut cfg, _) = test_config(signer, false);
+            cfg.max_peers = NZUsize!(1);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+            } = setup_actor(context.child("actor"), cfg);
+
+            let peer_1 = PrivateKey::from_seed(1).public_key();
+            let peer_2 = PrivateKey::from_seed(2).public_key();
+            let addr_1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
+            let addr_2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002);
+            oracle.track(
+                0,
+                Map::try_from([
+                    (myself, addr_1.into()),
+                    (peer_1.clone(), addr_1.into()),
+                ])
+                .unwrap(),
+            );
+            let _ = mailbox.dialable().await;
+
+            oracle.track(
+                1,
+                Map::try_from([(peer_1, addr_1.into()), (peer_2, addr_2.into())]).unwrap(),
+            );
+            let _ = mailbox.dialable().await;
         });
     }
 
@@ -760,6 +812,7 @@ mod tests {
 
             let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
             cfg.tracked_peer_sets = NZUsize!(1);
+            cfg.max_peers = NZUsize!(1);
 
             let TestHarness {
                 mailbox,

@@ -66,6 +66,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 mailbox_size: cfg.mailbox_size,
+                max_peers: cfg.max_peers,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 allow_private_ips: cfg.allow_private_ips,
@@ -118,8 +119,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// slot regardless of its number of recipients.
     ///
     /// The derived capacity budgets per-recipient quota bursts across at most
-    /// [`Config::max_peers`] connected peers. It does not reserve space for arbitrary offline
-    /// recipient identities, so bursts to those identities may be rejected under backpressure.
+    /// [`Config::max_peers`] configured peer identities. It does not reserve space for arbitrary
+    /// offline recipient identities, so bursts to those identities may be rejected under
+    /// backpressure.
     ///
     /// For memory budgeting, each inbound queue can retain roughly `max_peers * burst_size *
     /// max_message_size` bytes, in addition to queue and allocator overhead.
@@ -155,7 +157,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             self.context.child("router"),
             router::Config {
                 mailbox_size: self.channels.outbound_mailbox_size(self.cfg.mailbox_size),
-                max_peers: self.cfg.max_peers,
             },
         );
         self.channels.bind(router_mailbox.clone());

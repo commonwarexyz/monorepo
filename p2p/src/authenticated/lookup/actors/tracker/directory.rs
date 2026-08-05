@@ -372,6 +372,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         )
     }
 
+    /// Returns the number of distinct remote identities in retained peer sets. Temporarily blocked
+    /// peers remain part of this configured total.
+    pub fn peer_count(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|record| record.eligible())
+            .count()
+    }
+
     /// Returns true if the peer is eligible for connection.
     ///
     /// A peer is eligible if it is in a peer set, not blocked, and not ourselves.

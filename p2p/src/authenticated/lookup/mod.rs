@@ -2105,7 +2105,6 @@ mod tests {
         executor.start(|context| async move {
             let cfg = RouterConfig {
                 mailbox_size: NZUsize!(1),
-                max_peers: NZUsize!(2),
             };
             let (router, mailbox, messenger) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);

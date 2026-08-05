@@ -2871,12 +2871,18 @@ mod tests {
                 let malicious = participants[1].clone();
                 let honest = participants[2].clone();
 
-                let mut oracle = setup_network_with_participants(
+                let (network, mut oracle) = Network::new_with_peers(
                     context.child("network"),
-                    NZUsize!(2),
-                    [victim.clone(), malicious.clone()],
+                    simulated::Config {
+                        max_size: 1024 * 1024,
+                        max_peers: NZUsize!(3),
+                        disconnect_on_block: true,
+                        tracked_peer_sets: NZUsize!(2),
+                    },
+                    vec![victim.clone(), malicious.clone()],
                 )
                 .await;
+                network.start();
                 setup_network_links(
                     &mut oracle,
                     &[victim.clone(), malicious.clone()],
@@ -6685,6 +6691,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: 1024 * 1024,
+                    max_peers: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

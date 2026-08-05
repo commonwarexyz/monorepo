@@ -20,7 +20,6 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
     control: mailbox::UnreliableReceiver<Message<P>>,
-    max_peers: usize,
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 }
@@ -39,7 +38,6 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
             Self {
                 context: ContextCell::new(context),
                 control: control_receiver,
-                max_peers: cfg.max_peers.get(),
                 connections: BTreeMap::new(),
                 open_subscriptions: Vec::new(),
             },
@@ -101,8 +99,6 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                 } => {
                     if self.connections.contains_key(&peer) {
                         debug!(?peer, "rejecting duplicate ready peer");
-                    } else if self.connections.len() >= self.max_peers {
-                        debug!(?peer, max_peers = self.max_peers, "rejecting peer at capacity");
                     } else {
                         debug!(?peer, "peer ready");
                         assert!(self.connections.insert(peer.clone(), relay).is_none());
@@ -165,13 +161,12 @@ mod tests {
     use futures::FutureExt as _;
 
     #[test]
-    fn rejects_peers_beyond_limit_and_overlapping_duplicates() {
+    fn rejects_duplicate_peers_and_rolls_back_canceled_ready() {
         deterministic::Runner::default().start(|context| async move {
             let (actor, mailbox, _) = Actor::<deterministic::Context, PublicKey>::new(
                 context.child("router"),
                 Config {
                     mailbox_size: NZUsize!(4),
-                    max_peers: NZUsize!(1),
                 },
             );
             let routing = Channels::new(
@@ -181,10 +176,15 @@ mod tests {
             );
             let abandoned = PrivateKey::from_seed(0).public_key();
             let (relay, _) = Relay::new(context.child("abandoned"), NZUsize!(1));
-            assert!(mailbox.ready(abandoned, relay).now_or_never().is_none());
+            assert!(
+                mailbox
+                    .ready(abandoned.clone(), relay)
+                    .now_or_never()
+                    .is_none()
+            );
 
             let handle = actor.start(routing);
-            let first = PrivateKey::from_seed(1).public_key();
+            let first = abandoned;
             let second = PrivateKey::from_seed(2).public_key();
 
             let (relay, _) = Relay::new(context.child("first"), NZUsize!(1));
@@ -194,11 +194,9 @@ mod tests {
             assert!(mailbox.ready(first.clone(), relay).await.is_none());
 
             let (relay, _) = Relay::new(context.child("second"), NZUsize!(1));
-            assert!(mailbox.ready(second.clone(), relay).await.is_none());
+            assert!(mailbox.ready(second, relay).await.is_some());
 
             let _ = mailbox.release(first);
-            let (relay, _) = Relay::new(context.child("replacement"), NZUsize!(1));
-            assert!(mailbox.ready(second, relay).await.is_some());
 
             handle.abort();
         });
@@ -211,7 +209,6 @@ mod tests {
                 context,
                 Config {
                     mailbox_size: NZUsize!(1),
-                    max_peers: NZUsize!(1),
                 },
             );
             let (sender, receiver) = ring::channel(NZUsize!(1));

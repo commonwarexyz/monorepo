@@ -449,6 +449,7 @@ mod tests {
                 context.child("network"),
                 NetworkConfig {
                     max_size: 1024,
+                    max_peers: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

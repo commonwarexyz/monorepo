@@ -10,5 +10,4 @@ use std::num::NonZeroUsize;
 /// Config for an [Actor].
 pub struct Config {
     pub mailbox_size: NonZeroUsize,
-    pub max_peers: NonZeroUsize,
 }

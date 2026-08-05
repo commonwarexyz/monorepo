@@ -30,6 +30,7 @@ pub struct Config<C: Signer> {
     pub allow_dns: bool,
     pub synchrony_bound: Duration,
     pub mailbox_size: NonZeroUsize,
+    pub max_peers: NonZeroUsize,
     pub tracked_peer_sets: NonZeroUsize,
     pub max_peer_set_size: u64,
     pub peer_connection_cooldown: Duration,
