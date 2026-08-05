@@ -51,22 +51,17 @@ pub struct Config<C: Signer> {
     /// Maximum total number of remote peers that may be connected at once.
     ///
     /// This applies to distinct peers across the union of all retained primary and secondary peer
-    /// sets. The local identity does not consume a slot; use `1` when no remote peers are expected.
+    /// sets. The local identity does not consume a slot.
     ///
     /// This sizes every application channel's inbound mailbox to hold one quota burst from each
     /// peer. Every channel contributes that same capacity to the shared outbound router mailbox.
     /// Additional peers are rejected until a connection closes.
     pub max_peers: NonZeroUsize,
 
-    /// Message backlog allowed for internal actors.
+    /// Capacity for internal actor mailboxes.
     ///
-    /// When there are more messages in a mailbox than this value, messages may be rejected before
-    /// they are processed. Refer to [`commonware_actor::Feedback`] and/or metrics on
-    /// [`commonware_actor::mailbox`] for a signal this is occurring.
-    ///
-    /// This does not control application-channel inbound capacity. For the shared outbound router,
-    /// it provides control-message headroom in addition to the capacity derived from registered
-    /// channel rates and [`Config::max_peers`].
+    /// This does not affect inbound application message capacity, which is derived from channel
+    /// rate limits and [`Config::max_peers`].
     pub mailbox_size: NonZeroUsize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.
