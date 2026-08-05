@@ -330,7 +330,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _readers: &<Self::Databases as DatabaseSet<E>>::Readers,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = ()> + Send {
         async {}
     }

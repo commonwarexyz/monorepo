@@ -51,6 +51,7 @@ impl Merkleized for TestMerkleized {
 /// Completes one parked flush when released by the test.
 pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
 
+/// Signals that pruning has started, then blocks it until the test releases it.
 struct PruneGate {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
@@ -66,6 +67,8 @@ pub(crate) struct FlushControl {
 }
 
 impl FlushControl {
+    /// Gates the next prune. The receiver reports entry, and sending on the
+    /// returned sender lets pruning continue. Only one gate may be active.
     pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (started, started_rx) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();

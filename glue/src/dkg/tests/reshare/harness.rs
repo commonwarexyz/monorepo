@@ -299,7 +299,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        _readers: &<Self::Databases as DatabaseSet<E>>::Readers,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed
             .lock()

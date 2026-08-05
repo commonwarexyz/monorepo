@@ -949,12 +949,11 @@ where
     /// Notify the application that marshal delivered a finalized block already
     /// reflected in the database set.
     pub(super) async fn notify_finalized(&mut self, context: &E, block: &A::Block) {
-        let readers = self.execution.databases.readers();
         self.app
             .finalized(
                 (context.child("finalized"), block.context()),
                 block,
-                &readers,
+                self.execution.databases.readers(),
             )
             .await;
     }
@@ -1895,7 +1894,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            readers: &<Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+            readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
             if let Some(probe) = &self.finalized_probe {
                 probe.call(block.digest()).await;

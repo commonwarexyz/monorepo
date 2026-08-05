@@ -109,6 +109,8 @@ where
                     }
                 }
 
+                // Verification results must not overtake deferred finalization or
+                // mailbox work queued while pruning, which may invalidate them.
                 let finalization_deferred = matches!(
                     deferred_message.as_ref(),
                     Some(Message::Finalized { .. }),
@@ -228,13 +230,13 @@ where
                                         },
                                     ),
                                     Some(message) => {
+                                        // Only verification may overtake an active proposal. The
+                                        // first other message becomes a FIFO barrier, with
+                                        // finalization also fencing active verification results.
                                         verification_fenced = matches!(
                                             message,
                                             Message::Finalized { .. },
                                         );
-                                        // Only verification may overtake an active proposal. The
-                                        // first other message is a FIFO barrier, so later
-                                        // verifications must not cross it.
                                         deferred_message = Some(message);
                                         receive_messages = false;
                                     }
@@ -585,7 +587,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            _readers: &<Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
             let gate = self.finalized_gate.lock().take();
             if let Some(mut gate) = gate {

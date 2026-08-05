@@ -186,12 +186,6 @@ impl<DB> Shared<DB> {
 /// ```
 pub struct Reader<DB>(Shared<DB>);
 
-impl<DB> Clone for Reader<DB> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
 impl<DB> Reader<DB> {
     /// Acquire shared read access to the database.
     ///
@@ -472,7 +466,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Implementations must not expose mutation capabilities through this
     /// type. In particular, readers must not construct, finalize, prune, or
     /// rewind database batches.
-    type Readers: Clone + Send + Sync + 'static;
+    type Readers: Send;
 
     /// Configuration needed to construct every database in the set.
     ///
