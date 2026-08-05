@@ -126,12 +126,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         };
         actor.assert_peer_count();
 
-        (
-            actor,
-            Mailbox::new(sender),
-            oracle,
-            info_verifier,
-        )
+        (actor, Mailbox::new(sender), oracle, info_verifier)
     }
 
     /// Start the actor and run it in the background.
@@ -506,10 +501,8 @@ mod tests {
             let myself = signer.public_key();
             let bootstrapper = PrivateKey::from_seed(1).public_key();
             let bootstrapper_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
-            let mut cfg = default_test_config(
-                signer,
-                vec![(bootstrapper, bootstrapper_addr.into())],
-            );
+            let mut cfg =
+                default_test_config(signer, vec![(bootstrapper, bootstrapper_addr.into())]);
             cfg.max_peers = NZUsize!(2);
             let TestHarness {
                 mailbox,
@@ -519,10 +512,7 @@ mod tests {
 
             let peer_1 = PrivateKey::from_seed(2).public_key();
             let peer_2 = PrivateKey::from_seed(3).public_key();
-            oracle.track(
-                0,
-                Set::try_from([myself, peer_1.clone()]).unwrap(),
-            );
+            oracle.track(0, Set::try_from([myself, peer_1.clone()]).unwrap());
             let _ = mailbox.dialable().await;
 
             oracle.track(1, Set::try_from([peer_1, peer_2]).unwrap());

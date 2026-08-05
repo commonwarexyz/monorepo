@@ -356,11 +356,7 @@ mod tests {
             let addr_2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002);
             oracle.track(
                 0,
-                Map::try_from([
-                    (myself, addr_1.into()),
-                    (peer_1.clone(), addr_1.into()),
-                ])
-                .unwrap(),
+                Map::try_from([(myself, addr_1.into()), (peer_1.clone(), addr_1.into())]).unwrap(),
             );
             let _ = mailbox.dialable().await;
 
