@@ -178,6 +178,9 @@ impl<P: PublicKey> Channels<P> {
         }
     }
 
+    /// Adds internal-message headroom to the capacity derived from registered channel quotas.
+    ///
+    /// Internal and application messages share the entire router mailbox.
     pub(super) const fn outbound_mailbox_size(&self, base: NonZeroUsize) -> NonZeroUsize {
         base.checked_add(self.outbound_capacity)
             .expect("router mailbox capacity overflow")
