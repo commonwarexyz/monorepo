@@ -1424,10 +1424,10 @@ where
     H: Hasher,
 {
     /// Stage 1: accumulate shards. The shard for our assigned index is verified
-    /// immediately; all other shards are buffered until enough
-    /// are available for batch verification.
+    /// immediately. All other shards are buffered until enough are available
+    /// for batch verification.
     AwaitingQuorum(AwaitingQuorumState<P, C, H>),
-    /// Stage 2: batch validation passed; checked shards are available for
+    /// Stage 2: batch validation passed. Checked shards are available for
     /// reconstruction.
     Ready(ReadyState<P, C, H>),
 }
@@ -4282,6 +4282,81 @@ mod tests {
 
                 // Peer 0 (leader) should be blocked for invalid crypto.
                 assert_blocked(&oracle, &peers[2].public_key, &peers[0].public_key).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_invalid_assigned_shard_from_non_leader_blocks_only_sender() {
+        // A Byzantine participant can race the leader with garbage at the
+        // victim's assigned index, since the assigned index is accepted from
+        // any participant. The sender must be blocked without poisoning the
+        // slot: the leader's genuine shard must still verify afterward.
+        let fixture: Fixture<C> = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                // Create two different blocks — shard from block2 won't verify
+                // against commitment from block1.
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
+                let commitment1 = coded_block1.commitment();
+
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
+
+                // Get peer 2's shard from block2, but re-wrap it with
+                // block1's commitment so it fails verification.
+                let peer2_index = peers[2].index.get() as u16;
+                let mut wrong_shard = coded_block2.shard(peer2_index).expect("missing shard");
+                wrong_shard.commitment = commitment1;
+                let wrong_bytes = wrong_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                let mut shard_sub = peers[2]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment1);
+
+                // Inform peer 2 that peer 0 is the leader.
+                peers[2].mailbox.discovered(
+                    commitment1,
+                    leader,
+                    Round::new(Epoch::zero(), View::new(1)),
+                );
+
+                // Non-leader peer 1 sends the invalid shard at peer 2's
+                // assigned index.
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk.clone()), wrong_bytes, true);
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 1 should be blocked for invalid crypto, and the assigned
+                // slot must not be treated as satisfied.
+                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
+                assert!(
+                    matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "subscription should not resolve from invalid shard"
+                );
+
+                // The leader's genuine shard for the same index must still verify.
+                let real_bytes = coded_block1
+                    .shard(peer2_index)
+                    .expect("missing shard")
+                    .encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer2_pk), real_bytes, true);
+                select! {
+                    _ = shard_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("genuine assigned shard did not verify after invalid one");
+                    },
+                };
             },
         );
     }

@@ -340,7 +340,7 @@ where
     /// observation round.
     ///
     /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
-    /// close only for exact retirements; other block subscriptions remain open for local ingress.
+    /// close only for exact retirements. Other block subscriptions remain open for local ingress.
     /// Digest subscriptions remain open, and later consensus notifications may recreate state.
     pub fn retire(&self, update: RetentionUpdate<Commitment>) {
         let _ = self.sender.enqueue(Message::Retire { update });

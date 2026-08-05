@@ -1978,6 +1978,110 @@ mod tests {
         })
     }
 
+    /// A participant that never held the payload cannot wait for shards it
+    /// cannot yet classify. Re-proposal verification must acquire the block by
+    /// fetching at the parent's certified round and return the boundary verdict.
+    #[test_traced("WARN")]
+    fn test_coding_reproposal_verify_fetches_block_by_parent_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants[..2].iter().cloned(),
+            )
+            .await;
+
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let v0_setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let v1_setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 1),
+                &mut oracle,
+                participants[1].clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+
+            let mut v0_mailbox = v0_setup.mailbox;
+            let v1_marshal = v1_setup.mailbox;
+            let v1_shards = v1_setup.extra;
+
+            // The boundary block of epoch 0, originally proposed at view 5.
+            let original_round = Round::new(Epoch::new(0), View::new(5));
+            let original_context = CodingCtx {
+                round: original_round,
+                leader: participants[0].clone(),
+                parent: (View::new(4), genesis_commitment()),
+            };
+            let block = make_coding_block(
+                original_context,
+                Sha256::hash(&[b"parent"]),
+                Height::new(BLOCKS_PER_EPOCH.get() - 1),
+                1900,
+            );
+            let coded_block: TestCodedBlock = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+
+            // Serving a fetch by round requires the block and the round's
+            // notarization certificate.
+            assert!(
+                v0_mailbox
+                    .verified(original_round, coded_block.clone())
+                    .await
+            );
+            CodingHarness::report_notarization(
+                &mut v0_mailbox,
+                CodingHarness::make_notarization(
+                    Proposal {
+                        round: original_round,
+                        parent: View::new(4),
+                        payload: commitment,
+                    },
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+
+            // The re-proposal names its own parent, so verification targets the
+            // parent round. Validator 1 never held the payload.
+            assert!(v1_shards.get(commitment).await.is_none());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: v1_marshal.clone(),
+                shards: v1_shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[1].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let reproposal_context = CodingCtx {
+                round: Round::new(Epoch::new(0), View::new(7)),
+                leader: participants[1].clone(),
+                parent: (View::new(5), commitment),
+            };
+            let verdict = marshaled.verify(reproposal_context, commitment).await.await;
+            assert!(
+                verdict.expect("re-proposal verdict missing"),
+                "re-proposal should verify after fetching the block by parent round"
+            );
+        })
+    }
+
     #[test_traced("WARN")]
     fn test_marshaled_rejects_mismatched_context_digest() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));

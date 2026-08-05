@@ -574,8 +574,8 @@ where
             .await
             .expect("failed to sync application progress");
 
-        // The round is an inclusive floor; retire every exact commitment even if sparse
-        // certificates leave it above that floor.
+        // The round is an inclusive floor. Retire every exact commitment even if
+        // sparse certificates leave it above that floor.
         buffer.retire(RetentionUpdate {
             round_floor: processed_round,
             exact_retirements: processed_commitments,
