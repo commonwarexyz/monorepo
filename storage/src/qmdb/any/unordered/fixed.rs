@@ -1430,6 +1430,60 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    async fn batch_apply_after_committed_prefix_dropped_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let db = open_db_generic::<F>(context.child("db")).await;
+        let updated = key(0);
+        let recreated = key(1);
+        let deleted = key(2);
+        let (db, _) = commit_writes_generic(
+            db,
+            [(updated, Some(val(0))), (recreated, Some(val(10)))],
+            None,
+        )
+        .await;
+
+        // Build A -> B with update/update, delete/recreate, and create/delete overlaps.
+        let a = db
+            .new_batch()
+            .write(updated, Some(val(1)))
+            .write(recreated, None)
+            .write(deleted, Some(val(20)))
+            .merkleize(&db, None)
+            .await
+            .unwrap();
+        let b = a
+            .new_batch()
+            .write(updated, Some(val(2)))
+            .write(recreated, Some(val(11)))
+            .write(deleted, None)
+            .merkleize(&db, None)
+            .await
+            .unwrap();
+
+        // Commit and drop A, then build C from the retained B suffix.
+        let (db, _) = db.apply_batch(a).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let c = b
+            .new_batch()
+            .write(updated, Some(val(3)))
+            .merkleize(&db, None)
+            .await
+            .unwrap();
+        let expected_root = c.root();
+
+        // Applying C directly also applies B. The snapshot location must be rebased from
+        // the original DB location to A's now-committed update.
+        let (db, _) = db.apply_batch(c).await.unwrap();
+        assert_eq!(db.root(), expected_root);
+        assert_eq!(db.get(&updated).await.unwrap(), Some(val(3)));
+        assert_eq!(db.get(&recreated).await.unwrap(), Some(val(11)));
+        assert_eq!(db.get(&deleted).await.unwrap(), None);
+
+        db.destroy().await.unwrap();
+    }
+
     async fn log_replay_inner<F: Family>(context: deterministic::Context) {
         let db_context = context.child("db");
         let db = open_db_generic::<F>(db_context.child("db")).await;
@@ -1561,6 +1615,13 @@ pub(crate) mod test {
     fn test_unordered_fixed_batch_speculative_root_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(batch_speculative_root_inner::<crate::merkle::mmb::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_apply_after_committed_prefix_dropped_mmb() {
+        let executor = deterministic::Runner::default();
+        executor
+            .start(batch_apply_after_committed_prefix_dropped_inner::<crate::merkle::mmb::Family>);
     }
 
     #[test_traced("WARN")]

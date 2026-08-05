@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_inactive_peaks() {
-        let size = Family::location_to_position(Location::new(8));
+        let size = Location::new(8);
 
         // At 8 leaves (size 13 nodes), MMB has 3 peaks:
         // - Height 2 covering leaves 0..4 (capacity 4)

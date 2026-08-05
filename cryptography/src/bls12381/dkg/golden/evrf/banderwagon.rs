@@ -213,7 +213,7 @@ mod tests {
     use super::*;
     use crate::{
         bls12381::primitives::group::G1,
-        transcript::Transcript,
+        transcript::{Transcript, Version},
         zk::bulletproofs::circuit::{Setup, prove, verify},
     };
     use commonware_macros::test_group;
@@ -389,7 +389,7 @@ mod tests {
         let setup = Setup::hashed(TEST_DST, lg_len, G1::generator());
         let claim = witness.claim(&setup);
 
-        let mut prover_t = Transcript::new(TEST_DST);
+        let mut prover_t = Transcript::new(TEST_DST, Version::V1);
         let proof = prove(
             &mut rng,
             &mut prover_t,
@@ -401,7 +401,7 @@ mod tests {
         )
         .expect("proving should succeed");
 
-        let mut verifier_t = Transcript::new(TEST_DST);
+        let mut verifier_t = Transcript::new(TEST_DST, Version::V1);
         let verified = setup
             .eval(
                 |vs| {

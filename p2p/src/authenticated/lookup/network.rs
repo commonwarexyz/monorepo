@@ -7,8 +7,8 @@ use super::{
 use crate::{
     Channel,
     authenticated::{
+        MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
-        data::MAX_PAYLOAD_DATA_OVERHEAD,
         router,
     },
 };
@@ -30,6 +30,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
+    max_frame_size: u32,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
@@ -52,7 +53,15 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`Config::max_message_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
+        let max_frame_size = cfg
+            .max_message_size
+            .checked_add(MAX_PAYLOAD_OVERHEAD)
+            .expect("maximum frame size overflow");
         let (listener_mailbox, listener) = listener::Mailbox::new();
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
@@ -80,6 +89,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             Self {
                 context: ContextCell::new(context),
                 cfg,
+                max_frame_size,
 
                 channels,
                 tracker,
@@ -97,8 +107,26 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// # Parameters
     ///
     /// * `channel` - Unique identifier for the channel.
-    /// * `rate` - Rate at which messages can be received over the channel.
-    /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
+    /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
+    ///   is paced independently. The returned sender applies the same quota independently to each
+    ///   recipient.
+    /// * `backlog` - Capacity of the channel's single bounded inbound mailbox.
+    ///
+    /// # Backpressure
+    ///
+    /// All peer connections share the inbound mailbox. Enqueueing never waits for capacity. When
+    /// the mailbox is full, the arriving message is dropped and queued messages remain. There is no
+    /// per-peer reservation or fairness.
+    ///
+    /// A synchronized burst can contribute up to `rate.burst_size()` messages per connected peer.
+    /// To absorb one full burst from every peer, use
+    /// [`backlog`](crate::authenticated::backlog) with the maximum number of connected peers. This
+    /// sizing includes honest traffic since protocol events can synchronize honest senders. Also
+    /// account for expected receiver stalls and ensure its drain rate can sustain aggregate ingress.
+    /// No finite backlog can absorb sustained ingress above the drain rate.
+    ///
+    /// The queued payloads can consume roughly `backlog * max_message_size` bytes, in addition to
+    /// queue and allocator overhead.
     ///
     /// # Returns
     ///
@@ -152,10 +180,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self
-                .cfg
-                .max_message_size
-                .saturating_add(MAX_PAYLOAD_DATA_OVERHEAD),
+            max_message_size: self.max_frame_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

@@ -1,7 +1,7 @@
 //! Non-empty [`Range`] type that guarantees at least one element.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
+use commonware_codec::{BufsMut, EncodeSize, Error as CodecError, Read, Write};
 use core::{fmt, ops::Range};
 
 /// Error returned when attempting to create a non-empty range from an empty range.
@@ -66,17 +66,29 @@ where
     }
 }
 
-impl<Idx: Write + PartialOrd> Write for NonEmptyRange<Idx> {
+impl<Idx: Write> Write for NonEmptyRange<Idx> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
+        self.0.start.write(buf);
+        self.0.end.write(buf);
+    }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.0.start.write_bufs(buf);
+        self.0.end.write_bufs(buf);
     }
 }
 
 impl<Idx: EncodeSize> EncodeSize for NonEmptyRange<Idx> {
     #[inline]
     fn encode_size(&self) -> usize {
-        self.0.encode_size()
+        self.0.start.encode_size() + self.0.end.encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.0.start.encode_inline_size() + self.0.end.encode_inline_size()
     }
 }
 
@@ -85,15 +97,12 @@ impl<Idx: Read + PartialOrd> Read for NonEmptyRange<Idx> {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let range = Range::<Idx>::read_cfg(buf, cfg)?;
-        if !range
-            .start
-            .partial_cmp(&range.end)
-            .is_some_and(|o| o.is_lt())
-        {
+        let start = Idx::read_cfg(buf, cfg)?;
+        let end = Idx::read_cfg(buf, cfg)?;
+        if !start.partial_cmp(&end).is_some_and(|o| o.is_lt()) {
             return Err(CodecError::Invalid("NonEmptyRange", "start must be < end"));
         }
-        Ok(Self(range))
+        Ok(Self(start..end))
     }
 }
 
@@ -179,19 +188,15 @@ mod tests {
 
     #[test]
     fn test_non_empty_range_decode_invalid() {
-        // Manually encode start=20, end=10 to bypass the Range write panic
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&20u32.to_be_bytes());
-        buf.extend_from_slice(&10u32.to_be_bytes());
-        assert!(NonEmptyRange::<u32>::decode(bytes::Bytes::from(buf)).is_err());
-
-        // start == end is valid for Range but not for NonEmptyRange
-        let empty = Range {
-            start: 5u32,
-            end: 5u32,
-        };
-        let encoded = empty.encode();
-        assert!(NonEmptyRange::<u32>::decode(encoded).is_err());
+        for (start, end) in [(20u32, 10u32), (5, 5)] {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&start.to_be_bytes());
+            buf.extend_from_slice(&end.to_be_bytes());
+            assert!(matches!(
+                NonEmptyRange::<u32>::decode(bytes::Bytes::from(buf)),
+                Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
+            ));
+        }
     }
 
     #[cfg(feature = "arbitrary")]

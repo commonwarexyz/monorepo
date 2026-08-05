@@ -571,9 +571,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
             range_proof,
         })
     }
-}
 
-impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     /// Verify that the proof proves that `operation` is active in the database with the given
     /// `root`.
     pub fn verify<H: Hasher<Digest = D>, O: Codec>(&self, operation: O, root: &D) -> bool {
@@ -2059,8 +2057,7 @@ mod tests {
         let leaves = mmb::Location::new(leaf_count);
         let inactivity_floor = mmb::Location::new(chunk_bits - 2);
 
-        let ops_inactive_peaks =
-            F::inactive_peaks(F::location_to_position(leaves), inactivity_floor);
+        let ops_inactive_peaks = F::inactive_peaks(leaves, inactivity_floor);
         let aligned_inactive =
             grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)
                 .unwrap();

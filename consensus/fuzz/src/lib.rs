@@ -398,12 +398,12 @@ where
         fetch_timeout: Duration::from_secs(1),
         view_retention: Delta::new(10),
         skip_timeout: Duration::from_secs(11),
-        fetch_concurrent: NZUsize!(1),
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forwarding: ForwardingPolicy::Disabled,
+        track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
     engine.start(pending, recovered, resolver);
@@ -643,12 +643,12 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: Delta::new(10),
                 skip_timeout: Duration::from_secs(11),
-                fetch_concurrent: NZUsize!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             };
             let engine = Engine::new(primary_context.child("engine"), engine_cfg);
             engine.start(

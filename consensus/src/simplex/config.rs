@@ -109,6 +109,10 @@ where
     /// responsible for reusing the exact participant ordering carried by `participants` so that signer indices
     /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
     /// the wrong validator.
+    ///
+    /// Simplex compares complete signed votes when checking duplicates and
+    /// conflicts. Signing the same subject more than once for the same participant
+    /// must therefore produce the same signature encoding.
     pub scheme: S,
 
     /// Leader election configuration.
@@ -138,7 +142,19 @@ where
     /// verified (see [`crate::simplex::types::Activity`]). Consider wrapping with
     /// [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter
     /// and verify activities based on scheme attributability.
+    ///
+    /// Locally constructed votes are exported only after their journal entries are
+    /// durable. Network votes are not persisted, so an equivocating sender may have
+    /// different votes exported before and after a restart.
     pub reporter: F,
+
+    /// Track individual votes after certification.
+    ///
+    /// By default, full vote evidence is released when the corresponding certificate
+    /// is constructed or received, making later conflict reporting and peer blocking
+    /// best effort. Enabling this retains each recorded vote until its round is
+    /// pruned, increasing memory usage.
+    pub track_historical_votes: bool,
 
     /// Strategy for parallel operations.
     pub strategy: T,
@@ -191,9 +207,6 @@ where
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
-
-    /// Number of concurrent requests to make at once.
-    pub fetch_concurrent: NonZeroUsize,
 
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.

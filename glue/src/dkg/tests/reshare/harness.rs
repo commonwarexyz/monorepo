@@ -21,7 +21,7 @@ use crate::{
         SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p::standard as qmdb_resolver,
+            p2p as qmdb_resolver,
         },
     },
 };
@@ -269,7 +269,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             payload,
         };
         Some(Proposed { block, merkleized })
@@ -836,7 +836,7 @@ impl EngineDefinition for ReshareEngine {
             };
             plan = plan.with_floor(finalization);
         }
-        let (marshal_actor, marshal, _) = MarshalActor::init(
+        let (marshal_actor, marshal, floor) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -978,13 +978,13 @@ impl EngineDefinition for ReshareEngine {
                 },
                 db_config,
                 provider: (),
-                marshal: marshal.clone(),
+                marshal: (marshal.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
-                    apply_batch_size: 64,
+                    apply_batch_size: NZU64!(64),
                     max_outstanding_requests: 8,
                     update_channel_size: NZUsize!(256),
                     max_retained_roots: 8,
@@ -1025,10 +1025,10 @@ impl EngineDefinition for ReshareEngine {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_secs(2),
-                    fetch_concurrent: NZUsize!(3),
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(5),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 },
                 gate,
                 state_sync,

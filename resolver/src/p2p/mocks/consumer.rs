@@ -64,6 +64,7 @@ where
     type Key = R;
     type Value = V;
     type Subscriber = S;
+    type Outcome = bool;
 
     /// Deliver data to the consumer.
     ///

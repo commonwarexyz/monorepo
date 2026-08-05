@@ -35,7 +35,9 @@ pub struct PrioritySet<I: Ord + Hash + Clone, P: Ord + Copy> {
 }
 
 impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
-    /// Create a new `PrioritySet`.
+    /// Creates an empty `PrioritySet`.
+    ///
+    /// To support efficient temporary replacement, this does not allocate heap storage.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {

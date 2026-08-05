@@ -684,7 +684,7 @@ pub(crate) mod test {
 
             // inactivity_floor should be at some location < op_count
             let inactivity_floor = db.inactivity_floor_loc();
-            let beyond_floor = Location::new(*inactivity_floor + 1);
+            let beyond_floor = inactivity_floor + 1;
 
             // Try to prune beyond the inactivity floor
             let Err(err) = db.prune(beyond_floor).await else {
@@ -730,7 +730,7 @@ pub(crate) mod test {
             let Err(err) = db.apply_batch(batch_b).await else {
                 panic!("expected StaleBatch error");
             };
-            assert!(matches!(err, Error::StaleBatch { .. }));
+            assert!(matches!(err, Error::StaleBatch));
 
             // Reopen and confirm the stale batch left the committed state untouched.
             let db = open_db(context.child("reopen")).await;
@@ -770,14 +770,14 @@ pub(crate) mod test {
                 .unwrap();
 
             // B has more ops than A.
-            assert!(batch_b.bounds.total_size > batch_a.bounds.total_size);
+            assert!(batch_b.bounds.tip.size > batch_a.bounds.tip.size);
 
             // Apply A, then B must be stale.
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
             let Err(err) = db.apply_batch(batch_b).await else {
                 panic!("expected StaleBatch for asymmetric sibling");
             };
-            assert!(matches!(err, Error::StaleBatch { .. }));
+            assert!(matches!(err, Error::StaleBatch));
         });
     }
 
@@ -835,46 +835,59 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = open_db(context.child("storage")).await;
 
-            let key1 = Sha256::hash(&[&[1]]);
-            let key2 = Sha256::hash(&[&[2]]);
-            let key3 = Sha256::hash(&[&[3]]);
-
-            // Commit initial state.
-            let merkleized = db
+            // A conventional fork after a shared parent remains stale.
+            let common_parent = db
                 .new_batch()
-                .write(key1, Some(vec![10]))
+                .write(Sha256::hash(&[&[10]]), Some(vec![10]))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let sibling_a = common_parent
+                .new_batch::<Sha256>()
+                .write(Sha256::hash(&[&[11]]), Some(vec![11]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let sibling_b = common_parent
+                .new_batch::<Sha256>()
+                .write(Sha256::hash(&[&[12]]), Some(vec![12]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling_a).await.unwrap();
+            assert!(matches!(
+                db.validate_batch(&sibling_b),
+                Err(Error::StaleBatch)
+            ));
 
-            // Create a parent batch, then fork two children.
-            let parent = db
+            // Build equal-size sibling parents, then extend only one sibling.
+            let parent_a = db
                 .new_batch()
-                .write(key2, Some(vec![20]))
+                .write(Sha256::hash(&[&[1]]), Some(vec![10]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent_b = db
+                .new_batch()
+                .write(Sha256::hash(&[&[2]]), Some(vec![20]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let child_b = parent_b
+                .new_batch::<Sha256>()
+                .write(Sha256::hash(&[&[3]]), Some(vec![30]))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
 
-            let child_a = parent
-                .new_batch::<Sha256>()
-                .write(key3, Some(vec![30]))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            let child_b = parent
-                .new_batch::<Sha256>()
-                .write(key3, Some(vec![40]))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-
-            // Apply child_a, then child_b should be stale.
-            let (db, _) = db.apply_batch(child_a).await.unwrap();
-            let Err(err) = db.apply_batch(child_b).await else {
-                panic!("expected StaleBatch error for sibling");
-            };
-            assert!(matches!(err, Error::StaleBatch { .. }));
+            // The DB now has parent_b's size but parent_a's root. A size-only lineage check
+            // would incorrectly accept child_b here.
+            let (db, _) = db.apply_batch(parent_a).await.unwrap();
+            assert!(matches!(
+                db.validate_batch(&child_b),
+                Err(Error::StaleBatch)
+            ));
+            db.destroy().await.unwrap();
         });
     }
 
@@ -943,7 +956,7 @@ pub(crate) mod test {
             let Err(err) = db.apply_batch(parent).await else {
                 panic!("expected StaleBatch for parent after child applied");
             };
-            assert!(matches!(err, Error::StaleBatch { .. }));
+            assert!(matches!(err, Error::StaleBatch));
         });
     }
 
@@ -1501,6 +1514,11 @@ pub(crate) mod test {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
+
+            // With a's Weak reference gone, c's effective DB boundary moves forward from the
+            // chain's original DB state to b's base: the authenticated state committed by a.
+            assert_eq!(c.bounds().db.size, *db.bounds().end);
+            assert_eq!(c.bounds().db.root, db.root());
 
             // Commit b (skip_ancestors path since a is committed).
             let (db, _) = db.apply_batch(b).await.unwrap();

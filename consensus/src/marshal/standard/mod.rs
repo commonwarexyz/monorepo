@@ -1486,6 +1486,136 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_floor_preserves_registered_subscriptions() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            // No links are added. Network fetches cannot complete. Waiters
+            // resolve only through the buffer or closure.
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mailbox = setup.mailbox;
+            let buffer = setup.extra;
+
+            // Build a chain whose tip is the floor anchor.
+            const ANCHOR_HEIGHT: u64 = 5;
+            let mut parent = Sha256::hash(&[b""]);
+            let mut anchor = None;
+            for i in 1..=ANCHOR_HEIGHT {
+                let block = make_raw_block(parent, Height::new(i), i);
+                parent = block.digest();
+                anchor = Some(block);
+            }
+            let anchor = anchor.unwrap();
+            let anchor_round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
+
+            // Register every acquisition mode for the same unavailable parent.
+            // The parent subscription models verification that remains active
+            // while unrelated application progress advances the floor.
+            let missing = make_raw_block(Sha256::hash(&[b"missing-parent"]), Height::new(2), 999);
+            let missing_digest = missing.digest();
+            let child = make_raw_block(missing_digest, Height::new(3), 1_000);
+            let mut by_round = mailbox.subscribe_by_digest(
+                missing_digest,
+                DigestFallback::FetchByRound {
+                    round: Round::new(Epoch::zero(), View::new(2)),
+                },
+            );
+            let mut by_height = mailbox.subscribe_by_commitment(
+                missing_digest,
+                CommitmentFallback::FetchByCommitment {
+                    height: Height::new(2),
+                },
+            );
+            let mut wait = mailbox.subscribe_by_digest(missing_digest, DigestFallback::Wait);
+            let mut parent = Box::pin(mailbox.subscribe_parent(&child));
+
+            // The anchor subscription resolves when the block arrives.
+            let anchor_wait = mailbox.subscribe_by_digest(
+                anchor.digest(),
+                DigestFallback::FetchByRound {
+                    round: anchor_round,
+                },
+            );
+
+            // Install the floor and deliver the anchor through the buffer.
+            let finalization = StandardHarness::make_finalization(
+                Proposal {
+                    round: anchor_round,
+                    parent: View::new(ANCHOR_HEIGHT - 1),
+                    payload: anchor.digest(),
+                },
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(finalization);
+            let _ = buffer.broadcast(Recipients::All, anchor.clone());
+            let received = anchor_wait.await.unwrap();
+            assert_eq!(received.digest(), anchor.digest());
+
+            // Wait for the application to process the anchor so the processed
+            // floors advance past the subscriptions' fetch coordinates.
+            while mailbox.get_processed_height().await != Some(Height::new(ANCHOR_HEIGHT)) {
+                context.sleep(Duration::from_millis(50)).await;
+            }
+
+            // Parent availability determines subscription lifetime.
+            assert!(matches!(by_round.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(by_height.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(wait.try_recv(), Err(TryRecvError::Empty)));
+            select! {
+                result = &mut parent => {
+                    panic!("parent subscription resolved at processed floor: {result:?}");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // A below-floor request skips remote acquisition and keeps a
+            // subscription for local ingress.
+            let mut late_by_round = mailbox.subscribe_by_digest(
+                missing_digest,
+                DigestFallback::FetchByRound {
+                    round: Round::new(Epoch::zero(), View::new(3)),
+                },
+            );
+            let mut late_parent = Box::pin(mailbox.subscribe_parent(&child));
+            let _ = mailbox.get_processed_height().await;
+            assert!(matches!(late_by_round.try_recv(), Err(TryRecvError::Empty)));
+            select! {
+                result = &mut late_parent => {
+                    panic!("late parent subscription resolved before availability: {result:?}");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {},
+            };
+
+            // Later local availability satisfies every registered caller.
+            let _ = buffer.broadcast(Recipients::All, missing.clone());
+            assert_eq!(by_round.await.unwrap().digest(), missing_digest);
+            assert_eq!(by_height.await.unwrap().digest(), missing_digest);
+            assert_eq!(wait.await.unwrap().digest(), missing_digest);
+            assert_eq!(parent.await.unwrap().digest(), missing_digest);
+            assert_eq!(late_by_round.await.unwrap().digest(), missing_digest);
+            assert_eq!(late_parent.await.unwrap().digest(), missing_digest);
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_resolver_floor_anchor_install_wakes_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -2113,8 +2243,8 @@ mod tests {
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(6),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_concurrent: NZUsize!(3),
                     forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
                 },
             );
             let _engine = engine.start(vote_network, certificate_network, resolver_network);
@@ -3866,6 +3996,7 @@ mod tests {
         type Key = handler::Key<D>;
         type Value = Bytes;
         type Subscriber = handler::Annotation;
+        type Outcome = bool;
 
         fn deliver(
             &mut self,
@@ -5990,7 +6121,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_round_fetches_reject_processed_round() {
+    fn test_standard_processed_round_skips_fetch_and_preserves_subscription() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -6001,7 +6132,7 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
             let application = Application::<B>::manual_ack();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "fetch-notarized-processed-round",
                 ConstantProvider::new(schemes[0].clone()),
@@ -6010,6 +6141,7 @@ mod tests {
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            let buffer = buffer.expect("buffer was provided");
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
@@ -6035,8 +6167,10 @@ mod tests {
 
             let fetches_before = resolver.fetches().len();
             mailbox.hint_notarized(round, Sha256::hash(&[b"missing-at-processed-round"]));
-            let subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(&[b"missing-subscription-at-processed-round"]),
+            let missing = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 101);
+            let missing_digest = missing.digest();
+            let mut subscription = mailbox.subscribe_by_commitment(
+                missing_digest,
                 CommitmentFallback::FetchByRound { round },
             );
 
@@ -6053,17 +6187,15 @@ mod tests {
                 fetches_before,
                 "hint_notarized must not enqueue the already-pruned processed round"
             );
-            select! {
-                result = subscription => {
-                    assert!(
-                        result.is_err(),
-                        "processed-round subscription should be canceled without a fetch"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("processed-round subscription remained open");
-                },
-            }
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+            buffer
+                .commitment_subscriptions
+                .lock()
+                .pop()
+                .expect("commitment subscription should be registered")
+                .send_lossy(Arc::new(missing));
+            assert_eq!(subscription.await.unwrap().digest(), missing_digest);
         });
     }
 
@@ -6234,7 +6366,7 @@ mod tests {
             drop(mailbox);
             context.sleep(Duration::from_millis(1)).await;
 
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
                 context
                     .child("validator_restart")
                     .with_attribute("index", 0),
@@ -6245,11 +6377,14 @@ mod tests {
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            let buffer = buffer.expect("buffer was provided");
 
             let fetches_before = resolver.fetches().len();
             mailbox.hint_notarized(round, Sha256::hash(&[b"missing-after-restart"]));
-            let subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(&[b"missing-subscription-after-restart"]),
+            let missing = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 101);
+            let missing_digest = missing.digest();
+            let mut subscription = mailbox.subscribe_by_commitment(
+                missing_digest,
                 CommitmentFallback::FetchByRound { round },
             );
 
@@ -6265,17 +6400,17 @@ mod tests {
                 fetches_before,
                 "restart must restore the processed round floor"
             );
-            select! {
-                result = subscription => {
-                    assert!(
-                        result.is_err(),
-                        "processed-round subscription should be canceled after restart"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("processed-round subscription remained open after restart");
-                },
-            }
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+            // Restored progress controls network acquisition. Local ingress
+            // remains a valid source for the block.
+            buffer
+                .commitment_subscriptions
+                .lock()
+                .pop()
+                .expect("commitment subscription should be registered")
+                .send_lossy(Arc::new(missing));
+            assert_eq!(subscription.await.unwrap().digest(), missing_digest);
         });
     }
 
@@ -6374,7 +6509,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_round_floor_does_not_restore_unacknowledged_anchor() {
+    fn test_standard_round_floor_restores_unacknowledged_anchor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -6450,24 +6585,14 @@ mod tests {
                     .await,
                 "barrier verification should be processed"
             );
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "round-bound fetch before anchor ack",
-                || {
-                    resolver.fetches().len() > fetches_before
-                        && resolver.fetches().iter().any(|fetch| {
-                            matches!(
-                                fetch.key,
-                                handler::Key::Notarized { round } if round == floor_round
-                            )
-                        })
-                },
-            )
-            .await;
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "durable floor round must suppress round-bound fetches after restart"
+            );
             assert!(
                 matches!(subscription.try_recv(), Err(TryRecvError::Empty)),
-                "unacknowledged anchor round must remain subscribable after restart"
+                "durable floor round must preserve local subscriptions after restart"
             );
         });
     }

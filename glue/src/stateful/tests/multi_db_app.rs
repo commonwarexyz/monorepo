@@ -9,7 +9,7 @@ use crate::{
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p::{compact as compact_resolver, standard as qmdb_resolver},
+            p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -52,7 +52,7 @@ use commonware_storage::{
     qmdb::{
         any::{FixedConfig, unordered::fixed},
         immutable,
-        sync::{Target, compact as compact_sync},
+        sync::{CompactTarget, Target},
     },
     translator::TwoCap,
 };
@@ -265,15 +265,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
             parent: parent.digest(),
             height,
             root_a: merkleized_a.root(),
-            range_a: non_empty_range!(
-                bounds_a.inactivity_floor,
-                Location::new(bounds_a.total_size)
-            ),
+            range_a: non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size),
             root_b: merkleized_b.root(),
-            range_b: non_empty_range!(
-                bounds_b.inactivity_floor,
-                Location::new(bounds_b.total_size)
-            ),
+            range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size),
         };
         Some(Proposed {
             block,
@@ -293,15 +287,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let matches_a = merkleized_a.root() == tip.root_a
-            && non_empty_range!(
-                bounds_a.inactivity_floor,
-                Location::new(bounds_a.total_size)
-            ) == tip.range_a;
+            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size) == tip.range_a;
         let matches_b = merkleized_b.root() == tip.root_b
-            && non_empty_range!(
-                bounds_b.inactivity_floor,
-                Location::new(bounds_b.total_size)
-            ) == tip.range_b;
+            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) == tip.range_b;
         if !matches_a || !matches_b {
             return None;
         }
@@ -320,9 +308,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         (
             Target::new(block.root_a, block.range_a.clone()),
-            compact_sync::Target {
+            CompactTarget {
                 root: block.root_b,
-                leaf_count: block.range_b.end(),
+                size: block.range_b.end(),
             },
         )
     }
@@ -335,6 +323,7 @@ pub(crate) struct MultiDbEngine {
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
+    retained_marshal_blocks: usize,
     sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
@@ -354,11 +343,12 @@ impl MultiDbEngine {
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
                 fetch_batch_size: NZU64!(16),
-                apply_batch_size: 64,
+                apply_batch_size: NZU64!(64),
                 max_outstanding_requests: 8,
                 update_channel_size: NZUsize!(256),
                 max_retained_roots: 32,
             },
+            retained_marshal_blocks: 10,
             sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
             sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -373,11 +363,12 @@ impl MultiDbEngine {
     pub(crate) fn with_slow_state_sync(mut self) -> Self {
         self.sync_config = SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
-            apply_batch_size: 1,
+            apply_batch_size: NZU64!(1),
             max_outstanding_requests: 1,
             update_channel_size: NZUsize!(4),
             max_retained_roots: 32,
         };
+        self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
     }
 }
@@ -529,7 +520,7 @@ impl EngineDefinition for MultiDbEngine {
             initial_a.root,
             initial_a.range,
             initial_b.root,
-            non_empty_range!(Location::new(0), initial_b.leaf_count),
+            non_empty_range!(Location::new(0), initial_b.size),
         );
 
         let stateful_startup_context = context.child("stateful_startup");
@@ -574,7 +565,7 @@ impl EngineDefinition for MultiDbEngine {
             max_pending_acks,
             strategy: Sequential,
         };
-        let (marshal_actor, marshal_mailbox, _last_height) =
+        let (marshal_actor, marshal_mailbox, floor) =
             MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
                 context.child("marshal"),
                 finalizations_by_height,
@@ -604,29 +595,23 @@ impl EngineDefinition for MultiDbEngine {
             );
         qmdb_resolver_actor_a.start(qmdb_a_resolver_network);
 
-        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) = compact_resolver::Actor::<
-            _,
-            ed25519::PublicKey,
-            _,
-            _,
-            mmr::Family,
-            QmdbB<_>,
-            Sha256,
-        >::new(
-            context.child("qmdb_resolver_b"),
-            compact_resolver::Config {
-                peer_provider: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
-                database: None,
-                mailbox_size: NZUsize!(100),
-                me: Some(public_key.clone()),
-                initial: Duration::from_secs(1),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-                priority_responses: false,
-            },
-        );
+        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) =
+            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbB<_>>::new(
+                context.child("qmdb_resolver_b"),
+                qmdb_resolver::Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    database: None,
+                    mailbox_size: NZUsize!(100),
+                    me: Some(public_key.clone()),
+                    initial: Duration::from_secs(1),
+                    timeout: Duration::from_secs(2),
+                    fetch_retry_timeout: Duration::from_millis(100),
+                    max_serve_ops: NZU64!(16),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
         // Stateful actor
@@ -637,15 +622,14 @@ impl EngineDefinition for MultiDbEngine {
                 application,
                 db_config,
                 provider: (),
-                marshal: marshal_mailbox.clone(),
+                marshal: (marshal_mailbox.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
-                    max_pending_acks,
                     maintenance_interval: NZUsize!(5),
-                    retained_marshal_blocks: 10,
+                    retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
             },
@@ -724,8 +708,8 @@ impl EngineDefinition for MultiDbEngine {
             view_retention: ViewDelta::new(10),
             skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
-            fetch_concurrent: NZUsize!(3),
             forwarding: ForwardingPolicy::Disabled,
+            track_historical_votes: false,
         };
 
         let engine = simplex::Engine::new(context, simplex_config);

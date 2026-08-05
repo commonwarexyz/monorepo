@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest]
         partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
           - "--features commonware-runtime/iouring-storage"
@@ -34,17 +34,11 @@ jobs:
           - ""
         exclude:
           # Only run io_uring features on Ubuntu
-          - os: windows-latest
-            flags: "--features commonware-runtime/iouring-storage"
           - os: macos-latest
             flags: "--features commonware-runtime/iouring-storage"
-          - os: windows-latest
-            flags: "--features commonware-runtime/iouring-network"
           - os: macos-latest
             flags: "--features commonware-runtime/iouring-network"
           # Only run --no-default-features on Ubuntu
-          - os: windows-latest
-            flags: "--no-default-features"
           - os: macos-latest
             flags: "--no-default-features"
     steps:

@@ -31,7 +31,6 @@ members = [
     "examples/estimator",
     "examples/flood",
     "examples/log",
-    "examples/sync",
     "examples/reshare",
 
     # Fuzz builds

@@ -1,23 +1,24 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
-use super::handler;
-use crate::stateful::db::{AttachableResolver, Shared};
+use crate::stateful::db::{AttachableResolver, Shared, p2p::cancel};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
-use commonware_macros::select;
 use commonware_storage::{
-    merkle::{Family, Location},
-    qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
+    merkle::Family,
+    qmdb::sync::{FeedbackTx, Request, Response, Source},
 };
 use commonware_utils::channel::oneshot;
-use futures::FutureExt as _;
-use std::{collections::VecDeque, future::Future, num::NonZeroU64};
+use std::{collections::VecDeque, future::Future};
 
 /// The resolver actor dropped the response before completion.
 #[derive(Debug, thiserror::Error)]
 #[error("response dropped before completion")]
 pub struct ResponseDropped;
+
+/// Where the actor delivers a fetched response, along with the channel the caller reports
+/// verification feedback on.
+pub(super) type ResponseTx<F, Op, D> = oneshot::Sender<(Response<F, Op, D>, FeedbackTx)>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
@@ -25,11 +26,11 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     AttachDatabase(Shared<DB>),
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
-        request: handler::Request<F>,
-        response: oneshot::Sender<Result<FetchResult<F, Op, D>, ResponseDropped>>,
+        request: Request<F>,
+        response: ResponseTx<F, Op, D>,
     },
     /// Cancel a previously requested operation fetch.
-    CancelOperations { request: handler::Request<F> },
+    CancelOperations { request: Request<F> },
 }
 
 impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
@@ -126,7 +127,7 @@ impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
     }
 }
 
-impl<DB, F, Op, D> SyncResolver for Mailbox<DB, F, Op, D>
+impl<DB, F, Op, D> Source for Mailbox<DB, F, Op, D>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
@@ -138,39 +139,21 @@ where
     type Op = Op;
     type Error = ResponseDropped;
 
-    async fn get_operations(
+    async fn serve(
         &self,
-        op_count: Location<F>,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        let request = handler::Request {
-            op_count,
-            start_loc,
-            max_ops,
-            include_pinned_nodes,
-        };
-
-        futures::pin_mut!(cancel_rx);
+        request: Request<F>,
+    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {
-            request: request.clone(),
+            request,
             response: response_tx,
         });
-        futures::pin_mut!(response_rx);
 
-        select! {
-            response = response_rx.as_mut() => response.map_err(|_| ResponseDropped)?,
-            _ = cancel_rx.as_mut() => {
-                if let Some(response) = response_rx.as_mut().now_or_never() {
-                    return response.map_err(|_| ResponseDropped)?;
-                }
-                let _ = self.sender.enqueue(Message::CancelOperations { request });
-                Err(ResponseDropped)
-            },
-        }
+        let mut guard =
+            cancel::Guard::new(self.sender.clone(), Message::CancelOperations { request });
+        let result = response_rx.await;
+        guard.disarm();
+        result.map_err(|_| ResponseDropped)
     }
 }
 
@@ -195,48 +178,79 @@ mod tests {
     use commonware_storage::mmr;
     use commonware_utils::{NZU64, NZUsize};
 
+    /// A caller that abandons its fetch drops the future, which retracts the request from the
+    /// actor.
     #[test]
-    fn get_operations_cancellation_sends_cancel_message() {
+    fn dropping_get_operations_sends_cancel_message() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
-            let op_count = mmr::Location::new(10);
+            let size = mmr::Location::new(10);
             let start_loc = mmr::Location::new(3);
             let max_ops = NZU64!(2);
 
-            let (cancel_tx, cancel_rx) = oneshot::channel();
-            let get = mailbox.get_operations(op_count, start_loc, max_ops, false, cancel_rx);
-            let observe = async move {
-                let response = match receiver.recv().await.expect("request should be queued") {
-                    Message::GetOperations { request, response } => {
-                        assert_eq!(request.op_count, op_count);
-                        assert_eq!(request.start_loc, start_loc);
-                        assert_eq!(request.max_ops, max_ops);
-                        assert!(!request.include_pinned_nodes);
-                        response
-                    }
-                    Message::AttachDatabase(_) => panic!("unexpected attach message"),
-                    Message::CancelOperations { .. } => panic!("cancel should come after request"),
-                };
+            // Poll once so the request is enqueued, then abandon the fetch.
+            {
+                let get = mailbox.serve(Request::Operations {
+                    size,
+                    start: start_loc,
+                    max_ops,
+                });
+                futures::pin_mut!(get);
+                assert!(futures::poll!(get.as_mut()).is_pending());
+            }
 
-                drop(cancel_tx);
-
-                match receiver.recv().await.expect("cancel should be queued") {
-                    Message::CancelOperations { request } => {
-                        assert_eq!(request.op_count, op_count);
-                        assert_eq!(request.start_loc, start_loc);
-                        assert_eq!(request.max_ops, max_ops);
-                        assert!(!request.include_pinned_nodes);
-                    }
-                    Message::AttachDatabase(_) => panic!("unexpected attach message"),
-                    Message::GetOperations { .. } => panic!("unexpected duplicate request"),
+            match receiver.recv().await.expect("request should be queued") {
+                Message::GetOperations { request, .. } => {
+                    assert_eq!(request.size(), size);
+                    assert_eq!(request.start(), start_loc);
+                    assert_eq!(request.max_ops(), max_ops);
+                    assert!(matches!(request, Request::Operations { .. }));
                 }
+                Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                Message::CancelOperations { .. } => panic!("cancel should come after request"),
+            }
 
+            match receiver.recv().await.expect("cancel should be queued") {
+                Message::CancelOperations { request } => {
+                    assert_eq!(request.size(), size);
+                    assert_eq!(request.start(), start_loc);
+                    assert_eq!(request.max_ops(), max_ops);
+                    assert!(matches!(request, Request::Operations { .. }));
+                }
+                Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                Message::GetOperations { .. } => panic!("unexpected duplicate request"),
+            }
+        });
+    }
+
+    /// A fetch that completes normally disarms the guard, so no cancel follows.
+    #[test]
+    fn completed_get_operations_sends_no_cancel() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
+            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+            let get = mailbox.serve(Request::Operations {
+                size: mmr::Location::new(10),
+                start: mmr::Location::new(3),
+                max_ops: NZU64!(2),
+            });
+            let observe = async move {
+                let Message::GetOperations { response, .. } =
+                    receiver.recv().await.expect("request should be queued")
+                else {
+                    panic!("expected a fetch request");
+                };
                 drop(response);
+                receiver
             };
 
-            let (result, _) = futures::join!(get, observe);
+            let (result, mut receiver) = futures::join!(get, observe);
             assert!(matches!(result, Err(ResponseDropped)));
+            assert!(
+                receiver.try_recv().is_err(),
+                "a completed fetch must not enqueue a cancel"
+            );
         });
     }
 }

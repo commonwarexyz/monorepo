@@ -141,7 +141,8 @@ fn main() {
         // Provide authorized peers
         oracle.track(0, peer_keys.clone());
 
-        // Register flood channel
+        // Keep the backlog operator-controlled because this benchmark intentionally saturates the
+        // receiver instead of provisioning for the aggregate peer burst.
         let (mut flood_sender, mut flood_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(u32::MAX)),

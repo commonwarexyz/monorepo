@@ -2427,7 +2427,7 @@ pub(crate) mod test {
             assert_eq!(db.root(), root_before);
             assert_eq!(db.size(), size_before);
 
-            let too_large_target = Location::new(*size_before + 1);
+            let too_large_target = size_before + 1;
             let Err(too_large_err) = db.rewind(too_large_target).await else {
                 panic!("expected rewind past size to fail");
             };
@@ -2477,7 +2477,7 @@ pub(crate) mod test {
 
             let rewind_target = db.size();
             let target_floor = db.inactivity_floor_loc();
-            let prune_loc = Location::new(*target_floor + (KEYS / 2));
+            let prune_loc = target_floor + (KEYS / 2);
             assert!(
                 rewind_target > *prune_loc,
                 "test setup expected target size > prune_loc; target={rewind_target:?}, floor={target_floor:?}"
@@ -2810,10 +2810,7 @@ mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
     //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the snapshot index variant,
     //! so one variant (`unordered::variable`) suffices as the test bed.
-    use crate::{
-        merkle::Location,
-        qmdb::any::unordered::variable::test::{AnyTest, create_test_config},
-    };
+    use crate::qmdb::any::unordered::variable::test::{AnyTest, create_test_config};
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::{boxed, test_traced};
     use commonware_runtime::{
@@ -2881,9 +2878,7 @@ mod bitmap_tests {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                commit_locs.push(Location::<crate::merkle::mmr::Family>::new(
-                    batch.bounds.total_size - 1,
-                ));
+                commit_locs.push(batch.bounds.tip.size - 1);
                 (db, _) = db.apply_batch(batch).await.unwrap();
             }
             let db = db.commit().await.unwrap();
@@ -2931,7 +2926,7 @@ mod bitmap_tests {
                 .unwrap();
             let (db, _) = db.apply_batch(b1).await.unwrap();
             let db = db.commit().await.unwrap();
-            let size_after_first = Location::new(*db.last_commit_loc + 1);
+            let size_after_first = db.last_commit_loc + 1;
 
             let b2 = db
                 .new_batch()
@@ -3004,7 +2999,7 @@ mod bitmap_tests {
                 .await
                 .unwrap();
             assert!(
-                parent.bounds.total_size > committed_bitmap_len,
+                parent.bounds.tip.size > committed_bitmap_len,
                 "parent must extend past committed bitmap to exercise the tail path",
             );
 
@@ -3019,7 +3014,7 @@ mod bitmap_tests {
             }
             let child = child_batch.merkleize(&db, None).await.unwrap();
             assert!(
-                child.bounds.total_size > committed_bitmap_len,
+                child.bounds.tip.size > committed_bitmap_len,
                 "child must include an uncommitted tail beyond committed bitmap",
             );
             let expected_root = child.root();
