@@ -35,11 +35,11 @@ use commonware_glue::{
     },
 };
 use commonware_macros::boxed;
-use commonware_p2p::authenticated::{self, discovery};
+use commonware_p2p::authenticated::discovery;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZDuration, NZU64, NZUsize};
+use commonware_utils::{NZDuration, NZU64, NZUsize, ordered::Set};
 use futures::future::try_join_all;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
@@ -67,32 +67,38 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let local = node.public_key();
     let partition_prefix = "validator";
     let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let bootstrappers = network.bootstrappers(&local);
+    let max_peers = Set::from_iter_dedup(
+        network
+            .participants
+            .iter()
+            .cloned()
+            .chain(bootstrappers.iter().map(|(peer, _)| peer.clone())),
+    )
+    .len()
+    .try_into()
+    .expect("at least one peer must be configured");
 
     let mut p2p_config = discovery::Config::local(
         node.signing_key.clone(),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
-        network.bootstrappers(&local),
+        bootstrappers,
+        max_peers,
         MAX_MESSAGE_SIZE,
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
-    // Configure channel capacity
-    //
-    // The rate is enforced independently for each peer. All peers share each channel's inbound
-    // mailbox, so size its backlog for one full burst from every peer.
-    let message_backlog = authenticated::backlog(network.participants.len(), MESSAGE_RATE);
-
-    let vote_network = p2p.register(VOTE_CHANNEL, MESSAGE_RATE, message_backlog);
-    let certificate_network = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE, message_backlog);
-    let resolver_network = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE, message_backlog);
-    let backfill_network = p2p.register(BACKFILL_CHANNEL, MESSAGE_RATE, message_backlog);
-    let broadcast_network = p2p.register(BROADCAST_CHANNEL, MESSAGE_RATE, message_backlog);
-    let qmdb_network = p2p.register(QMDB_CHANNEL, MESSAGE_RATE, message_backlog);
-    let dkg_network = p2p.register(DKG_CHANNEL, MESSAGE_RATE, message_backlog);
-    let dkg_probe_network = p2p.register(DKG_PROBE_CHANNEL, MESSAGE_RATE, message_backlog);
+    let vote_network = p2p.register(VOTE_CHANNEL, MESSAGE_RATE);
+    let certificate_network = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE);
+    let resolver_network = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE);
+    let backfill_network = p2p.register(BACKFILL_CHANNEL, MESSAGE_RATE);
+    let broadcast_network = p2p.register(BROADCAST_CHANNEL, MESSAGE_RATE);
+    let qmdb_network = p2p.register(QMDB_CHANNEL, MESSAGE_RATE);
+    let dkg_network = p2p.register(DKG_CHANNEL, MESSAGE_RATE);
+    let dkg_probe_network = p2p.register(DKG_PROBE_CHANNEL, MESSAGE_RATE);
     let p2p_handle = p2p.start();
 
     let provider = DynamicProvider::default();

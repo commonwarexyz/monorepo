@@ -20,6 +20,7 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
     control: mailbox::UnreliableReceiver<Message<P>>,
+    max_peers: usize,
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 }
@@ -38,6 +39,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
             Self {
                 context: ContextCell::new(context),
                 control: control_receiver,
+                max_peers: cfg.max_peers.get(),
                 connections: BTreeMap::new(),
                 open_subscriptions: Vec::new(),
             },
@@ -97,10 +99,19 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                     relay,
                     channels,
                 } => {
-                    debug!(?peer, "peer ready");
-                    self.connections.insert(peer, relay);
-                    let _ = channels.send(routing.clone());
-                    self.notify_subscribers();
+                    if self.connections.contains_key(&peer) {
+                        debug!(?peer, "rejecting duplicate ready peer");
+                    } else if self.connections.len() >= self.max_peers {
+                        debug!(?peer, max_peers = self.max_peers, "rejecting peer at capacity");
+                    } else {
+                        debug!(?peer, "peer ready");
+                        assert!(self.connections.insert(peer.clone(), relay).is_none());
+                        if channels.send(routing.clone()).is_err() {
+                            self.connections.remove(&peer);
+                        } else {
+                            self.notify_subscribers();
+                        }
+                    }
                 }
                 Message::Release { peer } => {
                     debug!(?peer, "peer released");
@@ -145,9 +156,53 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::ed25519::PublicKey;
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_cryptography::{
+        Signer as _,
+        ed25519::{PrivateKey, PublicKey},
+    };
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
+    use futures::FutureExt as _;
+
+    #[test]
+    fn rejects_peers_beyond_limit_and_overlapping_duplicates() {
+        deterministic::Runner::default().start(|context| async move {
+            let (actor, mailbox, _) = Actor::<deterministic::Context, PublicKey>::new(
+                context.child("router"),
+                Config {
+                    mailbox_size: NZUsize!(4),
+                    max_peers: NZUsize!(1),
+                },
+            );
+            let routing = Channels::new(
+                Messenger::unbound(context.network_buffer_pool().clone()),
+                1024,
+                NZUsize!(1),
+            );
+            let abandoned = PrivateKey::from_seed(0).public_key();
+            let (relay, _) = Relay::new(context.child("abandoned"), NZUsize!(1));
+            assert!(mailbox.ready(abandoned, relay).now_or_never().is_none());
+
+            let handle = actor.start(routing);
+            let first = PrivateKey::from_seed(1).public_key();
+            let second = PrivateKey::from_seed(2).public_key();
+
+            let (relay, _) = Relay::new(context.child("first"), NZUsize!(1));
+            assert!(mailbox.ready(first.clone(), relay).await.is_some());
+
+            let (relay, _) = Relay::new(context.child("duplicate"), NZUsize!(1));
+            assert!(mailbox.ready(first.clone(), relay).await.is_none());
+
+            let (relay, _) = Relay::new(context.child("second"), NZUsize!(1));
+            assert!(mailbox.ready(second.clone(), relay).await.is_none());
+
+            let _ = mailbox.release(first);
+            let (relay, _) = Relay::new(context.child("replacement"), NZUsize!(1));
+            assert!(mailbox.ready(second, relay).await.is_some());
+
+            handle.abort();
+        });
+    }
 
     #[test]
     fn subscribe_retains_only_open_initial_sender() {
@@ -156,6 +211,7 @@ mod tests {
                 context,
                 Config {
                     mailbox_size: NZUsize!(1),
+                    max_peers: NZUsize!(1),
                 },
             );
             let (sender, receiver) = ring::channel(NZUsize!(1));

@@ -412,7 +412,7 @@ mod tests {
             context.network_buffer_pool().clone(),
             router::Mailbox::new(router_sender),
         );
-        Channels::new(messenger, MAX_MESSAGE_SIZE)
+        Channels::new(messenger, MAX_MESSAGE_SIZE, NZUsize!(1))
     }
 
     #[test]
@@ -483,7 +483,7 @@ mod tests {
             let mut channels = create_channels(context.child("channels"));
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
+            let (_sender, _receiver) = channels.register(0, quota, context.child("channel"));
 
             // Simulate the attack: send a Data message with an arbitrary
             // unregistered channel value. Before the fix, this would create
@@ -584,7 +584,7 @@ mod tests {
 
             let mut channels = create_channels(context.child("channels"));
             let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
+            let (_sender, _receiver) = channels.register(0, quota, context.child("channel"));
 
             let pool = context.network_buffer_pool().clone();
             assert!(

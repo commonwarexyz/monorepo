@@ -11,7 +11,7 @@ use std::{
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with
-/// the exception of `crypto`, `listen`, `allow_private_ips`, `mailbox_size`,
+/// the exception of `crypto`, `listen`, `allow_private_ips`, `max_peers`, `mailbox_size`,
 /// `send_batch_size`, and `dial_timeout`). If this is not synchronized, connections could
 /// be unnecessarily dropped, messages could be parsed incorrectly, and/or peers will rate
 /// limit each other during normal operation.
@@ -48,18 +48,25 @@ pub struct Config<C: Signer> {
     /// the limit, so the resulting network message will be larger.
     pub max_message_size: u32,
 
+    /// Maximum total number of remote peers that may be connected at once.
+    ///
+    /// This applies to distinct peers across the union of all retained primary and secondary peer
+    /// sets. The local identity does not consume a slot; use `1` when no remote peers are expected.
+    ///
+    /// This sizes every application channel's inbound mailbox to hold one quota burst from each
+    /// peer. Every channel contributes that same capacity to the shared outbound router mailbox.
+    /// Additional peers are rejected until a connection closes.
+    pub max_peers: NonZeroUsize,
+
     /// Message backlog allowed for internal actors.
     ///
     /// When there are more messages in a mailbox than this value, messages may be rejected before
     /// they are processed. Refer to [`commonware_actor::Feedback`] and/or metrics on
     /// [`commonware_actor::mailbox`] for a signal this is occurring.
     ///
-    /// This does not control an application channel's inbound backlog. That capacity is passed to
-    /// [`Network::register`](super::Network::register).
-    ///
-    /// For the shared outbound router, this provides initial content capacity and control-message
-    /// headroom. Each registered channel's backlog is added to both the pre-start staging mailbox
-    /// and the final router mailbox.
+    /// This does not control application-channel inbound capacity. For the shared outbound router,
+    /// it provides control-message headroom in addition to the capacity derived from registered
+    /// channel rates and [`Config::max_peers`].
     pub mailbox_size: NonZeroUsize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.
@@ -129,6 +136,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
+        max_peers: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
@@ -140,6 +148,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
+            max_peers,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
@@ -163,7 +172,13 @@ impl<C: Signer> Config<C> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: u32) -> Self {
+    pub fn local(
+        crypto: C,
+        namespace: &[u8],
+        listen: SocketAddr,
+        max_peers: NonZeroUsize,
+        max_message_size: u32,
+    ) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
@@ -173,6 +188,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
+            max_peers,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
@@ -201,6 +217,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
+            max_peers: NZUsize!(32),
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),

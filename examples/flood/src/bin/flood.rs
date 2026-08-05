@@ -19,6 +19,7 @@ use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroU32,
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -126,12 +127,17 @@ fn main() {
         }
 
         // Configure network
+        let max_peers = peer_keys
+            .len()
+            .try_into()
+            .expect("allowed peers must contain at least one peer");
         let mut p2p_cfg = discovery::Config::local(
             key.clone(),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),
             bootstrappers,
+            max_peers,
             config.message_size,
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
@@ -142,13 +148,15 @@ fn main() {
         // Provide authorized peers
         oracle.track(0, peer_keys.clone());
 
-        // Keep the backlog operator-controlled because this benchmark intentionally saturates the
-        // receiver instead of provisioning for the aggregate peer burst.
-        let (mut flood_sender, mut flood_receiver) = network.register(
-            0,
-            Quota::per_second(NZU32!(u32::MAX)),
-            config.message_backlog,
-        );
+        // Divide the configured aggregate backlog across peers while retaining an effectively
+        // unlimited refill rate. Rounding up preserves at least the requested capacity.
+        let per_peer_backlog = config.message_backlog.div_ceil(max_peers.get());
+        let burst = u32::try_from(per_peer_backlog)
+            .ok()
+            .and_then(NonZeroU32::new)
+            .expect("message backlog must be non-zero and fit in a u32");
+        let (mut flood_sender, mut flood_receiver) =
+            network.register(0, Quota::per_second(NZU32!(u32::MAX)).allow_burst(burst));
 
         // Create network
         let p2p = network.start();

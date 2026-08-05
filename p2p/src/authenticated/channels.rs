@@ -17,20 +17,6 @@ use std::{
 };
 use thiserror::Error;
 
-/// Returns the backlog required to hold one quota burst from every peer.
-///
-/// This covers a synchronized burst, including from honest peers, but does not account for
-/// receiver stalls or sustained ingress above the receiver's drain rate.
-///
-/// # Panics
-///
-/// Panics if the aggregate burst does not fit in a `usize`.
-pub const fn backlog(peers: usize, rate: Quota) -> usize {
-    peers
-        .checked_mul(rate.burst_size().get() as usize)
-        .expect("message backlog overflow")
-}
-
 /// Errors that can occur when interacting with the network.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -83,8 +69,8 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 /// Sends arbitrary bytes over one registered channel.
 ///
 /// The channel's quota is shared across clones and enforced independently for each recipient.
-/// All registered channels share one outbound router mailbox. A channel's configured backlog adds
-/// to that mailbox's capacity but does not reserve capacity exclusively for the channel.
+/// All registered channels share one outbound router mailbox. Each channel contributes one quota
+/// burst for every configured peer, but does not reserve that capacity exclusively.
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
 }
@@ -138,8 +124,7 @@ where
 ///
 /// Every peer connection feeds the same bounded inbound mailbox after independent per-peer rate
 /// limiting. If the mailbox is full, the arriving message is dropped and queued messages remain.
-/// Configure its capacity through `Network::register` using the aggregate peer burst, expected
-/// receiver stalls, and memory budget.
+/// Its capacity holds one quota burst from every peer allowed by the network configuration.
 pub struct Receiver<P: PublicKey> {
     receiver: mailbox::UnreliableReceiver<Inbound<P>>,
 }
@@ -177,61 +162,52 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: u32,
-    outbound_backlog: usize,
+    max_peers: NonZeroUsize,
+    outbound_capacity: usize,
     receivers: BTreeMap<Channel, (Quota, mailbox::UnreliableSender<Inbound<P>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
-    pub const fn new(messenger: Messenger<P>, max_size: u32) -> Self {
+    pub const fn new(messenger: Messenger<P>, max_size: u32, max_peers: NonZeroUsize) -> Self {
         Self {
             messenger,
             max_size,
-            outbound_backlog: 0,
+            max_peers,
+            outbound_capacity: 0,
             receivers: BTreeMap::new(),
         }
     }
 
     pub(super) const fn outbound_mailbox_size(&self, base: NonZeroUsize) -> NonZeroUsize {
-        base.checked_add(self.outbound_backlog)
+        base.checked_add(self.outbound_capacity)
             .expect("router mailbox capacity overflow")
     }
 
-    pub(super) fn grow_staging<M: Metrics>(
-        &self,
-        staging: &mut super::router::Staging<P>,
-        metrics: M,
-        base: NonZeroUsize,
-    ) {
-        self.messenger
-            .grow_staging(staging, metrics, self.outbound_mailbox_size(base));
-    }
-
-    pub(super) fn bind(
-        &self,
-        mailbox: super::router::Mailbox<P>,
-        staging: super::router::Staging<P>,
-    ) {
-        self.messenger.bind(mailbox, staging);
+    pub(super) fn bind(&self, mailbox: super::router::Mailbox<P>) {
+        self.messenger.bind(mailbox);
     }
 
     pub fn register<C: Clock + Metrics>(
         &mut self,
         channel: Channel,
         rate: Quota,
-        backlog: usize,
         context: C,
     ) -> (Sender<P, C>, Receiver<P>) {
-        let backlog = NonZeroUsize::new(backlog).expect("message backlog must be non-zero");
         if self.receivers.contains_key(&channel) {
             panic!("duplicate channel registration: {channel}");
         }
-        self.outbound_backlog = self
-            .outbound_backlog
-            .checked_add(backlog.get())
+        let capacity = self
+            .max_peers
+            .get()
+            .checked_mul(rate.burst_size().get() as usize)
+            .and_then(NonZeroUsize::new)
+            .expect("channel mailbox capacity overflow");
+        self.outbound_capacity = self
+            .outbound_capacity
+            .checked_add(capacity.get())
             .expect("router mailbox capacity overflow");
-        let (sender, receiver) = mailbox::new_unreliable(context.child("mailbox"), backlog);
-        let previous = self.receivers.insert(channel, (rate, sender));
-        assert!(previous.is_none());
+        let (sender, receiver) = mailbox::new_unreliable(context.child("mailbox"), capacity);
+        assert!(self.receivers.insert(channel, (rate, sender)).is_none());
         (
             Sender::new(
                 channel,
@@ -252,10 +228,6 @@ impl<P: PublicKey> Channels<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        CheckedSender as _, LimitedSender as _,
-        authenticated::router::{self, Actor},
-    };
     use commonware_cryptography::{
         Signer as _,
         ed25519::{PrivateKey, PublicKey},
@@ -266,49 +238,43 @@ mod tests {
     use commonware_utils::{NZU32, NZUsize};
 
     #[test]
-    fn backlog_aggregates_peers() {
-        let rate = Quota::per_second(NZU32!(128));
+    fn registered_rate_sizes_inbound_mailbox_for_every_peer() {
+        deterministic::Runner::default().start(|context| async move {
+            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let mut channels = Channels::new(messenger, 1024, NZUsize!(2));
+            let quota = Quota::per_second(NZU32!(2));
+            let (_, mut receiver) = channels.register(1, quota, context.child("channel"));
+            let inbound = channels.receivers.get(&1).unwrap().1.clone();
+            let peer = PrivateKey::from_seed(1).public_key();
 
-        assert_eq!(backlog(7, rate), 896);
+            for _ in 0..4 {
+                assert!(
+                    inbound
+                        .enqueue(Inbound((peer.clone(), IoBuf::from(b"message"))))
+                        .accepted()
+                );
+            }
+            assert_eq!(
+                inbound.enqueue(Inbound((peer, IoBuf::from(b"overflow")))),
+                Unreliable::Rejected
+            );
+
+            for _ in 0..4 {
+                assert!(receiver.receiver.try_recv().is_ok());
+            }
+        });
     }
 
     #[test]
-    fn registered_backlogs_size_shared_outbound_mailbox() {
+    fn registered_rates_size_shared_outbound_mailbox() {
         deterministic::Runner::default().start(|context| async move {
-            let (messenger, staging) = Messenger::unbound(
-                context.network_buffer_pool().clone(),
-                context.child("router_staging"),
-                NZUsize!(2),
-            );
-            let mut channels = Channels::new(messenger, 1024);
-            let quota = Quota::per_second(NZU32!(100));
-            let (mut first, _) = channels.register(1, quota, 2, context.child("first"));
-            let (mut second, _) = channels.register(2, quota, 2, context.child("second"));
-            let capacity = channels.outbound_mailbox_size(NZUsize!(2));
-            let (_router, mailbox, _) = Actor::<_, PublicKey>::new(
-                context.child("router"),
-                router::Config {
-                    mailbox_size: capacity,
-                },
-            );
-            channels.bind(mailbox, staging);
-            let peer = PrivateKey::from_seed(1).public_key();
+            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
+            let mut channels = Channels::new(messenger, 1024, NZUsize!(2));
+            let quota = Quota::per_second(NZU32!(2));
+            let _ = channels.register(1, quota, context.child("first"));
+            let _ = channels.register(2, quota, context.child("second"));
 
-            for sender in [&mut first, &mut second] {
-                for _ in 0..2 {
-                    let feedback = sender
-                        .check(Recipients::One(peer.clone()))
-                        .unwrap()
-                        .send(IoBuf::from(b"message"), false);
-                    assert!(feedback.accepted());
-                }
-            }
-
-            let feedback = first
-                .check(Recipients::One(peer))
-                .unwrap()
-                .send(IoBuf::from(b"overflow"), false);
-            assert_eq!(feedback, Unreliable::Rejected);
+            assert_eq!(channels.outbound_mailbox_size(NZUsize!(2)), NZUsize!(10));
         });
     }
 
@@ -316,23 +282,23 @@ mod tests {
     #[should_panic(expected = "router mailbox capacity overflow")]
     fn outbound_mailbox_size_panics_on_overflow() {
         deterministic::Runner::default().start(|context| async move {
-            let (messenger, _staging) = Messenger::unbound(
-                context.network_buffer_pool().clone(),
-                context.child("router_staging"),
-                NZUsize!(1),
-            );
-            let mut channels = Channels::<PublicKey>::new(messenger, 1024);
-            channels.outbound_backlog = 1;
+            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let mut channels = Channels::<PublicKey>::new(messenger, 1024, NZUsize!(1));
+            channels.outbound_capacity = 1;
 
             channels.outbound_mailbox_size(NonZeroUsize::new(usize::MAX).unwrap());
         });
     }
 
     #[test]
-    #[should_panic(expected = "message backlog overflow")]
-    fn backlog_panics_on_overflow() {
+    #[should_panic(expected = "channel mailbox capacity overflow")]
+    fn derived_capacity_panics_on_overflow() {
         let rate = Quota::per_second(NZU32!(2));
-
-        backlog(usize::MAX, rate);
+        deterministic::Runner::default().start(|context| async move {
+            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let mut channels =
+                Channels::<PublicKey>::new(messenger, 1024, NonZeroUsize::new(usize::MAX).unwrap());
+            let _ = channels.register(0, rate, context);
+        });
     }
 }

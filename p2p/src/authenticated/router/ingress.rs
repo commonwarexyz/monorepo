@@ -8,7 +8,7 @@ use commonware_actor::{
     mailbox::{self, UnreliablePolicy},
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{BufferPool, IoBufs, Metrics};
+use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     NZUsize,
     channel::{oneshot, ring},
@@ -17,7 +17,6 @@ use commonware_utils::{
 use std::{
     collections::VecDeque,
     fmt,
-    num::NonZeroUsize,
     sync::{Arc, OnceLock},
 };
 
@@ -78,7 +77,7 @@ impl<P: PublicKey> Mailbox<P> {
 
     /// Notify the router that a peer is ready to communicate.
     ///
-    /// Returns `None` if the router has shut down.
+    /// Returns `None` if the router rejects the peer or has shut down.
     pub async fn ready(&self, peer: P, relay: Relay<EncodedData>) -> Option<Channels<P>> {
         let (channels, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Ready {
@@ -101,91 +100,30 @@ impl<P: PublicKey> Mailbox<P> {
     }
 }
 
-/// Keeps the pre-start mailbox open until the network starts or is dropped.
-pub(in crate::authenticated) struct Staging<P: PublicKey>(mailbox::UnreliableReceiver<Message<P>>);
-
 /// Sends messages containing content to the router to send to peers.
 struct MessengerState<P: PublicKey> {
     mailbox: OnceLock<Mailbox<P>>,
-    staging: Mutex<Option<Mailbox<P>>>,
+    subscriptions: Mutex<Vec<ring::Sender<Vec<P>>>>,
 }
 
 impl<P: PublicKey> MessengerState<P> {
-    fn bound(mailbox: Mailbox<P>) -> Self {
-        Self {
-            mailbox: OnceLock::from(mailbox),
-            staging: Mutex::new(None),
-        }
-    }
-
-    const fn unbound(staging: Mailbox<P>) -> Self {
+    const fn new() -> Self {
         Self {
             mailbox: OnceLock::new(),
-            staging: Mutex::new(Some(staging)),
+            subscriptions: Mutex::new(Vec::new()),
         }
     }
 
-    fn enqueue(&self, message: Message<P>) -> Unreliable<Feedback> {
-        if let Some(mailbox) = self.mailbox.get() {
-            return mailbox.0.enqueue(message);
-        }
-
-        let staging = self.staging.lock();
-        if let Some(mailbox) = self.mailbox.get() {
-            return mailbox.0.enqueue(message);
-        }
-        staging
-            .as_ref()
-            .expect("unbound router messenger missing staging mailbox")
-            .0
-            .enqueue(message)
-    }
-
-    fn grow_staging(&self, mailbox: Mailbox<P>, staging: &mut Staging<P>, replacement: Staging<P>) {
-        // The staging lock excludes every producer, so an empty receive means all previously
-        // accepted messages have been transferred before the replacement becomes visible.
-        let mut staging_slot = self.staging.lock();
-        assert!(
-            self.mailbox.get().is_none(),
-            "router messenger already bound"
-        );
-        assert!(
-            staging_slot.is_some(),
-            "unbound router messenger missing staging mailbox"
-        );
-        while let Ok(message) = staging.0.try_recv() {
-            assert!(
-                mailbox.0.enqueue(message).accepted(),
-                "staged router message must be accepted by larger mailbox"
-            );
-        }
-        *staging = replacement;
-        *staging_slot = Some(mailbox);
-    }
-
-    fn bind(&self, mailbox: Mailbox<P>, mut staging: Staging<P>) {
-        // Publish the final mailbox only after draining staging while holding the lock. A
-        // concurrent sender therefore either enters staging first or waits and enters the final
-        // mailbox after every staged message.
-        let mut staging_slot = self.staging.lock();
-        assert!(
-            self.mailbox.get().is_none(),
-            "router messenger already bound"
-        );
-        let _staging_sender = staging_slot
-            .take()
-            .expect("unbound router messenger missing staging mailbox");
-        while let Ok(message) = staging.0.try_recv() {
-            assert!(
-                mailbox.0.enqueue(message).accepted(),
-                "staged router message must be accepted by final mailbox"
-            );
-        }
+    fn bind(&self, mailbox: Mailbox<P>) {
+        let mut subscriptions = self.subscriptions.lock();
         assert!(
             self.mailbox.set(mailbox).is_ok(),
             "router messenger already bound"
         );
-        drop(staging_slot);
+        let mailbox = self.mailbox.get().unwrap();
+        for sender in subscriptions.drain(..) {
+            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+        }
     }
 }
 
@@ -199,7 +137,7 @@ impl<P: PublicKey> fmt::Debug for Messenger<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Messenger")
             .field("bound", &self.state.mailbox.get().is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -207,46 +145,27 @@ impl<P: PublicKey> Messenger<P> {
     /// Returns a new [Messenger] with the given sender.
     /// (The router has the corresponding receiver.)
     pub fn new(pool: BufferPool, sender: Mailbox<P>) -> Self {
+        let messenger = Self::unbound(pool);
+        messenger.bind(sender);
+        messenger
+    }
+
+    pub(in crate::authenticated) fn unbound(pool: BufferPool) -> Self {
         Self {
             pool,
-            state: Arc::new(MessengerState::bound(sender)),
+            state: Arc::new(MessengerState::new()),
         }
     }
 
-    pub(in crate::authenticated) fn unbound<M: Metrics>(
-        pool: BufferPool,
-        metrics: M,
-        capacity: NonZeroUsize,
-    ) -> (Self, Staging<P>) {
-        let (sender, receiver) = mailbox::new_unreliable(metrics.child("mailbox"), capacity);
-        (
-            Self {
-                pool,
-                state: Arc::new(MessengerState::unbound(Mailbox::new(sender))),
-            },
-            Staging(receiver),
-        )
-    }
-
-    pub(in crate::authenticated) fn bind(&self, mailbox: Mailbox<P>, staging: Staging<P>) {
-        self.state.bind(mailbox, staging);
-    }
-
-    pub(in crate::authenticated) fn grow_staging<M: Metrics>(
-        &self,
-        staging: &mut Staging<P>,
-        metrics: M,
-        capacity: NonZeroUsize,
-    ) {
-        let (sender, receiver) = mailbox::new_unreliable(metrics.child("mailbox"), capacity);
-        self.state
-            .grow_staging(Mailbox::new(sender), staging, Staging(receiver));
+    pub(in crate::authenticated) fn bind(&self, mailbox: Mailbox<P>) {
+        self.state.bind(mailbox);
     }
 
     /// Sends a message to the given `recipients`.
     ///
     /// Encodes the message once and shares the encoded bytes across all recipients.
-    /// Returns feedback from enqueueing the router message.
+    /// Returns feedback from enqueueing the router message. Before the router is bound, the
+    /// submission is accepted and dropped without encoding.
     pub fn content(
         &self,
         recipients: Recipients<P>,
@@ -254,10 +173,14 @@ impl<P: PublicKey> Messenger<P> {
         message: IoBufs,
         priority: bool,
     ) -> Unreliable<Feedback> {
+        let Some(mailbox) = self.state.mailbox.get() else {
+            return Unreliable::new(Feedback::Ok);
+        };
+
         // Encode the data frame once for all recipients
         let encoded = EncodedData::new(&self.pool, channel, message);
 
-        self.state.enqueue(Message::Content {
+        mailbox.0.enqueue(Message::Content {
             recipients,
             encoded,
             priority,
@@ -270,7 +193,18 @@ impl<P: PublicKey> Connected for Messenger<P> {
 
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (sender, receiver) = ring::channel(NZUsize!(1));
-        let _ = self.state.enqueue(Message::SubscribePeers { sender });
+        if let Some(mailbox) = self.state.mailbox.get() {
+            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+            return receiver;
+        }
+
+        let mut subscriptions = self.state.subscriptions.lock();
+        if let Some(mailbox) = self.state.mailbox.get() {
+            drop(subscriptions);
+            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+        } else {
+            subscriptions.push(sender);
+        }
         receiver
     }
 }
@@ -287,100 +221,41 @@ mod tests {
     };
 
     #[test]
-    fn test_unbound_messenger_closes_when_staging_dropped() {
+    fn test_unbound_messenger_accepts_and_drops_content() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (messenger, staging) = Messenger::<PublicKey>::unbound(
-                context.network_buffer_pool().clone(),
-                context.child("router_staging"),
-                NZUsize!(1),
-            );
-            drop(staging);
-
+            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
             assert_eq!(
                 messenger.content(Recipients::All, 7, IoBuf::from(b"message").into(), false),
-                Unreliable::new(Feedback::Closed)
+                Unreliable::new(Feedback::Ok)
             );
+
+            let (sender, mut receiver) = mailbox::new_unreliable::<Message<PublicKey>>(
+                context.child("router_mailbox"),
+                NZUsize!(1),
+            );
+            messenger.bind(Mailbox::new(sender));
+            assert!(receiver.try_recv().is_err());
         });
     }
 
     #[test]
-    fn test_unbound_messenger_buffers_content() {
+    fn test_unbound_messenger_defers_subscriptions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (messenger, mut staging) = Messenger::<PublicKey>::unbound(
-                context.network_buffer_pool().clone(),
-                context.child("router_staging"),
-                NZUsize!(1),
-            );
-            let peer = PrivateKey::from_seed(1).public_key();
-
-            assert_eq!(format!("{messenger:?}"), "Messenger { bound: false }");
-            assert_eq!(
-                messenger.content(
-                    Recipients::One(peer.clone()),
-                    7,
-                    IoBuf::from(b"message").into(),
-                    false
-                ),
-                Unreliable::new(Feedback::Ok)
-            );
-            assert_eq!(
-                messenger.content(
-                    Recipients::One(peer.clone()),
-                    7,
-                    IoBuf::from(b"overflow").into(),
-                    false
-                ),
-                Unreliable::Rejected
-            );
-            messenger.grow_staging(&mut staging, context.child("router_staging"), NZUsize!(2));
-            assert_eq!(
-                messenger.content(
-                    Recipients::One(peer.clone()),
-                    8,
-                    IoBuf::from(b"after growth").into(),
-                    true
-                ),
-                Unreliable::new(Feedback::Ok)
-            );
+            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
             let _subscription = messenger.subscribe();
             let (sender, mut receiver) = mailbox::new_unreliable::<Message<PublicKey>>(
                 context.child("router_mailbox"),
-                NZUsize!(2),
+                NZUsize!(1),
             );
-            messenger.bind(Mailbox::new(sender), staging);
-            assert_eq!(format!("{messenger:?}"), "Messenger { bound: true }");
 
-            match receiver.try_recv().unwrap() {
-                Message::Content {
-                    recipients: Recipients::One(recipient),
-                    encoded,
-                    priority,
-                } => {
-                    assert_eq!(recipient, peer);
-                    assert_eq!(encoded.channel, 7);
-                    assert!(!priority);
-                }
-                _ => panic!("expected content"),
-            }
-            match receiver.try_recv().unwrap() {
-                Message::Content {
-                    recipients: Recipients::One(recipient),
-                    encoded,
-                    priority,
-                } => {
-                    assert_eq!(recipient, peer);
-                    assert_eq!(encoded.channel, 8);
-                    assert!(priority);
-                }
-                _ => panic!("expected content"),
-            }
-            match receiver.try_recv().unwrap() {
-                Message::SubscribePeers { .. } => {}
-                _ => panic!("expected peer subscription"),
-            }
-            assert!(receiver.try_recv().is_err());
+            messenger.bind(Mailbox::new(sender));
+
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(Message::SubscribePeers { .. })
+            ));
         });
     }
 

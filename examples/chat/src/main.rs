@@ -57,10 +57,7 @@ mod logger;
 
 use clap::{Arg, Command, value_parser};
 use commonware_cryptography::{Signer as _, ed25519};
-use commonware_p2p::{
-    Manager as _,
-    authenticated::{self, discovery},
-};
+use commonware_p2p::{Manager as _, authenticated::discovery};
 use commonware_runtime::{Quota, Runner as _, Supervisor as _, tokio};
 use commonware_utils::{NZU32, TryCollect, ordered::Set, sync::Mutex};
 use std::{
@@ -156,12 +153,22 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
+    let max_peers = Set::from_iter_dedup(
+        recipients
+            .iter()
+            .cloned()
+            .chain(bootstrapper_identities.iter().map(|(peer, _)| peer.clone())),
+    )
+    .len()
+    .try_into()
+    .expect("at least one peer must be configured");
     let p2p_cfg = discovery::Config::local(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        max_peers,
         MAX_MESSAGE_SIZE,
     );
 
@@ -170,13 +177,6 @@ fn main() {
         // Initialize network
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
-        // Configure channel capacity
-        //
-        // The rate is enforced independently for each peer. All peers share the channel's inbound
-        // mailbox, so size its backlog for one full burst from every peer.
-        let message_rate = Quota::per_second(NZU32!(128));
-        let message_backlog = authenticated::backlog(recipients.len(), message_rate);
-
         // Provide authorized peers
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
@@ -184,8 +184,8 @@ fn main() {
         oracle.track(0, recipients);
 
         // Initialize chat
-        let (chat_sender, chat_receiver) =
-            network.register(handler::CHANNEL, message_rate, message_backlog);
+        let message_rate = Quota::per_second(NZU32!(128));
+        let (chat_sender, chat_receiver) = network.register(handler::CHANNEL, message_rate);
 
         // Start network
         let network_handler = network.start();

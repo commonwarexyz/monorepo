@@ -53,10 +53,7 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{Sha256, Signer as _, ed25519};
-use commonware_p2p::{
-    Manager as _,
-    authenticated::{self, discovery},
-};
+use commonware_p2p::{Manager as _, authenticated::discovery};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
@@ -153,12 +150,22 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure network
+    let max_peers = Set::from_iter_dedup(
+        validators
+            .iter()
+            .cloned()
+            .chain(bootstrapper_identities.iter().map(|(peer, _)| peer.clone())),
+    )
+    .len()
+    .try_into()
+    .expect("at least one peer must be configured");
     let p2p_cfg = discovery::Config::local(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        max_peers,
         1024 * 1024, // 1MB
     );
 
@@ -166,13 +173,6 @@ fn main() {
     executor.start(async |context| {
         // Initialize network
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
-
-        // Configure channel capacity
-        //
-        // The rate is enforced independently for each peer. All peers share each channel's inbound
-        // mailbox, so size its backlog for one full burst from every peer.
-        let message_rate = Quota::per_second(NZU32!(10));
-        let message_backlog = authenticated::backlog(validators.len(), message_rate);
 
         // Provide authorized peers
         //
@@ -182,13 +182,11 @@ fn main() {
 
         // Register consensus channels
         //
-        // To support more views per second, increase the rate and retain enough backlog for every
-        // participant's full burst.
-        let (vote_sender, vote_receiver) = network.register(0, message_rate, message_backlog);
-        let (certificate_sender, certificate_receiver) =
-            network.register(1, message_rate, message_backlog);
-        let (resolver_sender, resolver_receiver) =
-            network.register(2, message_rate, message_backlog);
+        // To support more views per second, increase the rate.
+        let message_rate = Quota::per_second(NZU32!(10));
+        let (vote_sender, vote_receiver) = network.register(0, message_rate);
+        let (certificate_sender, certificate_receiver) = network.register(1, message_rate);
+        let (resolver_sender, resolver_receiver) = network.register(2, message_rate);
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");

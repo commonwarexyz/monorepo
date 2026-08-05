@@ -40,7 +40,6 @@ pub struct Network<
     max_frame_size: u32,
 
     channels: Channels<C::PublicKey>,
-    router_staging: Option<router::Staging<C::PublicKey>>,
     tracker: tracker::Actor<E, C>,
     tracker_mailbox: tracker::Mailbox<C::PublicKey>,
     info_verifier: InfoVerifier<C::PublicKey>,
@@ -87,12 +86,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let (messenger, router_staging) = router::Messenger::unbound(
-            context.network_buffer_pool().clone(),
-            context.child("router_staging"),
-            cfg.mailbox_size,
-        );
-        let channels = Channels::new(messenger, cfg.max_message_size);
+        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let channels = Channels::new(messenger, cfg.max_message_size, cfg.max_peers);
 
         (
             Self {
@@ -101,7 +96,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 max_frame_size,
 
                 channels,
-                router_staging: Some(router_staging),
                 tracker,
                 tracker_mailbox,
                 info_verifier,
@@ -118,31 +112,24 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
-    /// * `backlog` - Capacity of the channel's bounded inbound mailbox and its contribution to the
-    ///   shared outbound router mailbox.
-    ///
     /// # Backpressure
     ///
     /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for
     /// capacity. When the mailbox is full, the arriving message is dropped and queued messages
     /// remain. There is no per-peer reservation or fairness.
     ///
-    /// A synchronized burst can contribute up to `rate.burst_size()` messages per connected peer.
-    /// To absorb one full burst from every peer, use
-    /// [`backlog`](crate::authenticated::backlog) with the maximum number of connected peers. This
-    /// sizing includes honest traffic since protocol events can synchronize honest senders. Also
-    /// account for expected receiver stalls and ensure its drain rate can sustain aggregate ingress.
-    /// No finite backlog can absorb sustained ingress above the drain rate.
+    /// The mailbox holds one `rate.burst_size()` burst for each of the configured
+    /// [`Config::max_peers`]. This includes honest traffic since protocol events can synchronize
+    /// honest senders, but does not cover receiver stalls or sustained ingress above the
+    /// receiver's drain rate.
     ///
-    /// Outbound send invocations from all channels share one router mailbox. Each successful
-    /// registration grows the pre-start staging mailbox by `backlog`. The final mailbox has the
-    /// same capacity: [`Config::mailbox_size`] plus the sum of all registered backlogs. This
-    /// capacity is pooled rather than reserved per channel, and each send uses one slot regardless
-    /// of its number of recipients.
+    /// Outbound send invocations from all channels share one router mailbox. The final mailbox
+    /// capacity is [`Config::mailbox_size`] plus every registered channel's derived inbound
+    /// capacity. This capacity is pooled rather than reserved per channel, and each send uses one
+    /// slot regardless of its number of recipients.
     ///
-    /// For memory budgeting, the inbound queue can retain roughly `backlog * max_message_size`
-    /// bytes, and this backlog also adds the same number of slots to the shared outbound queue, in
-    /// addition to queue and allocator overhead.
+    /// For memory budgeting, each inbound queue can retain roughly `max_peers * burst_size *
+    /// max_message_size` bytes, in addition to queue and allocator overhead.
     ///
     /// # Returns
     ///
@@ -154,7 +141,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         &mut self,
         channel: Channel,
         rate: Quota,
-        backlog: usize,
     ) -> (
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
@@ -163,37 +149,23 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             .context
             .child("channel")
             .with_attribute("index", channel);
-        let registered = self.channels.register(channel, rate, backlog, context);
-        self.channels.grow_staging(
-            self.router_staging
-                .as_mut()
-                .expect("router staging mailbox missing"),
-            self.context.child("router_staging"),
-            self.cfg.mailbox_size,
-        );
-        registered
+        self.channels.register(channel, rate, context)
     }
 
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
-    /// Before the network starts, outbound content submissions use a staging mailbox bounded by
-    /// [`Config::mailbox_size`] plus the sum of all registered channel backlogs. Accepted
-    /// submissions are transferred to the equally sized final outbound router mailbox during this
-    /// call before the router starts.
+    /// Registered senders are bound to the outbound router during this call; submissions made
+    /// before it are accepted and dropped.
     pub fn start(mut self) -> Handle<()> {
         let (router, router_mailbox, _) = router::Actor::new(
             self.context.child("router"),
             router::Config {
                 mailbox_size: self.channels.outbound_mailbox_size(self.cfg.mailbox_size),
+                max_peers: self.cfg.max_peers,
             },
         );
-        self.channels.bind(
-            router_mailbox.clone(),
-            self.router_staging
-                .take()
-                .expect("router staging mailbox missing"),
-        );
+        self.channels.bind(router_mailbox.clone());
         spawn_cell!(self.context, self.run(router, router_mailbox))
     }
 
