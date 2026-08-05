@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use core::num::NonZeroUsize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 /// Why a resolver fetch was requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,14 +61,11 @@ pub struct State<S: Scheme, D: Digest> {
     fetch_floor: View,
     /// Number of views in each leader term.
     term_length: TermLength,
-    /// Views where certification has failed. Only nullifications
-    /// are accepted for these views.
-    failed_views: HashSet<View>,
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub fn new(fetch_concurrent: NonZeroUsize, term_length: TermLength) -> Self {
+    pub const fn new(fetch_concurrent: NonZeroUsize, term_length: TermLength) -> Self {
         Self {
             current_view: View::zero(),
             floor: None,
@@ -77,13 +74,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             fetch_concurrent: fetch_concurrent.get(),
             fetch_floor: View::zero(),
             term_length,
-            failed_views: HashSet::new(),
         }
-    }
-
-    /// Returns true if the given view has failed certification.
-    pub fn is_failed(&self, view: View) -> bool {
-        self.failed_views.contains(&view)
     }
 
     /// Returns the term length this state was built with.
@@ -145,7 +136,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
             effects.extend(self.fetch_missing(view));
         } else {
             self.notarizations.remove(&view);
-            self.failed_views.insert(view);
 
             // Request a nullification for this view (if not already covered).
             // Existing fetches remain active when the failed notarization did
@@ -241,7 +231,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         let term_length = self.term_length;
         self.nullifications
             .retain(|view, _| covers_above_floor(*view, term_length, floor));
-        self.failed_views.retain(|view| *view > floor);
 
         // A floor inside a partially-fetched term strands the term's tail
         // (see the module docs). Pull the cursor back to just above the
@@ -594,15 +583,13 @@ mod tests {
                 fetch(4, 5, FetchReason::MissingNullification),
             ]
         );
-        assert!(!state.is_failed(View::new(5)));
 
         // Certification fails for view 5
         let effects = state.handle_certified(View::new(5), false);
 
-        // View 5 is marked failed and only the failed view gets a new
-        // background request. Requests answered by the failed notarization
-        // are retried by the resolver engine.
-        assert!(state.is_failed(View::new(5)));
+        // Only the failed view gets a new background request. Requests
+        // answered by the failed notarization are retried by the resolver
+        // engine.
         assert_eq!(effects, vec![fetch(5, 5, FetchReason::CertificationFailed)]);
     }
 
@@ -627,12 +614,11 @@ mod tests {
         // Certification succeeds for view 5
         let effects = state.handle_certified(View::new(5), true);
 
-        // The certified notarization becomes the floor and view 5 is not marked failed
+        // The certified notarization becomes the floor
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
-        assert!(!state.is_failed(View::new(5)));
     }
 
     #[test]
@@ -790,7 +776,6 @@ mod tests {
         state.handle(Certificate::Nullification(nullification_v1));
 
         let effects = state.handle_certified(View::new(5), false);
-        assert!(state.is_failed(View::new(5)));
         assert!(effects.is_empty());
     }
 

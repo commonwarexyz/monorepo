@@ -1,5 +1,5 @@
 use super::{
-    super::Purpose,
+    super::{Ask, Kind, Until},
     Config,
     ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
     state::{Effect, FetchReason},
@@ -26,101 +26,16 @@ use commonware_runtime::{
     telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    futures::Pool,
-    ordered::Quorum,
-    sequence::U64,
-    vec::NonEmptyVec,
+    channel::fallible::OneshotExt, ordered::Quorum, sequence::U64, vec::NonEmptyVec,
 };
 use rand::RngExt as _;
 use rand_core::CryptoRng;
-use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroUsize,
+    time::Duration,
+};
 use tracing::{debug, info_span};
-
-/// A valid delivery waiting for local certification to determine whether it
-/// satisfies every attached purpose.
-struct PendingDelivery {
-    id: u64,
-    requested: View,
-    certification: View,
-    purposes: NonEmptyVec<Purpose>,
-    response: oneshot::Sender<Outcome>,
-}
-
-/// Owns deferred deliveries and their independent certification deadlines.
-///
-/// Timeout futures intentionally run to completion after a delivery resolves
-/// because some clocks retain registered alarms until their deadline. Removing
-/// the future would leave those alarms without a task to wake.
-#[derive(Default)]
-struct PendingDeliveries {
-    entries: Vec<PendingDelivery>,
-    timeouts: Pool<u64>,
-    next_id: u64,
-}
-
-impl PendingDeliveries {
-    /// Registers a delivery and its timeout under a never-reused ID.
-    ///
-    /// A timeout may complete after its delivery resolves. Never reusing IDs
-    /// prevents that stale completion from removing a newer delivery.
-    fn push(
-        &mut self,
-        requested: View,
-        certification: View,
-        purposes: NonEmptyVec<Purpose>,
-        response: oneshot::Sender<Outcome>,
-        timeout: impl Future<Output = ()> + Send + 'static,
-    ) {
-        let id = self.next_id;
-        self.next_id = self
-            .next_id
-            .checked_add(1)
-            .expect("pending delivery ID overflow");
-        self.timeouts.push(async move {
-            timeout.await;
-            id
-        });
-        self.entries.push(PendingDelivery {
-            id,
-            requested,
-            certification,
-            purposes,
-            response,
-        });
-    }
-
-    /// Removes the delivery associated with an expired timeout.
-    ///
-    /// Returns `None` when the delivery resolved before its timeout completed.
-    fn remove(&mut self, id: u64) -> Option<PendingDelivery> {
-        let index = self.entries.iter().position(|delivery| delivery.id == id)?;
-        Some(self.entries.swap_remove(index))
-    }
-
-    /// Drains active deliveries while reserving capacity to requeue unresolved ones.
-    fn take(&mut self) -> Vec<PendingDelivery> {
-        let entries = std::mem::take(&mut self.entries);
-        self.entries.reserve(entries.len());
-        entries
-    }
-
-    /// Requeues an unresolved delivery without replacing or extending its timeout.
-    fn requeue(&mut self, delivery: PendingDelivery) {
-        self.entries.push(delivery);
-    }
-
-    /// Waits for the next timeout and returns its associated delivery ID.
-    fn next_completed(&mut self) -> impl Future<Output = u64> + '_ {
-        self.timeouts.next_completed()
-    }
-
-    /// Returns all live timeout futures, including those for resolved deliveries.
-    #[cfg(test)]
-    fn timeout_count(&self) -> usize {
-        self.timeouts.len()
-    }
-}
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -138,7 +53,6 @@ pub struct Actor<
     epoch: Epoch,
     mailbox_size: NonZeroUsize,
     fetch_timeout: Duration,
-    certification_timeout: Duration,
 
     /// Certificates known between the floor and the current view. Serves
     /// [HandlerMessage::Produce] requests and emits the [Effect]s the actor
@@ -151,20 +65,25 @@ pub struct Actor<
 
     /// Nullifications cached in the encoded form expected by [p2p::Producer].
     /// These response payloads remain available while they cover views above
-    /// finalization so kindless retries survive later floor raises.
+    /// finalization so an ask below the floor can still be served.
     nullification_responses: BTreeMap<View, Bytes>,
 
-    /// Successfully certified notarizations cached in the encoded form
-    /// expected by [p2p::Producer]. These response payloads are not certificate
-    /// identities and remain available until finalization so exact parents
-    /// survive later floor raises.
+    /// Notarizations awaiting certification, cached in the encoded form received
+    /// by the actor. Possession completes an exact-parent fetch, but these
+    /// payloads are not served until certification succeeds.
+    uncertified_notarizations: BTreeMap<View, Bytes>,
+
+    /// Successfully certified notarizations cached in the encoded form expected
+    /// by [p2p::Producer]. These response payloads remain available until
+    /// finalization so exact parents survive later floor raises.
     notarization_responses: BTreeMap<View, Bytes>,
 
-    /// Terminal certification outcomes retained until covering finalization.
-    certification_outcomes: BTreeMap<View, bool>,
-
-    /// Deliveries independently waiting for bounded local certification.
-    pending: PendingDeliveries,
+    /// Views whose certification failed, retained until covering finalization.
+    ///
+    /// This is the sole record of a failed verdict. [State] prunes at the floor,
+    /// which rises above a failed view while a delayed request for it can still
+    /// arrive, so the tombstone is kept here against the finalization boundary.
+    failed_certifications: BTreeSet<View>,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
@@ -189,14 +108,13 @@ impl<
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
-                certification_timeout: cfg.certification_timeout,
 
                 state: State::new(cfg.fetch_concurrent, cfg.term_length),
                 last_finalized: View::zero(),
                 nullification_responses: BTreeMap::new(),
+                uncertified_notarizations: BTreeMap::new(),
                 notarization_responses: BTreeMap::new(),
-                certification_outcomes: BTreeMap::new(),
-                pending: PendingDeliveries::default(),
+                failed_certifications: BTreeSet::new(),
 
                 mailbox_receiver: receiver,
             },
@@ -256,9 +174,6 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
-            delivery = self.pending.next_completed() => {
-                self.expire_pending_delivery(delivery);
-            },
             Some(message) = self.mailbox_receiver.recv() else break => {
                 let span = info_span!(
                     parent: message.span(),
@@ -272,27 +187,17 @@ impl<
                     MailboxMessage::Certificate { certificate, .. } => {
                         self.updated(&mut resolver, certificate);
                     }
-                    MailboxMessage::Certified {
-                        round,
-                        encoded_notarization,
-                        success,
-                        ..
-                    } => {
-                        self.certified_notarization(
-                            &mut resolver,
-                            round.view(),
-                            encoded_notarization,
-                            success,
-                        );
+                    MailboxMessage::Certified { round, success, .. } => {
+                        self.certified(&mut resolver, round.view(), success);
                     }
                     MailboxMessage::Resolve {
                         proposal_view,
                         view,
-                        purpose,
+                        kind,
                         target,
                         ..
                     } => {
-                        self.resolve(&mut resolver, proposal_view, view, purpose, target);
+                        self.resolve(&mut resolver, proposal_view, view, kind, target);
                     }
                 }
             },
@@ -305,188 +210,101 @@ impl<
         }
     }
 
-    /// Releases a delivery whose bounded certification wait has elapsed.
-    fn expire_pending_delivery(&mut self, id: u64) {
-        // A response may resolve before its sleeper. The sleeper is retained
-        // to keep the runtime alarm live, so a missing delivery is expected.
-        let Some(delivery) = self.pending.remove(id) else {
-            return;
-        };
-        if delivery.response.is_closed() {
-            return;
-        }
-
-        // Re-check all purposes at the deadline because certificates handled
-        // after deferral may have completed the delivery. Otherwise the valid
-        // response is ambiguous and must remain eligible for resolver retry.
-        let outcome = if delivery
-            .purposes
-            .iter()
-            .all(|purpose| self.purpose_satisfied(delivery.requested, *purpose))
-        {
-            Outcome::Complete
-        } else {
-            Outcome::Ambiguous
-        };
-        delivery.response.send_lossy(outcome);
-    }
-
-    /// Re-evaluates deliveries after resolver state changes. A terminal
-    /// certification result releases deliveries that were waiting on that
-    /// exact certification even when another purpose remains unresolved.
-    fn resolve_pending_deliveries(&mut self, certified: Option<View>) {
-        for delivery in self.pending.take() {
-            // Closed consumers need no verdict. Their sleepers still run to
-            // completion so registered runtime alarms remain well-formed.
-            if delivery.response.is_closed() {
-                continue;
-            }
-
-            let resolved = delivery
-                .purposes
-                .iter()
-                .all(|purpose| self.purpose_satisfied(delivery.requested, *purpose));
-
-            // Complete only when every subscriber purpose is satisfied. A
-            // terminal verdict for the exact certification makes any still-
-            // unresolved purpose ambiguous rather than worth waiting longer.
-            if resolved {
-                delivery.response.send_lossy(Outcome::Complete);
-            } else if certified == Some(delivery.certification) {
-                delivery.response.send_lossy(Outcome::Ambiguous);
-            } else {
-                self.pending.requeue(delivery);
-            }
-        }
-    }
-
-    /// Returns whether successful certification of `certification` could
-    /// satisfy every purpose that is not already resolved.
-    fn certification_could_complete(
-        &self,
-        requested: View,
-        certification: View,
-        purposes: &NonEmptyVec<Purpose>,
-    ) -> bool {
-        // Certification can satisfy any backfill subscriber, but a parent
-        // subscriber requires this exact view. A notarization can never
-        // satisfy a nullification subscriber.
-        !self.certification_outcomes.contains_key(&certification)
-            && purposes.iter().all(|purpose| {
-                self.purpose_satisfied(requested, *purpose)
-                    || match purpose {
-                        Purpose::Backfill => true,
-                        Purpose::Parent => requested == certification,
-                        Purpose::Nullification => false,
-                    }
-            })
-    }
-
-    /// Holds one delivery without blocking the actor while local
-    /// certification remains capable of satisfying it.
-    fn defer_delivery(
-        &mut self,
-        requested: View,
-        certification: View,
-        purposes: NonEmptyVec<Purpose>,
-        response: oneshot::Sender<Outcome>,
-    ) {
-        // Awaiting this sleep here would block unrelated resolver work. The
-        // persistent pool gives each delivery one fixed deadline while the
-        // actor continues processing certificates and certification verdicts.
-        let timeout = self.context.sleep(self.certification_timeout);
-        self.pending
-            .push(requested, certification, purposes, response, timeout);
-    }
-
     /// Records a certificate and applies its resolver lifecycle effects.
-    fn updated<R: Resolver<Key = U64, Subscriber = Purpose>>(
+    fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
         certificate: Certificate<S, D>,
     ) {
-        let (finalized, nullified) = match &certificate {
-            Certificate::Finalization(finalization) => (Some(finalization.view()), None),
-            Certificate::Nullification(nullification) => (None, Some(nullification.view())),
-            Certificate::Notarization(_) => (None, None),
+        let (finalized, nullified, notarized) = match &certificate {
+            Certificate::Finalization(finalization) => (Some(finalization.view()), None, None),
+            Certificate::Nullification(nullification) => (None, Some(nullification.view()), None),
+            Certificate::Notarization(notarization) => (None, None, Some(notarization.view())),
         };
 
-        // A nullification retires background and targeted nullification demand across the rest of
-        // its term. Retain the evidence above finalization so delayed requests cannot recreate the
-        // demand and kindless retries can still serve it after a certified-floor raise.
-        if let Some(nullified) = nullified {
-            let term_end = nullified.term_end(self.state.term_length());
-            if term_end > self.last_finalized {
-                self.nullification_responses
-                    .insert(nullified, certificate.encode());
+        let term_length = self.state.term_length();
+
+        // Cache response payloads for as long as a peer can still ask for them.
+        // [State] prunes at the floor, which rises sooner than finalization and
+        // would hide this evidence from a peer still repairing the view.
+        if let Some(nullified) = nullified
+            && nullified.term_end(term_length) > self.last_finalized
+        {
+            self.nullification_responses
+                .insert(nullified, certificate.encode());
+            let covered = nullified..=nullified.term_end(term_length);
+            Self::retire(resolver, move |view, ask| {
+                ask.kind == Kind::Nullification && covered.contains(&view)
+            });
+        }
+        if let Some(notarized) = notarized
+            && notarized > self.last_finalized
+            && !self.failed_certifications.contains(&notarized)
+        {
+            if !self.notarization_responses.contains_key(&notarized) {
+                self.uncertified_notarizations
+                    .insert(notarized, certificate.encode());
             }
-            self.retire(resolver, Purpose::Nullification, nullified, term_end);
+            Self::retire(resolver, move |view, ask| {
+                ask.kind == Kind::Notarization && view == notarized
+            });
+        }
+
+        // Finalization is the global retirement boundary: a valid proposal can no
+        // longer name ancestry at or below it, so nothing here can still be asked
+        // for.
+        if let Some(finalized) = finalized {
+            self.last_finalized = self.last_finalized.max(finalized);
+            let finalized = self.last_finalized;
+            self.nullification_responses
+                .retain(|view, _| view.term_end(term_length) > finalized);
+            self.uncertified_notarizations
+                .retain(|view, _| *view > finalized);
+            self.notarization_responses
+                .retain(|view, _| *view > finalized);
+            self.failed_certifications.retain(|view| *view > finalized);
+            Self::retire(resolver, move |view, _| view <= finalized);
         }
 
         // Certificate state owns floor selection and background repair.
         let effects = self.state.handle(certificate);
         self.apply_effects(resolver, effects);
-
-        // Finalization is the global retirement boundary. Remove covered tombstones and resolver
-        // requests so delayed work cannot recreate demand below the finalized view.
-        if let Some(finalized) = finalized {
-            self.last_finalized = self.last_finalized.max(finalized);
-            let term_length = self.state.term_length();
-            self.nullification_responses
-                .retain(|view, _| view.term_end(term_length) > self.last_finalized);
-            self.notarization_responses
-                .retain(|view, _| *view > self.last_finalized);
-            self.certification_outcomes
-                .retain(|view, _| *view > self.last_finalized);
-            let floor = U64::from(self.last_finalized);
-            let _ = resolver.retain(move |candidate, _| *candidate > floor);
-        }
-        self.resolve_pending_deliveries(None);
-    }
-
-    /// Retains a successful exact parent before applying its certification outcome.
-    fn certified_notarization<R: Resolver<Key = U64, Subscriber = Purpose>>(
-        &mut self,
-        resolver: &mut R,
-        view: View,
-        encoded_notarization: Bytes,
-        success: bool,
-    ) {
-        if success && view > self.last_finalized {
-            self.notarization_responses
-                .insert(view, encoded_notarization);
-        }
-        self.certified(resolver, view, success);
     }
 
     /// Handles a certification outcome from the voter.
-    fn certified<R: Resolver<Key = U64, Subscriber = Purpose>>(
+    fn certified<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
         view: View,
         success: bool,
     ) {
-        // A terminal outcome is a tombstone for delayed targeted work. Views
-        // covered by finalization need no tombstone because finalization is the
-        // global retirement boundary.
-        if view > self.last_finalized {
-            self.certification_outcomes.insert(view, success);
-            if !success {
-                self.notarization_responses.remove(&view);
-            }
+        // Every verdict clears the uncertified payload. Only successful
+        // notarizations above finalization become servable.
+        if let Some(notarization) = self.uncertified_notarizations.remove(&view)
+            && success
+            && view > self.last_finalized
+        {
+            self.notarization_responses.insert(view, notarization);
         }
 
-        // Exact parent demand is terminal regardless of the verdict. Apply
-        // state effects before releasing deliveries so success can advance the
-        // floor and failure can schedule nullification repair first.
-        self.retire(resolver, Purpose::Parent, view, view);
+        // No copy of an uncertifiable notarization can certify anywhere, so it
+        // is not an answer to an exact-parent request.
+        if !success {
+            self.notarization_responses.remove(&view);
+            if view > self.last_finalized {
+                self.failed_certifications.insert(view);
+            }
+            Self::retire(resolver, move |asked, ask| {
+                ask.kind == Kind::Notarization && asked == view
+            });
+        }
+
         let effects = self.state.handle_certified(view, success);
         self.apply_effects(resolver, effects);
-        self.resolve_pending_deliveries(Some(view));
     }
 
     /// Applies the side effects requested by [super::state::State] to the resolver.
-    fn apply_effects<R: Resolver<Key = U64, Subscriber = Purpose>>(
+    fn apply_effects<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
         effects: Vec<Effect>,
@@ -499,52 +317,65 @@ impl<
                     reason,
                 } => self.fetch(resolver, view, cause, reason),
                 Effect::RetainAbove(floor) => {
-                    // Resolver retention cancels background-only delivery.
-                    // Targeted subscribers keep the key active until evidence
-                    // satisfies their specific purpose.
-                    let floor = U64::from(floor);
-                    let _ = resolver.retain(move |candidate, purpose| {
-                        purpose.is_targeted() || *candidate > floor
+                    // Resolver state does not repair below its floor, so a
+                    // background ask there has nothing left to do. Only
+                    // background asks retire here, because a proposal may name
+                    // ancestry below the floor and only finalization rules that
+                    // out.
+                    Self::retire(resolver, move |view, ask| {
+                        ask.until == Until::Floor && view <= floor
                     });
                 }
             }
         }
     }
 
-    /// Removes demand made unnecessary by matching terminal evidence.
-    fn retire<R: Resolver<Key = U64, Subscriber = Purpose>>(
-        &self,
+    /// Retires the asks that new evidence settles.
+    ///
+    /// `settled` reports whether the evidence answers an ask. [Resolver::retain]
+    /// takes an owned predicate, so it cannot call [Self::settled]. Every
+    /// retirement here names a span of views and a kind, which the caller captures
+    /// by value instead.
+    ///
+    /// Settlement is monotonic: no later evidence unsettles an ask. A retirement
+    /// therefore stays true however the resolver orders it against fetches, which
+    /// it reorders under backpressure.
+    fn retire<R: Resolver<Key = U64, Subscriber = Ask>>(
         resolver: &mut R,
-        resolved: Purpose,
-        start: View,
-        end: View,
+        settled: impl Fn(View, Ask) -> bool + Send + 'static,
     ) {
-        let start = U64::from(start);
-        let end = U64::from(end);
-        let _ = resolver.retain(move |candidate, purpose| {
-            *candidate < start || *candidate > end || !purpose.is_retired_by(resolved)
-        });
+        let _ = resolver.retain(move |key, ask| !settled(View::new(u64::from(key)), *ask));
     }
 
-    /// Issues a resolver fetch for `view`, attaching a span that records why the
-    /// fetch was needed and which view's processing caused it.
-    fn fetch<R: Resolver<Key = U64, Subscriber = Purpose>>(
+    /// Issues a background fetch for the nullification covering `view`.
+    ///
+    /// Both [FetchReason]s want the same certificate: [State] only reports
+    /// a view whose covering nullification is missing, whether the gap was found
+    /// by scanning below the current view or opened by a failed certification.
+    fn fetch<R: Resolver<Key = U64, Subscriber = Ask>>(
         &self,
         resolver: &mut R,
         view: View,
         cause: View,
         reason: FetchReason,
     ) {
+        let ask = Ask::backfill();
+
+        // Every reported gap sits above the floor, and a cached nullification
+        // covering a view above the floor is also stored in [State], so a
+        // reported gap is never settled.
+        assert!(!self.settled(view, ask.kind));
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
             cause = cause.traced(),
             view = view.traced(),
-            reason = reason.as_str()
+            reason = reason.as_str(),
+            kind = ask.kind.as_str()
         );
         let _ = resolver.fetch(Fetch {
             key: U64::from(view),
-            subscriber: Purpose::Backfill,
+            subscriber: ask,
             span,
         });
     }
@@ -555,174 +386,164 @@ impl<
         resolver: &mut R,
         proposal_view: View,
         view: View,
-        purpose: Purpose,
+        kind: Kind,
         target: S::PublicKey,
     ) where
-        R: TargetedResolver<Key = U64, Subscriber = Purpose, PublicKey = S::PublicKey>,
+        R: TargetedResolver<Key = U64, Subscriber = Ask, PublicKey = S::PublicKey>,
     {
-        if view >= proposal_view
-            || view <= self.last_finalized
-            || self.purpose_resolved(view, purpose)
-        {
+        if view >= proposal_view || self.settled(view, kind) {
             return;
         }
+        let ask = Ask::ancestry(kind);
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
             cause = proposal_view.traced(),
             view = view.traced(),
             reason = "proposal_ancestry",
-            purpose = purpose.as_str()
+            kind = ask.kind.as_str()
         );
         let _ = resolver.fetch_targeted(
             Fetch {
                 key: U64::from(view),
-                subscriber: purpose,
+                subscriber: ask,
                 span,
             },
             NonEmptyVec::new(target),
         );
     }
 
-    /// Returns whether local evidence has already made this targeted demand
-    /// unnecessary. Keeping this knowledge separately from resolver storage
-    /// prevents an older queued request from resurrecting retired work.
-    fn purpose_resolved(&self, view: View, purpose: Purpose) -> bool {
-        self.purpose_satisfied(view, purpose)
-            || matches!(purpose, Purpose::Parent) && self.certification_outcomes.contains_key(&view)
-    }
-
-    /// Returns whether local evidence satisfies a delivered subscriber.
-    fn purpose_satisfied(&self, view: View, purpose: Purpose) -> bool {
+    /// Returns whether local evidence has settled an ask for `kind` at `view`.
+    ///
+    /// Settled means there is nothing left to fetch: either the evidence is in
+    /// hand, or no response could ever serve the ask. This decides whether to
+    /// open a fetch and whether a delivery completed one. [Self::retire] carries
+    /// the same rule to the resolver, one piece of evidence at a time.
+    ///
+    /// A valid response does not imply this. The wire key names only a view, so a
+    /// peer may answer a notarization request with a covering nullification: valid
+    /// evidence the actor records, but not what was asked for.
+    fn settled(&self, view: View, kind: Kind) -> bool {
+        // Finalization rules out any further need for the view. This is also
+        // what settles an ask answered by a finalization, since recording one
+        // raises [Self::last_finalized].
         if view <= self.last_finalized {
             return true;
         }
-        match purpose {
-            Purpose::Nullification => self
-                .nullification_responses
-                .range(view.covering_range(self.state.term_length()))
-                .next_back()
-                .is_some(),
-            Purpose::Parent => self.certification_outcomes.get(&view) == Some(&true),
-            Purpose::Backfill => self.state.get(view).is_some(),
+        match kind {
+            Kind::Nullification => self.covering_nullification(view).is_some(),
+            // Holding the notarization settles this, and so does a failed
+            // verdict: certification judges the evidence itself, so no other
+            // copy of it could pass either.
+            Kind::Notarization => {
+                self.uncertified_notarizations.contains_key(&view)
+                    || self.notarization_responses.contains_key(&view)
+                    || self.failed_certifications.contains(&view)
+            }
         }
     }
 
-    /// Selects among the valid artifacts for a kindless wire key.
+    /// Returns the cached nullification covering `view`, if any.
     ///
-    /// Every retained evidence class must remain selectable on an ambiguous
-    /// retry. Otherwise a newer floor can permanently hide the exact parent or
-    /// covering nullification requested from a proposal leader.
-    fn produce_certificate(&mut self, view: View) -> Option<Bytes> {
-        let exact_parent = (self.certification_outcomes.get(&view) == Some(&true))
-            .then(|| self.notarization_responses.get(&view))
-            .flatten();
-        let covering_nullification = self
-            .nullification_responses
+    /// A nullification covers the rest of its term, so it may be keyed at an
+    /// earlier view than the one being served.
+    fn covering_nullification(&self, view: View) -> Option<&Bytes> {
+        self.nullification_responses
             .range(view.covering_range(self.state.term_length()))
             .next_back()
-            .map(|(_, nullification)| nullification);
-        let fallback = self.state.get(view);
+            .map(|(_, nullification)| nullification)
+    }
 
-        // A finalization satisfies every purpose, so selecting weaker
-        // evidence would only delay completion.
-        if let Some(certificate @ Certificate::Finalization(_)) = fallback {
+    /// Selects a certificate to serve for `view`.
+    ///
+    /// The request does not say which certificate it wants, so when both a
+    /// certified notarization and a covering nullification are held either may
+    /// be the one the requester needs. The choice is random: a fixed preference
+    /// would answer every retry from a requester wanting the other
+    /// kind with the same useless certificate. A notarization awaiting its
+    /// verdict is never served.
+    fn produce_certificate(&mut self, view: View) -> Option<Bytes> {
+        // A finalization settles either kind, so weaker evidence would only
+        // delay the requester.
+        if let Some(certificate @ Certificate::Finalization(_)) = self.state.get(view) {
             return Some(certificate.encode());
         }
 
-        // Either purpose-specific certificate also satisfies ordinary
-        // backfill, so a newer floor adds no useful response class here.
-        // Independent selection prevents concurrent requesters from being
-        // pinned to opposite sides of a shared rotation.
-        match (exact_parent, covering_nullification) {
-            (Some(parent), Some(nullification)) => {
-                let candidates = [parent, nullification];
-                Some(candidates[self.context.random_range(0..2)].clone())
+        let notarization = self.notarization_responses.get(&view).cloned();
+        let nullification = self.covering_nullification(view).cloned();
+        match (notarization, nullification) {
+            (Some(notarization), Some(nullification)) => {
+                Some(if self.context.random_range(0..2) == 0 {
+                    notarization
+                } else {
+                    nullification
+                })
             }
-            (Some(certificate), None) | (None, Some(certificate)) => Some(certificate.clone()),
-            (None, None) => fallback.map(|certificate| certificate.encode()),
+            (Some(certificate), None) | (None, Some(certificate)) => Some(certificate),
+            // Either cached response also serves ordinary backfill, so the floor
+            // adds no response the requester could not already have.
+            (None, None) => self.state.get(view).map(|certificate| certificate.encode()),
         }
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
+    ///
+    /// Validity is judged against `view` alone, because that is all the request
+    /// named. Any certificate an honest peer could serve for the view is accepted,
+    /// including one that answers the other kind: rejecting it would fault a peer
+    /// that answered the only question the wire key asked. Whether it
+    /// settles the ask is a separate check (see [Self::settled]).
     fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
-        // Decode message
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
 
-        // Validate message
-        match incoming {
-            Certificate::Notarization(notarization) => {
-                let notarization_view = notarization.view();
-                if notarization.view() < view {
-                    debug!(%view, received = %notarization.view(), "notarization below view");
-                    return None;
-                }
-                if notarization.epoch() != self.epoch {
-                    debug!(
-                        epoch = %notarization.epoch(),
-                        expected = %self.epoch,
-                        "rejecting notarization from different epoch"
-                    );
-                    return None;
-                }
-                if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
-                    debug!(%view, "notarization failed verification");
-                    return None;
-                }
-                debug!(%view, received = %notarization_view, "received notarization for request");
-                Some(Certificate::Notarization(notarization))
+        // A nullification covers the rest of its term. A notarization or
+        // finalization is servable from a peer's floor, which may sit above the
+        // requested view.
+        let servable = match &incoming {
+            Certificate::Nullification(nullification) => {
+                nullification.view().covers(view, self.state.term_length())
             }
-            Certificate::Finalization(finalization) => {
-                if finalization.view() < view {
-                    debug!(%view, received = %finalization.view(), "finalization below view");
-                    return None;
-                }
-                if finalization.epoch() != self.epoch {
-                    debug!(
-                        epoch = %finalization.epoch(),
-                        expected = %self.epoch,
-                        "rejecting finalization from different epoch"
-                    );
-                    return None;
-                }
-                if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
-                    debug!(%view, "finalization failed verification");
-                    return None;
-                }
-                debug!(%view, received = %finalization.view(), "received finalization for request");
-                Some(Certificate::Finalization(finalization))
+            Certificate::Notarization(notarization) => notarization.view() >= view,
+            Certificate::Finalization(finalization) => finalization.view() >= view,
+        };
+        if !servable {
+            debug!(%view, received = %incoming.view(), "certificate below requested view");
+            return None;
+        }
+
+        if incoming.epoch() != self.epoch {
+            debug!(
+                %view,
+                epoch = %incoming.epoch(),
+                expected = %self.epoch,
+                "rejecting certificate from different epoch"
+            );
+            return None;
+        }
+
+        let verified = match &incoming {
+            Certificate::Notarization(notarization) => {
+                notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
             }
             Certificate::Nullification(nullification) => {
-                let nullified_view = nullification.view();
-                if !nullified_view.covers(view, self.state.term_length()) {
-                    debug!(%view, received = %nullified_view, "nullification view mismatch");
-                    return None;
-                }
-                if nullification.epoch() != self.epoch {
-                    debug!(
-                        epoch = %nullification.epoch(),
-                        expected = %self.epoch,
-                        "rejecting nullification from different epoch"
-                    );
-                    return None;
-                }
-                if !nullification.verify::<_, D>(
-                    self.context.as_mut(),
-                    &self.scheme,
-                    &self.strategy,
-                ) {
-                    debug!(%view, "nullification failed verification");
-                    return None;
-                }
-                debug!(%view, received = %nullification.view(), "received nullification for request");
-                Some(Certificate::Nullification(nullification))
+                nullification.verify::<_, D>(self.context.as_mut(), &self.scheme, &self.strategy)
             }
+            Certificate::Finalization(finalization) => {
+                finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
+            }
+        };
+        if !verified {
+            debug!(%view, "certificate failed verification");
+            return None;
         }
+
+        debug!(%view, received = %incoming.view(), "received certificate for request");
+        Some(incoming)
     }
 
     /// Handles a message from the [p2p::Engine].
-    fn handle_resolver<R: Resolver<Key = U64, Subscriber = Purpose>>(
+    fn handle_resolver<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
@@ -733,7 +554,7 @@ impl<
                 span,
                 view,
                 data,
-                purposes,
+                asks,
                 response,
             } => {
                 let span = info_span!(
@@ -756,20 +577,12 @@ impl<
                 };
 
                 // A failed notarization remains valid protocol evidence, but
-                // replaying it cannot satisfy any outstanding repair demand.
+                // replaying it cannot satisfy any outstanding repair ask.
                 let obsolete = matches!(
                     &parsed,
                     Certificate::Notarization(notarization)
-                        if self.state.is_failed(notarization.view())
-                            || self.certification_outcomes.get(&notarization.view())
-                                == Some(&false)
+                        if self.failed_certifications.contains(&notarization.view())
                 );
-                let certification = match &parsed {
-                    Certificate::Notarization(notarization) if !obsolete => {
-                        Some(notarization.view())
-                    }
-                    _ => None,
-                };
                 if !obsolete {
                     // Notify voter as soon as possible.
                     let resolved = info_span!(
@@ -780,27 +593,21 @@ impl<
                     );
                     resolved.in_scope(|| voter.resolved(parsed.clone()));
 
-                    // Recording the certificate applies purpose-specific
-                    // retention before the resolver retries ambiguous data.
+                    // Record the certificate, which settles whichever asks it
+                    // answered and retires their fetches.
                     self.updated(resolver, parsed);
                 }
 
-                if purposes
-                    .iter()
-                    .all(|purpose| self.purpose_satisfied(view, *purpose))
-                {
-                    response.send_lossy(Outcome::Complete);
-                    return;
-                }
-
-                if let Some(certification) = certification
-                    && self.certification_could_complete(view, certification, &purposes)
-                {
-                    self.defer_delivery(view, certification, purposes, response);
-                    return;
-                }
-
-                response.send_lossy(Outcome::Ambiguous);
+                // The peer answered the view it was asked about, so it is never
+                // faulted here. If an ask for this view is still open, the
+                // response was valid but ambiguous, and the resolver retries
+                // without penalizing the peer.
+                let outcome = if asks.iter().all(|ask| self.settled(view, ask.kind)) {
+                    Outcome::Complete
+                } else {
+                    Outcome::Ambiguous
+                };
+                response.send_lossy(outcome);
             }
             HandlerMessage::Produce { view, response } => {
                 let span = info_span!(
@@ -865,8 +672,8 @@ mod tests {
     /// Tracks the set of pending requests the way the resolver engine would.
     #[derive(Clone, Default)]
     struct RecordingResolver {
-        outstanding: Arc<Mutex<BTreeSet<(U64, Purpose)>>>,
-        targeted: Arc<Mutex<Vec<(U64, Purpose, PublicKey)>>>,
+        outstanding: Arc<Mutex<BTreeSet<(U64, Ask)>>>,
+        targeted: Arc<Mutex<Vec<(U64, Ask, PublicKey)>>>,
     }
 
     impl RecordingResolver {
@@ -880,7 +687,7 @@ mod tests {
                 .collect()
         }
 
-        fn targeted(&self) -> Vec<(u64, Purpose, PublicKey)> {
+        fn targeted(&self) -> Vec<(u64, Ask, PublicKey)> {
             self.targeted
                 .lock()
                 .iter()
@@ -888,7 +695,7 @@ mod tests {
                 .collect()
         }
 
-        fn subscriptions(&self, view: u64) -> Vec<Purpose> {
+        fn subscriptions(&self, view: u64) -> Vec<Ask> {
             self.outstanding
                 .lock()
                 .iter()
@@ -899,11 +706,11 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = U64;
-        type Subscriber = Purpose;
+        type Subscriber = Ask;
 
         fn fetch<F>(&mut self, key: F) -> Feedback
         where
-            F: Into<Fetch<U64, Purpose>> + Send,
+            F: Into<Fetch<U64, Ask>> + Send,
         {
             let fetch = key.into();
             self.outstanding
@@ -914,7 +721,7 @@ mod tests {
 
         fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
         where
-            F: Into<Fetch<U64, Purpose>> + Send,
+            F: Into<Fetch<U64, Ask>> + Send,
         {
             for key in keys {
                 self.fetch(key);
@@ -922,10 +729,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&U64, &Purpose) -> bool + Send + 'static,
-        ) -> Feedback {
+        fn retain(&mut self, predicate: impl Fn(&U64, &Ask) -> bool + Send + 'static) -> Feedback {
             self.outstanding
                 .lock()
                 .retain(|(key, subscription)| predicate(key, subscription));
@@ -938,7 +742,7 @@ mod tests {
 
         fn fetch_targeted(
             &mut self,
-            fetch: impl Into<Fetch<U64, Purpose>> + Send,
+            fetch: impl Into<Fetch<U64, Ask>> + Send,
             targets: NonEmptyVec<PublicKey>,
         ) -> Feedback {
             let fetch = fetch.into();
@@ -955,7 +759,7 @@ mod tests {
 
         fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<PublicKey>)>) -> Feedback
         where
-            F: Into<Fetch<U64, Purpose>> + Send,
+            F: Into<Fetch<U64, Ask>> + Send,
         {
             for (fetch, targets) in fetches {
                 self.fetch_targeted(fetch, targets);
@@ -983,7 +787,6 @@ mod tests {
                 mailbox_size: NZUsize!(8),
                 fetch_concurrent: NZUsize!(4),
                 fetch_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(1),
                 term_length,
             },
         );
@@ -1062,7 +865,6 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
-                    certification_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -1084,7 +886,6 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
-                    certification_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -1099,7 +900,7 @@ mod tests {
             responder_mailbox.updated(Certificate::Nullification(available.clone()));
             context.sleep(Duration::from_millis(10)).await;
 
-            // Advancing to view 2 creates unrestricted background demand for
+            // Advancing to view 2 creates an unrestricted background ask for
             // view 1. The only connected peer is the silent target, so seeing
             // its request proves the background fetch is already in flight.
             requester_mailbox.updated(Certificate::Nullification(build_nullification(
@@ -1116,19 +917,19 @@ mod tests {
             };
             assert_eq!(requester_key, participants[0]);
 
-            // Add targeted ancestry demand for the same key and silent peer.
+            // Add a targeted ancestry ask for the same key and silent peer.
             // It must attach a subscriber without narrowing the in-flight
             // unrestricted fetch.
             requester_mailbox.resolve(
                 View::new(3),
                 requested,
-                Purpose::Nullification,
+                Kind::Nullification,
                 participants[1].clone(),
             );
             context.sleep(Duration::from_millis(10)).await;
 
             // Remove the silent target and expose a different responder. If
-            // the targeted demand narrowed the fetch, recovery cannot finish.
+            // the targeted ask narrowed the fetch, recovery cannot finish.
             oracle
                 .remove_link(participants[0].clone(), participants[1].clone())
                 .await
@@ -1166,10 +967,10 @@ mod tests {
         });
     }
 
-    /// A valid notarization with pending certification does not prevent a
+    /// A valid notarization that does not settle the ask does not prevent a
     /// different peer from supplying the requested nullification.
     #[test_async]
-    async fn pending_certification_does_not_block_nullification_fetch() {
+    async fn ambiguous_notarization_does_not_block_nullification_fetch() {
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1240,7 +1041,6 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
-                    certification_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -1262,7 +1062,6 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
-                    certification_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -1284,7 +1083,6 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
-                    certification_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -1298,16 +1096,16 @@ mod tests {
             let notarized = requested.next();
             let notarization = build_notarization(&schemes, &verifier, EPOCH, notarized);
             first_responder_mailbox.updated(Certificate::Notarization(notarization.clone()));
-            // Model the Byzantine peer as willing to serve this notarization.
-            // Honest certification at the requester may still reject it.
-            first_responder_mailbox.certified(&notarization, true);
+            // Certifying the notarization makes it the responder's floor, so
+            // the responder answers a lower-view request with it.
+            first_responder_mailbox.certified(notarization.round(), true);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, requested);
             nullification_holder_mailbox.updated(Certificate::Nullification(nullification.clone()));
             context.sleep(Duration::from_millis(10)).await;
 
             // A later nullification exposes a gap and starts an unrestricted
             // background fetch. The only connected peer answers with a valid
-            // notarization, whose resolver verdict waits for certification.
+            // notarization that does not settle the nullification ask.
             requester_mailbox.updated(Certificate::Nullification(build_nullification(
                 &schemes, &verifier, EPOCH, notarized,
             )));
@@ -1349,14 +1147,14 @@ mod tests {
                 .unwrap();
             context.sleep(Duration::from_millis(10)).await;
 
-            // A proposal objection for the same view attaches another
-            // subscriber. Certification remains pending, but the valid
-            // notarization must release the network slot so another peer can
-            // supply the nullification that this proposal actually needs.
+            // A targeted ancestry ask for the same view attaches another
+            // subscriber. The ambiguous notarization answer released the
+            // network slot, so another peer can supply the nullification
+            // this proposal actually needs.
             requester_mailbox.resolve(
                 View::new(3),
                 requested,
-                Purpose::Nullification,
+                Kind::Nullification,
                 participants[2].clone(),
             );
             let recovered = select! {
@@ -1364,7 +1162,7 @@ mod tests {
                     message.expect("voter mailbox closed")
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("pending certification blocked ancestry repair");
+                    panic!("ambiguous notarization answer blocked ancestry repair");
                 },
             };
             assert!(matches!(
@@ -1427,7 +1225,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn targeted_fetches_drop_only_when_purpose_is_satisfied() {
+    async fn targeted_fetches_drop_only_when_ask_is_satisfied() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1444,31 +1242,43 @@ mod tests {
                 &mut resolver,
                 View::new(10),
                 requested,
-                Purpose::Nullification,
+                Kind::Nullification,
                 participants[0].clone(),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(11),
                 requested,
-                Purpose::Parent,
+                Kind::Notarization,
                 participants[1].clone(),
             );
             resolver.fetch(Fetch {
                 key: U64::from(requested),
-                subscriber: Purpose::Backfill,
+                subscriber: Ask::backfill(),
                 span: tracing::Span::none(),
             });
             assert_eq!(
                 resolver.targeted(),
                 vec![
-                    (3, Purpose::Nullification, participants[0].clone()),
-                    (3, Purpose::Parent, participants[1].clone()),
+                    (
+                        3,
+                        Ask::ancestry(Kind::Nullification),
+                        participants[0].clone()
+                    ),
+                    (
+                        3,
+                        Ask::ancestry(Kind::Notarization),
+                        participants[1].clone()
+                    ),
                 ]
             );
             assert_eq!(
                 resolver.subscriptions(3),
-                vec![Purpose::Backfill, Purpose::Nullification, Purpose::Parent,]
+                vec![
+                    Ask::backfill(),
+                    Ask::ancestry(Kind::Nullification),
+                    Ask::ancestry(Kind::Notarization),
+                ]
             );
 
             // A covering nullification completes both background repair and
@@ -1481,56 +1291,72 @@ mod tests {
                     &schemes, &verifier, EPOCH, requested,
                 )),
             );
-            assert_eq!(resolver.subscriptions(3), vec![Purpose::Parent]);
+            assert_eq!(
+                resolver.subscriptions(3),
+                vec![Ask::ancestry(Kind::Notarization)]
+            );
             actor.resolve(
                 &mut resolver,
                 View::new(14),
                 requested,
-                Purpose::Nullification,
+                Kind::Nullification,
                 participants[2].clone(),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(14),
                 requested.next(),
-                Purpose::Nullification,
+                Kind::Nullification,
                 participants[2].clone(),
             );
             assert_eq!(resolver.targeted().len(), 2);
 
-            // Exercise the mirror case at another key. Successful
-            // certification completes only the exact parent request. It does
-            // not provide the nullification needed to skip that view.
+            // Exercise the mirror case at another key. Holding the exact
+            // parent completes only the targeted parent request. It does not
+            // provide the nullification needed to skip that view.
             let second_requested = requested.next_term_start(actor.state.term_length());
             actor.resolve(
                 &mut resolver,
                 View::new(12),
                 second_requested,
-                Purpose::Nullification,
+                Kind::Nullification,
                 participants[2].clone(),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(13),
                 second_requested,
-                Purpose::Parent,
+                Kind::Notarization,
                 participants[3].clone(),
             );
             resolver.fetch(Fetch {
                 key: U64::from(second_requested),
-                subscriber: Purpose::Backfill,
+                subscriber: Ask::backfill(),
                 span: tracing::Span::none(),
             });
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(build_notarization(
+                    &schemes,
+                    &verifier,
+                    EPOCH,
+                    second_requested,
+                )),
+            );
             actor.certified(&mut resolver, second_requested, true);
+
+            // The certified notarization is now the floor, which satisfies
+            // background repair at that view. The targeted nullification ask
+            // survives: a notarization is not a nullification covering it.
             assert_eq!(
                 resolver.subscriptions(6),
-                vec![Purpose::Backfill, Purpose::Nullification,]
+                vec![Ask::ancestry(Kind::Nullification)]
             );
             actor.resolve(
                 &mut resolver,
                 View::new(14),
                 second_requested,
-                Purpose::Parent,
+                Kind::Notarization,
                 participants[0].clone(),
             );
             assert_eq!(resolver.targeted().len(), 4);
@@ -1553,12 +1379,14 @@ mod tests {
             );
             assert!(resolver.outstanding().is_empty());
             assert!(actor.nullification_responses.is_empty());
-            assert!(actor.certification_outcomes.is_empty());
+            assert!(actor.uncertified_notarizations.is_empty());
+            assert!(actor.notarization_responses.is_empty());
+            assert!(actor.failed_certifications.is_empty());
             actor.resolve(
                 &mut resolver,
                 finalized.next(),
                 requested,
-                Purpose::Parent,
+                Kind::Notarization,
                 participants[0].clone(),
             );
             assert!(resolver.outstanding().is_empty());
@@ -1590,25 +1418,14 @@ mod tests {
             let parent = build_notarization(&schemes, &verifier, EPOCH, requested);
             let expected_parent = Certificate::Notarization(parent.clone()).encode();
             responder.updated(&mut responder_resolver, Certificate::Notarization(parent));
-            responder.certified_notarization(
-                &mut responder_resolver,
-                requested,
-                expected_parent.clone(),
-                true,
-            );
+            responder.certified(&mut responder_resolver, requested, true);
             let floor = View::new(4);
             let floor_notarization = build_notarization(&schemes, &verifier, EPOCH, floor);
-            let floor_certificate = Certificate::Notarization(floor_notarization.clone()).encode();
             responder.updated(
                 &mut responder_resolver,
                 Certificate::Notarization(floor_notarization),
             );
-            responder.certified_notarization(
-                &mut responder_resolver,
-                floor,
-                floor_certificate,
-                true,
-            );
+            responder.certified(&mut responder_resolver, floor, true);
 
             let mut first_saw_nullification = false;
             let mut second_saw_parent = false;
@@ -1633,6 +1450,77 @@ mod tests {
                 second_saw_parent,
                 "second requester stayed pinned to the nullification"
             );
+        });
+    }
+
+    #[test_async]
+    async fn notarization_is_served_only_after_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone());
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(3);
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
+            let encoded = Certificate::Notarization(notarization.clone()).encode();
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view,
+                    data: encoded.clone(),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert!(actor.produce_certificate(view).is_none());
+
+            actor.certified(&mut resolver, view, true);
+            assert_eq!(actor.produce_certificate(view), Some(encoded));
+        });
+    }
+
+    #[test_async]
+    async fn late_verdict_after_finalization_promotes_nothing() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(5);
+
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, view)),
+            );
+            assert!(actor.uncertified_notarizations.contains_key(&view));
+
+            // A covering finalization prunes the payload awaiting its verdict.
+            actor.updated(
+                &mut resolver,
+                Certificate::Finalization(build_finalization(
+                    &schemes,
+                    &verifier,
+                    EPOCH,
+                    view.next(),
+                )),
+            );
+            assert!(actor.uncertified_notarizations.is_empty());
+
+            // The late verdict finds nothing to promote: a notarization at or
+            // below finalization never becomes servable.
+            actor.certified(&mut resolver, view, true);
+            assert!(actor.notarization_responses.is_empty());
         });
     }
 
@@ -1673,17 +1561,17 @@ mod tests {
                 &mut resolver,
                 View::new(10),
                 view,
-                Purpose::Nullification,
+                Kind::Nullification,
                 participants[0].clone(),
             );
             assert_eq!(
                 resolver.subscriptions(3),
-                vec![Purpose::Nullification]
+                vec![Ask::ancestry(Kind::Nullification)]
             );
 
             // Certificate state still prefers the certified floor for
             // background bookkeeping, but locally observing the nullification
-            // must retire the exact targeted demand it satisfies.
+            // must retire the exact targeted ask it satisfies.
             actor.updated(
                 &mut resolver,
                 Certificate::Nullification(build_nullification(
@@ -1698,7 +1586,7 @@ mod tests {
                 &mut resolver,
                 View::new(11),
                 view,
-                Purpose::Nullification,
+                Kind::Nullification,
                 participants[1].clone(),
             );
             assert_eq!(resolver.targeted().len(), 1);
@@ -1729,12 +1617,16 @@ mod tests {
                 &mut resolver,
                 View::new(8),
                 View::new(4),
-                Purpose::Parent,
+                Kind::Notarization,
                 participants[0].clone(),
             );
             assert_eq!(
                 resolver.targeted(),
-                vec![(4, Purpose::Parent, participants[0].clone())]
+                vec![(
+                    4,
+                    Ask::ancestry(Kind::Notarization),
+                    participants[0].clone()
+                )]
             );
         });
     }
@@ -1757,7 +1649,7 @@ mod tests {
                 &mut resolver,
                 View::new(10),
                 view,
-                Purpose::Parent,
+                Kind::Notarization,
                 participants[0].clone(),
             );
             actor.updated(
@@ -1769,12 +1661,12 @@ mod tests {
             // A false certification verdict is permanent. Parent repair is
             // retired, while ordinary repair asks for the nullification that
             // can now cover the failed view.
-            assert_eq!(resolver.subscriptions(5), vec![Purpose::Backfill]);
+            assert_eq!(resolver.subscriptions(5), vec![Ask::backfill()]);
             actor.resolve(
                 &mut resolver,
                 View::new(11),
                 view,
-                Purpose::Parent,
+                Kind::Notarization,
                 participants[1].clone(),
             );
             assert_eq!(resolver.targeted().len(), 1);
@@ -1782,7 +1674,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn pending_notarization_waits_without_blocking_other_deliveries() {
+    async fn parent_delivery_completes_on_possession_not_certification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1792,171 +1684,129 @@ mod tests {
             let mut voter = voter::Mailbox::new(voter_tx);
             let mut actor = build_actor(context.child("actor"), verifier.clone());
             let mut resolver = RecordingResolver::default();
+            let view = View::new(6);
 
-            let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
+            // The exact parent was asked for and arrived. Certification is an
+            // application verdict on evidence already in hand, so the fetch has
+            // nothing left to retrieve and must not stay open waiting for it.
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
                 HandlerMessage::Deliver {
                     span: tracing::Span::none(),
-                    view: View::new(6),
+                    view,
+                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(
+                        build_notarization(&schemes, &verifier, EPOCH, view),
+                    )
+                    .encode(),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert!(actor.uncertified_notarizations.contains_key(&view));
+            assert!(!actor.notarization_responses.contains_key(&view));
+        });
+    }
+
+    #[test_async]
+    async fn failed_certification_retires_parent_ask_until_finalization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes,
+                verifier,
+                participants,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(6);
+
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, view)),
+            );
+            actor.certified(&mut resolver, view, false);
+
+            // The payload is no longer an answer, and the tombstone keeps a
+            // delayed request from recreating the ask. A floor raise above the
+            // view must not resurrect it (state prunes its own failed views).
+            assert!(!actor.uncertified_notarizations.contains_key(&view));
+            assert!(!actor.notarization_responses.contains_key(&view));
+            let floor = View::new(9);
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, floor)),
+            );
+            actor.certified(&mut resolver, floor, true);
+
+            let targeted = resolver.targeted().len();
+            actor.resolve(
+                &mut resolver,
+                View::new(11),
+                view,
+                Kind::Notarization,
+                participants[0].clone(),
+            );
+            assert_eq!(resolver.targeted().len(), targeted);
+        });
+    }
+
+    #[test_async]
+    async fn tombstoned_notarization_delivery_completes_without_recording() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, mut voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(6);
+
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(notarization.clone()),
+            );
+            actor.certified(&mut resolver, view, false);
+
+            // Replaying the failed notarization is not new evidence: the voter
+            // is not re-notified and the payload is not re-cached. The failed
+            // verdict settles the ask, so the fetch still completes.
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view,
                     data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
                         .encode(),
-                    purposes: non_empty_vec![Purpose::Backfill],
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(actor.pending.timeout_count(), 1);
-            let mut receiver = receiver;
-            select! {
-                outcome = &mut receiver => {
-                    panic!("pending certification completed delivery early: {outcome:?}");
-                },
-                _ = context.sleep(Duration::from_millis(1)) => {},
-            }
-
-            let (other_response, other_receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: View::new(11),
-                    data: Certificate::<TestScheme, Sha256Digest>::Nullification(
-                        build_nullification(&schemes, &verifier, EPOCH, View::new(11)),
-                    )
-                    .encode(),
-                    purposes: non_empty_vec![Purpose::Backfill],
-                    response: other_response,
-                },
-                &mut voter,
-                &mut resolver,
-            );
-            assert_eq!(other_receiver.await.unwrap(), Outcome::Complete);
-            assert_eq!(actor.pending.timeout_count(), 1);
-            assert!(matches!(
-                receiver.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-
-            actor.certified(&mut resolver, View::new(6), true);
             assert_eq!(receiver.await.unwrap(), Outcome::Complete);
-        });
-    }
+            assert!(!actor.uncertified_notarizations.contains_key(&view));
+            assert!(!actor.notarization_responses.contains_key(&view));
+            drop(voter);
+            assert!(voter_rx.recv().await.is_none());
 
-    #[test_async]
-    async fn failed_parent_certification_is_ambiguous() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
-            let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context.child("actor"), verifier.clone());
-            let mut resolver = RecordingResolver::default();
-            let view = View::new(6);
-
-            let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(
-                        build_notarization(&schemes, &verifier, EPOCH, view),
-                    )
-                    .encode(),
-                    purposes: non_empty_vec![Purpose::Parent],
-                    response,
-                },
-                &mut voter,
+            // Finalization is the tombstone's retirement boundary.
+            actor.updated(
                 &mut resolver,
+                Certificate::Finalization(build_finalization(
+                    &schemes,
+                    &verifier,
+                    EPOCH,
+                    view.next(),
+                )),
             );
-
-            actor.certified(&mut resolver, view, false);
-            assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous);
-        });
-    }
-
-    #[test_async]
-    async fn pending_notarization_times_out_as_ambiguous() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
-            let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context.child("actor"), verifier.clone());
-            let mut resolver = RecordingResolver::default();
-
-            let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: View::new(6),
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(
-                        build_notarization(&schemes, &verifier, EPOCH, View::new(6)),
-                    )
-                    .encode(),
-                    purposes: non_empty_vec![Purpose::Backfill],
-                    response,
-                },
-                &mut voter,
-                &mut resolver,
-            );
-
-            let id = actor.pending.next_completed().await;
-            actor.expire_pending_delivery(id);
-            assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous);
-        });
-    }
-
-    #[test_async]
-    async fn completed_delivery_timeout_keeps_runtime_live() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
-            let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context.child("actor"), verifier.clone());
-            let mut resolver = RecordingResolver::default();
-            let view = View::new(6);
-
-            let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(
-                        build_notarization(&schemes, &verifier, EPOCH, view),
-                    )
-                    .encode(),
-                    purposes: non_empty_vec![Purpose::Backfill],
-                    response,
-                },
-                &mut voter,
-                &mut resolver,
-            );
-
-            // Poll the timeout once so it is registered with the runtime.
-            let mut pending_timeout = actor.pending.next_completed();
-            select! {
-                result = &mut pending_timeout => {
-                    panic!("delivery timed out early: {result:?}");
-                },
-                _ = context.sleep(Duration::from_millis(1)) => {},
-            }
-            drop(pending_timeout);
-
-            actor.certified(&mut resolver, view, true);
-            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
-
-            // Drive the timeout pool once more, then cross the original
-            // deadline. Cleanup must not strand the deterministic clock.
-            let _ = actor.pending.next_completed().await;
-            context.sleep(Duration::from_secs(2)).await;
+            assert!(actor.failed_certifications.is_empty());
         });
     }
 
@@ -1983,7 +1833,7 @@ mod tests {
                     view: View::new(4),
                     data: Certificate::<TestScheme, Sha256Digest>::Nullification(nullification)
                         .encode(),
-                    purposes: non_empty_vec![Purpose::Parent],
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
@@ -2020,7 +1870,7 @@ mod tests {
                     view: requested,
                     data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
                         .encode(),
-                    purposes: non_empty_vec![Purpose::Parent],
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
@@ -2071,18 +1921,22 @@ mod tests {
                     span: tracing::Span::none(),
                     view,
                     data: Certificate::<TestScheme, Sha256Digest>::Notarization(alternate).encode(),
-                    purposes: non_empty_vec![Purpose::Parent],
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
                 &mut resolver,
             );
             assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+
+            // The duplicate is not re-cached as uncertified: no second verdict
+            // would ever clear it.
+            assert!(actor.uncertified_notarizations.is_empty());
         });
     }
 
     #[test_async]
-    async fn finalization_completes_every_delivery_purpose() {
+    async fn finalization_completes_every_delivery_ask() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -2103,10 +1957,10 @@ mod tests {
                         build_finalization(&schemes, &verifier, EPOCH, View::new(6)),
                     )
                     .encode(),
-                    purposes: non_empty_vec![
-                        Purpose::Backfill,
-                        Purpose::Nullification,
-                        Purpose::Parent,
+                    asks: non_empty_vec![
+                        Ask::backfill(),
+                        Ask::ancestry(Kind::Nullification),
+                        Ask::ancestry(Kind::Notarization),
                     ],
                     response,
                 },
@@ -2203,7 +2057,9 @@ mod tests {
             actor.certified(&mut resolver, floor, true);
 
             let notarization = build_notarization(&schemes, &verifier, EPOCH, failed);
-            assert_eq!(actor.certification_outcomes.get(&failed), Some(&false));
+            assert!(actor.failed_certifications.contains(&failed));
+            assert!(!actor.uncertified_notarizations.contains_key(&failed));
+            assert!(!actor.notarization_responses.contains_key(&failed));
             assert!(
                 actor
                     .validate(failed, Certificate::Notarization(notarization).encode())

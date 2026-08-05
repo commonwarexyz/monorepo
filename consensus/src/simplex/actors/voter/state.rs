@@ -1,4 +1,4 @@
-use super::{super::Purpose, round::Round};
+use super::{super::Kind, round::Round};
 use crate::{
     Viewable,
     simplex::{
@@ -88,7 +88,7 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
     Resolve {
         proposal_view: View,
         view: View,
-        purpose: Purpose,
+        kind: Kind,
         target: S::PublicKey,
     },
     Wait,
@@ -759,12 +759,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         "proposal exists but ancestry is not yet certified"
                     );
                 }
-                let (requested, purpose) = match err {
+                let (missing, kind) = match err {
                     ParentPayloadError::MissingNullification { missing_view, .. } => {
-                        (missing_view, Purpose::Nullification)
+                        (missing_view, Kind::Nullification)
                     }
                     ParentPayloadError::ParentNotCertified { parent_view, .. } => {
-                        (parent_view, Purpose::Parent)
+                        (parent_view, Kind::Notarization)
                     }
                     ParentPayloadError::ParentNotBeforeProposal { .. }
                     | ParentPayloadError::IntraTermProposalSkipsViews { .. }
@@ -774,14 +774,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     .views
                     .get_mut(&view)
                     .expect("current round must exist")
-                    .request(requested)
+                    .request(missing)
                 {
                     return Verify::Wait;
                 }
                 return Verify::Resolve {
                     proposal_view: proposal.view(),
-                    view: requested,
-                    purpose,
+                    view: missing,
+                    kind,
                     target: leader.key,
                 };
             }
@@ -3700,19 +3700,18 @@ mod tests {
                 Verify::Resolve {
                     proposal_view,
                     view,
-                    purpose,
+                    kind: Kind::Nullification,
                     target,
                 }
                     if proposal_view == child_view
                         && view == skipped_view
-                        && purpose == Purpose::Nullification
                         && target == expected_leader
             ));
 
-            // A kindless response can validly contain the leader's preferred
-            // notarization, which is already known and does not provide the
-            // nullification this proposal needs. It must neither permit a
-            // vote nor create a request loop in the same round.
+            // The leader's preferred notarization is already known and does
+            // not provide the nullification this proposal needs. It must
+            // neither permit a vote nor create a request loop in the same
+            // round.
             let (added, _) = state.add_notarization(notarization);
             assert!(!added);
             assert!(matches!(state.try_verify(), Verify::Wait));
@@ -3749,18 +3748,16 @@ mod tests {
                 Verify::Resolve {
                     proposal_view,
                     view,
-                    purpose,
+                    kind: Kind::Notarization,
                     ..
                 }
                     if proposal_view == child_view
                         && view == parent_view
-                        && purpose == Purpose::Parent
             ));
 
-            // A kindless response can instead contain the leader's preferred
-            // covering nullification. It is valid evidence for the key but
-            // does not certify the named parent, so it must neither permit a
-            // vote nor create a same-round request loop.
+            // The leader's preferred covering nullification does not certify
+            // the named parent, so it must neither permit a vote nor create a
+            // same-round request loop.
             assert!(!state.add_nullification(nullification_1));
             assert!(matches!(state.try_verify(), Verify::Wait));
         });
@@ -3841,12 +3838,11 @@ mod tests {
                 Verify::Resolve {
                     proposal_view,
                     view,
-                    purpose,
+                    kind: Kind::Nullification,
                     ..
                 }
                     if proposal_view == child_view
                         && view == View::new(2)
-                        && purpose == Purpose::Nullification
             ));
         });
     }
@@ -3880,7 +3876,7 @@ mod tests {
                 state.try_verify(),
                 Verify::Resolve {
                     view,
-                    purpose: Purpose::Nullification,
+                    kind: Kind::Nullification,
                     ..
                 } if view == skipped_view
             ));
@@ -3909,12 +3905,11 @@ mod tests {
                 Verify::Resolve {
                     proposal_view,
                     view,
-                    purpose,
+                    kind: Kind::Nullification,
                     ..
                 }
                     if proposal_view == retry_view
                         && view == skipped_view
-                        && purpose == Purpose::Nullification
             ));
         });
     }
@@ -3953,12 +3948,11 @@ mod tests {
                 Verify::Resolve {
                     proposal_view,
                     view,
-                    purpose,
+                    kind: Kind::Nullification,
                     ..
                 }
                     if proposal_view == child_view
                         && view == skipped_view
-                        && purpose == Purpose::Nullification
             ));
 
             // Certification does not duplicate the still-active request.
@@ -3998,12 +3992,11 @@ mod tests {
                 Verify::Resolve {
                     proposal_view,
                     view,
-                    purpose,
+                    kind: Kind::Notarization,
                     ..
                 }
                     if proposal_view == child_view
                         && view == View::new(2)
-                        && purpose == Purpose::Parent
             ));
         });
     }
@@ -4043,12 +4036,11 @@ mod tests {
                 Verify::Resolve {
                     proposal_view,
                     view,
-                    purpose,
+                    kind: Kind::Nullification,
                     ..
                 }
                     if proposal_view == child_view
                         && view == View::new(2)
-                        && purpose == Purpose::Nullification
             ));
         });
     }

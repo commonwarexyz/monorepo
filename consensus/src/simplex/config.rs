@@ -188,10 +188,6 @@ where
     /// Amount of time to wait for certification progress in a view
     /// before attempting to skip the view.
     ///
-    /// This also bounds how long the resolver holds a valid notarization
-    /// delivery for local certification. Expiry releases only the delivery
-    /// while application certification continues.
-    ///
     /// This timeout must be greater than the leader timeout.
     pub certification_timeout: Duration,
 

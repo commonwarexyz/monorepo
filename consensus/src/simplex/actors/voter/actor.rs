@@ -380,10 +380,10 @@ impl<
             Verify::Resolve {
                 proposal_view,
                 view,
-                purpose,
+                kind,
                 target,
             } => {
-                resolver.resolve(proposal_view, view, purpose, target);
+                resolver.resolve(proposal_view, view, kind, target);
                 return None;
             }
             Verify::Wait => return None,
@@ -859,7 +859,7 @@ impl<
             // after a nullification for the same view because certification is
             // asynchronous; finalization is the boundary that cancels in-flight
             // certification and suppresses late reporting.
-            resolver.certified(&notarization, certified);
+            resolver.certified(notarization.round(), certified);
             if certified {
                 self.reporter.report(Activity::Certification(notarization));
             }
@@ -1008,7 +1008,7 @@ impl<
                         let Some(notarization) = notarization else {
                             continue;
                         };
-                        resolver.certified(&notarization, success);
+                        resolver.certified(round, success);
                         if success {
                             self.reporter.report(Activity::Certification(notarization));
                         }
