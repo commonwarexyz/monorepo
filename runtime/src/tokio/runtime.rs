@@ -244,7 +244,12 @@ impl Config {
         self.network_cfg.zero_linger = l;
         self
     }
-    /// See [Config]
+    /// See [Config].
+    ///
+    /// On Unix the runtime holds an exclusive advisory lock (a flock on
+    /// `.logstore` under this directory) for its lifetime: a second runtime
+    /// started over the same directory fails at startup, and a [Context]
+    /// leaked across an in-process restart keeps the lock held.
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
         self
@@ -446,6 +451,9 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize log storage
+        let log_storage = new_log_store(&self.cfg, &storage_buffer_pool);
+
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
@@ -506,6 +514,7 @@ impl crate::Runner for Runner {
         // Run the future
         let context = Context {
             storage,
+            log_storage,
             name: label.name(),
             attributes: Vec::new(),
             executor: executor.clone(),
@@ -538,14 +547,61 @@ cfg_if::cfg_if! {
     }
 }
 
+cfg_if::cfg_if! {
+    if #[cfg(all(
+        unix,
+        not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ))
+    ))] {
+        // ALPHA + Unix: the log storage capability and its segment backend.
+        use crate::storage::logstore::{
+            Bounds as LogBounds,
+            segment::{
+                store::{Family as SegmentLogFamily, LogStorage as SegmentLogStorage},
+                tokio::Fs as LogMedium,
+            },
+        };
+
+        type LogStore = SegmentLogStorage<LogMedium>;
+
+        /// Opens the segment-backed log storage under `.logstore` in the
+        /// storage directory (never a valid partition name, so it cannot
+        /// collide with blob storage).
+        fn new_log_store(cfg: &Config, pool: &BufferPool) -> LogStore {
+            let root = cfg.storage_directory.join(".logstore");
+            let medium = LogMedium::new(root.clone()).unwrap_or_else(|e| {
+                panic!("failed to initialize log storage at {}: {e}", root.display())
+            });
+            let mut seed = [0u8; 16];
+            sys_rng().fill_bytes(&mut seed);
+            SegmentLogStorage::new(medium, "families", seed, pool.clone(), LogBounds::default())
+        }
+    } else {
+        /// Stand-in when the ALPHA log storage capability is compiled out or
+        /// the target is not Unix; keeps [Context]'s shape uniform.
+        #[derive(Clone)]
+        struct LogStore;
+
+        fn new_log_store(_: &Config, _: &BufferPool) -> LogStore {
+            LogStore
+        }
+    }
+}
+
 /// Implementation of [crate::Spawner], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `tokio`
-/// runtime.
+/// [crate::Network], [crate::Storage], and (on Unix)
+/// [crate::LogStorage] for the `tokio` runtime.
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
     executor: Arc<Executor>,
     storage: Storage,
+    log_storage: LogStore,
     network: Network,
     network_buffer_pool: BufferPool,
     storage_buffer_pool: BufferPool,
@@ -680,6 +736,7 @@ impl crate::Supervisor for Context {
             attributes: self.attributes.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
+            log_storage: self.log_storage.clone(),
             network: self.network.clone(),
             network_buffer_pool: self.network_buffer_pool.clone(),
             storage_buffer_pool: self.storage_buffer_pool.clone(),
@@ -832,6 +889,24 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+}
+
+#[cfg(unix)]
+#[stability(ALPHA)]
+impl crate::LogStorage for Context {
+    type Family = SegmentLogFamily<LogMedium>;
+
+    async fn open_family(&self, name: &str) -> Result<Self::Family, Error> {
+        crate::LogStorage::open_family(&self.log_storage, name).await
+    }
+
+    async fn scan_families(&self) -> Result<Vec<String>, Error> {
+        crate::LogStorage::scan_families(&self.log_storage).await
+    }
+
+    async fn destroy_family(&self, name: &str) -> Result<(), Error> {
+        crate::LogStorage::destroy_family(&self.log_storage, name).await
     }
 }
 

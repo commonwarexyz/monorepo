@@ -144,6 +144,11 @@ harness = false
 path = "src/journal/benches/bench.rs"
 
 [[bench]]
+name="logstore"
+harness = false
+path = "src/journal/logstore/benches/bench.rs"
+
+[[bench]]
 name="merkle"
 harness = false
 path = "src/merkle/benches/bench.rs"

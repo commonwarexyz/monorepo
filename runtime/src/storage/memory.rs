@@ -62,7 +62,7 @@ impl crate::Storage for Storage {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), crate::Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_name(partition)?;
 
         let mut partitions = self.partitions.lock();
         let partition_entry = partitions.entry(partition.into()).or_default();
@@ -94,7 +94,7 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_name(partition)?;
 
         let mut partitions = self.partitions.lock();
         match name {
@@ -115,7 +115,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, crate::Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_name(partition)?;
 
         let partitions = self.partitions.lock();
         let partition = partitions

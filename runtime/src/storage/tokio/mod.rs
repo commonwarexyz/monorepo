@@ -90,7 +90,7 @@ impl crate::Storage for Storage {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_name(partition)?;
 
         // Acquire the filesystem lock. The guard is owned so the creation path can move it
         // into a task that outlives a dropped open future.
@@ -182,7 +182,7 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_name(partition)?;
 
         // Acquire the filesystem lock
         let _guard = self.lock.lock().await;
@@ -209,7 +209,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_name(partition)?;
 
         // Acquire the filesystem lock
         let _guard = self.lock.lock().await;

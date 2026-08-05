@@ -81,6 +81,7 @@ arbitrary = [
 ]
 bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
+fuzz = []
 loom = [ "dep:loom" ]
 test-utils = []
 iouring = [ "iouring-network", "iouring-storage" ]

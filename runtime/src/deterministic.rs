@@ -54,8 +54,11 @@ use crate::{
     },
     prefixed_name,
     storage::{
-        audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
-        memory::Storage as MemStorage, metered::Storage as MeteredStorage,
+        audited::Storage as AuditedStorage,
+        faulty::Storage as FaultyStorage,
+        logstore::{Bounds as LogBounds, memory::LogStorage as MemLogStorage},
+        memory::Storage as MemStorage,
+        metered::Storage as MeteredStorage,
     },
     telemetry::metrics::{
         Counter, CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
@@ -479,6 +482,7 @@ pub struct Checkpoint {
     rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
+    log_storage: MemLogStorage,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
     network_buffer_pool_cfg: BufferPoolConfig,
@@ -558,6 +562,7 @@ impl Runner {
 
         // Pin root task to the heap
         let storage = context.storage.clone();
+        let log_storage = context.log_storage.clone();
         let network_buffer_pool_cfg = context.network_buffer_pool.config().clone();
         let storage_buffer_pool_cfg = context.storage_buffer_pool.config().clone();
         let mut root = Box::pin(panicked.interrupt(f(context)));
@@ -721,6 +726,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            log_storage,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
             network_buffer_pool_cfg,
@@ -898,14 +904,15 @@ type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `deterministic`
-/// runtime.
+/// [crate::Network], [crate::Storage], and [crate::LogStorage] for the
+/// `deterministic` runtime.
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
+    log_storage: MemLogStorage,
     network_buffer_pool: BufferPool,
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
@@ -953,6 +960,9 @@ impl Context {
             &mut runtime_registry,
         );
 
+        // Create log storage
+        let log_storage = MemLogStorage::new(storage_buffer_pool.clone(), LogBounds::default());
+
         // Create network
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, &mut runtime_registry);
@@ -982,6 +992,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                log_storage,
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1051,6 +1062,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
+                log_storage: checkpoint.log_storage,
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1246,6 +1258,7 @@ impl crate::Supervisor for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            log_storage: self.log_storage.clone(),
             network_buffer_pool: self.network_buffer_pool.clone(),
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
@@ -1581,6 +1594,22 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+}
+
+impl crate::LogStorage for Context {
+    type Family = crate::storage::logstore::memory::Family;
+
+    async fn open_family(&self, name: &str) -> Result<Self::Family, Error> {
+        crate::LogStorage::open_family(&self.log_storage, name).await
+    }
+
+    async fn scan_families(&self) -> Result<Vec<String>, Error> {
+        crate::LogStorage::scan_families(&self.log_storage).await
+    }
+
+    async fn destroy_family(&self, name: &str) -> Result<(), Error> {
+        crate::LogStorage::destroy_family(&self.log_storage, name).await
     }
 }
 

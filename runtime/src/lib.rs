@@ -35,6 +35,10 @@ stability_scope!(ALPHA {
     pub mod conformance;
     pub mod deterministic;
     pub mod mocks;
+    /// Fuzz driver over the log-storage on-disk format, exported for the
+    /// fuzz targets only.
+    #[cfg(feature = "fuzz")]
+    pub use storage::logstore::segment::fuzz as logstore_fuzz;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
@@ -104,9 +108,9 @@ stability_scope!(BETA {
         #[error("dns resolution failed: {0}")]
         ResolveFailed(String),
         #[error(
-            "partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}"
+            "name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}"
         )]
-        PartitionNameInvalid(String),
+        NameInvalid(String),
         #[error("partition creation failed: {0}")]
         PartitionCreationFailed(String),
         #[error("partition missing: {0}")]
@@ -134,6 +138,29 @@ stability_scope!(BETA {
         InvalidChecksum,
         #[error("offset overflow")]
         OffsetOverflow,
+        #[error("family corrupt: {0} reason: {1}")]
+        FamilyCorrupt(String, String),
+        #[error("family poisoned: {0}")]
+        FamilyPoisoned(String),
+        /// The named family's committed state is at a capacity ceiling
+        /// (checkpointable logs or extents, or the uncheckpointed replay
+        /// span), so no further transaction can be admitted regardless of its
+        /// own size. Unlike [`Error::TransactionTooLarge`], shrinking the
+        /// transaction does not help: remove logs, or wait for cleaning. A
+        /// family wedged at the replay-span ceiling by repeated checkpoint
+        /// failures stays full until a checkpoint lands or it is destroyed.
+        #[error("family full: {0}")]
+        FamilyFull(String),
+        #[error("log insufficient length")]
+        LogInsufficientLength,
+        #[error("invalid transaction: {0}")]
+        InvalidTransaction(String),
+        #[error("rewind beyond length: length {length}, requested {requested}")]
+        RewindBeyondLength { length: u64, requested: u64 },
+        #[error("transaction too large: {0}")]
+        TransactionTooLarge(String),
+        #[error("unsupported")]
+        Unsupported,
         #[error("io error: {0}")]
         Io(Arc<IoError>),
         #[error("buffer pool: {0}")]
@@ -810,6 +837,282 @@ stability_scope!(BETA {
 
         /// Returns the storage [BufferPool].
         fn storage_buffer_pool(&self) -> &BufferPool;
+    }
+});
+stability_scope!(ALPHA {
+    /// Interface to interact with transactional, append-only log storage.
+    ///
+    /// `LogStorage` is a sibling capability of [`Storage`]: where [`Storage`] exposes
+    /// randomly writable [`Blob`]s, `LogStorage` exposes **families** of append-only
+    /// **logs** mutated exclusively through per-family transactions.
+    ///
+    /// A family is one transaction domain: one logical structure, one writer queue,
+    /// one durability and failure domain. Transactions never span families.
+    ///
+    /// # Family Names
+    ///
+    /// Family names must be non-empty and contain only ASCII alphanumeric
+    /// characters, dashes (`-`), or underscores (`_`).
+    ///
+    /// # Poisoning
+    ///
+    /// After a commit whose outcome is indeterminate (see
+    /// [`LogTransaction::start_commit`]), the family is poisoned: every fallible
+    /// operation through any of its handles fails with [`Error::FamilyPoisoned`].
+    /// Reopening the family with [`LogStorage::open_family`] performs recovery and
+    /// mints a fresh session; handles from before recovery fail with
+    /// [`Error::Closed`], even while they are still held.
+    pub trait LogStorage: Send + Sync + 'static {
+        /// The family type opened by this storage.
+        type Family: LogFamily;
+
+        /// Open a family, creating it if absent.
+        fn open_family(
+            &self,
+            name: &str,
+        ) -> impl Future<Output = Result<Self::Family, Error>> + Send;
+
+        /// Return the names of all families, in ascending lexicographic order.
+        fn scan_families(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
+
+        /// Destroy a family and all of its logs.
+        ///
+        /// Existing family and log handles fail with [`Error::Closed`], and writers
+        /// waiting in [`LogFamily::transaction`] are woken with [`Error::Closed`].
+        /// Destroying an absent family succeeds. Recreating the name yields a fresh
+        /// family identity: handles into the destroyed family can never observe the
+        /// new one.
+        fn destroy_family(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    }
+
+    /// A transaction domain of append-only logs.
+    ///
+    /// Reads through the family and through [`Log`] handles see committed state
+    /// only. Staged mutations and drafts are visible only through the transaction
+    /// that staged them.
+    pub trait LogFamily: Clone + Send + Sync + 'static {
+        /// The committed log handle type.
+        type Log: Log;
+
+        /// The write transaction type.
+        type Transaction: LogTransaction<Log = Self::Log>;
+
+        /// Open a committed log by name, or `None` if absent.
+        fn open(
+            &self,
+            name: &[u8],
+        ) -> impl Future<Output = Result<Option<Self::Log>, Error>> + Send;
+
+        /// Return the names of all committed logs, in ascending byte order.
+        fn scan(&self) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+
+        /// Acquire the family's single write transaction.
+        ///
+        /// One writer per family: while a transaction is live, a second caller waits
+        /// until it commits (through activation) or aborts. Waiters are served in
+        /// arrival order. Cancelling a waiting future removes it from the queue
+        /// without affecting later waiters.
+        fn transaction(&self)
+        -> impl Future<Output = Result<Self::Transaction, Error>> + Send;
+    }
+
+    /// Read handle to a committed log.
+    ///
+    /// No mutation methods exist here; all mutation happens through
+    /// [`LogTransaction`]. When a transaction that removes the log commits, existing
+    /// handles fail with [`Error::Closed`]. Recreating the name is a new log
+    /// identity: old handles stay closed.
+    #[allow(clippy::len_without_is_empty)]
+    pub trait Log: Clone + Send + Sync + 'static {
+        /// The committed length of the log in bytes.
+        ///
+        /// Fallible so a closed handle fails consistently from every method.
+        fn len(&self) -> Result<u64, Error>;
+
+        /// Read `len` bytes of committed data starting at `offset`.
+        fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// [`Log::read_at`] into caller-provided buffer(s).
+        ///
+        /// The returned buffers reuse the caller's storage, with exactly `len` bytes
+        /// filled and the caller's chunk layout preserved.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `len` exceeds the total capacity of `bufs`.
+        fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+    }
+
+    /// A family's single write transaction.
+    ///
+    /// All mutation of a family happens here, **staged** privately: mutations are
+    /// invisible to [`Log`] and [`LogFamily`] readers until the transaction commits,
+    /// while reads through the transaction observe committed state with the staged
+    /// mutations applied (read-your-writes).
+    ///
+    /// # Targets
+    ///
+    /// Methods come in pairs: `append`/`append_draft`, `rewind`/`rewind_draft`, and
+    /// so on. The base spelling targets a committed [`Log`]; the `_draft` spelling
+    /// targets a [`LogTransaction::Draft`] created by this transaction. The
+    /// semantics are identical.
+    ///
+    /// # Validation
+    ///
+    /// Staging methods validate eagerly and change nothing when they fail: the
+    /// transaction remains usable after a rejection. A transaction may not touch a
+    /// log it removed, remove a log it touched, or create a name that already
+    /// exists, committed or staged (including a name it removes itself).
+    ///
+    /// # Abort
+    ///
+    /// Dropping the transaction before [`LogTransaction::start_commit`] discards all
+    /// staged state, invalidates its drafts, and releases the writer.
+    pub trait LogTransaction: Send {
+        /// The committed log type this transaction mutates.
+        type Log: Log;
+
+        /// A log staged for creation, invisible outside this transaction until
+        /// commit.
+        ///
+        /// A draft has no methods of its own: all access goes through this
+        /// transaction's `_draft` methods. After a successful commit it is an inert
+        /// token; reopen the name through [`LogFamily::open`] to get the [`Log`].
+        type Draft;
+
+        /// Stage creation of a log named `name`, returning its draft.
+        fn create(&mut self, name: &[u8]) -> Result<Self::Draft, Error>;
+
+        /// Stage an append of `data` to `log`, returning the offset at which the
+        /// data begins.
+        fn append(&mut self, log: &Self::Log, data: impl Into<IoBufs>) -> Result<u64, Error>;
+
+        /// Stage a rewind of `log` to `len` bytes, discarding staged and committed
+        /// data beyond it.
+        ///
+        /// Rewinding below the committed length and reappending in one transaction
+        /// commits the net state atomically; committed data is never exposed torn.
+        fn rewind(&mut self, log: &Self::Log, len: u64) -> Result<(), Error>;
+
+        /// Stage removal of `log`.
+        ///
+        /// When the transaction commits, existing handles to the log fail with
+        /// [`Error::Closed`]; recreating the name later is a new log identity.
+        fn remove(&mut self, log: &Self::Log) -> Result<(), Error>;
+
+        /// The staged length of `log`: its committed length with this transaction's
+        /// mutations applied.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `log` is closed (including by a concurrent
+        /// [`LogStorage::destroy_family`]), foreign to this family, or removed by
+        /// this transaction. The fallible methods report those states as errors;
+        /// this is an in-memory fact about a target the transaction already
+        /// validated.
+        fn len(&self, log: &Self::Log) -> u64;
+
+        /// Read `len` bytes at `offset` from the staged view of `log`: committed
+        /// data with this transaction's mutations applied.
+        fn read_at(
+            &self,
+            log: &Self::Log,
+            offset: u64,
+            len: usize,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// [`LogTransaction::read_at`] into caller-provided buffer(s).
+        ///
+        /// The returned buffers reuse the caller's storage, with exactly `len` bytes
+        /// filled and the caller's chunk layout preserved.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `len` exceeds the total capacity of `bufs`.
+        fn read_at_buf(
+            &self,
+            log: &Self::Log,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// Stage an append of `data` to draft `log`, returning the offset at which
+        /// the data begins.
+        fn append_draft(
+            &mut self,
+            log: &Self::Draft,
+            data: impl Into<IoBufs>,
+        ) -> Result<u64, Error>;
+
+        /// Stage a rewind of draft `log` to `len` bytes, discarding staged data
+        /// beyond it.
+        fn rewind_draft(&mut self, log: &Self::Draft, len: u64) -> Result<(), Error>;
+
+        /// The staged length of draft `log`.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `log` belongs to another transaction.
+        fn len_draft(&self, log: &Self::Draft) -> u64;
+
+        /// Read `len` bytes at `offset` from the staged data of draft `log`.
+        fn read_draft_at(
+            &self,
+            log: &Self::Draft,
+            offset: u64,
+            len: usize,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// [`LogTransaction::read_draft_at`] into caller-provided buffer(s).
+        ///
+        /// The returned buffers reuse the caller's storage, with exactly `len` bytes
+        /// filled and the caller's chunk layout preserved.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `len` exceeds the total capacity of `bufs`.
+        fn read_draft_at_buf(
+            &self,
+            log: &Self::Draft,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// Discard draft `log`: the created name and its staged data vanish as if
+        /// never staged.
+        fn discard(&mut self, log: Self::Draft) -> Result<(), Error>;
+
+        /// Validate and admit the transaction, consuming it.
+        ///
+        /// Returns **without** durability: only the returned handle resolving `Ok`
+        /// proves the transaction durable and active. The handle resolves after the
+        /// transaction is durable, its mutations are visible to readers, and the
+        /// writer permit is released. Dropping the handle cancels nothing.
+        ///
+        /// An error from this method means nothing changed. The handle resolving
+        /// [`Error::FamilyPoisoned`] means the outcome is indeterminate and the
+        /// family is poisoned (see [`LogStorage`]).
+        fn start_commit(self) -> impl Future<Output = Result<Handle<()>, Error>> + Send;
+
+        /// Commit and wait for durability. Convenience for callers that do not
+        /// pipeline commits.
+        fn commit(self) -> impl Future<Output = Result<(), Error>> + Send
+        where
+            Self: Sized,
+        {
+            async move { self.start_commit().await?.await }
+        }
     }
 });
 stability_scope!(BETA, cfg(feature = "external") {

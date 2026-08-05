@@ -5,6 +5,13 @@
 //!
 //! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
+//! # Storage locking
+//!
+//! On Unix each running runtime exclusively locks its storage directory (a
+//! flock on `.logstore` inside it): two concurrent runtimes over one directory
+//! fail at startup, and a leaked [Context] across an in-process restart keeps
+//! the lock held.
+//!
 //! # Example
 //!
 //! ```rust
