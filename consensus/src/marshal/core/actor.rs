@@ -1,5 +1,5 @@
 use super::{
-    Buffer, Variant,
+    Buffer, Retirement, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
@@ -134,6 +134,8 @@ where
     stream: Stream<E>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
+    // Acknowledgements cleared while a floor transition owns application progress
+    cleared_acks: Vec<(Height, V::Commitment)>,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
@@ -258,6 +260,7 @@ where
                 floor: floor_state,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
+                cleared_acks: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 dispatch_gate: DispatchGate::default(),
@@ -539,7 +542,8 @@ where
     {
         // Start with the ack that woke this `select_loop!` arm.
         let mut pending = Some(self.pending_acks.complete_current(result));
-        let last_acked_commitment = loop {
+        let mut processed_commitments = Vec::new();
+        let processed_round = loop {
             let (height, commitment, result) = pending.take().expect("pending ack must exist");
             match result {
                 Ok(()) => {
@@ -553,12 +557,13 @@ where
                     panic!("application did not acknowledge block at height {height}: {e:?}");
                 }
             }
+            processed_commitments.push(commitment);
 
             // Opportunistically drain any additional already-ready acks so we
             // can persist one metadata sync for the whole batch below.
             match self.pending_acks.pop_ready() {
                 Some(next) => pending = Some(next),
-                None => break commitment,
+                None => break self.floor.round(),
             }
         };
 
@@ -569,9 +574,12 @@ where
             .await
             .expect("failed to sync application progress");
 
-        // Anything below the last acknowledged commitment is safe for the
-        // buffer to prune.
-        buffer.finalized(last_acked_commitment);
+        // The round is an inclusive floor. Retire every exact commitment even if
+        // sparse certificates leave it above that floor.
+        buffer.retire(Retirement {
+            round_floor: processed_round,
+            exact_retirements: processed_commitments,
+        });
 
         // Refill the application dispatch pipeline.
         self.try_dispatch_blocks(application).await
@@ -1188,8 +1196,9 @@ where
         }
 
         // The pending floor owns the next application sync point. Drop any
-        // in-flight acks before they can advance the processed height past it.
-        self.pending_acks.clear();
+        // in-flight acks before they can advance the processed height past it,
+        // but retain their heights and commitments until the anchor makes the floor active.
+        self.cleared_acks.extend(self.pending_acks.clear());
 
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
@@ -1302,6 +1311,11 @@ where
             self = self
                 .update_processed_round_floor(height, finalization.round(), resolver)
                 .await;
+            let commitments = self.take_superseded_ack_commitments();
+            buffer.retire(Retirement {
+                round_floor: self.floor.round(),
+                exact_retirements: commitments,
+            });
             let repaired;
             (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
             if repaired {
@@ -1350,7 +1364,15 @@ where
 
         // Drop all pending acknowledgement waiters so any in-flight application
         // acks for blocks below the new floor cannot rewrite the processed floor.
-        self.pending_acks.clear();
+        self.cleared_acks.extend(self.pending_acks.clear());
+
+        // The active floor retires round-bound entries and every commitment whose
+        // acknowledgement it superseded.
+        let commitments = self.take_superseded_ack_commitments();
+        buffer.retire(Retirement {
+            round_floor: self.floor.round(),
+            exact_retirements: commitments,
+        });
 
         // The floor is durable, so cache/finalized data below it can be pruned.
         self = self.prune_after_floor(height).await;
@@ -1364,6 +1386,17 @@ where
             self = self.sync_finalized().await;
         }
         self.try_dispatch_blocks(application).await
+    }
+
+    /// Takes cleared acknowledgement commitments covered by the active processed-height floor.
+    ///
+    /// Cleared acknowledgements above the floor are re-dispatched and remain live.
+    fn take_superseded_ack_commitments(&mut self) -> Vec<V::Commitment> {
+        let processed_height = self.floor.processed_height();
+        std::mem::take(&mut self.cleared_acks)
+            .into_iter()
+            .filter_map(|(height, commitment)| (height <= processed_height).then_some(commitment))
+            .collect()
     }
 
     /// Handle a deliver message from the resolver. Block delivers are handled

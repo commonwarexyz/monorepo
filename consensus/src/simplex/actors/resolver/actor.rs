@@ -94,7 +94,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
-                state: State::new(cfg.fetch_concurrent, cfg.term_length),
+                state: State::new(cfg.term_length),
 
                 held: BTreeMap::new(),
 
@@ -521,7 +521,6 @@ mod tests {
                 strategy: Sequential,
                 epoch: EPOCH,
                 mailbox_size: NZUsize!(8),
-                fetch_concurrent: NZUsize!(4),
                 fetch_timeout: Duration::from_secs(1),
                 term_length: TermLength::new(NZU32!(5)),
             },
@@ -539,7 +538,7 @@ mod tests {
             let mut actor = build_actor(context, verifier.clone());
             let mut resolver = RecordingResolver::default();
 
-            // The first certificate opens the fetch window at the term anchors.
+            // The first certificate emits requests at the term anchors.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
             let effects = actor
                 .state

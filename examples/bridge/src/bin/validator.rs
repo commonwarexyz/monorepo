@@ -255,7 +255,6 @@ fn main() {
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(11),
-                fetch_concurrent: NZUsize!(32),
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forwarding: simplex::ForwardingPolicy::Disabled,
