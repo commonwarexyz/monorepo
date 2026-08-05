@@ -186,6 +186,7 @@ impl<P: PublicKey> Channels<P> {
             .expect("router mailbox capacity overflow")
     }
 
+    /// Connects every registered channel sender to the router mailbox.
     pub(super) fn bind(&self, mailbox: super::router::Mailbox<P>) {
         self.messenger.bind(mailbox);
     }
