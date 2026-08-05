@@ -460,9 +460,94 @@ pub mod elector;
 pub mod scheme;
 pub mod types;
 
+use crate::types::{TermLength, View, ViewDelta};
+
+/// The view geometry of a term: its length and `optimistic_views`, the
+/// depth of the two optimistic windows. The *admission* window is
+/// anchored at the current view ([`Self::in_admission_window`]); the
+/// *issuance* window at the last directly-notarized view
+/// ([`Self::issuance_floor`]). See the [module docs] for what each
+/// governs.
+///
+/// `current` arguments must be locally derived views (they feed
+/// panicking arithmetic in [`View::term_end`]); candidate arguments
+/// (`pending`, `view`) may be adversarial.
+///
+/// [module docs]: crate::simplex#optimistic-validation
+#[derive(Clone, Copy)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) struct Lookahead {
+    /// Number of views in each leader term.
+    pub term_length: TermLength,
+    /// Depth of the admission and issuance windows; zero disables
+    /// optimistic validation.
+    pub optimistic_views: ViewDelta,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+impl Lookahead {
+    /// Builds the term geometry from an elector's [`elector::Terms`].
+    pub(crate) const fn new(terms: &elector::Terms) -> Self {
+        Self {
+            term_length: terms.length(),
+            optimistic_views: terms.optimistic_views(),
+        }
+    }
+
+    /// Returns true when `pending` is inside the optimistic admission
+    /// window of `current`: a same-term future view at most
+    /// `optimistic_views` ahead.
+    pub fn in_admission_window(&self, current: View, pending: View) -> bool {
+        current < pending && pending <= self.admission_limit(current)
+    }
+
+    /// Returns whether `pending` is admissible relative to `current`
+    /// (extending [`View::admits`] with the optimistic admission
+    /// window).
+    ///
+    /// Views at or below `current` are always admitted. Admitted futures are:
+    /// - `current + 1`
+    /// - `next_term_start(current)`
+    /// - views in the optimistic admission window
+    pub fn admits(&self, current: View, pending: View) -> bool {
+        current.admits(pending, self.term_length)
+            || self.in_admission_window(current, pending)
+    }
+
+    /// Returns the highest view in the admission window of `current`
+    /// (`current` itself when the window is empty).
+    pub fn admission_limit(&self, current: View) -> View {
+        current
+            .term_end(self.term_length)
+            .min(current.saturating_add(self.optimistic_views))
+    }
+
+    /// Returns the lowest view whose direct notarization can anchor
+    /// `view` inside the optimistic *issuance* window, or `None` when
+    /// `view` can never be issued optimistically, either because
+    /// optimism is disabled or because `view` starts a term and so
+    /// requires explicitly certified ancestry.
+    ///
+    /// An anchor below the floor fails the hop bound exactly like no
+    /// anchor at all, so a caller decides membership by asking whether
+    /// any directly-notarized view sits in `floor..view`. A floor of
+    /// genesis means the window is open until the first notarization
+    /// lands. Compare [`Self::in_admission_window`], which anchors at
+    /// the current view instead.
+    pub const fn issuance_floor(&self, view: View) -> Option<View> {
+        if self.optimistic_views.is_zero() || view.is_term_start(self.term_length) {
+            return None;
+        }
+        Some(
+            view.saturating_sub(self.optimistic_views)
+                .saturating_sub(ViewDelta::new(1)),
+        )
+    }
+}
+
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use crate::types::{Round, TermLength, View, ViewDelta};
+        use crate::types::Round;
         use commonware_cryptography::PublicKey;
         use commonware_p2p::Recipients;
 
@@ -472,87 +557,6 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod metrics;
-
-        /// The view geometry of a term: its length and `optimistic_views`, the
-        /// depth of the two optimistic windows. The *admission* window is
-        /// anchored at the current view ([`Self::in_admission_window`]); the
-        /// *issuance* window at the last directly-notarized view
-        /// ([`Self::issuance_floor`]). See the [module docs] for what each
-        /// governs.
-        ///
-        /// `current` arguments must be locally derived views (they feed
-        /// panicking arithmetic in [`View::term_end`]); candidate arguments
-        /// (`pending`, `view`) may be adversarial.
-        ///
-        /// [module docs]: crate::simplex#optimistic-validation
-        #[derive(Clone, Copy)]
-        pub(crate) struct Lookahead {
-            /// Number of views in each leader term.
-            pub term_length: TermLength,
-            /// Depth of the admission and issuance windows; zero disables
-            /// optimistic validation.
-            pub optimistic_views: ViewDelta,
-        }
-
-        impl Lookahead {
-            /// Builds the term geometry from an elector's [`elector::Terms`].
-            pub(crate) const fn new(terms: &elector::Terms) -> Self {
-                Self {
-                    term_length: terms.length(),
-                    optimistic_views: terms.optimistic_views(),
-                }
-            }
-
-            /// Returns true when `pending` is inside the optimistic admission
-            /// window of `current`: a same-term future view at most
-            /// `optimistic_views` ahead.
-            pub fn in_admission_window(&self, current: View, pending: View) -> bool {
-                current < pending && pending <= self.admission_limit(current)
-            }
-
-            /// Returns whether `pending` is admissible relative to `current`
-            /// (extending [`View::admits`] with the optimistic admission
-            /// window).
-            ///
-            /// Views at or below `current` are always admitted. Admitted futures are:
-            /// - `current + 1`
-            /// - `next_term_start(current)`
-            /// - views in the optimistic admission window
-            pub fn admits(&self, current: View, pending: View) -> bool {
-                current.admits(pending, self.term_length)
-                    || self.in_admission_window(current, pending)
-            }
-
-            /// Returns the highest view in the admission window of `current`
-            /// (`current` itself when the window is empty).
-            pub fn admission_limit(&self, current: View) -> View {
-                current
-                    .term_end(self.term_length)
-                    .min(current.saturating_add(self.optimistic_views))
-            }
-
-            /// Returns the lowest view whose direct notarization can anchor
-            /// `view` inside the optimistic *issuance* window, or `None` when
-            /// `view` can never be issued optimistically, either because
-            /// optimism is disabled or because `view` starts a term and so
-            /// requires explicitly certified ancestry.
-            ///
-            /// An anchor below the floor fails the hop bound exactly like no
-            /// anchor at all, so a caller decides membership by asking whether
-            /// any directly-notarized view sits in `floor..view`. A floor of
-            /// genesis means the window is open until the first notarization
-            /// lands. Compare [`Self::in_admission_window`], which anchors at
-            /// the current view instead.
-            pub const fn issuance_floor(&self, view: View) -> Option<View> {
-                if self.optimistic_views.is_zero() || view.is_term_start(self.term_length) {
-                    return None;
-                }
-                Some(
-                    view.saturating_sub(self.optimistic_views)
-                        .saturating_sub(ViewDelta::new(1)),
-                )
-            }
-        }
 
         /// The window of views an actor tracks, bounded below by retention
         /// and above by admission policy.
