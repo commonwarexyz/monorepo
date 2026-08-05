@@ -399,6 +399,7 @@ pub async fn run_atomic_batch_append_loop<S: BatchStorage>(
 ///
 /// The order alternates to distribute within-run ordering effects. Each side's elapsed time only
 /// includes its own operations, so paired wall time is never used as either throughput denominator.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_paired_atomic_batch_append_loop<S: BatchStorage>(
     storage: &S,
     ordinary_blobs: &[S::Blob],
@@ -535,6 +536,8 @@ async fn run_ordinary_append_group(
     Ok(elapsed)
 }
 
+// Keep every timed input explicit so the helper cannot accidentally capture setup work.
+#[allow(clippy::too_many_arguments)]
 async fn run_atomic_append_group<S: BatchStorage>(
     storage: &S,
     blobs: &[S::AtomicBlob],

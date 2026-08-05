@@ -28,7 +28,8 @@ pub use parking_lot::{
     Condvar, MappedMutexGuard, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 pub use tokio::sync::{
-    Barrier, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, RwLock as AsyncRwLock,
+    Barrier, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify,
+    OwnedMutexGuard as AsyncOwnedMutexGuard, RwLock as AsyncRwLock,
     RwLockReadGuard as AsyncRwLockReadGuard, RwLockWriteGuard as AsyncRwLockWriteGuard,
 };
 

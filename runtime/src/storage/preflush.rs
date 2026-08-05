@@ -8,13 +8,10 @@
 
 use super::atomic;
 use crate::Error;
-#[cfg(any(not(feature = "iouring-storage"), test))]
+#[cfg(test)]
 use commonware_utils::sync::Condvar;
-use commonware_utils::sync::{Mutex, MutexGuard};
+use commonware_utils::sync::{AsyncMutex, AsyncOwnedMutexGuard, Mutex, MutexGuard};
 use std::sync::Arc;
-#[cfg(any(feature = "iouring-storage", test))]
-use tokio::sync::Notify;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// Shared state and payload-preflush coordination for one current V2 generation.
 pub(super) struct Context {
@@ -31,7 +28,7 @@ impl Context {
         }))
     }
 
-    pub(super) async fn lock(self: &Arc<Self>) -> OwnedMutexGuard<atomic::State> {
+    pub(super) async fn lock(self: &Arc<Self>) -> AsyncOwnedMutexGuard<atomic::State> {
         if let Ok(state) = self.state.clone().try_lock_owned() {
             return state;
         }
@@ -48,6 +45,7 @@ struct Inner {
     durable: u64,
     running: bool,
     failure: Option<Error>,
+    waiters: Vec<commonware_utils::channel::oneshot::Sender<()>>,
 }
 
 /// Runtime-neutral coordination around a backend-owned durability worker.
@@ -56,10 +54,8 @@ struct Inner {
 /// coalesce newer requests into the current pass and reports completion through [`Self::complete`].
 pub(super) struct Preflush {
     inner: Mutex<Inner>,
-    #[cfg(any(not(feature = "iouring-storage"), test))]
+    #[cfg(test)]
     changed: Condvar,
-    #[cfg(any(feature = "iouring-storage", test))]
-    notify: Notify,
 }
 
 /// Owns one active durability driver and poisons the generation if the driver disappears.
@@ -95,11 +91,10 @@ impl Preflush {
                 durable,
                 running: false,
                 failure: None,
+                waiters: Vec::new(),
             }),
-            #[cfg(any(not(feature = "iouring-storage"), test))]
+            #[cfg(test)]
             changed: Condvar::new(),
-            #[cfg(any(feature = "iouring-storage", test))]
-            notify: Notify::new(),
         }
     }
 
@@ -107,11 +102,12 @@ impl Preflush {
         self.inner.lock()
     }
 
-    fn notify(&self) {
-        #[cfg(any(not(feature = "iouring-storage"), test))]
+    fn notify(&self, inner: &mut Inner) {
+        #[cfg(test)]
         self.changed.notify_all();
-        #[cfg(any(feature = "iouring-storage", test))]
-        self.notify.notify_waiters();
+        for waiter in inner.waiters.drain(..) {
+            let _ = waiter.send(());
+        }
     }
 
     pub(super) fn driver(self: &Arc<Self>) -> Driver {
@@ -143,7 +139,7 @@ impl Preflush {
             Err(error) => {
                 inner.failure = Some(error);
                 inner.running = false;
-                self.notify();
+                self.notify(&mut inner);
                 return None;
             }
         }
@@ -151,7 +147,7 @@ impl Preflush {
         if next.is_none() {
             inner.running = false;
         }
-        self.notify();
+        self.notify(&mut inner);
         next
     }
 
@@ -159,7 +155,7 @@ impl Preflush {
         let mut inner = self.lock();
         inner.failure.get_or_insert(error);
         inner.running = false;
-        self.notify();
+        self.notify(&mut inner);
     }
 
     /// Record durability established by the foreground publication barrier.
@@ -168,7 +164,7 @@ impl Preflush {
         inner.durable = inner.durable.max(target);
         let durable = inner.durable;
         inner.requested = inner.requested.max(durable);
-        self.notify();
+        self.notify(&mut inner);
     }
 
     /// Forget durability credit above a tail that is about to be reused.
@@ -180,7 +176,7 @@ impl Preflush {
         debug_assert!(!inner.running);
         inner.requested = target;
         inner.durable = target;
-        self.notify();
+        self.notify(&mut inner);
     }
 
     pub(super) fn failure(&self) -> Option<Error> {
@@ -192,7 +188,12 @@ impl Preflush {
         self.lock().requested
     }
 
-    #[cfg(any(not(feature = "iouring-storage"), test))]
+    #[cfg(test)]
+    fn waiter_count(&self) -> usize {
+        self.lock().waiters.len()
+    }
+
+    #[cfg(test)]
     pub(super) fn wait_blocking(&self, target: u64) -> Result<(), Error> {
         let mut inner = self.lock();
         loop {
@@ -206,7 +207,7 @@ impl Preflush {
         }
     }
 
-    #[cfg(any(not(feature = "iouring-storage"), test))]
+    #[cfg(test)]
     pub(super) fn wait_idle_blocking(&self) -> Result<(), Error> {
         let mut inner = self.lock();
         loop {
@@ -220,41 +221,43 @@ impl Preflush {
         }
     }
 
-    #[cfg(any(feature = "iouring-storage", test))]
+    #[allow(dead_code)]
     pub(super) async fn wait(&self, target: u64) -> Result<(), Error> {
         loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            {
-                let inner = self.lock();
+            let receiver = {
+                let mut inner = self.lock();
                 if let Some(error) = &inner.failure {
                     return Err(error.clone());
                 }
                 if inner.durable >= target {
                     return Ok(());
                 }
-            }
-            notified.await;
+                inner.waiters.retain(|waiter| !waiter.is_closed());
+                let (sender, receiver) = commonware_utils::channel::oneshot::channel();
+                inner.waiters.push(sender);
+                receiver
+            };
+            receiver.await.map_err(|_| Error::Closed)?;
         }
     }
 
-    #[cfg(feature = "iouring-storage")]
+    #[allow(dead_code)]
     pub(super) async fn wait_idle(&self) -> Result<(), Error> {
         loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            {
-                let inner = self.lock();
+            let receiver = {
+                let mut inner = self.lock();
                 if let Some(error) = &inner.failure {
                     return Err(error.clone());
                 }
                 if !inner.running {
                     return Ok(());
                 }
-            }
-            notified.await;
+                inner.waiters.retain(|waiter| !waiter.is_closed());
+                let (sender, receiver) = commonware_utils::channel::oneshot::channel();
+                inner.waiters.push(sender);
+                receiver
+            };
+            receiver.await.map_err(|_| Error::Closed)?;
         }
     }
 }
@@ -262,6 +265,7 @@ impl Preflush {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{pin_mut, poll};
 
     #[test]
     fn requests_are_coalesced_behind_one_worker() {
@@ -311,5 +315,19 @@ mod tests {
         preflush.complete(20, Err(Error::WriteFailed));
         assert!(matches!(waiter.await.unwrap(), Err(Error::WriteFailed)));
         assert!(matches!(preflush.request(30), Err(Error::WriteFailed)));
+    }
+
+    #[tokio::test]
+    async fn canceled_waiters_are_pruned_while_a_driver_is_blocked() {
+        let preflush = Preflush::new(10);
+        assert_eq!(preflush.request(20).unwrap(), Some(20));
+
+        for _ in 0..1_000 {
+            let waiter = preflush.wait(20);
+            pin_mut!(waiter);
+            assert!(poll!(waiter.as_mut()).is_pending());
+        }
+
+        assert!(preflush.waiter_count() <= 1);
     }
 }

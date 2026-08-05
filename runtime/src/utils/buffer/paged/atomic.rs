@@ -15,14 +15,42 @@ use crate::{
     ATOMIC_BLOB_TAG_LEN, AtomicBlob, Buf, Error, Handle, IntegrityBoundary, IntegrityScheme,
     IntegrityToken, IntegrityUnit, IoBuf, IoBufs,
 };
+use commonware_utils::sync::Mutex;
 use std::{
     collections::VecDeque,
+    future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 const CRC_LEN: usize = size_of::<u32>();
 /// Number of application-owned marker bytes in an atomic checked-page tag.
 pub const ATOMIC_MARKER_LEN: usize = ATOMIC_BLOB_TAG_LEN;
+
+/// Serialize polling of a `Send` storage future so callers may retain a `Sync` future contract.
+///
+/// Storage traits require their futures to be `Send`, but the BETA contiguous-journal API also
+/// promises that its read future is `Sync`. The mutex is held only for one nonblocking poll and is
+/// released whenever the inner future returns `Pending`.
+struct SyncFuture<F>(Mutex<Pin<Box<F>>>);
+
+impl<F> SyncFuture<F> {
+    fn new(future: F) -> Self {
+        Self(Mutex::new(Box::pin(future)))
+    }
+}
+
+impl<F> Future for SyncFuture<F>
+where
+    F: Future + Send,
+{
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().0.lock().as_mut().poll(context)
+    }
+}
 
 /// Return the logical page size whose atomic physical page occupies `physical_page_size` bytes.
 ///
@@ -95,8 +123,13 @@ impl<B: AtomicBlob> AtomicSnapshot<B> {
     }
 
     /// Read exactly `len` logical bytes beginning at `offset`.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        self.view().read_at(offset, len).await
+    pub fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+    ) -> impl Future<Output = Result<IoBufs, Error>> + Send + Sync + '_ {
+        let view = self.view();
+        SyncFuture::new(async move { view.read_at(offset, len).await })
     }
 
     /// Read logical bytes into `buf` beginning at `offset`.

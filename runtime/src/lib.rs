@@ -21,7 +21,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::{stability_mod, stability_scope};
+use commonware_macros::stability_scope;
 
 #[macro_use]
 mod macros;
@@ -30,7 +30,16 @@ mod network;
 mod process;
 mod storage;
 
-stability_mod!(ALPHA, mod atomic_api);
+// Keep the private protocol types available to the BETA blob implementation so it can reopen an
+// opt-in layout even when the ALPHA entry points are hidden from the public surface.
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+#[cfg_attr(commonware_stability_BETA, allow(dead_code))]
+mod atomic_api;
 stability_scope!(ALPHA {
     pub use atomic_api::{
         ATOMIC_BLOB_TAG_LEN, AtomicBlob, AtomicStorage, BatchOperation, BatchStorage,

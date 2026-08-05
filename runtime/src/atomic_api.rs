@@ -22,13 +22,13 @@ pub enum BatchOperation<B> {
 /// Opt-in interface for opening blobs that support crash-atomic journal mutations.
 ///
 /// Ordinary [`Storage::open`] and [`Storage::open_versioned`] retain the flat blob layout and
-/// behavior used by runtimes that do not opt into this capability. Atomic blobs use a distinct
-/// append-only layout. Appended payload occupies its final offset and is written once. A rewind
-/// that crosses the last published length fences further appends until synchronization publishes
-/// the shorter length and truncates the file. Recovery exposes either the preceding synced epoch
-/// or the complete new epoch while reading only bounded metadata and, for an unresolved batch, a
-/// bounded appended suffix. A failed or canceled mutation after physical I/O admission poisons
-/// that open generation.
+/// behavior used by runtimes that do not opt into this capability. Atomic blobs expose a distinct
+/// append-only protocol that implementations can layer over their ordinary [`Blob`] I/O. Appended
+/// payload occupies its final offset and is written once. A rewind that crosses the last published
+/// length fences further appends until synchronization publishes the shorter length and truncates
+/// the blob. Recovery exposes either the preceding synced epoch or the complete new epoch while
+/// reading only bounded metadata and, for an unresolved batch, a bounded appended suffix. A failed
+/// or canceled mutation after physical I/O admission poisons that open generation.
 pub trait AtomicStorage: Storage {
     /// Blob type returned by atomic opens.
     type AtomicBlob: AtomicBlob;
@@ -168,15 +168,17 @@ pub enum IntegrityBoundary {
     Complete,
     /// Complete units whenever their payload reaches this many bytes.
     ///
-    /// A final shorter unit remains open. The selected V2 root carries its rolling checksum, so a
+    /// A final shorter unit remains open. The selected root carries its rolling checksum, so a
     /// sync does not force a short unit to be closed.
     Chunked(NonZeroU32),
 }
 
 /// Durable checksum-unit layout bound to an atomic blob.
 ///
-/// A blob binds itself on its first integrity-aware append. Reopening with a different fixed unit
-/// width is rejected before any offsets are interpreted.
+/// A blob binds itself when a [`IntegrityBoundary::Complete`] or
+/// [`IntegrityBoundary::Chunked`] operation first chooses a layout. A `Continue` append may leave
+/// an unbound blob open. Reopening with a different fixed unit width is rejected before any offsets
+/// are interpreted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntegrityScheme {
     /// No integrity-unit layout has been chosen yet.
@@ -206,7 +208,7 @@ impl IntegrityScheme {
             Self::Chunked(size) => {
                 let data_len = u64::from(size.get());
                 let encoded_len = data_len + size_of::<u32>() as u64;
-                if unit.len != data_len || unit.offset % encoded_len != 0 {
+                if unit.len != data_len || !unit.offset.is_multiple_of(encoded_len) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         "fixed integrity unit does not match the blob's bound geometry",
@@ -219,7 +221,7 @@ impl IntegrityScheme {
     }
 }
 
-/// One completed or in-progress integrity unit in the encoded V2 payload.
+/// One completed or in-progress integrity unit in the encoded atomic payload.
 ///
 /// `offset` addresses the first data byte and `len` excludes the four-byte checksum footer of a
 /// completed unit. The footer immediately follows the data. An in-progress unit has no footer;
@@ -270,7 +272,8 @@ pub struct IntegrityAppend {
 /// synchronized length fences appends until a successful [`Blob::sync`] or completed
 /// [`Blob::start_sync`] publishes the rewind.
 ///
-/// V2 can own payload integrity without forcing one checksum granularity on every caller.
+/// The atomic blob can own payload integrity without forcing one checksum granularity on every
+/// caller.
 /// Integrity-aware appends extend a rolling CRC32C for the current unit. Completing a unit appends
 /// one four-byte footer; publication stores the start and checksum of an unfinished unit in the
 /// selected root. Callers choose only when units close and never calculate or encode checksums.
@@ -328,14 +331,14 @@ pub trait AtomicBlob: Blob {
         tag: [u8; ATOMIC_BLOB_TAG_LEN],
     ) -> impl Future<Output = Result<u64, Error>> + Send;
 
-    /// Append bytes while maintaining V2-owned integrity units.
+    /// Append bytes while maintaining protocol-owned integrity units.
     ///
-    /// The returned offset addresses the first newly supplied byte in the encoded payload. V2 may
-    /// insert four-byte checksum footers before later supplied bytes when `boundary` closes one or
-    /// more units. `tag`, when present, is staged atomically with the append and integrity state.
-    /// Empty data can still complete an existing non-empty unit. A stale `expected` token is
-    /// rejected before payload I/O. The returned token must name the next coherent integrity or
-    /// tag mutation.
+    /// The returned offset addresses the first newly supplied byte in the encoded payload. The
+    /// protocol may insert four-byte checksum footers before later supplied bytes when `boundary`
+    /// closes one or more units. `tag`, when present, is staged atomically with the append and
+    /// integrity state. Empty data can still complete an existing non-empty unit. A stale
+    /// `expected` token is rejected before payload I/O. The returned token must name the next
+    /// coherent integrity or tag mutation.
     fn append_integrity(
         &self,
         expected: IntegrityToken,
@@ -355,11 +358,12 @@ pub trait AtomicBlob: Blob {
 
     /// Read and validate one complete integrity unit.
     ///
-    /// The unit's checksum footer is consumed by V2 and is not included in the returned buffers.
+    /// The unit's checksum footer is consumed by the protocol and is not included in the returned
+    /// buffers.
     fn read_integrity(
         &self,
         unit: IntegrityUnit,
-    ) -> impl Future<Output = Result<IoBufs, Error>> + Send + Sync;
+    ) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 
     /// Rewind the blob to `len`, which must not exceed its current logical length.
     ///
@@ -378,14 +382,14 @@ pub trait AtomicBlob: Blob {
         tag: [u8; ATOMIC_BLOB_TAG_LEN],
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Rewind the encoded payload while preserving V2-owned integrity state.
+    /// Rewind the encoded payload while preserving protocol-owned integrity state.
     ///
     /// When `unit` is `Some`, it identifies the complete or current unit containing the new end;
-    /// V2 validates that unit and stores the checksum of the retained prefix as the new unfinished
-    /// unit. Pass `None` only when `len` is already a completed-unit boundary. `tag`, when present,
-    /// is staged atomically with the rewind and rebuilt integrity state. A stale `expected` token
-    /// is rejected before payload I/O. The returned token must name the next coherent integrity or
-    /// tag mutation.
+    /// the protocol validates that unit and stores the checksum of the retained prefix as the new
+    /// unfinished unit. Pass `None` only when `len` is already a completed-unit boundary. `tag`,
+    /// when present, is staged atomically with the rewind and rebuilt integrity state. A stale
+    /// `expected` token is rejected before payload I/O. The returned token must name the next
+    /// coherent integrity or tag mutation.
     fn rewind_integrity(
         &self,
         expected: IntegrityToken,

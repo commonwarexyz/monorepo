@@ -20,9 +20,11 @@
 //! This implementation is only available on Linux systems that support io_uring.
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
-use super::Header;
+use super::{Header, uno};
 use crate::{
-    BatchOperation, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, WriteOptions,
+    BatchOperation, Blob as _, Buf, BufferPool, Error, Handle, IntegrityAppend, IntegrityBoundary,
+    IntegrityScheme, IntegritySnapshot, IntegrityToken, IntegrityUnit, IoBufs, IoBufsMut,
+    WriteOptions,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
@@ -33,17 +35,20 @@ use futures::future::join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
+    future::Future,
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard as TokioOwnedMutexGuard};
 
 type ResolvedHeader = (u64, u16, u64, Option<[u8; Header::V2_INCARNATION_LEN]>);
+type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
 fn resolve_header(
@@ -129,58 +134,30 @@ struct AtomicStateEntry {
 /// Mutable log/index state shared by every handle opened for one current V2 name generation.
 type V2State = super::atomic::State;
 
-async fn lock_v2(state: &Arc<super::preflush::Context>) -> OwnedMutexGuard<V2State> {
-    state.lock().await
+/// Poisons a batch participant if its worker exits after mutation admission but before completion.
+struct ArmedBatchState {
+    state: TokioOwnedMutexGuard<V2State>,
+    armed: bool,
 }
 
-/// Owns a V2 content lock while an admitted mutation is in flight.
-///
-/// io_uring retains admitted requests after their observer is dropped. If the future holding this
-/// guard is canceled before normal completion, poisoning prevents later readers from treating the
-/// possibly partial physical mutation as a committed logical state.
-struct V2OperationGuard {
-    state: OwnedMutexGuard<V2State>,
-    completed: bool,
-}
-
-struct V2WriteRequest {
-    prepared: super::atomic::PreparedMutation,
-    options: WriteOptions,
-    cache: iouring::Cache,
-    retained: Arc<super::preflush::Context>,
-    sync: bool,
-    tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
-}
-
-impl V2OperationGuard {
-    const fn new(state: OwnedMutexGuard<V2State>) -> Self {
-        Self {
-            state,
-            completed: false,
-        }
+impl ArmedBatchState {
+    const fn new(state: TokioOwnedMutexGuard<V2State>) -> Self {
+        Self { state, armed: true }
     }
 
-    const fn finish(&mut self) {
-        self.completed = true;
+    const fn disarm(&mut self) {
+        self.armed = false;
     }
 
     fn poison(&mut self) {
         self.state.poison();
-        self.completed = true;
-    }
-
-    fn complete(&mut self, success: bool) {
-        if success {
-            self.finish();
-        } else {
-            self.poison();
-        }
+        self.armed = false;
     }
 }
 
-impl Drop for V2OperationGuard {
+impl Drop for ArmedBatchState {
     fn drop(&mut self) {
-        if !self.completed {
+        if self.armed {
             self.state.poison();
         }
     }
@@ -545,7 +522,7 @@ impl Storage {
                         .get(&(blob.partition.clone(), blob.name.clone()))
                         .copied();
                     async move {
-                        let mut operation = V2OperationGuard::new(state);
+                        let mut operation = ArmedBatchState::new(state);
                         if let Some(len) = resize {
                             let rewound = blob.rewind_log(&mut operation.state, len, None).await;
                             if let Err(error) = rewound {
@@ -557,7 +534,6 @@ impl Storage {
                                 .map(Some)
                         } else {
                             blob.prepare_batch_commit_unflushed(&mut operation.state)
-                                .await
                         };
                         let preflush = prepared.as_ref().ok().and_then(Option::as_ref).is_some_and(
                             |prepared| match prepared.payload_checksum() {
@@ -848,23 +824,25 @@ impl Storage {
                     }
                     if removed {
                         debug_assert!(prepared.as_ref().is_ok_and(Option::is_some));
-                        operation.finish();
+                        operation.disarm();
                         continue;
                     }
                     let force_truncate =
                         rewind_lengths.contains_key(&(blob.partition.clone(), blob.name.clone()));
-                    let result = blob.finish_batch_commit(
-                        &mut operation.state,
-                        prepared.unwrap(),
-                        !has_removals,
-                        force_truncate,
-                    );
+                    let result = blob
+                        .activate_batch_commit(
+                            &mut operation.state,
+                            prepared.unwrap(),
+                            !has_removals,
+                            force_truncate,
+                        )
+                        .await;
                     if let Err(error) = result {
                         operation.poison();
                         completion = Err(error);
                         continue;
                     }
-                    operation.finish();
+                    operation.disarm();
                 }
                 namespace
                     .recovery_required
@@ -899,18 +877,20 @@ impl Storage {
                         rewind_lengths.contains_key(&(blob.partition.clone(), blob.name.clone()));
                     let prepared = std::mem::replace(prepared, Ok(None))
                         .expect("successful preparation retains no error");
-                    let completion = blob.finish_batch_commit(
-                        &mut operation.state,
-                        prepared,
-                        false,
-                        force_truncate,
-                    );
+                    let completion = blob
+                        .activate_batch_commit(
+                            &mut operation.state,
+                            prepared,
+                            false,
+                            force_truncate,
+                        )
+                        .await;
                     if let Err(error) = completion {
                         operation.poison();
                         result = Err(error);
                         break;
                     }
-                    operation.finish();
+                    operation.disarm();
                 }
             } else {
                 for (_, operation, _, _) in &mut prepared_states {
@@ -1084,16 +1064,13 @@ impl Storage {
             match shared_atomic {
                 Some(state) => Some(state),
                 None => {
-                    let state = (|| {
-                        super::batch::recover_embedded(
-                            &self.storage_directory,
-                            &stored_partition,
-                            name,
-                            &file,
-                            data_offset,
-                        )?;
-                        V2State::recover(&file, data_offset)
-                    })()
+                    super::batch::recover_embedded(
+                        &self.storage_directory,
+                        &stored_partition,
+                        name,
+                        &file,
+                        data_offset,
+                    )
                     .map_err(|error| {
                         Error::BlobCorrupt(
                             partition.into(),
@@ -1101,6 +1078,36 @@ impl Storage {
                             format!("atomic log recovery failed: {error}"),
                         )
                     })?;
+                    let recovery_blob = Blob::new_with_generation(
+                        stored_partition.clone(),
+                        name,
+                        file.try_clone().map_err(|_| Error::ReadFailed)?,
+                        self.io_handle.clone(),
+                        self.pool.clone(),
+                        data_offset,
+                        BlobContext {
+                            generation: generation.clone(),
+                            namespace: Some(self.namespace.clone()),
+                            atomic: None,
+                            incarnation,
+                        },
+                    );
+                    let backing = recovery_blob.atomic_backing();
+                    let backing_len = file
+                        .metadata()
+                        .map_err(|_| Error::ReadFailed)?
+                        .len()
+                        .checked_sub(super::Layout::V1.data_offset())
+                        .ok_or(Error::BlobInsufficientLength)?;
+                    let state = uno::Core::recover(&backing, backing_len)
+                        .await
+                        .map_err(|error| {
+                            Error::BlobCorrupt(
+                                partition.into(),
+                                hex(name),
+                                format!("atomic root recovery failed: {error}"),
+                            )
+                        })?;
                     Some(self.namespace.insert_atomic_state(
                         &stored_partition,
                         name,
@@ -1262,7 +1269,7 @@ impl crate::Storage for Storage {
 }
 
 impl crate::AtomicStorage for Storage {
-    type AtomicBlob = Blob;
+    type AtomicBlob = AtomicBlob;
 
     async fn migrate_atomic(&self, blob: Self::Blob) -> Result<(), Error> {
         let partition = blob.partition.clone();
@@ -1328,8 +1335,10 @@ impl crate::AtomicStorage for Storage {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::AtomicBlob, u64, u16), Error> {
-        self.open_versioned_inner(partition, name, versions, true)
-            .await
+        let (blob, len, version) = self
+            .open_versioned_inner(partition, name, versions, true)
+            .await?;
+        Ok((AtomicBlob::from_legacy(blob), len, version))
     }
 }
 
@@ -1373,6 +1382,19 @@ struct BlobContext {
     namespace: Option<Arc<Namespace>>,
     atomic: Option<Arc<super::preflush::Context>>,
     incarnation: Option<[u8; Header::V2_INCARNATION_LEN]>,
+}
+
+/// Direct ordinary-geometry view used as UNO's backing boundary.
+#[derive(Clone)]
+struct AtomicBacking {
+    blob: Blob,
+    retained: Arc<AtomicBackingRetention>,
+}
+
+/// Keeps a canceled, admitted write attached to its original logical generation until final CQE.
+struct AtomicBackingRetention {
+    _generation: Arc<super::generation::Token>,
+    _state: Option<Arc<super::preflush::Context>>,
 }
 
 impl Clone for Blob {
@@ -1452,231 +1474,126 @@ impl Blob {
         }
     }
 
+    /// Return an ordinary V1-geometry view whose logical offset zero begins after the immutable
+    /// typed-envelope header. UNO keeps the root page private above this view.
+    fn atomic_backing(&self) -> AtomicBacking {
+        let retained = Arc::new(AtomicBackingRetention {
+            _generation: self.generation.clone(),
+            _state: self.atomic.clone(),
+        });
+        let mut backing = self.clone();
+        backing.data_offset = super::Layout::V1.data_offset();
+        backing.atomic = None;
+        AtomicBacking {
+            blob: backing,
+            retained,
+        }
+    }
+
+    async fn read_at_buf_v1(
+        &self,
+        offset: u64,
+        len: usize,
+        mut input_bufs: IoBufsMut,
+    ) -> Result<IoBufsMut, Error> {
+        // SAFETY: `len` bytes are filled via the io_uring read below.
+        unsafe { input_bufs.set_len(len) };
+
+        // For single buffers, read directly into them (zero-copy).
+        // For multi-chunk buffers, use a temporary and copy to preserve the input structure.
+        let (io_buf, original_bufs) = if input_bufs.is_single() {
+            (input_bufs.coalesce(), None)
+        } else {
+            // SAFETY: `len` bytes are filled via the io_uring read below.
+            let tmp = unsafe { self.pool.alloc_len(len) };
+            (tmp, Some(input_bufs))
+        };
+        let physical_offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Zero-length reads succeed trivially without submitting to the ring.
+        if len == 0 {
+            return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
+        }
+
+        let io_buf = self
+            .io_handle
+            .read_at(self.file.clone(), physical_offset, len, io_buf)
+            .await
+            .map_err(|(_, error)| error)?;
+        match original_bufs {
+            None => Ok(io_buf.into()),
+            Some(mut bufs) => {
+                bufs.copy_from_slice(io_buf.as_ref());
+                Ok(bufs)
+            }
+        }
+    }
+
+    async fn write_at_v1(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        if !bufs.has_remaining() {
+            return Ok(());
+        }
+        let physical_offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+        self.io_handle
+            .write_at(
+                self.file.clone(),
+                physical_offset,
+                bufs,
+                options,
+                self.cache_for(options),
+            )
+            .await
+    }
+
+    // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
+    fn resize_v1(&self, len: u64) -> Result<(), Error> {
+        let raw_len = len
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+        self.file.set_len(raw_len).map_err(|error| {
+            Error::BlobResizeFailed(
+                self.partition.clone(),
+                hex(&self.name),
+                IoError::other(error).into(),
+            )
+        })
+    }
+
+    async fn sync_v1(&self) -> Result<(), Error> {
+        self.io_handle
+            .sync(self.file.clone())
+            .await
+            .map_err(|error| self.map_sync_error(error))
+    }
+
+    async fn start_sync_v1(&self) -> Handle<()> {
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let receiver = self.io_handle.start_sync(self.file.clone()).await;
+        Handle::from_future(async move {
+            match receiver.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(Error::Io(error))) => {
+                    Err(Error::BlobSyncFailed(partition, hex(&name), error))
+                }
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(Error::Closed),
+            }
+        })
+    }
+
     const fn incarnation(&self) -> [u8; Header::V2_INCARNATION_LEN] {
         self.incarnation
             .expect("atomic blobs have a persistent incarnation")
-    }
-
-    fn atomic_layout_required(&self) -> Error {
-        Error::BlobOpenFailed(
-            self.partition.clone(),
-            hex(&self.name),
-            IoError::new(
-                std::io::ErrorKind::Unsupported,
-                "blob was not created with atomic storage",
-            )
-            .into(),
-        )
-    }
-
-    fn poisoned(&self) -> Error {
-        Error::BlobCorrupt(
-            self.partition.clone(),
-            hex(&self.name),
-            "atomic blob generation is poisoned".into(),
-        )
-    }
-
-    fn ensure_healthy(&self, state: &V2State) -> Result<(), Error> {
-        if state.is_poisoned() {
-            return Err(self.poisoned());
-        }
-        if let Some(error) = self
-            .atomic
-            .as_ref()
-            .and_then(|atomic| atomic.preflush().failure())
-        {
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    async fn drive_preflush(&self, mut driver: super::preflush::Driver, mut target: u64) {
-        loop {
-            let result = self
-                .io_handle
-                .sync(self.file.clone())
-                .await
-                .map_err(|error| self.map_sync_error(error));
-            let Some(next) = driver.complete(target, result) else {
-                break;
-            };
-            target = next;
-        }
-    }
-
-    fn request_preflush(&self, target: u64) -> Result<(), Error> {
-        let atomic = self
-            .atomic
-            .as_ref()
-            .expect("payload preflush is only used for V2 blobs");
-        let Some(first) = atomic.preflush().request(target)? else {
-            return Ok(());
-        };
-        let driver = atomic.preflush().driver();
-        let blob = self.clone();
-        drop(tokio::spawn(async move {
-            blob.drive_preflush(driver, first).await;
-        }));
-        Ok(())
-    }
-
-    async fn ensure_preflush(&self, target: u64) -> Result<(), Error> {
-        let atomic = self
-            .atomic
-            .as_ref()
-            .expect("payload preflush is only used for V2 blobs");
-        match atomic.preflush().request(target)? {
-            Some(first) => {
-                let driver = atomic.preflush().driver();
-                self.drive_preflush(driver, first).await;
-            }
-            None => atomic.preflush().wait(target).await?,
-        }
-        atomic.preflush().wait(target).await
-    }
-
-    async fn rewind_log(
-        &self,
-        state: &mut V2State,
-        len: u64,
-        unit: Option<crate::IntegrityUnit>,
-    ) -> Result<(), Error> {
-        state.validate_rewind(len)?;
-        if len == state.logical_len() {
-            return state.rewind(len).map_err(Error::from);
-        }
-        let source = state.rewind_integrity_source(len, unit)?;
-        let target = state.raw_len()?;
-        self.ensure_preflush(target).await?;
-        let preflush = self
-            .atomic
-            .as_ref()
-            .expect("atomic rewinds require V2 state")
-            .preflush();
-        preflush.wait_idle().await?;
-        let source_data = if let Some(source) = source {
-            let data_len = usize::try_from(source.unit.len).map_err(|_| Error::OffsetOverflow)?;
-            let encoded_len = if source.current {
-                data_len
-            } else {
-                data_len
-                    .checked_add(std::mem::size_of::<u32>())
-                    .ok_or(Error::OffsetOverflow)?
-            };
-            let span = state
-                .read_plan(source.unit.offset, encoded_len)?
-                .into_iter()
-                .next()
-                .expect("nonempty integrity sources have one file span");
-            let super::atomic::ReadSource::File(offset) = span.source;
-            let mut encoded = self.pool.alloc(encoded_len);
-            // SAFETY: `read_at` fills the requested integrity source before it is read.
-            unsafe { encoded.set_len(encoded_len) };
-            let mut encoded = self
-                .io_handle
-                .read_at(self.file.clone(), offset, encoded_len, encoded)
-                .await
-                .map_err(|(_, error)| error)?;
-            if source.current {
-                state.validate_integrity_tail(encoded.as_ref())?;
-            } else {
-                let expected = u32::from_be_bytes(
-                    encoded.as_ref()[data_len..]
-                        .try_into()
-                        .expect("integrity checksum footer has a fixed length"),
-                );
-                super::atomic::validate_integrity(&encoded.as_ref()[..data_len], expected)?;
-                encoded.truncate(data_len);
-            }
-            source.retain_prefix.then_some((source.unit, encoded))
-        } else {
-            None
-        };
-        state.rewind_preflushed(
-            len,
-            source_data
-                .as_ref()
-                .map(|(unit, data)| (*unit, data.as_ref())),
-        )?;
-        preflush.reset_after_rewind(state.raw_len()?);
-        Ok(())
-    }
-
-    async fn rewind_atomic(
-        &self,
-        expected: Option<crate::IntegrityToken>,
-        len: u64,
-        unit: Option<crate::IntegrityUnit>,
-        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
-    ) -> Result<crate::IntegrityToken, Error> {
-        let Some(atomic) = &self.atomic else {
-            return Err(self.atomic_layout_required());
-        };
-        let mut state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        if let Some(expected) = expected {
-            state.expect_integrity_token(expected)?;
-        }
-        state.validate_rewind(len)?;
-        let truncate = len < state.logical_len() && len >= state.committed_len();
-        self.rewind_log(&mut state, len, unit).await?;
-        if truncate {
-            let raw_len = state.raw_len()?;
-            if let Err(error) = self.file.set_len(raw_len) {
-                state.poison();
-                return Err(Error::BlobResizeFailed(
-                    self.partition.clone(),
-                    hex(&self.name),
-                    IoError::other(error).into(),
-                ));
-            }
-        }
-        if let Some(tag) = tag {
-            state.set_tag(tag)?;
-        }
-        Ok(state.integrity_token())
-    }
-
-    async fn append_atomic(
-        &self,
-        expected: Option<crate::IntegrityToken>,
-        data: IoBufs,
-        boundary: crate::IntegrityBoundary,
-        tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
-    ) -> Result<(u64, crate::IntegrityToken), Error> {
-        let Some(atomic) = &self.atomic else {
-            return Err(self.atomic_layout_required());
-        };
-        let mut state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        if let Some(expected) = expected {
-            state.expect_integrity_token(expected)?;
-        }
-        let offset = state.logical_len();
-        let Some(prepared) = state.prepare_integrity_append(data, boundary)? else {
-            if let Some(tag) = tag {
-                state.set_tag(tag)?;
-            }
-            return Ok((offset, state.integrity_token()));
-        };
-        let result_offset = prepared.result_offset;
-        let token = self
-            .start_v2_write(
-                state,
-                V2WriteRequest {
-                    prepared,
-                    options: WriteOptions::default(),
-                    cache: iouring::Cache::Enabled,
-                    retained: atomic.clone(),
-                    sync: false,
-                    tag,
-                },
-                None,
-            )
-            .await
-            .unwrap_or(Err(Error::Closed))?;
-        Ok((result_offset, token))
     }
 
     fn map_sync_error(&self, error: Error) -> Error {
@@ -1688,160 +1605,118 @@ impl Blob {
         }
     }
 
-    fn complete_v2_operation(
-        mut operation: V2OperationGuard,
-        result: Result<crate::IntegrityToken, Error>,
-        completion: oneshot::Sender<Result<crate::IntegrityToken, Error>>,
-    ) {
-        operation.complete(result.is_ok());
-        let _ = completion.send(result);
-    }
-
-    fn start_v2_write(
-        &self,
-        state: OwnedMutexGuard<V2State>,
-        request: V2WriteRequest,
-        namespace_guard: Option<OwnedMutexGuard<()>>,
-    ) -> oneshot::Receiver<Result<crate::IntegrityToken, Error>> {
-        let blob = self.clone();
-        let (completion, receiver) = oneshot::channel();
-        drop(tokio::spawn(async move {
-            let _namespace_guard = namespace_guard;
-            let mut operation = V2OperationGuard::new(state);
-            let result = async {
-                blob.io_handle
-                    .write_at_retained(
-                        blob.file.clone(),
-                        request.prepared.file_offset,
-                        request.prepared.data,
-                        request.options,
-                        request.cache,
-                        request.retained,
-                    )
-                    .await?;
-                if let Some(range) = operation
-                    .state
-                    .finish_mutation(request.prepared.mutation, !request.sync)
-                {
-                    let file = blob.file.clone();
-                    let start = range.start;
-                    let len = range.end - range.start;
-                    match tokio::task::spawn_blocking(move || {
-                        super::atomic::begin_payload_writeback(&file, start, len)
-                    })
-                    .await
-                    {
-                        Ok(result) => result?,
-                        Err(error) if error.is_panic() => {
-                            std::panic::resume_unwind(error.into_panic())
-                        }
-                        Err(_) => return Err(Error::Closed),
-                    }
-                    blob.request_preflush(range.end)?;
-                }
-                if let Some(tag) = request.tag {
-                    operation.state.set_tag(tag)?;
-                }
-                if request.sync {
-                    blob.commit_log(&mut operation.state).await?;
-                }
-                Ok(operation.state.integrity_token())
+    async fn lock_publication_namespace(&self) -> Result<TokioOwnedMutexGuard<()>, Error> {
+        let namespace = self
+            .namespace
+            .as_ref()
+            .expect("V2 blobs always retain their namespace")
+            .clone();
+        let namespace_guard = namespace.lock.clone().lock_owned().await;
+        if namespace.carried_batch_decision.load(Ordering::Acquire) {
+            if namespace.embedded_batch_decision.lock().is_none() {
+                return Err(IoError::new(
+                    std::io::ErrorKind::InvalidData,
+                    "carried batch decision has no embedded witness",
+                )
+                .into());
             }
-            .await;
-            Self::complete_v2_operation(operation, result, completion);
-        }));
-        receiver
+        } else {
+            namespace.recover_locked()?;
+        }
+        if !namespace.is_current(&self.partition, &self.name, &self.generation) {
+            return Err(Error::BlobMissing(self.partition.clone(), hex(&self.name)));
+        }
+        Ok(namespace_guard)
+    }
+}
+
+#[derive(Clone)]
+struct V2Publisher {
+    blob: Blob,
+}
+
+impl crate::Blob for AtomicBacking {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.blob
+            .read_at_buf_v1(offset, len, self.blob.pool.alloc(len).into())
+            .await
     }
 
-    async fn prepare_log_writes(
+    async fn read_at_buf(
         &self,
-        state: &mut V2State,
-        materialize_previous: bool,
-        batch_prepared: bool,
-    ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
-        if !state.is_dirty() {
-            return Ok(None);
-        }
-        if state.preflush_requested()? {
-            self.ensure_preflush(state.preflush_target()).await?;
-        }
-        let materialized_previous = state.deferred_batch_root().cloned();
-        let mut prepared = state
-            .prepare_commit()?
-            .expect("dirty atomic state always prepares a commit");
-        if batch_prepared {
-            prepared.mark_batch_prepared();
-        }
-        if materialize_previous && let Some(candidate) = &materialized_previous {
-            let root = super::atomic::materialized_candidate_root(candidate)?;
-            self.io_handle
-                .write_at(
-                    self.file.clone(),
-                    candidate.root_offset,
-                    root.to_vec().into(),
-                    WriteOptions::default(),
-                    iouring::Cache::Enabled,
-                )
-                .await?;
-        }
-        if !batch_prepared {
-            self.io_handle
-                .write_at(
-                    self.file.clone(),
-                    prepared.root_offset,
-                    prepared.prepared_root.clone().into(),
-                    WriteOptions::default(),
-                    iouring::Cache::Enabled,
-                )
-                .await?;
-        }
-        Ok(Some(prepared))
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.blob.read_at_buf_v1(offset, len, bufs.into()).await
     }
 
-    async fn prepare_log(
+    async fn write_at(
         &self,
-        state: &mut V2State,
-    ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
-        let prepared = self.prepare_log_writes(state, true, false).await?;
-        if let Some(prepared) = &prepared {
-            // The first barrier makes payload bytes durable. Publishing the
-            // committed root with RWF_DSYNC then makes recovery metadata-only.
-            self.sync_batch_commit().await?;
-            self.atomic
-                .as_ref()
-                .expect("atomic commits require V2 state")
-                .preflush()
-                .record_durable(prepared.raw_len());
-        }
-        Ok(prepared)
-    }
-
-    async fn commit_log(&self, state: &mut V2State) -> Result<(), Error> {
-        let Some(prepared) = self.prepare_log(state).await? else {
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        if !bufs.has_remaining() {
             return Ok(());
-        };
-        let candidate = prepared.candidate();
-        self.publish_batch_candidate(&candidate).await?;
-        if prepared.requires_truncate() {
-            self.file.set_len(prepared.raw_len()).map_err(|error| {
-                Error::BlobResizeFailed(
-                    self.partition.clone(),
-                    hex(&self.name),
-                    IoError::other(error).into(),
-                )
-            })?;
         }
-        state.finish_commit(prepared);
+        let physical_offset = offset
+            .checked_add(self.blob.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+        self.blob
+            .io_handle
+            .write_at_retained(
+                self.blob.file.clone(),
+                physical_offset,
+                bufs,
+                options,
+                self.blob.cache_for(options),
+                self.retained.clone(),
+            )
+            .await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.blob.resize_v1(len)
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.blob.sync_v1().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.blob.start_sync_v1().await
+    }
+}
+
+impl uno::Publisher<AtomicBacking> for V2Publisher {
+    fn spawn(&self, task: uno::Task) -> Result<(), Error> {
+        drop(tokio::spawn(task));
         Ok(())
     }
 
-    /// Publish one blob with a participant-embedded decision and one inode barrier.
-    async fn commit_uno(&self, state: &mut V2State) -> Result<(), Error> {
+    async fn publish(
+        &self,
+        core: Arc<uno::Core<AtomicBacking>>,
+        mut state: uno::MutationGuard,
+    ) -> Result<(), Error> {
+        let namespace_guard = match self.blob.lock_publication_namespace().await {
+            Ok(namespace_guard) => namespace_guard,
+            Err(error) => {
+                // Namespace admission has not touched the backing blob or guarded mutation.
+                // Stale handles remain readable even though they cannot publish.
+                state.finish();
+                return Err(error);
+            }
+        };
         if !state.is_dirty() {
+            state.finish();
             return Ok(());
         }
+        state.arm();
         if state.preflush_requested()? {
-            self.ensure_preflush(state.preflush_target()).await?;
+            core.ensure_preflush(state.preflush_target()).await?;
         }
 
         let previous_candidate = state.deferred_batch_root().cloned();
@@ -1852,18 +1727,19 @@ impl Blob {
             prepared.payload_checksum(),
             super::atomic::PayloadChecksumEligibility::Ineligible
         ) {
-            self.sync_batch_commit().await?;
+            core.backing().sync().await?;
             prepared.mark_payload_preflushed();
         }
         prepared.mark_batch_prepared();
         let namespace = self
+            .blob
             .namespace
             .as_ref()
             .expect("V2 blobs always retain their namespace");
         let (participant, batch) = super::batch::prepare_single_publish(
-            &self.partition,
-            &self.name,
-            self.incarnation(),
+            &self.blob.partition,
+            &self.blob.name,
+            self.blob.incarnation(),
             &prepared,
         )?;
 
@@ -1893,30 +1769,27 @@ impl Blob {
             && let Some(candidate) = previous_candidate
         {
             let root = super::atomic::materialized_candidate_root(&candidate)?;
-            self.io_handle
+            core.backing()
                 .write_at(
-                    self.file.clone(),
-                    candidate.root_offset,
-                    root.to_vec().into(),
+                    uno::Core::<AtomicBacking>::backing_offset(candidate.root_offset)?,
+                    root.to_vec(),
                     WriteOptions::default(),
-                    iouring::Cache::Enabled,
                 )
                 .await?;
         }
         let witness = batch
-            .witness(&self.partition, &self.name)
+            .witness(&self.blob.partition, &self.blob.name)
             .expect("single-participant batches retain their local witness");
         prepared.attach_batch_witness(witness)?;
-        self.io_handle
+        core.backing()
             .write_at(
-                self.file.clone(),
-                prepared.root_offset,
-                prepared.prepared_root.clone().into(),
+                uno::Core::<AtomicBacking>::backing_offset(prepared.root_offset)?,
+                prepared.prepared_root.clone(),
                 WriteOptions::default(),
-                iouring::Cache::Enabled,
             )
             .await?;
-        self.sync_batch_commit().await?;
+        core.backing().sync().await?;
+
         let raw_len = prepared.raw_len();
         let requires_truncate = prepared.requires_truncate();
         *namespace.embedded_batch_decision.lock() = Some(Arc::new(batch));
@@ -1925,58 +1798,64 @@ impl Blob {
             .carried_batch_decision
             .store(true, Ordering::Release);
         if requires_truncate {
-            self.file.set_len(raw_len).map_err(|error| {
-                Error::BlobResizeFailed(
-                    self.partition.clone(),
-                    hex(&self.name),
-                    IoError::other(error).into(),
-                )
-            })?;
+            core.backing()
+                .resize(uno::Core::<AtomicBacking>::backing_len(raw_len)?)
+                .await?;
         }
-        self.atomic
-            .as_ref()
-            .expect("atomic commits require V2 state")
-            .preflush()
-            .record_durable(raw_len);
+        core.state().preflush().record_durable(raw_len);
         state.finish_batch_commit(prepared);
+        state.finish();
+        drop(namespace_guard);
         Ok(())
     }
+}
 
-    async fn publish_batch_candidate(
-        &self,
-        candidate: &super::atomic::Candidate,
-    ) -> Result<(), Error> {
-        self.io_handle
-            .write_at(
-                self.file.clone(),
-                candidate.root_offset,
-                candidate.committed_root.to_vec().into(),
-                WriteOptions::SYNC,
-                iouring::Cache::Enabled,
-            )
-            .await
-            .map_err(|error| self.map_sync_error(error))?;
-        Ok(())
-    }
+/// Atomic UNO view over an ordinary V1-geometry io_uring blob.
+#[derive(Clone)]
+#[commonware_macros::stability(ALPHA)]
+pub struct AtomicBlob {
+    inner: uno::AtomicBlob<AtomicBacking, V2Publisher>,
+}
 
-    async fn lock_batch_state(&self) -> Result<OwnedMutexGuard<V2State>, Error> {
-        let atomic = self
+impl AtomicBlob {
+    fn from_legacy(blob: Blob) -> Self {
+        let state = blob
             .atomic
             .as_ref()
-            .ok_or_else(|| self.atomic_layout_required())?;
-        let state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        Ok(state)
+            .expect("atomic wrappers require recovered V2 state")
+            .clone();
+        let core = uno::Core::new(blob.atomic_backing(), state);
+        Self {
+            inner: uno::AtomicBlob::new(core, V2Publisher { blob }),
+        }
     }
 
-    async fn prepare_batch_commit_unflushed(
+    async fn lock_batch_state(&self) -> Result<TokioOwnedMutexGuard<V2State>, Error> {
+        self.inner.lock_state().await
+    }
+
+    async fn rewind_log(
+        &self,
+        state: &mut V2State,
+        len: u64,
+        unit: Option<IntegrityUnit>,
+    ) -> Result<(), Error> {
+        self.inner.core().rewind_state(state, len, unit).await
+    }
+
+    fn prepare_batch_commit_unflushed(
         &self,
         state: &mut V2State,
     ) -> Result<Option<super::atomic::PreparedCommit>, Error> {
-        let prepared = self.prepare_log_writes(state, false, true).await?;
+        let prepared = self.inner.core().prepare_batch_commit(state)?;
         if let Some(prepared) = &prepared {
             let start = prepared.payload_start();
-            super::atomic::begin_payload_writeback(&self.file, start, prepared.raw_len() - start)?;
+            // Begin payload writeback early so the later inode barrier has less dirty data to drain.
+            super::atomic::begin_payload_writeback(
+                &self.inner.publisher().blob.file,
+                start,
+                prepared.raw_len() - start,
+            )?;
         }
         Ok(prepared)
     }
@@ -1985,9 +1864,11 @@ impl Blob {
         &self,
         state: &V2State,
     ) -> Result<super::atomic::PreparedCommit, Error> {
-        let mut prepared = state.prepare_delete()?;
-        prepared.mark_batch_prepared();
-        Ok(prepared)
+        self.inner.core().prepare_batch_delete(state)
+    }
+
+    async fn ensure_preflush(&self, target: u64) -> Result<(), Error> {
+        self.inner.core().ensure_preflush(target).await
     }
 
     async fn stage_batch_commit(
@@ -1995,223 +1876,61 @@ impl Blob {
         prepared: &mut super::atomic::PreparedCommit,
         witness: Option<&[u8]>,
     ) -> Result<(), Error> {
-        if let Some(witness) = witness {
-            prepared.attach_batch_witness(witness)?;
-        }
-        self.io_handle
-            .write_at(
-                self.file.clone(),
-                prepared.root_offset,
-                prepared.prepared_root.clone().into(),
-                WriteOptions::default(),
-                iouring::Cache::Enabled,
-            )
-            .await?;
-        Ok(())
+        self.inner
+            .core()
+            .stage_batch_commit(prepared, witness)
+            .await
     }
 
-    /// Durably stage a deletion witness without flushing discarded payload.
     async fn stage_batch_delete(
         &self,
         prepared: &mut super::atomic::PreparedCommit,
         witness: &[u8],
     ) -> Result<(), Error> {
-        prepared.attach_batch_witness(witness)?;
-        self.io_handle
-            .write_at(
-                self.file.clone(),
-                prepared.root_offset,
-                prepared.prepared_root.clone().into(),
-                WriteOptions::SYNC,
-                iouring::Cache::Enabled,
-            )
+        self.inner
+            .core()
+            .stage_batch_delete(prepared, witness)
             .await
-            .map_err(|error| self.map_sync_error(error))
     }
 
     async fn sync_batch_commit(&self) -> Result<(), Error> {
-        self.io_handle
-            .sync(self.file.clone())
-            .await
-            .map_err(|error| self.map_sync_error(error))
+        self.inner.core().sync_batch_commit().await
     }
 
-    fn finish_batch_commit(
+    async fn activate_batch_commit(
         &self,
         state: &mut V2State,
         prepared: Option<super::atomic::PreparedCommit>,
         defer_root: bool,
         force_truncate: bool,
-    ) -> Result<(), Error> {
-        let Some(prepared) = prepared else {
-            if force_truncate {
-                self.truncate_batch_rewind(state)?;
-            }
-            return Ok(());
-        };
-        self.atomic
-            .as_ref()
-            .expect("atomic batch commits require V2 state")
-            .preflush()
-            .record_durable(prepared.raw_len());
-        if force_truncate || prepared.requires_truncate() {
-            self.truncate_batch_rewind(state)?;
-        }
-        if defer_root {
-            state.finish_batch_commit(prepared);
-        } else {
-            state.finish_commit(prepared);
-        }
-        Ok(())
-    }
-
-    /// Reclaim a batch-rewound suffix after the group decision is durable.
-    fn truncate_batch_rewind(&self, state: &V2State) -> Result<(), Error> {
-        self.file.set_len(state.raw_len()?).map_err(|error| {
-            Error::BlobResizeFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::other(error).into(),
-            )
-        })
-    }
-
-    async fn lock_publication(
-        &self,
-    ) -> Result<(OwnedMutexGuard<V2State>, OwnedMutexGuard<()>), Error> {
-        let state = lock_v2(
-            self.atomic
-                .as_ref()
-                .expect("publication is only used for V2 blobs"),
-        )
-        .await;
-        self.ensure_healthy(&state)?;
-        let namespace = self
-            .namespace
-            .as_ref()
-            .expect("V2 blobs always retain their namespace")
-            .clone();
-        let namespace_guard = namespace.lock.clone().lock_owned().await;
-        if namespace.carried_batch_decision.load(Ordering::Acquire) {
-            if namespace.embedded_batch_decision.lock().is_none() {
-                return Err(IoError::new(
-                    std::io::ErrorKind::InvalidData,
-                    "carried batch decision has no embedded witness",
-                )
-                .into());
-            }
-        } else {
-            namespace.recover_locked()?;
-        }
-        if !namespace.is_current(&self.partition, &self.name, &self.generation) {
-            return Err(Error::BlobMissing(self.partition.clone(), hex(&self.name)));
-        }
-        Ok((state, namespace_guard))
-    }
-
-    fn start_atomic_sync_locked(
-        &self,
-        state: OwnedMutexGuard<V2State>,
-        namespace_guard: OwnedMutexGuard<()>,
-    ) -> Handle<()> {
-        let blob = self.clone();
-        let (sender, receiver) = oneshot::channel();
-        drop(tokio::spawn(async move {
-            let _namespace_guard = namespace_guard;
-            let mut operation = V2OperationGuard::new(state);
-            let result = blob.commit_uno(&mut operation.state).await;
-            Self::complete_v2_operation(operation, result, sender);
-        }));
-        Handle::from_receiver(receiver)
-    }
-
-    async fn sync_v2(&self) -> Result<(), Error> {
-        let (state, namespace_guard) = self.lock_publication().await?;
-        self.start_atomic_sync_locked(state, namespace_guard).await
+    ) -> Result<Option<super::atomic::Candidate>, Error> {
+        self.inner
+            .core()
+            .activate_batch_commit(state, prepared, defer_root, force_truncate)
+            .await
     }
 }
 
-impl crate::Blob for Blob {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len)).await
-    }
+impl std::ops::Deref for AtomicBlob {
+    type Target = Blob;
 
+    fn deref(&self) -> &Self::Target {
+        &self.inner.publisher().blob
+    }
+}
+
+impl crate::Blob for AtomicBlob {
     async fn read_at_buf(
         &self,
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let mut input_bufs = bufs.into();
-        // SAFETY: `len` bytes are filled via io_uring read loop below.
-        unsafe { input_bufs.set_len(len) };
+        crate::Blob::read_at_buf(&self.inner, offset, len, bufs).await
+    }
 
-        // For single buffers, read directly into them (zero-copy).
-        // For multi-chunk buffers, use a temporary and copy to preserve the input structure.
-        let (mut io_buf, original_bufs) = if input_bufs.is_single() {
-            (input_bufs.coalesce(), None)
-        } else {
-            // SAFETY: `len` bytes are filled via io_uring read loop below.
-            let tmp = unsafe { self.pool.alloc_len(len) };
-            (tmp, Some(input_bufs))
-        };
-
-        if let Some(atomic) = &self.atomic {
-            let state = lock_v2(atomic).await;
-            self.ensure_healthy(&state)?;
-            let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
-            let end = offset.checked_add(len_u64).ok_or(Error::OffsetOverflow)?;
-            if end > state.logical_len() {
-                return Err(Error::BlobInsufficientLength);
-            }
-            let plan = state.read_plan(offset, len)?;
-
-            for span in plan {
-                let destination =
-                    &mut io_buf.as_mut()[span.destination..span.destination + span.len];
-                let super::atomic::ReadSource::File(file_offset) = span.source;
-                let mut direct = self.pool.alloc(span.len);
-                // SAFETY: `read_at` fills the complete span before it is read.
-                unsafe { direct.set_len(span.len) };
-                let direct = self
-                    .io_handle
-                    .read_at(self.file.clone(), file_offset, span.len, direct)
-                    .await
-                    .map_err(|(_, error)| error)?;
-                destination.copy_from_slice(direct.as_ref());
-            }
-
-            return match original_bufs {
-                None => Ok(io_buf.into()),
-                Some(mut bufs) => {
-                    bufs.copy_from_slice(io_buf.as_ref());
-                    Ok(bufs)
-                }
-            };
-        }
-
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // Zero-length reads succeed trivially without submitting to the ring.
-        if len == 0 {
-            return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
-        }
-
-        let io_buf = self
-            .io_handle
-            .read_at(self.file.clone(), offset, len, io_buf)
-            .await
-            .map_err(|(_, error)| error)?;
-
-        match original_bufs {
-            None => Ok(io_buf.into()),
-            Some(mut bufs) => {
-                bufs.copy_from_slice(io_buf.as_ref());
-                Ok(bufs)
-            }
-        }
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        crate::Blob::read_at(&self.inner, offset, len).await
     }
 
     async fn write_at(
@@ -2220,226 +1939,50 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
-
-        if let Some(atomic) = &self.atomic {
-            if !bufs.has_remaining() {
-                return Ok(());
-            }
-
-            let mut state = lock_v2(atomic).await;
-            self.ensure_healthy(&state)?;
-            if offset != state.logical_len() {
-                return Err(IoError::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "atomic writes must append at the current logical tail",
-                )
-                .into());
-            }
-            let sync = options.contains(WriteOptions::SYNC);
-            let namespace_guard = if sync {
-                let namespace = self
-                    .namespace
-                    .as_ref()
-                    .expect("V2 blobs always retain their namespace");
-                let guard = namespace.lock.clone().lock_owned().await;
-                namespace.recover_locked()?;
-                if !namespace.is_current(&self.partition, &self.name, &self.generation) {
-                    return Err(Error::BlobMissing(self.partition.clone(), hex(&self.name)));
-                }
-                Some(guard)
-            } else {
-                None
-            };
-            let prepared = state
-                .prepare_append(bufs)?
-                .expect("nonempty writes always prepare payload storage");
-            let write_options = options.without(WriteOptions::SYNC);
-            return self
-                .start_v2_write(
-                    state,
-                    V2WriteRequest {
-                        prepared,
-                        options: write_options,
-                        cache: self.cache_for(write_options),
-                        retained: atomic.clone(),
-                        sync,
-                        tag: None,
-                    },
-                    namespace_guard,
-                )
-                .await
-                .unwrap_or(Err(Error::Closed))
-                .map(|_| ());
-        }
-
-        let physical_offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        self.io_handle
-            .write_at(
-                self.file.clone(),
-                physical_offset,
-                bufs,
-                options,
-                self.cache_for(options),
-            )
-            .await
+        crate::Blob::write_at(&self.inner, offset, bufs, options).await
     }
 
-    // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        if self.atomic.is_some() {
-            return self.rewind_atomic(None, len, None, None).await.map(|_| ());
-        }
-
-        let raw_len = len
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-        self.file.set_len(raw_len).map_err(|e| {
-            Error::BlobResizeFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::other(e).into(),
-            )
-        })
+        crate::Blob::resize(&self.inner, len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        if self.atomic.is_some() {
-            return self.sync_v2().await;
-        }
-        self.io_handle
-            .sync(self.file.clone())
-            .await
-            .map_err(|error| match error {
-                Error::Io(error) => {
-                    Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), error)
-                }
-                error => error,
-            })
+        crate::Blob::sync(&self.inner).await
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        if self.atomic.is_some() {
-            return match self.lock_publication().await {
-                Ok((state, namespace_guard)) => {
-                    self.start_atomic_sync_locked(state, namespace_guard)
-                }
-                Err(error) => Handle::ready(Err(error)),
-            };
-        }
-        let partition = self.partition.clone();
-        let name = self.name.clone();
-        let receiver = self.io_handle.start_sync(self.file.clone()).await;
-        Handle::from_future(async move {
-            match receiver.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
-                Ok(Err(err)) => Err(err),
-                Err(_) => Err(Error::Closed),
-            }
-        })
+        crate::Blob::start_sync(&self.inner).await
     }
 }
 
-impl crate::AtomicBlob for Blob {
+#[commonware_macros::stability(ALPHA)]
+impl crate::AtomicBlob for AtomicBlob {
     async fn tag(&self) -> Result<[u8; crate::ATOMIC_BLOB_TAG_LEN], Error> {
-        let Some(atomic) = &self.atomic else {
-            return Err(self.atomic_layout_required());
-        };
-        let state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        Ok(state.tag())
+        crate::AtomicBlob::tag(&self.inner).await
     }
 
     async fn set_tag(&self, tag: [u8; crate::ATOMIC_BLOB_TAG_LEN]) -> Result<(), Error> {
-        let Some(atomic) = &self.atomic else {
-            return Err(self.atomic_layout_required());
-        };
-        let mut state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        state.set_tag(tag)?;
-        Ok(())
+        crate::AtomicBlob::set_tag(&self.inner, tag).await
+    }
+
+    async fn integrity_scheme(&self) -> Result<IntegrityScheme, Error> {
+        crate::AtomicBlob::integrity_scheme(&self.inner).await
+    }
+
+    async fn integrity_snapshot(&self) -> Result<IntegritySnapshot, Error> {
+        crate::AtomicBlob::integrity_snapshot(&self.inner).await
     }
 
     async fn compare_set_tag(
         &self,
-        expected: crate::IntegrityToken,
+        expected: IntegrityToken,
         tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
-    ) -> Result<crate::IntegrityToken, Error> {
-        let Some(atomic) = &self.atomic else {
-            return Err(self.atomic_layout_required());
-        };
-        let mut state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        state.expect_integrity_token(expected)?;
-        state.set_tag(tag)?;
-        Ok(state.integrity_token())
-    }
-
-    async fn integrity_scheme(&self) -> Result<crate::IntegrityScheme, Error> {
-        let Some(atomic) = &self.atomic else {
-            return Err(self.atomic_layout_required());
-        };
-        let state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        Ok(state.integrity_scheme())
-    }
-
-    async fn integrity_snapshot(&self) -> Result<crate::IntegritySnapshot, Error> {
-        let Some(atomic) = &self.atomic else {
-            return Err(self.atomic_layout_required());
-        };
-        let state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        let encoded_len = state.logical_len();
-        let scheme = state.integrity_scheme();
-        let tag = state.tag();
-        let token = state.integrity_token();
-        let Some(unit) = state.integrity_tail() else {
-            return Ok(crate::IntegritySnapshot {
-                encoded_len,
-                scheme,
-                tag,
-                tail: None,
-                token,
-            });
-        };
-        let len = usize::try_from(unit.len).map_err(|_| Error::OffsetOverflow)?;
-        let span = state
-            .read_plan(unit.offset, len)?
-            .into_iter()
-            .next()
-            .expect("nonempty integrity tails have one file span");
-        let super::atomic::ReadSource::File(offset) = span.source;
-        let mut data = self.pool.alloc(len);
-        // SAFETY: `read_at` fills the complete integrity tail before it is read.
-        unsafe { data.set_len(len) };
-        let data = self
-            .io_handle
-            .read_at(self.file.clone(), offset, len, data)
-            .await
-            .map_err(|(_, error)| error)?;
-        state.validate_integrity_tail(data.as_ref())?;
-        Ok(crate::IntegritySnapshot {
-            encoded_len,
-            scheme,
-            tag,
-            tail: Some((unit, IoBufs::from(data.freeze()))),
-            token,
-        })
+    ) -> Result<IntegrityToken, Error> {
+        crate::AtomicBlob::compare_set_tag(&self.inner, expected, tag).await
     }
 
     async fn append(&self, data: impl Into<IoBufs> + Send) -> Result<u64, Error> {
-        self.append_atomic(None, data.into(), crate::IntegrityBoundary::Continue, None)
-            .await
-            .map(|(offset, _)| offset)
+        crate::AtomicBlob::append(&self.inner, data).await
     }
 
     async fn append_tagged(
@@ -2447,80 +1990,29 @@ impl crate::AtomicBlob for Blob {
         data: impl Into<IoBufs> + Send,
         tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<u64, Error> {
-        self.append_atomic(
-            None,
-            data.into(),
-            crate::IntegrityBoundary::Continue,
-            Some(tag),
-        )
-        .await
-        .map(|(offset, _)| offset)
+        crate::AtomicBlob::append_tagged(&self.inner, data, tag).await
     }
 
     async fn append_integrity(
         &self,
-        expected: crate::IntegrityToken,
+        expected: IntegrityToken,
         data: impl Into<IoBufs> + Send,
-        boundary: crate::IntegrityBoundary,
+        boundary: IntegrityBoundary,
         tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
-    ) -> Result<crate::IntegrityAppend, Error> {
-        self.append_atomic(Some(expected), data.into(), boundary, tag)
-            .await
-            .map(|(offset, token)| crate::IntegrityAppend { offset, token })
+    ) -> Result<IntegrityAppend, Error> {
+        crate::AtomicBlob::append_integrity(&self.inner, expected, data, boundary, tag).await
     }
 
-    async fn read_integrity_tail(&self) -> Result<Option<(crate::IntegrityUnit, IoBufs)>, Error> {
-        Ok(self.integrity_snapshot().await?.tail)
+    async fn read_integrity_tail(&self) -> Result<Option<(IntegrityUnit, IoBufs)>, Error> {
+        crate::AtomicBlob::read_integrity_tail(&self.inner).await
     }
 
-    async fn read_integrity(&self, unit: crate::IntegrityUnit) -> Result<IoBufs, Error> {
-        let Some(atomic) = &self.atomic else {
-            return Err(self.atomic_layout_required());
-        };
-        let state = lock_v2(atomic).await;
-        self.ensure_healthy(&state)?;
-        state.integrity_scheme().validate_completed_unit(unit)?;
-        let data_len = usize::try_from(unit.len).map_err(|_| Error::OffsetOverflow)?;
-        let encoded_len = data_len
-            .checked_add(std::mem::size_of::<u32>())
-            .ok_or(Error::OffsetOverflow)?;
-        let encoded_end = unit
-            .offset
-            .checked_add(encoded_len as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        if encoded_end > state.completed_integrity_len() {
-            return Err(IoError::new(
-                std::io::ErrorKind::InvalidInput,
-                "integrity unit is not within the completed payload prefix",
-            )
-            .into());
-        }
-        let span = state
-            .read_plan(unit.offset, encoded_len)?
-            .into_iter()
-            .next()
-            .expect("nonempty integrity units have one file span");
-        let super::atomic::ReadSource::File(offset) = span.source;
-        let mut encoded = self.pool.alloc(encoded_len);
-        // SAFETY: `read_at` fills the complete integrity unit before it is read.
-        unsafe { encoded.set_len(encoded_len) };
-        let mut encoded = self
-            .io_handle
-            .read_at(self.file.clone(), offset, encoded_len, encoded)
-            .await
-            .map_err(|(_, error)| error)?;
-        let expected = u32::from_be_bytes(
-            encoded.as_ref()[data_len..]
-                .try_into()
-                .expect("integrity checksum footer has a fixed length"),
-        );
-        super::atomic::validate_integrity(&encoded.as_ref()[..data_len], expected)?;
-        encoded.truncate(data_len);
-        Ok(IoBufs::from(encoded.freeze()))
+    async fn read_integrity(&self, unit: IntegrityUnit) -> Result<IoBufs, Error> {
+        crate::AtomicBlob::read_integrity(&self.inner, unit).await
     }
 
     async fn rewind(&self, len: u64) -> Result<(), Error> {
-        self.rewind_atomic(None, len, None, None).await.map(|_| ())
+        crate::AtomicBlob::rewind(&self.inner, len).await
     }
 
     async fn rewind_tagged(
@@ -2528,19 +2020,94 @@ impl crate::AtomicBlob for Blob {
         len: u64,
         tag: [u8; crate::ATOMIC_BLOB_TAG_LEN],
     ) -> Result<(), Error> {
-        self.rewind_atomic(None, len, None, Some(tag))
-            .await
-            .map(|_| ())
+        crate::AtomicBlob::rewind_tagged(&self.inner, len, tag).await
     }
 
     async fn rewind_integrity(
         &self,
-        expected: crate::IntegrityToken,
+        expected: IntegrityToken,
         len: u64,
-        unit: Option<crate::IntegrityUnit>,
+        unit: Option<IntegrityUnit>,
         tag: Option<[u8; crate::ATOMIC_BLOB_TAG_LEN]>,
-    ) -> Result<crate::IntegrityToken, Error> {
-        self.rewind_atomic(Some(expected), len, unit, tag).await
+    ) -> Result<IntegrityToken, Error> {
+        crate::AtomicBlob::rewind_integrity(&self.inner, expected, len, unit, tag).await
+    }
+}
+
+impl crate::Blob for Blob {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        if self.atomic.is_some() {
+            let atomic = AtomicBlob::from_legacy(self.clone());
+            let future: BoxedFuture<'_, Result<IoBufsMut, Error>> =
+                Box::pin(async move { crate::Blob::read_at(&atomic, offset, len).await });
+            return future.await;
+        }
+        self.read_at_buf_v1(offset, len, self.pool.alloc(len).into())
+            .await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        if self.atomic.is_some() {
+            let atomic = AtomicBlob::from_legacy(self.clone());
+            let future: BoxedFuture<'_, Result<IoBufsMut, Error>> =
+                Box::pin(async move { crate::Blob::read_at_buf(&atomic, offset, len, bufs).await });
+            return future.await;
+        }
+        self.read_at_buf_v1(offset, len, bufs.into()).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        if self.atomic.is_some() {
+            let atomic = AtomicBlob::from_legacy(self.clone());
+            let future: BoxedFuture<'_, Result<(), Error>> =
+                Box::pin(
+                    async move { crate::Blob::write_at(&atomic, offset, bufs, options).await },
+                );
+            return future.await;
+        }
+        self.write_at_v1(offset, bufs.into(), options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        if self.atomic.is_some() {
+            let atomic = AtomicBlob::from_legacy(self.clone());
+            let future: BoxedFuture<'_, Result<(), Error>> =
+                Box::pin(async move { crate::Blob::resize(&atomic, len).await });
+            return future.await;
+        }
+        self.resize_v1(len)
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        if self.atomic.is_some() {
+            let atomic = AtomicBlob::from_legacy(self.clone());
+            let future: BoxedFuture<'_, Result<(), Error>> =
+                Box::pin(async move { crate::Blob::sync(&atomic).await });
+            return future.await;
+        }
+        self.sync_v1().await
+    }
+
+    // The outer future creates the awaitable handle returned by this API.
+    #[allow(clippy::async_yields_async)]
+    async fn start_sync(&self) -> Handle<()> {
+        if self.atomic.is_some() {
+            let atomic = AtomicBlob::from_legacy(self.clone());
+            let future: BoxedFuture<'_, Handle<()>> =
+                Box::pin(async move { crate::Blob::start_sync(&atomic).await });
+            return future.await;
+        }
+        self.start_sync_v1().await
     }
 }
 
@@ -2548,8 +2115,8 @@ impl crate::AtomicBlob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        AtomicBlob as _, AtomicStorage as _, BatchStorage as _, Blob as _, BufferPool,
-        BufferPoolConfig, IoBuf, IoBufMut, Storage as _,
+        AtomicBlob as _, AtomicStorage as _, BatchStorage as _, BufferPool, BufferPoolConfig,
+        IoBuf, IoBufMut, Storage as _,
         storage::{
             Layout,
             tests::{
@@ -2560,6 +2127,7 @@ mod tests {
         telemetry::metrics::Registry,
         utils::thread,
     };
+    use futures::{pin_mut, poll};
     use std::{
         env,
         ffi::OsString,
@@ -2805,7 +2373,7 @@ mod tests {
 
         let atomic = blob.atomic.as_ref().unwrap();
         let target = {
-            let state = lock_v2(atomic).await;
+            let state = atomic.lock().await;
             state.preflush_target()
         };
         assert!(atomic.preflush().requested() >= target);
@@ -2851,7 +2419,7 @@ mod tests {
 
         let atomic = blob.atomic.as_ref().unwrap();
         let target = {
-            let state = lock_v2(atomic).await;
+            let state = atomic.lock().await;
             state.preflush_target()
         };
         atomic.preflush().wait(target).await.unwrap();
@@ -2864,7 +2432,7 @@ mod tests {
 
         blob.append(vec![0xa5; payload_len]).await.unwrap();
         let replacement_target = {
-            let state = lock_v2(atomic).await;
+            let state = atomic.lock().await;
             state.preflush_target()
         };
         assert_eq!(
@@ -2985,25 +2553,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dropped_atomic_operation_guard_poisons_generation() {
+    async fn test_dropped_batch_state_guard_poisons_generation() {
         let (storage, storage_directory) = create_test_storage();
         let (blob, _) = storage.open_atomic("atomic", b"canceled").await.unwrap();
         let state = blob.atomic.as_ref().unwrap().lock().await;
 
-        drop(V2OperationGuard::new(state));
+        drop(ArmedBatchState::new(state));
 
         assert!(blob.atomic.as_ref().unwrap().lock().await.is_poisoned());
         let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     #[tokio::test]
-    async fn test_canceled_atomic_append_before_admission_does_not_poison() {
+    async fn test_canceled_atomic_append_after_backing_admission_blocks_reopen() {
         let (storage, storage_directory) = create_test_storage();
-        let (mut blob, _) = storage.open_atomic("atomic", b"queued").await.unwrap();
-        let state = blob.atomic.as_ref().unwrap().clone();
+        let (opened, _) = storage.open_atomic("atomic", b"queued").await.unwrap();
 
-        // Leave a size-one submission channel full so the append cannot be admitted until the
-        // loop starts below.
+        // Keep the loop stopped so an admitted write remains queued after its observer is dropped.
         let mut registry = Registry::default();
         let (submitter, io_loop) = iouring::IoUringLoop::new(
             iouring::Config {
@@ -3012,34 +2578,32 @@ mod tests {
             },
             &mut registry.sub_registry("blocked_iouring"),
         );
-        let blocker = submitter.start_sync(blob.file.clone()).await;
-        blob.io_handle = submitter.clone();
+        let mut legacy = (*opened).clone();
+        legacy.io_handle = submitter.clone();
+        let state = Arc::downgrade(legacy.atomic.as_ref().unwrap());
+        let generation = Arc::downgrade(&legacy.generation);
+        let queued = AtomicBlob::from_legacy(legacy);
+        drop(opened);
 
-        let append = tokio::spawn({
-            let blob = blob.clone();
-            async move { blob.append(b"data").await }
-        });
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
+        {
+            let append = queued.append(b"data");
+            pin_mut!(append);
+            assert!(poll!(append.as_mut()).is_pending());
         }
-        append.abort();
-        assert!(append.await.unwrap_err().is_cancelled());
+        drop(queued);
 
-        // Draining the blocker admits any self-driving mutation that survived caller
-        // cancellation. Once it completes, the generation must remain healthy.
-        let loop_thread = std::thread::spawn(move || io_loop.run());
-        blocker.await.unwrap().unwrap();
-        let state_guard = tokio::time::timeout(Duration::from_secs(5), state.lock())
-            .await
-            .expect("atomic mutation should release its state lock");
-        assert!(!state_guard.is_poisoned());
-        assert_eq!(state_guard.logical_len(), 4);
-        drop(state_guard);
-        assert_eq!(blob.read_at(0, 4).await.unwrap().coalesce(), b"data");
+        assert!(state.upgrade().is_some());
+        assert!(generation.upgrade().is_some());
+        assert!(matches!(
+            storage.open_atomic("atomic", b"queued").await,
+            Err(Error::BlobCorrupt(_, _, reason)) if reason.contains("poisoned")
+        ));
 
-        drop(blob);
         drop(submitter);
+        let loop_thread = std::thread::spawn(move || io_loop.run());
         loop_thread.join().unwrap();
+        assert!(state.upgrade().is_none());
+        assert!(generation.upgrade().is_none());
         let _ = std::fs::remove_dir_all(storage_directory);
     }
 

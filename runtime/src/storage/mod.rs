@@ -61,14 +61,18 @@ stability_scope!(BETA {
     pub(crate) const ATOMIC_BLOB_TAG_LEN: usize = 64;
     pub mod metered;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(
+        any(target_arch = "wasm32", commonware_stability_BETA),
+        allow(dead_code)
+    )]
     pub(crate) mod atomic;
     pub(crate) mod batch;
     #[cfg(not(target_arch = "wasm32"))]
     mod generation;
     mod header;
-    #[cfg(not(target_arch = "wasm32"))]
     mod preflush;
+    #[cfg_attr(commonware_stability_BETA, allow(dead_code))]
+    mod uno;
     pub(crate) use header::{Header, Layout};
 
     /// Validate that a partition name contains only allowed characters.
@@ -140,8 +144,8 @@ pub(crate) mod tests {
     /// Runs the batch-specific suite on an opt-in storage implementation.
     pub(crate) async fn run_batch_storage_tests<S>(storage: S)
     where
-        S: BatchStorage<AtomicBlob = <S as Storage>::Blob> + Send + Sync + 'static,
-        <S as Storage>::Blob: AtomicBlob + Send + Sync,
+        S: BatchStorage + Send + Sync + 'static,
+        S::AtomicBlob: AtomicBlob + Send + Sync,
     {
         test_start_apply_is_self_driving(&storage).await;
         test_apply_batch_deduplication(&storage).await;
@@ -153,7 +157,6 @@ pub(crate) mod tests {
         test_apply_batch_carries_consecutive_publications(&storage).await;
         test_apply_batch_carries_disjoint_publications(&storage).await;
         test_direct_sync_transitions_to_and_from_a_group(&storage).await;
-        test_apply_batch_rejects_non_atomic_handle(&storage).await;
         test_apply_batch_validates_atomically(&storage).await;
         test_apply_batch_validates_all_rewinds_before_mutating(&storage).await;
         test_apply_batch_conflicts_are_atomic(&storage).await;
@@ -447,12 +450,11 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(len, expected.len() as u64 + 4);
         assert_eq!(version, VERSION);
+        ordinary
+            .write_at(expected.len() as u64 + 4, b"!", WriteOptions::default())
+            .await
+            .unwrap();
         storage.migrate_atomic(ordinary).await.unwrap();
-        assert_eq!(
-            atomic.append(b"!").await.unwrap(),
-            expected.len() as u64 + 4
-        );
-        atomic.sync().await.unwrap();
         drop(atomic);
         let (atomic, len, version) = storage
             .open_atomic_versioned("migrate_atomic", b"blob", VERSION..=VERSION)
@@ -1145,8 +1147,8 @@ pub(crate) mod tests {
     /// Direct one-participant publication can replace and be replaced by a larger group.
     async fn test_direct_sync_transitions_to_and_from_a_group<S>(storage: &S)
     where
-        S: BatchStorage<AtomicBlob = <S as Storage>::Blob> + Send + Sync,
-        <S as Storage>::Blob: AtomicBlob + Send + Sync,
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: AtomicBlob + Send + Sync,
     {
         let (first, _) = storage
             .open_atomic("batch_direct_transition", b"first")
@@ -1186,52 +1188,6 @@ pub(crate) mod tests {
         assert_eq!(second_len, 2);
         assert_eq!(first.read_at(0, 6).await.unwrap().coalesce(), b"a0a1a2");
         assert_eq!(second.read_at(0, 2).await.unwrap().coalesce(), b"b1");
-    }
-
-    /// An ordinary handle rejects the batch before a valid atomic publication is applied.
-    async fn test_apply_batch_rejects_non_atomic_handle<S>(storage: &S)
-    where
-        S: BatchStorage<AtomicBlob = <S as Storage>::Blob> + Send + Sync,
-        <S as Storage>::Blob: AtomicBlob + Send + Sync,
-    {
-        let (published, _) = storage
-            .open_atomic("batch_non_atomic", b"published")
-            .await
-            .unwrap();
-        published.append(b"pending").await.unwrap();
-        let (ordinary, _) = storage.open("batch_non_atomic", b"ordinary").await.unwrap();
-        ordinary
-            .write_at(0, b"ordinary", WriteOptions::SYNC)
-            .await
-            .unwrap();
-
-        let result = storage
-            .apply(vec![
-                BatchOperation::Publish(published.clone()),
-                BatchOperation::Remove(ordinary.clone()),
-            ])
-            .await;
-        assert!(matches!(result, Err(crate::Error::BlobOpenFailed(..))));
-        assert_eq!(
-            published.read_at(0, 7).await.unwrap().coalesce(),
-            b"pending"
-        );
-        assert_eq!(
-            ordinary.read_at(0, 8).await.unwrap().coalesce(),
-            b"ordinary"
-        );
-        assert_eq!(
-            storage.scan("batch_non_atomic").await.unwrap(),
-            vec![b"ordinary".to_vec(), b"published".to_vec()]
-        );
-
-        drop(published);
-        let (published, len) = storage
-            .open_atomic("batch_non_atomic", b"published")
-            .await
-            .unwrap();
-        assert_eq!(len, 0);
-        assert!(published.read_at(0, 1).await.is_err());
     }
 
     /// A bad late operation rejects the entire batch before an exact removal is applied.

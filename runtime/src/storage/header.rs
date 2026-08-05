@@ -403,6 +403,7 @@ stability_scope!(BETA {
         /// Creates the zero-padded V2 header region for a new atomic blob using the latest version
         /// from the range. As with [Header::create], callers must truncate an existing file before
         /// writing the returned region.
+        #[cfg(not(target_arch = "wasm32"))]
         pub(crate) fn create_atomic(versions: &RangeInclusive<u16>) -> (Vec<u8>, u16) {
             let layout = Layout::V2;
             let blob_version = *versions.end();

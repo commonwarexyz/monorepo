@@ -1,12 +1,12 @@
 //! Append-only storage for epoch-atomic blobs.
 //!
-//! Payload bytes are written once into caller-delimited integrity units. Every completed unit is
-//! followed by one CRC32C footer; the selected root carries the start and rolling CRC32C of the
-//! only unfinished unit. Page caches can close fixed-size units while record stores close one unit
-//! per value. Appends may accumulate until a sync publishes a new encoded length. Rewinding
-//! unpublished appends may reuse their tail immediately. Rewinding committed bytes fences further
-//! appends until the shorter length is durably published, after which the file is truncated in
-//! place.
+//! Payload bytes are written once at their final offsets. Integrity-aware appends organize them
+//! into caller-delimited units: every completed unit is followed by one CRC32C footer, while the
+//! selected root carries the start and rolling CRC32C of the only unfinished unit. Page caches can
+//! close fixed-size units while record stores close one unit per value. Appends may accumulate
+//! until a sync publishes a new encoded length. Rewinding unpublished appends may reuse their tail
+//! immediately. Rewinding committed bytes fences further appends until the shorter length is
+//! durably published, after which the backing blob is truncated in place.
 //!
 //! Recovery reads two fixed, self-contained roots. An unresolved speculative batch may
 //! additionally checksum a bounded appended suffix, but never scans historical payload.
@@ -15,22 +15,21 @@
 //! under CRC32C. Thus a crash may retain any subset of later unsynchronized writes without making
 //! a partially written epoch visible.
 //!
-//! # V2 root slots
+//! # UNO root slots
 //!
-//! A V2 file reserves one immutable header page followed by one 4 KiB root page split into two
-//! 2 KiB slots. Root generation parity selects the slot, so publishing a generation never
-//! overwrites its immediate fallback. Payload begins after the root page.
+//! UNO retains the protocol's virtual V2 coordinates: one virtual 4 KiB envelope header, followed
+//! by one 4 KiB root page split into two 2 KiB slots, followed by payload. Root generation parity
+//! selects the slot, so publishing a generation never overwrites its immediate fallback.
+//!
+//! The runtime-neutral wrapper maps that protocol onto an ordinary V1-geometry [`crate::Blob`].
+//! The virtual header is outside the backing blob's logical view, so roots occupy backing offsets
+//! 0 and 2 KiB and payload starts at backing offset 4 KiB. Reads, writes, resizes, and durability
+//! barriers all pass through the backing [`crate::Blob`]; filesystem implementations retain only a
+//! narrow typed envelope for kind, incarnation, and namespace recovery.
 //!
 //! ```text
-//! +----------------------+ offset 0
-//! | immutable V2 header  | 4 KiB
-//! +----------------------+ offset 4 KiB
-//! | root slot 0          | 2 KiB
-//! +----------------------+ offset 6 KiB
-//! | root slot 1          | 2 KiB
-//! +----------------------+ offset 8 KiB
-//! | payload log          |
-//! +----------------------+
+//! protocol:  [virtual header 4 KiB][root 0 2 KiB][root 1 2 KiB][payload ...]
+//! backing:                         [root 0 2 KiB][root 1 2 KiB][payload ...]
 //! ```
 //!
 //! The two logical slots share one physical page, so the crash model covers arbitrary subsets of
@@ -57,22 +56,25 @@
 //! recovery protocol and its crash outcomes are documented in `storage::batch::coordinator`.
 
 use crate::{
-    IntegrityBoundary, IntegrityScheme, IntegrityToken, IntegrityUnit, IoBuf, IoBufs,
+    IoBuf, IoBufs,
+    atomic_api::{IntegrityBoundary, IntegrityScheme, IntegrityToken, IntegrityUnit},
     storage::ATOMIC_BLOB_TAG_LEN,
 };
-commonware_macros::stability_scope!(ALPHA {
+commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::storage::{Header, Layout};
     use std::os::unix::fs::MetadataExt as _;
 });
 use commonware_cryptography::{Crc32, Hasher as _};
+#[cfg(not(target_arch = "wasm32"))]
 use commonware_formatting::hex;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd as _;
+use std::{io, ops::Range};
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::{self, Seek as _, SeekFrom, Write as _},
-    ops::Range,
+    io::{Seek as _, SeekFrom, Write as _},
     os::unix::fs::FileExt,
     path::Path,
 };
@@ -903,7 +905,7 @@ mod tests {
 
     #[test]
     fn recovery_rejects_noncanonical_integrity_roots() {
-        let (path, file) = test_file();
+        let (path, _file) = test_file();
         let valid = Root {
             generation: 1,
             logical_len: 11,
@@ -914,7 +916,6 @@ mod tests {
         };
         assert!(
             recover_root(
-                &file,
                 DATA_OFFSET,
                 DATA_OFFSET + valid.logical_len,
                 ROOT_OFFSETS[1],
@@ -951,7 +952,6 @@ mod tests {
         ] {
             assert!(
                 recover_root(
-                    &file,
                     DATA_OFFSET,
                     DATA_OFFSET + invalid.logical_len,
                     ROOT_OFFSETS[1],
@@ -1214,6 +1214,7 @@ const LEGACY_ROOT_MAGICS: [[u8; 8]; 10] = [
     *b"CWUNOM12",
     *b"CWUNOT12",
 ];
+#[cfg(not(target_arch = "wasm32"))]
 const CREATION_PREFIX: &str = ".commonware-uno-create-";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_LOG_ROOT";
 const BATCH_WITNESS_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_BATCH_WITNESS";
@@ -1225,7 +1226,7 @@ const ROOT_SLOT_LEN: u64 = 2048;
 const BATCH_WITNESS_HEADER_LEN: usize = 16;
 pub(super) const MAX_BATCH_WITNESS_LEN: usize =
     ROOT_SLOT_LEN as usize - ROOT_LEN - BATCH_WITNESS_HEADER_LEN;
-const ROOT_OFFSETS: [u64; 2] = [4096, 6144];
+pub(super) const ROOT_OFFSETS: [u64; 2] = [4096, 6144];
 pub(super) const MAX_VALIDATED_PAYLOAD_LEN: u64 = 64 * 1024 * 1024;
 const TARGET_PREFLUSH_PARTICIPANTS: u64 = 4;
 /// Bound the aggregate unflushed tail for the common four-participant group. Larger groups enforce
@@ -1235,8 +1236,9 @@ pub(super) const BACKGROUND_PREFLUSH_INTERVAL: u64 =
 const PAYLOAD_CHECKSUM_READ_LEN: usize = 64 * 1024;
 const INTEGRITY_CHECKSUM_LEN: usize = std::mem::size_of::<u32>();
 #[commonware_macros::stability(ALPHA)]
+#[cfg(not(target_arch = "wasm32"))]
 const MIGRATION_COPY_LEN: usize = 1024 * 1024;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "iouring-storage"))]
 const MIN_WRITEBACK_HINT_LEN: u64 = 64 * 1024;
 /// Checksum of one physically contiguous payload range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1254,7 +1256,7 @@ pub(super) enum PayloadChecksumEligibility {
     Ineligible,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct PayloadChecksumTracker {
     offset: u64,
     len: u64,
@@ -1272,24 +1274,41 @@ impl PayloadChecksumTracker {
         }
     }
 
-    fn update(&mut self, physical: u64, data_len: u64, checksum: &Crc32) {
+    fn extend(&mut self, physical: u64, data_len: u64) -> Option<bool> {
         if !self.eligible {
-            return;
+            return None;
         }
         if self.offset.checked_add(self.len) != Some(physical) {
             self.eligible = false;
-            return;
+            return None;
         }
         let Some(next_len) = self.len.checked_add(data_len) else {
             self.eligible = false;
-            return;
+            return None;
         };
         if next_len > MAX_VALIDATED_PAYLOAD_LEN {
             self.eligible = false;
-            return;
+            return None;
         }
-        self.hasher.combine(checksum);
+        let was_empty = self.len == 0;
         self.len = next_len;
+        Some(was_empty)
+    }
+
+    fn update_bytes(&mut self, physical: u64, data: &[u8]) {
+        if self.extend(physical, data.len() as u64).is_some() {
+            self.hasher.update(data);
+        }
+    }
+
+    fn update_part(&mut self, physical: u64, data: &IoBufs, checksum: &Crc32) {
+        match self.extend(physical, data.len() as u64) {
+            Some(true) => self.hasher = checksum.clone(),
+            Some(false) => data.for_each_chunk(|chunk| {
+                self.hasher.update(chunk);
+            }),
+            None => {}
+        }
     }
 }
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -1332,6 +1351,7 @@ fn checksum(parts: &[&[u8]]) -> u32 {
     hasher.finalize().1.as_u32()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_exact_at(file: &File, mut offset: u64, mut out: &mut [u8]) -> io::Result<()> {
     while !out.is_empty() {
         let read = match file.read_at(out, offset) {
@@ -1378,7 +1398,7 @@ pub(super) fn track_durable_writes<T>(operation: impl FnOnce() -> T) -> (T, Vec<
 }
 
 /// Start Linux writeback for the current payload while its root is built.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "iouring-storage"))]
 pub(super) fn begin_payload_writeback(file: &File, offset: u64, len: u64) -> io::Result<()> {
     // The syscall is only a scheduling hint. For small epochs its fixed cost exceeds any overlap
     // with root construction; the following inode sync remains the ordering barrier either way.
@@ -1407,15 +1427,6 @@ pub(super) fn begin_payload_writeback(file: &File, offset: u64, len: u64) -> io:
     Err(error)
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(super) const fn begin_payload_writeback(
-    _file: &File,
-    _offset: u64,
-    _len: u64,
-) -> io::Result<()> {
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReadSource {
     File(u64),
@@ -1436,6 +1447,7 @@ pub(super) struct Mutation {
     integrity_start: u64,
     integrity_checksum: Crc32,
     integrity_scheme: IntegrityScheme,
+    payload_checksum: PayloadChecksumTracker,
 }
 
 pub(super) struct PreparedMutation {
@@ -1655,6 +1667,7 @@ impl State {
         }
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), test))]
     pub(super) fn recover(file: &File, data_offset: u64) -> io::Result<Self> {
         if data_offset < ROOT_OFFSETS[1] + ROOT_SLOT_LEN {
             return Err(invalid_input(
@@ -1666,14 +1679,44 @@ impl State {
             return Err(invalid_data("atomic blob is shorter than its V2 header"));
         }
 
+        let mut slots = [[0u8; ROOT_LEN]; ROOT_OFFSETS.len()];
+        for (slot, offset) in slots.iter_mut().zip(ROOT_OFFSETS) {
+            read_exact_at(file, offset, slot)?;
+        }
+        let (state, truncate_to) = Self::recover_from_root_slots(data_offset, raw_len, &slots)?;
+        if let Some(selected_len) = truncate_to {
+            // The selected root is the durable authority. A crash may lose this truncate, but the
+            // same root makes recovery repeat it before any discarded offset can be reused.
+            file.set_len(selected_len)?;
+        }
+        Ok(state)
+    }
+
+    /// Recover from the two fixed root headers already read from a backing blob.
+    ///
+    /// `raw_len` and `data_offset` use the protocol's virtual file coordinates. The generic V1
+    /// envelope presents a virtual immutable-header prefix, so these coordinates remain identical
+    /// to the native filesystem layout without exposing that header through [`crate::Blob`].
+    pub(super) fn recover_from_root_slots(
+        data_offset: u64,
+        raw_len: u64,
+        slots: &[[u8; ROOT_LEN]; ROOT_OFFSETS.len()],
+    ) -> io::Result<(Self, Option<u64>)> {
+        if data_offset < ROOT_OFFSETS[1] + ROOT_SLOT_LEN {
+            return Err(invalid_input(
+                "V2 data offset does not reserve both root slots",
+            ));
+        }
+        if raw_len < data_offset {
+            return Err(invalid_data("atomic blob is shorter than its V2 header"));
+        }
+
         let mut roots = Vec::new();
         let mut recovery_error = None;
         let mut invalid_root_slot = false;
         let mut slot_zero = [false; ROOT_OFFSETS.len()];
         let mut observed_later_generation = false;
-        for (index, offset) in ROOT_OFFSETS.into_iter().enumerate() {
-            let mut encoded = [0u8; ROOT_LEN];
-            read_exact_at(file, offset, &mut encoded)?;
+        for (index, (&encoded, offset)) in slots.iter().zip(ROOT_OFFSETS).enumerate() {
             if encoded.iter().all(|byte| *byte == 0) {
                 slot_zero[index] = true;
                 continue;
@@ -1700,7 +1743,7 @@ impl State {
 
         let mut recovered = None;
         for (root, root_offset) in roots {
-            match recover_root(file, data_offset, raw_len, root_offset, root) {
+            match recover_root(data_offset, raw_len, root_offset, root) {
                 Ok((candidate, _)) => {
                     recovered = Some(candidate);
                     break;
@@ -1722,13 +1765,8 @@ impl State {
             }
         };
         let selected_len = state.raw_len()?;
-        if raw_len != selected_len {
-            // The selected root is the durable authority. A crash may lose this truncate, but the
-            // same root makes recovery repeat it before any discarded offset can be reused.
-            file.set_len(selected_len)?;
-        }
         state.dirty = false;
-        Ok(state)
+        Ok((state, (raw_len != selected_len).then_some(selected_len)))
     }
 
     pub(super) fn raw_len(&self) -> io::Result<u64> {
@@ -1848,6 +1886,7 @@ impl State {
     /// Return whether batch preparation can finish without waiting for payload durability.
     #[commonware_macros::stability(ALPHA)]
     #[cfg(any(not(feature = "iouring-storage"), test))]
+    #[cfg(test)]
     pub(super) fn can_prepare_batch_inline(&self, payload_budget: u64) -> io::Result<bool> {
         if self.poisoned || self.logical_len < self.committed_len || self.preflush_requested()? {
             return Ok(false);
@@ -1965,6 +2004,7 @@ impl State {
         let mut logical_cursor = logical_start;
         let mut integrity_start = self.integrity_start;
         let mut integrity_checksum = self.integrity_checksum.clone();
+        let mut payload_checksum = self.payload_checksum.clone();
         let mut result_offset = None;
         let mut parts = Vec::new();
         let mut footer_bytes = Vec::new();
@@ -2008,13 +2048,7 @@ impl State {
             let footer = integrity_checksum.value().to_be_bytes();
             let footer_offset = footer_bytes.len();
             footer_bytes.extend_from_slice(&footer);
-            let mut footer_checksum = Crc32::default();
-            footer_checksum.update(&footer);
-            payload_checksum.update(
-                *physical_cursor,
-                INTEGRITY_CHECKSUM_LEN as u64,
-                &footer_checksum,
-            );
+            payload_checksum.update_bytes(*physical_cursor, &footer);
             *physical_cursor = checked_end(*physical_cursor, INTEGRITY_CHECKSUM_LEN as u64)?;
             *logical_cursor = checked_end(*logical_cursor, INTEGRITY_CHECKSUM_LEN as u64)?;
             *integrity_start = *logical_cursor;
@@ -2032,7 +2066,7 @@ impl State {
                     &mut integrity_checksum,
                     &mut logical_cursor,
                     &mut physical_cursor,
-                    &mut self.payload_checksum,
+                    &mut payload_checksum,
                 )?;
             }
             let available = chunk_size
@@ -2043,15 +2077,23 @@ impl State {
                 .min(usize::try_from(available).unwrap_or(usize::MAX));
             debug_assert_ne!(take, 0);
             let part = data.split_to(take);
+            let physical_end = checked_end(physical_cursor, take as u64)?;
             let mut part_checksum = Crc32::default();
             part.for_each_chunk(|chunk| {
                 part_checksum.update(chunk);
             });
-            integrity_checksum.combine(&part_checksum);
+            // Reuse the first checksum when a stream is empty. Extending an existing stream visits
+            // the bytes again because combining every small unit is substantially more expensive.
+            if logical_cursor == integrity_start {
+                integrity_checksum = part_checksum.clone();
+            } else {
+                part.for_each_chunk(|chunk| {
+                    integrity_checksum.update(chunk);
+                });
+            }
+            payload_checksum.update_part(physical_cursor, &part, &part_checksum);
             result_offset.get_or_insert(logical_cursor);
-            self.payload_checksum
-                .update(physical_cursor, take as u64, &part_checksum);
-            physical_cursor = checked_end(physical_cursor, take as u64)?;
+            physical_cursor = physical_end;
             logical_cursor = checked_end(logical_cursor, take as u64)?;
             parts.push((part, None));
 
@@ -2063,7 +2105,7 @@ impl State {
                     &mut integrity_checksum,
                     &mut logical_cursor,
                     &mut physical_cursor,
-                    &mut self.payload_checksum,
+                    &mut payload_checksum,
                 )?;
             }
         }
@@ -2076,7 +2118,7 @@ impl State {
                 &mut integrity_checksum,
                 &mut logical_cursor,
                 &mut physical_cursor,
-                &mut self.payload_checksum,
+                &mut payload_checksum,
             )?;
         }
 
@@ -2103,6 +2145,7 @@ impl State {
                 integrity_start,
                 integrity_checksum,
                 integrity_scheme,
+                payload_checksum,
             },
         }))
     }
@@ -2119,6 +2162,7 @@ impl State {
         self.integrity_start = mutation.integrity_start;
         self.integrity_checksum = mutation.integrity_checksum;
         self.integrity_scheme = mutation.integrity_scheme;
+        self.payload_checksum = mutation.payload_checksum;
         self.advance_revision();
         self.dirty = true;
         if !schedule_preflush {
@@ -2178,7 +2222,7 @@ impl State {
                         let encoded_unit = u64::from(size.get())
                             .checked_add(INTEGRITY_CHECKSUM_LEN as u64)
                             .ok_or_else(|| invalid_input("atomic integrity unit overflows u64"))?;
-                        len % encoded_unit == 0
+                        len.is_multiple_of(encoded_unit)
                     }
                     IntegrityScheme::Unbound | IntegrityScheme::Variable => false,
                 };
@@ -2567,6 +2611,7 @@ fn decode_batch_witness(slot: &[u8]) -> Option<(usize, &[u8])> {
     (stored_checksum == expected_checksum).then_some((witness_offset, witness))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_root_slot(
     file: &File,
     root_offset: u64,
@@ -2687,6 +2732,7 @@ fn candidate_root_is_delete_transition(installed: &[u8; ROOT_LEN], candidate: &C
         )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn embedded_batch_candidates_with_materialized(
     file: &File,
     data_offset: u64,
@@ -2772,6 +2818,7 @@ fn embedded_batch_candidates_with_materialized(
 }
 
 /// Discover intact embedded witnesses even when their root header was torn during installation.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn embedded_batch_witnesses(
     file: &File,
     data_offset: u64,
@@ -2808,6 +2855,7 @@ pub(crate) fn embedded_batch_witnesses(
 ///
 /// Unresolved-candidate selection ignores these stale witnesses. A separate transfer pass uses
 /// them to make dependent peers independently recoverable before this witness is reused or removed.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn materialized_batch_candidates(
     file: &File,
     data_offset: u64,
@@ -2832,6 +2880,7 @@ pub(crate) fn materialized_batch_candidates(
 }
 
 /// Verify that an exact witness remains beside a known batch candidate's root transition.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn candidate_has_embedded_batch_witness(
     file: &File,
     candidate: &Candidate,
@@ -2886,6 +2935,7 @@ pub(crate) fn candidate_has_embedded_batch_witness(
 }
 
 /// Return whether a candidate's exact committed header is installed in its generation slot.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn candidate_is_committed(file: &File, candidate: &Candidate) -> io::Result<bool> {
     let Some(prepared) = decode_prepared_root(&candidate.prepared_root) else {
         return Ok(false);
@@ -2907,6 +2957,7 @@ pub(crate) fn candidate_is_committed(file: &File, candidate: &Candidate) -> io::
 
 /// Return whether a batch candidate's exact materialized header is installed.
 #[cfg_attr(not(test), allow(dead_code))]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn candidate_is_materialized(file: &File, candidate: &Candidate) -> io::Result<bool> {
     let Some(materialized_root) = candidate_materialized_root(candidate) else {
         return Ok(false);
@@ -2921,6 +2972,7 @@ pub(crate) fn candidate_is_materialized(file: &File, candidate: &Candidate) -> i
 }
 
 /// Return whether a batch candidate's exact independently recoverable tombstone is installed.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn candidate_is_tombstoned(file: &File, candidate: &Candidate) -> io::Result<bool> {
     let Some(tombstone_root) = candidate_tombstone_root(candidate) else {
         return Ok(false);
@@ -2935,6 +2987,7 @@ pub(crate) fn candidate_is_tombstoned(file: &File, candidate: &Candidate) -> io:
 }
 
 /// Validate and durably publish a batch candidate as independently recoverable.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn materialize_candidate(
     file: &File,
     data_offset: u64,
@@ -2948,6 +3001,7 @@ pub(crate) fn materialize_candidate(
 }
 
 /// Validate and durably replace a prepared candidate with a payload-preserving tombstone.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn materialize_tombstone_candidate(
     file: &File,
     data_offset: u64,
@@ -2972,7 +3026,6 @@ pub(crate) fn materialize_tombstone_candidate(
 }
 
 fn recover_root(
-    _file: &File,
     data_offset: u64,
     raw_len: u64,
     root_offset: u64,
@@ -3005,7 +3058,7 @@ fn recover_root(
         IntegrityScheme::Chunked(size) => {
             let data_len = u64::from(size.get());
             let encoded_len = data_len + INTEGRITY_CHECKSUM_LEN as u64;
-            if root.integrity_start % encoded_len != 0 {
+            if !root.integrity_start.is_multiple_of(encoded_len) {
                 return Err(invalid_data(
                     "atomic fixed integrity prefix is not unit-aligned",
                 ));
@@ -3040,6 +3093,7 @@ fn recover_root(
 }
 
 /// Write a small publication record and make that write durable before returning.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     let tracked_write = (offset, bytes.len());
@@ -3105,6 +3159,7 @@ pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Re
 /// A prepared root is deliberately invisible to ordinary blob recovery. An exact durable batch
 /// witness supplies the prepared and committed headers, allowing validation to accept any
 /// bytewise prefix-independent transition between those headers.
+#[cfg(not(target_arch = "wasm32"))]
 fn validate_candidate_transition(
     file: &File,
     data_offset: u64,
@@ -3142,10 +3197,11 @@ fn validate_candidate_transition(
         ));
     }
 
-    let (_, metadata) = recover_root(file, data_offset, raw_len, candidate.root_offset, committed)?;
+    let (_, metadata) = recover_root(data_offset, raw_len, candidate.root_offset, committed)?;
     Ok(metadata)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn validate_candidate(
     file: &File,
     data_offset: u64,
@@ -3154,6 +3210,7 @@ pub(super) fn validate_candidate(
     validate_candidate_transition(file, data_offset, candidate, false)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn validate_delete_candidate(
     file: &File,
     data_offset: u64,
@@ -3163,6 +3220,7 @@ pub(super) fn validate_delete_candidate(
 }
 
 /// Verify a bounded speculative payload suffix without publishing its candidate root.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn validate_payload_checksum(
     file: &File,
     data_offset: u64,
@@ -3220,6 +3278,7 @@ pub(super) fn validate_payload_checksum(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn creation_path(live_path: &Path) -> io::Result<std::path::PathBuf> {
     let file_name = live_path
         .file_name()
@@ -3229,6 +3288,7 @@ fn creation_path(live_path: &Path) -> io::Result<std::path::PathBuf> {
     Ok(live_path.with_file_name(staging_name))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn is_creation_file_name(name: &OsStr) -> bool {
     name.as_encoded_bytes()
         .starts_with(CREATION_PREFIX.as_bytes())
@@ -3239,6 +3299,7 @@ pub(super) fn is_creation_file_name(name: &OsStr) -> bool {
 /// The live name is published only after its complete header is durable. A crash can therefore
 /// leave either no live name or a parseable V2 file, without broadening legacy torn-header
 /// recovery to cover the larger V2 header region.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn create_live(
     root: &Path,
     _partition: &str,
@@ -3272,6 +3333,7 @@ pub(super) fn create_live(
 /// An ordinary same-directory rename then publishes the replacement atomically. The caller must
 /// serialize namespace operations and prevent concurrent mutation through other source handles.
 #[commonware_macros::stability(ALPHA)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn migrate_live(
     root: &Path,
     partition: &str,
@@ -3386,6 +3448,7 @@ pub(super) fn migrate_live(
 
 /// Persist a same-directory live-name update after its target inode is durable.
 #[commonware_macros::stability(ALPHA)]
+#[cfg(not(target_arch = "wasm32"))]
 fn sync_live_directories(root: &Path, live_path: &Path) -> io::Result<()> {
     let parent = live_path
         .parent()
@@ -3396,6 +3459,7 @@ fn sync_live_directories(root: &Path, live_path: &Path) -> io::Result<()> {
 }
 
 /// Discard a V2 creation inode left before publication.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn discard(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
     let live_path = root.join(partition).join(hex(name));
     let creation_path = creation_path(&live_path)?;
@@ -3412,6 +3476,7 @@ pub(super) fn discard(root: &Path, partition: &str, name: &[u8]) -> io::Result<(
 }
 
 /// V2 state is contained in the live inode, so partition removal needs no sidecar cleanup.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) const fn discard_partition(_root: &Path, _partition: &str) -> io::Result<()> {
     Ok(())
 }
