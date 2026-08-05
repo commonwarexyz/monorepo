@@ -302,6 +302,7 @@ where
 {
     round: Round,
     phase: CommitmentPhase<B, C, H, P>,
+    proposed: bool,
 }
 
 /// The current lifecycle status of a commitment.
@@ -336,6 +337,7 @@ where
         Self {
             round,
             phase: CommitmentPhase::Reconstructing(reconstruction),
+            proposed: false,
         }
     }
 
@@ -347,6 +349,7 @@ where
                 block,
                 reconstruction: None,
             },
+            proposed: false,
         }
     }
 
@@ -393,6 +396,19 @@ where
             CommitmentPhase::Reconstructing(reconstruction) => Some(reconstruction),
             CommitmentPhase::Cached { reconstruction, .. } => reconstruction.as_mut(),
         }
+    }
+
+    /// Returns whether the local validator can satisfy its assigned-shard obligation.
+    fn is_assigned_shard_ready(&self) -> bool {
+        self.proposed
+            || self
+                .reconstruction()
+                .is_some_and(ReconstructionState::is_assigned_shard_verified)
+    }
+
+    /// Records that the local validator built and cached this commitment.
+    const fn mark_proposed(&mut self) {
+        self.proposed = true;
     }
 
     /// Caches `block` while preserving reconstruction state needed for shard readiness.
@@ -1179,6 +1195,10 @@ where
         // Cache the block so we don't have to reconstruct it again.
         self.cache_block(round, block)
             .expect("local proposal epoch was validated before broadcast");
+        self.records
+            .get_mut(&commitment)
+            .expect("caching a local proposal must create a commitment record")
+            .mark_proposed();
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
         // for "our valid shard arrived" still need a notification.
@@ -1263,24 +1283,11 @@ where
         commitment: Commitment,
         response: oneshot::Sender<()>,
     ) {
-        // Answer immediately if our own shard has been verified.
-        let has_shard = self
-            .records
-            .get(&commitment)
-            .and_then(CommitmentRecord::reconstruction)
-            .is_some_and(|state| state.is_assigned_shard_verified());
-        if has_shard {
-            response.send_lossy(());
-            return;
-        }
-
-        // When there is no reconstruction state but the block is already in
-        // the cache, the local node was the proposer. Proposers trivially
-        // have all shards, so resolve immediately.
+        // Answer immediately if our own shard has been verified or we built the block.
         if self
             .records
             .get(&commitment)
-            .is_some_and(|record| record.reconstruction().is_none() && record.block().is_some())
+            .is_some_and(CommitmentRecord::is_assigned_shard_ready)
         {
             response.send_lossy(());
             return;
@@ -2711,7 +2718,10 @@ mod tests {
                 .mailbox
                 .subscribe_assigned_shard_verified(live_commitment);
             context.sleep(Duration::from_millis(10)).await;
-            assert!(matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)));
+            assert!(
+                matches!(shard_sub.try_recv(), Ok(())),
+                "late subscription should resolve after a local reproposal"
+            );
 
             peer.mailbox.retire(Retirement {
                 round_floor: floor,
@@ -2721,7 +2731,14 @@ mod tests {
 
             assert!(peer.mailbox.get(live_commitment).await.is_some());
             assert!(peer.mailbox.get(state_first_commitment).await.is_some());
-            assert!(matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)));
+            let mut retained_shard_sub = peer
+                .mailbox
+                .subscribe_assigned_shard_verified(live_commitment);
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                matches!(retained_shard_sub.try_recv(), Ok(())),
+                "retained local proposal should resolve a late subscription"
+            );
         });
     }
 
@@ -5496,11 +5513,20 @@ mod tests {
                 let reconstructed = block_sub.await.expect("block subscription should resolve");
                 assert_eq!(reconstructed.commitment(), commitment);
 
-                // Shard subscription must NOT resolve because the leader
-                // never sent the victim its own shard.
+                let mut late_shard_sub = peers[1]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+                context.sleep(Duration::from_millis(10)).await;
+
+                // Neither an existing nor a late shard subscription may resolve because
+                // the leader never sent the victim its own shard.
                 assert!(
                     matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
                     "shard subscription must not resolve without own shard verification"
+                );
+                assert!(
+                    matches!(late_shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "late shard subscription must not resolve from reconstruction alone"
                 );
             },
         );
