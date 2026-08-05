@@ -1179,7 +1179,7 @@ impl Storage {
             .ok_or_else(|| Error::PartitionCreationFailed(partition.into()))?;
 
         #[cfg(unix)]
-        let removed = {
+        {
             let root = self.cfg.storage_directory.clone();
             let recovery_partition = stored_partition.clone();
             let recovery_name = name.to_vec();
@@ -1199,27 +1199,28 @@ impl Storage {
                             name: name.to_vec(),
                         },
                     )]);
+                // The blob is durably removed, but a non-anchor tombstone left by a crash during a
+                // multi-blob deletion keeps its name on disk (only ordinal-zero recovery unlinks
+                // the descending frontier, and there is no global startup scan). Unlink it here so
+                // the create path below produces a fresh generation, rather than reopening it as a
+                // live blob and resurrecting the pre-delete committed root that is retained only
+                // for open handles. Ordinary open uses create_new, which needs an absent name;
+                // create_live (atomic) recreates via rename regardless.
+                if let Err(error) = fs::remove_file(&path).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(Error::BlobOpenFailed(partition.into(), hex(name), error.into()));
+                }
             }
-            removed
-        };
-        #[cfg(not(unix))]
-        let removed = false;
+        }
 
         // Open existing first so stale sidecars are durably discarded before create_new makes a
-        // replacement user name visible. A durably-removed participant whose namespace cleanup was
-        // deferred -- a non-anchor tombstone left by a crash during a multi-blob deletion, whose
-        // name only ordinal-zero recovery can unlink -- must not reopen as a live blob. Treat it as
-        // absent so a fresh generation replaces it (via create_live's rename) rather than
-        // resurrecting the pre-delete committed root that is retained only for open handles.
-        let existing_open = if removed {
-            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
-        } else {
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .await
-        };
+        // replacement user name visible.
+        let existing_open = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .await;
         let (mut file, _new_name) = match existing_open {
             Ok(file) => (file, false),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

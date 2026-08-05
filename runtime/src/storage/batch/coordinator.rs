@@ -2461,11 +2461,10 @@ mod tests {
 
     /// A blob atomically deleted as a non-anchor (ring ordinal != 0) participant of a multi-blob
     /// group must not reopen with its pre-delete contents after a crash that interrupts the
-    /// descending tombstone-unlink phase. The coordinator correctly reports the blob removed, but
-    /// a non-anchor tombstone cannot self-clean (only ordinal zero resumes the frontier) and there
-    /// is no global startup scan, so its name lingers. The open-by-name path then discards the
-    /// `removed` verdict and resolves the lingering tombstone via the committed-root fallback that
-    /// `State::recover` intentionally keeps for already-open handles -- resurrecting the blob.
+    /// descending tombstone-unlink phase. The coordinator reports the blob removed, but a non-anchor
+    /// tombstone cannot self-clean (only ordinal zero resumes the frontier) and there is no global
+    /// startup scan, so its name lingers. Reopening it by name must yield a fresh generation, not
+    /// the committed-root fallback that `State::recover` keeps for already-open handles.
     #[tokio::test]
     async fn nonanchor_tombstone_does_not_resurrect_on_open() {
         use crate::AtomicStorage as _;
@@ -2507,6 +2506,40 @@ mod tests {
             len, 0,
             "deleted non-anchor blob b reopened with its pre-delete contents instead of a fresh \
              empty generation",
+        );
+    }
+
+    /// Same crash scenario as [`nonanchor_tombstone_does_not_resurrect_on_open`], reopened through
+    /// the ordinary (non-atomic) `open`. Its create path uses `create_new`, which requires the
+    /// lingering tombstone name to be unlinked first, so it must recreate a fresh blob rather than
+    /// failing with `AlreadyExists`.
+    #[tokio::test]
+    async fn nonanchor_tombstone_ordinary_open_creates_fresh() {
+        use crate::Storage as _;
+
+        let root = TestRoot::new("nonanchor-tombstone-ordinary-open");
+        let mut blobs = vec![
+            TestBlob::create(root.path(), b"a", 14, b"a-old"),
+            TestBlob::create(root.path(), b"b", 34, b"b-old"),
+            TestBlob::create(root.path(), b"c", 54, b"c-old"),
+        ];
+        let group = stage_group(&mut blobs, &[Role::Delete, Role::Delete, Role::Delete]);
+        group.write_all(&blobs);
+        materialize_decision_participants(root.path(), &group.decision).unwrap();
+        fs::remove_file(&blobs[2].path).unwrap();
+        sync_directory(&root.path().join(PARTITION)).unwrap();
+        drop(blobs);
+
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let storage = crate::storage::tokio::Storage::new(
+            crate::storage::tokio::Config::new(root.path().to_path_buf(), 2 * 1024 * 1024),
+            pool,
+        );
+        let (_blob, len) = storage.open(PARTITION, b"b").await.unwrap();
+        assert_eq!(
+            len, 0,
+            "ordinary open of a removed non-anchor blob must create a fresh generation",
         );
     }
 
