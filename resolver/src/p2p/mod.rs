@@ -56,6 +56,11 @@
 //! consumer should return an ambiguous outcome if the delivered response does not satisfy every
 //! subscriber, allowing the resolver to try another response.
 //!
+//! # Scheduling
+//!
+//! All pending fresh keys are attempted before any pending retries. Fresh keys and retries are
+//! each ordered by their next attempt time.
+//!
 //! # Peer Selection
 //!
 //! Outbound fetches are only sent to peers in `latest.primary` (see [commonware_p2p::Provider]) but inbound
@@ -600,11 +605,14 @@ mod tests {
     /// letting it resolve verdicts synchronously (without a task yield).
     #[derive(Clone)]
     struct HoldingConsumer {
-        deliveries: mpsc::UnboundedSender<(Key, oneshot::Sender<bool>)>,
+        deliveries: mpsc::UnboundedSender<(Key, oneshot::Sender<Outcome>)>,
     }
 
     impl HoldingConsumer {
-        fn new() -> (Self, mpsc::UnboundedReceiver<(Key, oneshot::Sender<bool>)>) {
+        fn new() -> (
+            Self,
+            mpsc::UnboundedReceiver<(Key, oneshot::Sender<Outcome>)>,
+        ) {
             let (deliveries, receiver) = mpsc::unbounded_channel();
             (Self { deliveries }, receiver)
         }
@@ -614,13 +622,13 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = ();
-        type Outcome = bool;
+        type Outcome = Outcome;
 
         fn deliver(
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
             _: Self::Value,
-        ) -> oneshot::Receiver<bool> {
+        ) -> oneshot::Receiver<Outcome> {
             let (sender, receiver) = oneshot::channel();
             self.deliveries.send_lossy((delivery.key, sender));
             receiver
@@ -673,14 +681,14 @@ mod tests {
             // runs, and it must settle the completion first so the re-fetch
             // starts fresh instead of being deduplicated against the
             // completing key and dropped with it.
-            verdict.send_lossy(true);
+            verdict.send_lossy(Outcome::Complete);
             mailbox1.fetch(key.clone());
 
             select! {
                 delivered = deliveries.recv() => {
                     let (second, verdict) = delivered.unwrap();
                     assert_eq!(second, key);
-                    verdict.send_lossy(true);
+                    verdict.send_lossy(Outcome::Complete);
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("re-fetch was dropped with the completed fetch");
@@ -2684,6 +2692,81 @@ mod tests {
             assert_eq!(prod2_observer.remaining(&key), vec![unexpected_refetch]);
             assert!(prod3_observer.remaining(&key).is_empty());
             assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_due_retry_precedes_queued_fresh_request() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers_with_rate_limit(
+                    &context,
+                    &[1, 2],
+                    Quota::per_second(NZU32!(2)),
+                )
+                .await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let retry_key = Key(60);
+            let fresh_key = Key(61);
+
+            let (requester_consumer, mut deliveries) = HoldingConsumer::new();
+            let requester = schemes.remove(0);
+            let requester_key = requester.public_key();
+            let (requester_engine, mut requester_mailbox) = Engine::new(
+                context.child("requester"),
+                Config {
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(requester_key.clone()),
+                    consumer: requester_consumer,
+                    producer: Producer::<Key, Bytes>::default(),
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(requester_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: Duration::ZERO,
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+
+            let mut producer = Producer::default();
+            producer.insert(retry_key.clone(), Bytes::from("retry"));
+            producer.insert(fresh_key.clone(), Bytes::from("fresh"));
+            let responder = schemes.remove(0);
+            let _responder_mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(responder.public_key()),
+                responder,
+                connections.remove(1),
+                dummy_consumer(),
+                producer,
+            );
+
+            requester_engine.start(connections.remove(0));
+            requester_mailbox.fetch(retry_key.clone());
+
+            let (delivered_key, verdict) =
+                deliveries.recv().await.expect("requester consumer closed");
+            assert_eq!(delivered_key, retry_key);
+
+            // Resolving the delivery makes its retry due before the queued
+            // mailbox request is admitted. The two-token quota admits the
+            // retry and holds the fresh request.
+            requester_mailbox.fetch(fresh_key.clone());
+            verdict.send_lossy(Outcome::Ambiguous);
+
+            let (delivered_key, verdict) =
+                deliveries.recv().await.expect("requester consumer closed");
+            assert_eq!(delivered_key, retry_key);
+            verdict.send_lossy(Outcome::Complete);
+
+            let (delivered_key, verdict) =
+                deliveries.recv().await.expect("requester consumer closed");
+            assert_eq!(delivered_key, fresh_key);
+            verdict.send_lossy(Outcome::Complete);
         });
     }
 

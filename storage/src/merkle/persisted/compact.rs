@@ -292,7 +292,7 @@ mod tests {
         ));
 
         // Leaf count beyond the family maximum.
-        let too_many = Location::new(mmr::Family::MAX_LEAVES.as_u64() + 1);
+        let too_many = mmr::Family::MAX_LEAVES + 1;
         assert!(matches!(
             merkle.reset_to(too_many, vec![]),
             Err(Error::LocationOverflow(loc)) if loc == too_many

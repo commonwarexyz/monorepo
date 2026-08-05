@@ -1656,9 +1656,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{
-            coding::types::coding_config_for_participants, mocks::block::Block as MockBlock,
-        },
+        marshal::{coding::types::coding_config_for_participants, mocks::block::EmptyBlock},
         types::{Epoch, Height, View},
     };
     use bytes::Bytes;
@@ -1796,7 +1794,7 @@ mod tests {
     }
 
     // Type aliases for test convenience.
-    type B = MockBlock<Sha256Digest, ()>;
+    type B = EmptyBlock<H>;
     type H = Sha256;
     type P = PublicKey;
     type C = ReedSolomon<H>;
@@ -2034,7 +2032,7 @@ mod tests {
 
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2078,7 +2076,7 @@ mod tests {
 
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, PhasedAsScheme<Zoda<H>>, H>::new(
                     inner,
                     coding_config,
@@ -2126,7 +2124,7 @@ mod tests {
 
         fixture.start(
             |config, context, _, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let digest = coded_block.digest();
@@ -2174,7 +2172,7 @@ mod tests {
         };
 
         fixture.start(|config, context, _, peers, _, coding_config| async move {
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
             let digest = coded_block.digest();
@@ -2230,7 +2228,7 @@ mod tests {
                 // peers[1] = honest proposer
                 // peers[2] = receiver
 
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let receiver_index = peers[2].index.get() as u16;
@@ -2292,17 +2290,17 @@ mod tests {
         fixture.start(|_, context, _, mut peers, _, coding_config| async move {
             // Create 3 blocks at heights 1, 2, 3.
             let block1 = CodedBlock::<B, C, H>::new(
-                B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                 coding_config,
                 &STRATEGY,
             );
             let block2 = CodedBlock::<B, C, H>::new(
-                B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 100),
+                B::new(Sha256Digest::EMPTY, Height::new(2), 100),
                 coding_config,
                 &STRATEGY,
             );
             let block3 = CodedBlock::<B, C, H>::new(
-                B::new::<H>((), Sha256Digest::EMPTY, Height::new(3), 100),
+                B::new(Sha256Digest::EMPTY, Height::new(3), 100),
                 coding_config,
                 &STRATEGY,
             );
@@ -2359,7 +2357,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2408,12 +2406,12 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment = coded_block1.commitment();
 
                 // Create a second block with different payload to get different shard data.
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 2's shard from both blocks.
@@ -2463,7 +2461,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2502,7 +2500,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2548,7 +2546,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2620,7 +2618,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2683,7 +2681,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2739,7 +2737,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -2815,7 +2813,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
 
                 // Get peer 2's shard (from the leader).
@@ -2882,11 +2880,11 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
 
                 // Create a second block with different payload to get different shard data.
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(1), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 1's shard from block 1.
@@ -2951,7 +2949,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Commitment A at lower view (1).
                 let block_a = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                     coding_config,
                     &STRATEGY,
                 );
@@ -2959,7 +2957,7 @@ mod tests {
 
                 // Commitment B at higher view (2), which we will reconstruct.
                 let block_b = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
                     coding_config,
                     &STRATEGY,
                 );
@@ -3047,14 +3045,14 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let block_a = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                     coding_config,
                     &STRATEGY,
                 );
                 let commitment_a = block_a.commitment();
 
                 let block_b = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
                     coding_config,
                     &STRATEGY,
                 );
@@ -3072,7 +3070,7 @@ mod tests {
                 let shard_a = block_a.shard(peer1_index).expect("missing shard");
 
                 let block_a_equivocating = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 300),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 300),
                     coding_config,
                     &STRATEGY,
                 );
@@ -3139,7 +3137,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -3221,7 +3219,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -3304,7 +3302,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -3396,7 +3394,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -3446,7 +3444,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -3544,7 +3542,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
 
                 // Get peer 2's shard.
@@ -3594,11 +3592,11 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Create two different blocks — shard from block2 won't verify
                 // against commitment from block1.
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 2's shard from block2, but re-wrap it with
@@ -3641,7 +3639,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -3695,11 +3693,11 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Create two different blocks.
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 3's leader shard from block1 (valid).
@@ -3766,11 +3764,11 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 let receiver_idx = 3usize;
@@ -3862,11 +3860,11 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Create two different blocks.
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 1's shard from block2, but wrap with block1's commitment.
@@ -4015,7 +4013,7 @@ mod tests {
 
             // Build a coded block using epoch 1's participant set.
             let coding_config = coding_config_for_participants(epoch1_set.len() as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
@@ -4166,7 +4164,7 @@ mod tests {
             receiver_engine.start((receiver_sender, receiver_receiver));
 
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -4222,11 +4220,11 @@ mod tests {
         fixture.start(
             |config, context, _oracle, mut peers, _, coding_config| async move {
                 // Block 1: the "claimed" block (its digest goes in the fake commitment).
-                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
 
                 // Block 2: the actual data behind the shards.
-                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
                 let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
                 let real_commitment2 = coded_block2.commitment();
 
@@ -4360,7 +4358,7 @@ mod tests {
 
         fixture.start(
             |config, context, _oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let real_commitment = coded_block.commitment();
 
@@ -4487,13 +4485,13 @@ mod tests {
 
                 // Two different commitments in the same round (equivocation scenario).
                 let block_a = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 111),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 111),
                     coding_config,
                     &STRATEGY,
                 );
                 let commitment_a = block_a.commitment();
                 let block_b = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 222),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 222),
                     coding_config,
                     &STRATEGY,
                 );
@@ -4594,7 +4592,7 @@ mod tests {
             |config, context, oracle, mut peers, _, coding_config| async move {
                 // Commitment being tracked by the receiver.
                 let tracked_block = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                     coding_config,
                     &STRATEGY,
                 );
@@ -4602,7 +4600,7 @@ mod tests {
 
                 // Separate block used to source "unrelated" shard data.
                 let unrelated_block = CodedBlock::<B, C, H>::new(
-                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
                     coding_config,
                     &STRATEGY,
                 );
@@ -4654,7 +4652,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -4728,7 +4726,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -4784,7 +4782,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, non_participants, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
@@ -4845,7 +4843,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, non_participants, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -4966,7 +4964,7 @@ mod tests {
 
             // Build a coded block and extract the shard destined for the receiver.
             let coding_config = coding_config_for_participants(num_peers as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
@@ -5070,7 +5068,7 @@ mod tests {
             // buffer row (`buffer_peer_shard` / `peer_buffers`).
             engine.update_latest_primary_peers(Set::from_iter_dedup([sender_pk.clone()]));
 
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(
                 inner,
                 coding_config_for_participants(participants.len() as u16),
@@ -5180,7 +5178,7 @@ mod tests {
             engine.start((sender_handle, receiver_handle));
 
             let coding_config = coding_config_for_participants(epoch0_set.len() as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
@@ -5334,7 +5332,7 @@ mod tests {
             engine.start((evicted_sender, evicted_receiver));
 
             let coding_config = coding_config_for_participants(num_peers as u16);
-            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
@@ -5428,7 +5426,7 @@ mod tests {
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));

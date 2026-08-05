@@ -207,7 +207,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         None
     };
 
-    let (marshal_actor, marshal, _) = MarshalActor::init(
+    let (marshal_actor, marshal, floor) = MarshalActor::init(
         context.child("marshal"),
         finalizations_by_height,
         finalized_blocks,
@@ -304,7 +304,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             application: App::new(genesis.clone()),
             db_config: types::db_config(partition_prefix, page_cache.clone()),
             provider: (),
-            marshal: marshal.clone(),
+            marshal: (marshal.clone(), floor),
             mailbox_size: MAILBOX_SIZE,
             plan,
             resolvers: qmdb_sync_resolver,
@@ -344,7 +344,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_millis(500),
                 fetch_timeout: Duration::from_secs(2),
-                fetch_concurrent: NZUsize!(3),
                 view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(5),
                 forwarding: ForwardingPolicy::Disabled,

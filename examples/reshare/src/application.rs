@@ -15,7 +15,7 @@ use commonware_glue::{
     },
 };
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
-use commonware_storage::{mmr::Location, qmdb::sync::Target};
+use commonware_storage::qmdb::sync::Target;
 use commonware_utils::{non_empty_range, sequence::U64};
 use futures::StreamExt;
 use rand::Rng;
@@ -79,7 +79,7 @@ where
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             payload,
         };
         Some(Proposed { block, merkleized })

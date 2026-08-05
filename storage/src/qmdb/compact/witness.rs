@@ -190,7 +190,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         // entry. Decode outside it so concurrent readers do not contend.
         let (entry, proof) = self.with(|w| -> Result<(Witness<F, D>, Proof<F, D>), Error<F>> {
             let current = w.size();
-            let last_commit_loc = Location::new(*current - 1);
+            let last_commit_loc = current - 1;
             if request.size() > current || request.size() == 0 {
                 return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
             }
@@ -565,8 +565,8 @@ where
     let hasher = qmdb::hasher::<H>();
     merkle.with_mem(|mem| {
         let size = mem.leaves();
-        let last_commit_loc = Location::new(*size - 1);
-        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), inactivity_floor_loc);
+        let last_commit_loc = size - 1;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = mem.root(&hasher, inactive_peaks)?;
         let pinned_nodes = F::nodes_to_pin(last_commit_loc)
             .map(|pos| *mem.get_node_unchecked(pos))
@@ -644,7 +644,7 @@ where
 
     // Decode the commit op to get the inactivity floor, which determines the inactive peak
     // boundary used for root computation.
-    let last_commit_loc = Location::new(*size - 1);
+    let last_commit_loc = size - 1;
     let last_commit_op = Op::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let inactivity_floor_loc = last_commit_op

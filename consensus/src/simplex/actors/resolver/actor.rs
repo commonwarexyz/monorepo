@@ -109,7 +109,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
-                state: State::new(cfg.fetch_concurrent, cfg.term_length),
+                state: State::new(cfg.term_length),
                 last_finalized: View::zero(),
                 nullification_responses: BTreeMap::new(),
                 uncertified_notarizations: BTreeMap::new(),
@@ -785,7 +785,6 @@ mod tests {
                 strategy: Sequential,
                 epoch: EPOCH,
                 mailbox_size: NZUsize!(8),
-                fetch_concurrent: NZUsize!(4),
                 fetch_timeout: Duration::from_secs(1),
                 term_length,
             },
@@ -863,7 +862,6 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -884,7 +882,6 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -1039,7 +1036,6 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -1060,7 +1056,6 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -1081,7 +1076,6 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_concurrent: NZUsize!(4),
                     fetch_timeout: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -1185,7 +1179,7 @@ mod tests {
             let mut actor = build_actor(context, verifier.clone());
             let mut resolver = RecordingResolver::default();
 
-            // The first certificate opens the fetch window at the term anchors.
+            // The first certificate emits requests at the term anchors.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
             actor.updated(&mut resolver, Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![1, 6, 11, 16]);

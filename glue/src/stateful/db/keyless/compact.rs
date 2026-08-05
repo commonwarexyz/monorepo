@@ -11,7 +11,7 @@ use crate::stateful::db::{
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
     merkle::{Family, Location},
@@ -224,12 +224,12 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -290,12 +290,12 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -550,11 +550,11 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                slot.put(
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap(),
-                );
+                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
+                slot.put(database);
+                sync.await.expect("finalize flush failed");
             }
 
             let guard = db.read().await;
@@ -585,7 +585,7 @@ mod tests {
 
             let valid_target = sync::CompactTarget {
                 root: merkleized.root(),
-                size: mmr::Location::new(merkleized.bounds().total_size),
+                size: merkleized.bounds().tip.size,
             };
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
@@ -594,7 +594,7 @@ mod tests {
 
             let wrong_size = sync::CompactTarget {
                 root: merkleized.root(),
-                size: mmr::Location::new(merkleized.bounds().total_size - 1),
+                size: merkleized.bounds().tip.size - 1,
             };
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
@@ -735,7 +735,7 @@ mod tests {
             // hangs so the test can observe the gauges while they diverge.
             let unservable_target = sync::CompactTarget {
                 root: Sha256::hash(&[&[0xFF]]),
-                size: Location::new(*target.size + 1),
+                size: target.size + 1,
             };
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
             let superseding_source = SupersedingCompactSource {

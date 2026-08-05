@@ -16,6 +16,7 @@ use rand_core::Rng;
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
+    mem,
     time::{Duration, SystemTime},
 };
 use tracing::debug;
@@ -114,9 +115,10 @@ where
     /// Manages pending requests. When a request is registered (for both the first time and after
     /// a retry), it is added to this set.
     ///
-    /// The value is a tuple of the next time to try the request and a boolean indicating if the request
-    /// is a retry (in which case the request should be made to a random peer).
-    pending: PrioritySet<Key, (SystemTime, bool)>,
+    /// Fresh requests precede retries. Within each class, requests are ordered
+    /// by the next time they should be attempted. Retried requests use a random
+    /// peer rather than the best-performing peer.
+    pending: PrioritySet<Key, (bool, SystemTime)>,
 
     /// If no peers are ready to handle a request (all filtered out or send failed), the waiter is set
     /// to the next time to try the request.
@@ -252,19 +254,17 @@ where
     pub fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
         self.waiter = None;
 
-        // Collect keys to try (need to clone since we mutate self during iteration)
-        let pending_keys: Vec<(Key, bool)> = self
-            .pending
-            .iter()
-            .map(|(k, (_, retry))| (k.clone(), *retry))
-            .collect();
-
         // Try each pending key until one succeeds
         let mut earliest_rate_limit: Option<SystemTime> = None;
         let mut found_eligible_peers = false;
-        for (key, retry) in pending_keys {
+
+        // Detach the queue to leave skipped entries untouched and remove only the
+        // successfully sent key.
+        let pending = mem::replace(&mut self.pending, PrioritySet::new());
+        let mut sent = None;
+        'pending: for (key, &(retry, _)) in pending.iter() {
             // Skip keys with no eligible peers
-            let peers = self.get_eligible_peers(&key, retry);
+            let peers = self.get_eligible_peers(key, retry);
             if peers.is_empty() {
                 self.requests_created.inc(Status::Dropped);
                 continue;
@@ -296,20 +296,9 @@ where
                     Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
-                        self.pending.remove(&key);
                         let now = self.context.current();
-                        let deadline = now.checked_add(self.timeout).expect("time overflowed");
-                        self.active.put(id, deadline);
-                        self.requests.insert(
-                            id,
-                            ActiveRequest {
-                                key: key.clone(),
-                                peer,
-                                start: now,
-                            },
-                        );
-                        self.key_to_id.insert(key, id);
-                        return;
+                        sent = Some((key.clone(), id, peer, now));
+                        break 'pending;
                     }
                     feedback @ (Unreliable::Rejected | Unreliable::Outcome(Feedback::Closed)) => {
                         // Send was not handled, try next peer
@@ -319,6 +308,24 @@ where
                     }
                 }
             }
+        }
+
+        // Restore the pending queue before moving a successful request to active tracking.
+        self.pending = pending;
+        if let Some((key, id, peer, start)) = sent {
+            assert!(self.pending.remove(&key));
+            let deadline = start.checked_add(self.timeout).expect("time overflowed");
+            self.active.put(id, deadline);
+            self.requests.insert(
+                id,
+                ActiveRequest {
+                    key: key.clone(),
+                    peer,
+                    start,
+                },
+            );
+            self.key_to_id.insert(key, id);
+            return;
         }
 
         // Set waiter for next fetch attempt
@@ -363,7 +370,7 @@ where
         // because no eligible peer could serve it. A new ready key can still be
         // fetchable, so wake pending processing immediately.
         self.waiter = None;
-        self.pending.put(key, (self.context.current(), false));
+        self.pending.put(key, (false, self.context.current()));
     }
 
     /// Adds a key to the pending queue.
@@ -376,7 +383,7 @@ where
         // so this retry can drive pending processing again.
         self.waiter = None;
         let deadline = self.context.current() + self.retry_timeout;
-        self.pending.put(key, (deadline, true));
+        self.pending.put(key, (true, deadline));
     }
 
     /// Returns the deadline for the next pending retry.
@@ -387,7 +394,7 @@ where
         }
 
         // Return the greater of the waiter and the next pending deadline
-        let pending_deadline = self.pending.peek().map(|(_, (deadline, _))| *deadline);
+        let pending_deadline = self.pending.peek().map(|(_, (_, deadline))| *deadline);
         pending_deadline.max(self.waiter)
     }
 
@@ -1227,6 +1234,25 @@ mod tests {
             // Pop key
             let (key, _) = fetcher.pending.pop().unwrap();
             assert_eq!(key, MockKey(1));
+        });
+    }
+
+    #[test]
+    fn test_ready_requests_precede_all_retries() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context.child("fetcher"));
+
+            fetcher.add_retry(MockKey(1));
+            context.sleep(Duration::from_millis(50)).await;
+            fetcher.add_retry(MockKey(2));
+            context.sleep(Duration::from_millis(200)).await;
+            fetcher.add_ready(MockKey(4));
+            fetcher.add_ready(MockKey(3));
+
+            let keys: Vec<_> =
+                std::iter::from_fn(|| fetcher.pending.pop().map(|(key, _)| key)).collect();
+            assert_eq!(keys, vec![MockKey(3), MockKey(4), MockKey(1), MockKey(2)]);
         });
     }
 

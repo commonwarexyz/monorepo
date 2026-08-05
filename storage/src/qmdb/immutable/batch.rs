@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
-        batch_chain::{self, Bounds},
+        batch_chain::{self, Bounds, Commitment},
         immutable::operation::Operation,
         operation::Key,
     },
@@ -53,12 +53,9 @@ where
     /// Parent batch in the chain. `None` for batches created directly from the DB.
     parent: Option<Arc<MerkleizedBatch<F, H::Digest, K, V, S>>>,
 
-    /// Total operation count before this batch (committed DB + prior batches).
-    /// This batch's i-th operation lands at location `base_size + i`.
-    base_size: u64,
-
-    /// The database size when this batch was created, used to detect stale batches.
-    db_size: u64,
+    /// The state immediately before this batch's operations.
+    /// This batch's i-th operation lands at location `base.size + i`.
+    base: Commitment<F, H::Digest>,
 }
 
 /// Merkleized authenticated-journal batch wrapping an [`Operation`] payload.
@@ -70,9 +67,6 @@ type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Oper
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> {
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: JournalBatch<F, D, K, V, S>,
-
-    /// Cached operations root after applying this batch.
-    pub(super) root: D,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
@@ -87,7 +81,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: St
     pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 
     /// Position and floor bounds for this batch chain.
-    pub(super) bounds: batch_chain::Bounds<F>,
+    pub(super) bounds: batch_chain::Bounds<F, D>,
 }
 
 impl<F, H, K, V, S: Strategy> UnmerkleizedBatch<F, H, K, V, S>
@@ -101,7 +95,7 @@ where
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, C, T>(
         immutable: &Immutable<F, E, K, V, C, H, T, S>,
-        journal_size: u64,
+        base: Commitment<F, H::Digest>,
     ) -> Self
     where
         E: Context,
@@ -113,9 +107,17 @@ where
             journal_batch: immutable.journal.new_batch(),
             mutations: BTreeMap::new(),
             parent: None,
-            base_size: journal_size,
-            db_size: journal_size,
+            base,
         }
+    }
+
+    /// The database boundary for this batch chain.
+    ///
+    /// A batch created from the database uses its base. A child inherits its parent's `db`.
+    fn db(&self) -> Commitment<F, H::Digest> {
+        self.parent
+            .as_ref()
+            .map_or(self.base, |parent| parent.bounds.db)
     }
 
     /// Set a key to a value.
@@ -243,7 +245,10 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
-        let base = self.base_size;
+        let base = self.base.size;
+
+        // Capture the DB boundary before `self` is consumed below.
+        let boundary = self.db();
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
@@ -251,7 +256,7 @@ where
         let mut diff: DiffVec<K, F, V::Value> = Vec::with_capacity(self.mutations.len());
 
         for (key, value) in self.mutations {
-            let loc = Location::new(base + ops.len() as u64);
+            let loc = base + ops.len() as u64;
             ops.push(Operation::Set(key.clone(), value.clone()));
             diff.push((key, DiffEntry { value, loc }));
         }
@@ -260,10 +265,7 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = base + ops.len() as u64;
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(total_size)),
-            inactivity_floor,
-        );
+        let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job on the
         // strategy instead of occupying the calling task (see `Journal::merkleize`).
@@ -282,20 +284,19 @@ where
             ancestor_diffs.push(Arc::clone(&batch.diff));
             ancestors.push(batch_chain::AncestorBounds {
                 floor: batch.bounds.inactivity_floor,
-                end: batch.bounds.total_size,
+                state: batch.commitment(),
             });
         }
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
-            root,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_diffs,
             bounds: batch_chain::Bounds {
-                base_size: self.base_size,
-                db_size: self.db_size,
-                total_size,
+                base: self.base,
+                db: boundary,
+                tip: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
@@ -309,17 +310,22 @@ where
 {
     /// Return the speculative root.
     pub const fn root(&self) -> D {
-        self.root
+        self.bounds.tip.root
     }
 
     /// Return the [`Bounds`] of the batch.
-    pub const fn bounds(&self) -> &Bounds<F> {
+    pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
     pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, K, V, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+    }
+
+    /// The [`Commitment`] this batch commits to.
+    pub(super) const fn commitment(&self) -> Commitment<F, D> {
+        self.bounds.tip
     }
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
@@ -419,8 +425,7 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.bounds.total_size,
-            db_size: self.bounds.db_size,
+            base: self.commitment(),
         }
     }
 }
@@ -439,20 +444,12 @@ where
 {
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>> {
-        let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
-            root: self.root,
             diff: Arc::new(Vec::new()),
             parent: None,
             ancestor_diffs: Vec::new(),
-            bounds: batch_chain::Bounds {
-                base_size: journal_size,
-                db_size: journal_size,
-                total_size: journal_size,
-                ancestors: Vec::new(),
-                inactivity_floor: self.inactivity_floor_loc,
-            },
+            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 }

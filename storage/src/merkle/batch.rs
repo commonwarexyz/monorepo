@@ -33,15 +33,16 @@
 //! # Parent chain and memory
 //!
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
-//! plus `Arc` refs to each ancestor's data, collected during
+//! plus `Arc` refs to each retained ancestor's data, collected during
 //! [`UnmerkleizedBatch::merkleize`]. These ancestor batches' data are used by
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
 //! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
 //! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, but their
-//! data is already captured in `ancestor_appended` / `ancestor_overwrites`.
+//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
+//! data in the committed [`Mem`]. `ancestor_base_size` records the position before the
+//! oldest retained ancestor so the remaining suffix is replayed at the correct offset.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
 //! (keeping it alive for the walk), and the `Weak` chain is walked to collect
@@ -372,7 +373,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
 
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
-        let (ancestor_appended, ancestor_overwrites) = collect_ancestor_batches(&self.parent);
+        let (ancestor_base_size, ancestor_appended, ancestor_overwrites) =
+            collect_ancestor_batches(&self.parent);
 
         let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
@@ -381,6 +383,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             overwrites: Arc::new(self.overwrites),
             parent_size,
             base_size: self.parent.base_size,
+            ancestor_base_size,
             pruning_boundary: self.parent.pruning_boundary(),
             ancestor_appended,
             ancestor_overwrites,
@@ -459,14 +462,15 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 }
 
 /// Collect ancestor batch data by walking the parent + its Weak chain.
-/// Returns (appended, overwrites) in root-to-tip order. Skips empty batches
-/// (e.g. root batches from `from_mem`).
+/// Returns the size before the oldest retained ancestor followed by its appended nodes and
+/// overwrites in root-to-tip order. Skips empty batches (e.g. root batches from `from_mem`).
 #[allow(clippy::type_complexity)]
 fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     parent: &Arc<MerkleizedBatch<F, D, S>>,
-) -> (Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
+) -> (Position<F>, Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
     let mut appended = Vec::new();
     let mut overwrites = Vec::new();
+    let mut base_size = parent.parent_size;
 
     // Parent is alive (strong Arc held by UnmerkleizedBatch).
     if !parent.appended.is_empty() || !parent.overwrites.is_empty() {
@@ -477,6 +481,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     // Walk Weak chain for grandparents+.
     let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
     while let Some(batch) = current {
+        base_size = batch.parent_size;
         if !batch.appended.is_empty() || !batch.overwrites.is_empty() {
             appended.push(Arc::clone(&batch.appended));
             overwrites.push(Arc::clone(&batch.overwrites));
@@ -486,7 +491,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
 
     appended.reverse();
     overwrites.reverse();
-    (appended, overwrites)
+    (base_size, appended, overwrites)
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +517,9 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// Number of committed nodes when the batch chain was forked. Inherited unchanged
     /// by all descendants. Used by `apply_batch` to detect already-committed ancestors.
     pub(crate) base_size: Position<F>,
+
+    /// Number of nodes before the oldest retained ancestor batch.
+    pub(crate) ancestor_base_size: Position<F>,
 
     /// Pruning boundary of the [`Mem`] when the batch chain was forked. Inherited
     /// unchanged by all descendants, like `base_size`.
@@ -546,6 +554,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             overwrites: Arc::new(Overwrites::default()),
             parent_size: mem.size(),
             base_size: mem.size(),
+            ancestor_base_size: mem.size(),
             pruning_boundary: Readable::pruning_boundary(mem),
             ancestor_appended: Vec::new(),
             ancestor_overwrites: Vec::new(),

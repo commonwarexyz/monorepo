@@ -215,7 +215,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
         };
         Some(Proposed { block, merkleized })
     }
@@ -231,8 +231,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
         if merkleized.root() != tip.state_root
-            || non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
-                != tip.range
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.range
         {
             return None;
         }
@@ -260,6 +259,7 @@ pub(crate) struct SingleDbEngine {
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
+    retained_marshal_blocks: usize,
     sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
@@ -284,6 +284,7 @@ impl SingleDbEngine {
                 update_channel_size: NZUsize!(256),
                 max_retained_roots: 8,
             },
+            retained_marshal_blocks: 10,
             sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
             sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -303,6 +304,7 @@ impl SingleDbEngine {
             update_channel_size: NZUsize!(4),
             max_retained_roots: 8,
         };
+        self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
     }
 }
@@ -469,7 +471,7 @@ impl EngineDefinition for SingleDbEngine {
             max_pending_acks,
             strategy: Sequential,
         };
-        let (marshal_actor, marshal_mailbox, _last_height) =
+        let (marshal_actor, marshal_mailbox, floor) =
             MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
                 context.child("marshal"),
                 finalizations_by_height,
@@ -507,15 +509,14 @@ impl EngineDefinition for SingleDbEngine {
                 application,
                 db_config,
                 provider: (),
-                marshal: marshal_mailbox.clone(),
+                marshal: (marshal_mailbox.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
-                    max_pending_acks,
                     maintenance_interval: NZUsize!(5),
-                    retained_marshal_blocks: 10,
+                    retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
             },
@@ -594,7 +595,6 @@ impl EngineDefinition for SingleDbEngine {
             view_retention: ViewDelta::new(10),
             skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
-            fetch_concurrent: NZUsize!(3),
             forwarding: ForwardingPolicy::Disabled,
             track_historical_votes: false,
         };
