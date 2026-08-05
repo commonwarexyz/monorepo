@@ -33,7 +33,7 @@
 //!
 //! The wire key names only the view. A responder holding both a notarization and a covering
 //! nullification cannot tell which one the requester wants, so it serves one at random. The
-//! requester recognizes a response that does not settle its demand and retries without faulting the
+//! requester recognizes a response that does not settle its ask and retries without faulting the
 //! peer.
 //!
 //! # Mid-Term Floor Raises

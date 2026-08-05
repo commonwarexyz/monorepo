@@ -1,5 +1,5 @@
 use super::{
-    super::{Demand, Kind, Until},
+    super::{Ask, Kind, Until},
     Config,
     ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
     state::{Effect, FetchReason},
@@ -65,7 +65,7 @@ pub struct Actor<
 
     /// Nullifications cached in the encoded form expected by [p2p::Producer].
     /// These response payloads remain available while they cover views above
-    /// finalization so a demand below the floor can still be served.
+    /// finalization so an ask below the floor can still be served.
     nullification_responses: BTreeMap<View, Bytes>,
 
     /// Notarizations cached in the encoded form expected by [p2p::Producer].
@@ -206,7 +206,7 @@ impl<
     }
 
     /// Records a certificate and applies its resolver lifecycle effects.
-    fn updated<R: Resolver<Key = U64, Subscriber = Demand>>(
+    fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
         certificate: Certificate<S, D>,
@@ -228,8 +228,8 @@ impl<
             self.nullification_responses
                 .insert(nullified, certificate.encode());
             let covered = nullified..=nullified.term_end(term_length);
-            Self::retire(resolver, move |view, demand| {
-                demand.kind == Kind::Nullification && covered.contains(&view)
+            Self::retire(resolver, move |view, ask| {
+                ask.kind == Kind::Nullification && covered.contains(&view)
             });
         }
         if let Some(notarized) = notarized
@@ -238,8 +238,8 @@ impl<
         {
             self.notarization_responses
                 .insert(notarized, certificate.encode());
-            Self::retire(resolver, move |view, demand| {
-                demand.kind == Kind::Notarization && view == notarized
+            Self::retire(resolver, move |view, ask| {
+                ask.kind == Kind::Notarization && view == notarized
             });
         }
 
@@ -263,7 +263,7 @@ impl<
     }
 
     /// Handles a certification outcome from the voter.
-    fn certified<R: Resolver<Key = U64, Subscriber = Demand>>(
+    fn certified<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
         view: View,
@@ -276,8 +276,8 @@ impl<
             if view > self.last_finalized {
                 self.failed_certifications.insert(view);
             }
-            Self::retire(resolver, move |demanded, demand| {
-                demand.kind == Kind::Notarization && demanded == view
+            Self::retire(resolver, move |asked, ask| {
+                ask.kind == Kind::Notarization && asked == view
             });
         }
 
@@ -286,7 +286,7 @@ impl<
     }
 
     /// Applies the side effects requested by [super::state::State] to the resolver.
-    fn apply_effects<R: Resolver<Key = U64, Subscriber = Demand>>(
+    fn apply_effects<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
         effects: Vec<Effect>,
@@ -300,33 +300,33 @@ impl<
                 } => self.fetch(resolver, view, cause, reason),
                 Effect::RetainAbove(floor) => {
                     // Resolver state does not repair below its floor, so a
-                    // background demand there has nothing left to do. Only
-                    // background demands retire here, because a proposal may name
+                    // background ask there has nothing left to do. Only
+                    // background asks retire here, because a proposal may name
                     // ancestry below the floor and only finalization rules that
                     // out.
-                    Self::retire(resolver, move |view, demand| {
-                        demand.until == Until::Floor && view <= floor
+                    Self::retire(resolver, move |view, ask| {
+                        ask.until == Until::Floor && view <= floor
                     });
                 }
             }
         }
     }
 
-    /// Retires the demands that new evidence settles.
+    /// Retires the asks that new evidence settles.
     ///
-    /// `settled` reports whether the evidence answers a demand. [Resolver::retain]
+    /// `settled` reports whether the evidence answers an ask. [Resolver::retain]
     /// takes an owned predicate, so it cannot call [Self::settled]. Every
     /// retirement here names a span of views and a kind, which the caller captures
     /// by value instead.
     ///
-    /// Settlement is monotonic: no later evidence unsettles a demand. A retirement
+    /// Settlement is monotonic: no later evidence unsettles an ask. A retirement
     /// therefore stays true however the resolver orders it against fetches, which
     /// it reorders under backpressure.
-    fn retire<R: Resolver<Key = U64, Subscriber = Demand>>(
+    fn retire<R: Resolver<Key = U64, Subscriber = Ask>>(
         resolver: &mut R,
-        settled: impl Fn(View, Demand) -> bool + Send + 'static,
+        settled: impl Fn(View, Ask) -> bool + Send + 'static,
     ) {
-        let _ = resolver.retain(move |key, demand| !settled(View::new(u64::from(key)), *demand));
+        let _ = resolver.retain(move |key, ask| !settled(View::new(u64::from(key)), *ask));
     }
 
     /// Issues a background fetch for the nullification covering `view`.
@@ -334,30 +334,30 @@ impl<
     /// Both [FetchReason]s want the same certificate: [State] only reports
     /// a view whose covering nullification is missing, whether the gap was found
     /// by scanning below the current view or opened by a failed certification.
-    fn fetch<R: Resolver<Key = U64, Subscriber = Demand>>(
+    fn fetch<R: Resolver<Key = U64, Subscriber = Ask>>(
         &self,
         resolver: &mut R,
         view: View,
         cause: View,
         reason: FetchReason,
     ) {
-        let demand = Demand::backfill();
+        let ask = Ask::backfill();
 
         // Every reported gap sits above the floor, and a cached nullification
         // covering a view above the floor is also stored in [State], so a
         // reported gap is never settled.
-        debug_assert!(!self.settled(view, demand.kind));
+        debug_assert!(!self.settled(view, ask.kind));
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
             cause = cause.traced(),
             view = view.traced(),
             reason = reason.as_str(),
-            kind = demand.kind.as_str()
+            kind = ask.kind.as_str()
         );
         let _ = resolver.fetch(Fetch {
             key: U64::from(view),
-            subscriber: demand,
+            subscriber: ask,
             span,
         });
     }
@@ -371,34 +371,34 @@ impl<
         kind: Kind,
         target: S::PublicKey,
     ) where
-        R: TargetedResolver<Key = U64, Subscriber = Demand, PublicKey = S::PublicKey>,
+        R: TargetedResolver<Key = U64, Subscriber = Ask, PublicKey = S::PublicKey>,
     {
         if view >= proposal_view || self.settled(view, kind) {
             return;
         }
-        let demand = Demand::ancestry(kind);
+        let ask = Ask::ancestry(kind);
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
             cause = proposal_view.traced(),
             view = view.traced(),
             reason = "proposal_ancestry",
-            kind = demand.kind.as_str()
+            kind = ask.kind.as_str()
         );
         let _ = resolver.fetch_targeted(
             Fetch {
                 key: U64::from(view),
-                subscriber: demand,
+                subscriber: ask,
                 span,
             },
             NonEmptyVec::new(target),
         );
     }
 
-    /// Returns whether local evidence has settled a demand for `kind` at `view`.
+    /// Returns whether local evidence has settled an ask for `kind` at `view`.
     ///
     /// Settled means there is nothing left to fetch: either the evidence is in
-    /// hand, or no response could ever serve the demand. This decides whether to
+    /// hand, or no response could ever serve the ask. This decides whether to
     /// open a fetch and whether a delivery completed one. [Self::retire] carries
     /// the same rule to the resolver, one piece of evidence at a time.
     ///
@@ -407,7 +407,7 @@ impl<
     /// evidence the actor records, but not what was asked for.
     fn settled(&self, view: View, kind: Kind) -> bool {
         // Finalization rules out any further need for the view. This is also
-        // what settles a demand answered by a finalization, since recording one
+        // what settles an ask answered by a finalization, since recording one
         // raises [Self::last_finalized].
         if view <= self.last_finalized {
             return true;
@@ -472,7 +472,7 @@ impl<
     /// named. Any certificate an honest peer could serve for the view is accepted,
     /// including one that answers the other kind: rejecting it would fault a peer
     /// that answered the only question the wire key asked. Whether it
-    /// settles the demand is a separate check (see [Self::settled]).
+    /// settles the ask is a separate check (see [Self::settled]).
     fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
@@ -523,7 +523,7 @@ impl<
     }
 
     /// Handles a message from the [p2p::Engine].
-    fn handle_resolver<R: Resolver<Key = U64, Subscriber = Demand>>(
+    fn handle_resolver<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
@@ -534,7 +534,7 @@ impl<
                 span,
                 view,
                 data,
-                demands,
+                asks,
                 response,
             } => {
                 let span = info_span!(
@@ -557,7 +557,7 @@ impl<
                 };
 
                 // A failed notarization remains valid protocol evidence, but
-                // replaying it cannot satisfy any outstanding repair demand.
+                // replaying it cannot satisfy any outstanding repair ask.
                 let obsolete = matches!(
                     &parsed,
                     Certificate::Notarization(notarization)
@@ -573,16 +573,16 @@ impl<
                     );
                     resolved.in_scope(|| voter.resolved(parsed.clone()));
 
-                    // Record the certificate, which settles whichever demands it
+                    // Record the certificate, which settles whichever asks it
                     // answered and retires their fetches.
                     self.updated(resolver, parsed);
                 }
 
                 // The peer answered the view it was asked about, so it is never
-                // faulted here. If a demand for this view is still open, the
+                // faulted here. If an ask for this view is still open, the
                 // response was valid but ambiguous, and the resolver retries
                 // without penalizing the peer.
-                let outcome = if demands.iter().all(|demand| self.settled(view, demand.kind)) {
+                let outcome = if asks.iter().all(|ask| self.settled(view, ask.kind)) {
                     Outcome::Complete
                 } else {
                     Outcome::Ambiguous
@@ -652,8 +652,8 @@ mod tests {
     /// Tracks the set of pending requests the way the resolver engine would.
     #[derive(Clone, Default)]
     struct RecordingResolver {
-        outstanding: Arc<Mutex<BTreeSet<(U64, Demand)>>>,
-        targeted: Arc<Mutex<Vec<(U64, Demand, PublicKey)>>>,
+        outstanding: Arc<Mutex<BTreeSet<(U64, Ask)>>>,
+        targeted: Arc<Mutex<Vec<(U64, Ask, PublicKey)>>>,
     }
 
     impl RecordingResolver {
@@ -667,7 +667,7 @@ mod tests {
                 .collect()
         }
 
-        fn targeted(&self) -> Vec<(u64, Demand, PublicKey)> {
+        fn targeted(&self) -> Vec<(u64, Ask, PublicKey)> {
             self.targeted
                 .lock()
                 .iter()
@@ -675,7 +675,7 @@ mod tests {
                 .collect()
         }
 
-        fn subscriptions(&self, view: u64) -> Vec<Demand> {
+        fn subscriptions(&self, view: u64) -> Vec<Ask> {
             self.outstanding
                 .lock()
                 .iter()
@@ -686,11 +686,11 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = U64;
-        type Subscriber = Demand;
+        type Subscriber = Ask;
 
         fn fetch<F>(&mut self, key: F) -> Feedback
         where
-            F: Into<Fetch<U64, Demand>> + Send,
+            F: Into<Fetch<U64, Ask>> + Send,
         {
             let fetch = key.into();
             self.outstanding
@@ -701,7 +701,7 @@ mod tests {
 
         fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
         where
-            F: Into<Fetch<U64, Demand>> + Send,
+            F: Into<Fetch<U64, Ask>> + Send,
         {
             for key in keys {
                 self.fetch(key);
@@ -709,10 +709,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&U64, &Demand) -> bool + Send + 'static,
-        ) -> Feedback {
+        fn retain(&mut self, predicate: impl Fn(&U64, &Ask) -> bool + Send + 'static) -> Feedback {
             self.outstanding
                 .lock()
                 .retain(|(key, subscription)| predicate(key, subscription));
@@ -725,7 +722,7 @@ mod tests {
 
         fn fetch_targeted(
             &mut self,
-            fetch: impl Into<Fetch<U64, Demand>> + Send,
+            fetch: impl Into<Fetch<U64, Ask>> + Send,
             targets: NonEmptyVec<PublicKey>,
         ) -> Feedback {
             let fetch = fetch.into();
@@ -742,7 +739,7 @@ mod tests {
 
         fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<PublicKey>)>) -> Feedback
         where
-            F: Into<Fetch<U64, Demand>> + Send,
+            F: Into<Fetch<U64, Ask>> + Send,
         {
             for (fetch, targets) in fetches {
                 self.fetch_targeted(fetch, targets);
@@ -883,7 +880,7 @@ mod tests {
             responder_mailbox.updated(Certificate::Nullification(available.clone()));
             context.sleep(Duration::from_millis(10)).await;
 
-            // Advancing to view 2 creates unrestricted background demand for
+            // Advancing to view 2 creates an unrestricted background ask for
             // view 1. The only connected peer is the silent target, so seeing
             // its request proves the background fetch is already in flight.
             requester_mailbox.updated(Certificate::Nullification(build_nullification(
@@ -900,7 +897,7 @@ mod tests {
             };
             assert_eq!(requester_key, participants[0]);
 
-            // Add targeted ancestry demand for the same key and silent peer.
+            // Add a targeted ancestry ask for the same key and silent peer.
             // It must attach a subscriber without narrowing the in-flight
             // unrestricted fetch.
             requester_mailbox.resolve(
@@ -912,7 +909,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Remove the silent target and expose a different responder. If
-            // the targeted demand narrowed the fetch, recovery cannot finish.
+            // the targeted ask narrowed the fetch, recovery cannot finish.
             oracle
                 .remove_link(participants[0].clone(), participants[1].clone())
                 .await
@@ -1237,7 +1234,7 @@ mod tests {
             );
             resolver.fetch(Fetch {
                 key: U64::from(requested),
-                subscriber: Demand::backfill(),
+                subscriber: Ask::backfill(),
                 span: tracing::Span::none(),
             });
             assert_eq!(
@@ -1245,12 +1242,12 @@ mod tests {
                 vec![
                     (
                         3,
-                        Demand::ancestry(Kind::Nullification),
+                        Ask::ancestry(Kind::Nullification),
                         participants[0].clone()
                     ),
                     (
                         3,
-                        Demand::ancestry(Kind::Notarization),
+                        Ask::ancestry(Kind::Notarization),
                         participants[1].clone()
                     ),
                 ]
@@ -1258,9 +1255,9 @@ mod tests {
             assert_eq!(
                 resolver.subscriptions(3),
                 vec![
-                    Demand::backfill(),
-                    Demand::ancestry(Kind::Nullification),
-                    Demand::ancestry(Kind::Notarization),
+                    Ask::backfill(),
+                    Ask::ancestry(Kind::Nullification),
+                    Ask::ancestry(Kind::Notarization),
                 ]
             );
 
@@ -1276,7 +1273,7 @@ mod tests {
             );
             assert_eq!(
                 resolver.subscriptions(3),
-                vec![Demand::ancestry(Kind::Notarization)]
+                vec![Ask::ancestry(Kind::Notarization)]
             );
             actor.resolve(
                 &mut resolver,
@@ -1314,7 +1311,7 @@ mod tests {
             );
             resolver.fetch(Fetch {
                 key: U64::from(second_requested),
-                subscriber: Demand::backfill(),
+                subscriber: Ask::backfill(),
                 span: tracing::Span::none(),
             });
             actor.updated(
@@ -1329,11 +1326,11 @@ mod tests {
             actor.certified(&mut resolver, second_requested, true);
 
             // The certified notarization is now the floor, which satisfies
-            // background repair at that view. Targeted nullification demand
+            // background repair at that view. The targeted nullification ask
             // survives: a notarization is not a nullification covering it.
             assert_eq!(
                 resolver.subscriptions(6),
-                vec![Demand::ancestry(Kind::Nullification)]
+                vec![Ask::ancestry(Kind::Nullification)]
             );
             actor.resolve(
                 &mut resolver,
@@ -1477,12 +1474,12 @@ mod tests {
             );
             assert_eq!(
                 resolver.subscriptions(3),
-                vec![Demand::ancestry(Kind::Nullification)]
+                vec![Ask::ancestry(Kind::Nullification)]
             );
 
             // Certificate state still prefers the certified floor for
             // background bookkeeping, but locally observing the nullification
-            // must retire the exact targeted demand it satisfies.
+            // must retire the exact targeted ask it satisfies.
             actor.updated(
                 &mut resolver,
                 Certificate::Nullification(build_nullification(
@@ -1535,7 +1532,7 @@ mod tests {
                 resolver.targeted(),
                 vec![(
                     4,
-                    Demand::ancestry(Kind::Notarization),
+                    Ask::ancestry(Kind::Notarization),
                     participants[0].clone()
                 )]
             );
@@ -1572,7 +1569,7 @@ mod tests {
             // A false certification verdict is permanent. Parent repair is
             // retired, while ordinary repair asks for the nullification that
             // can now cover the failed view.
-            assert_eq!(resolver.subscriptions(5), vec![Demand::backfill()]);
+            assert_eq!(resolver.subscriptions(5), vec![Ask::backfill()]);
             actor.resolve(
                 &mut resolver,
                 View::new(11),
@@ -1609,7 +1606,7 @@ mod tests {
                         build_notarization(&schemes, &verifier, EPOCH, view),
                     )
                     .encode(),
-                    demands: non_empty_vec![Demand::ancestry(Kind::Notarization)],
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
@@ -1641,7 +1638,7 @@ mod tests {
             actor.certified(&mut resolver, view, false);
 
             // The payload is no longer an answer, and the tombstone keeps a
-            // delayed request from recreating demand. A floor raise above the
+            // delayed request from recreating the ask. A floor raise above the
             // view must not resurrect it (state prunes its own failed views).
             assert!(!actor.notarization_responses.contains_key(&view));
             let floor = View::new(9);
@@ -1686,7 +1683,7 @@ mod tests {
                     view: View::new(4),
                     data: Certificate::<TestScheme, Sha256Digest>::Nullification(nullification)
                         .encode(),
-                    demands: non_empty_vec![Demand::ancestry(Kind::Notarization)],
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
@@ -1723,7 +1720,7 @@ mod tests {
                     view: requested,
                     data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
                         .encode(),
-                    demands: non_empty_vec![Demand::ancestry(Kind::Notarization)],
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
@@ -1774,7 +1771,7 @@ mod tests {
                     span: tracing::Span::none(),
                     view,
                     data: Certificate::<TestScheme, Sha256Digest>::Notarization(alternate).encode(),
-                    demands: non_empty_vec![Demand::ancestry(Kind::Notarization)],
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
@@ -1806,10 +1803,10 @@ mod tests {
                         build_finalization(&schemes, &verifier, EPOCH, View::new(6)),
                     )
                     .encode(),
-                    demands: non_empty_vec![
-                        Demand::backfill(),
-                        Demand::ancestry(Kind::Nullification),
-                        Demand::ancestry(Kind::Notarization),
+                    asks: non_empty_vec![
+                        Ask::backfill(),
+                        Ask::ancestry(Kind::Nullification),
+                        Ask::ancestry(Kind::Notarization),
                     ],
                     response,
                 },

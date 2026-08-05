@@ -1,7 +1,7 @@
 use crate::{
     Epochable, Viewable,
     simplex::{
-        actors::{Demand, Kind},
+        actors::{Ask, Kind},
         types::Certificate,
     },
     types::{Round as Rnd, View},
@@ -265,7 +265,7 @@ pub(crate) enum HandlerMessage {
         span: Span,
         view: View,
         data: Bytes,
-        demands: NonEmptyVec<Demand>,
+        asks: NonEmptyVec<Ask>,
         response: oneshot::Sender<Outcome>,
     },
     Produce {
@@ -335,7 +335,7 @@ impl Handler {
 impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
-    type Subscriber = Demand;
+    type Subscriber = Ask;
     type Outcome = Outcome;
 
     fn deliver(
@@ -345,12 +345,12 @@ impl Consumer for Handler {
     ) -> oneshot::Receiver<Self::Outcome> {
         let (response, receiver) = oneshot::channel();
         let (_, span) = delivery.subscribers.first().clone();
-        let demands = delivery.subscribers.map_into(|(demand, _)| demand);
+        let asks = delivery.subscribers.map_into(|(ask, _)| ask);
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
             span,
             view: View::new(delivery.key.into()),
             data: value,
-            demands,
+            asks,
             response,
         });
         receiver
