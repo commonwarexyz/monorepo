@@ -2,7 +2,7 @@ use crate::stateful::{
     Application,
     actor::{
         core::mailbox::Verification,
-        processor::{PendingDigest, VerificationDisposition, VerificationProgress, Verifier},
+        processor::{Disposition, PendingDigest, VerificationProgress, Verifier},
     },
 };
 use commonware_consensus::marshal::{
@@ -164,19 +164,19 @@ where
     /// callers still need a verdict are returned for rescheduling after the
     /// mutation completes.
     pub(super) async fn quiesce(&mut self) -> Vec<Request<E, A>> {
-        let (retry, reject) = self.quiesce_where(|_| VerificationDisposition::Retry).await;
+        let (retry, reject) = self.quiesce_where(|_| Disposition::Retry).await;
         assert!(reject.is_empty());
         retry
     }
 
     pub(super) async fn quiesce_where(
         &mut self,
-        disposition: impl Fn(&VerificationProgress<PendingDigest<A, E>>) -> VerificationDisposition,
+        disposition: impl Fn(&VerificationProgress<PendingDigest<A, E>>) -> Disposition,
     ) -> (Vec<Request<E, A>>, Vec<Verification>) {
         let mut pending = BTreeMap::new();
         for (&id, control) in &mut self.controls {
             let disposition = disposition(&control.progress);
-            if disposition == VerificationDisposition::Retain {
+            if disposition == Disposition::Retain {
                 continue;
             }
             assert!(control.invalidation.take().is_some());
@@ -199,15 +199,15 @@ where
                     let disposition = disposition.expect("verification must be invalidated");
                     assert!(control.invalidation.is_none());
                     match disposition {
-                        VerificationDisposition::Retain => {
+                        Disposition::Retain => {
                             unreachable!("retained verification cannot be invalidated")
                         }
-                        VerificationDisposition::Retry => {
+                        Disposition::Retry => {
                             if !request.verification.is_cancelled() {
                                 retry.push(request);
                             }
                         }
-                        VerificationDisposition::Reject => reject.push(request.verification),
+                        Disposition::Reject => reject.push(request.verification),
                     }
                 }
             }

@@ -260,9 +260,11 @@ where
     /// it before finalization or pruning. Cancellation and retry must not
     /// violate invariants or lose durable progress.
     ///
-    /// Verification may overlap database finalization. Read through the
-    /// provided batches, which snapshot database state without holding the
-    /// database set's locks (see [`db::Shared::read`] for guard discipline).
+    /// Verification may overlap finalization while its batches remain valid.
+    /// Stateful retries or rejects requests that cannot safely overlap it. Read
+    /// through the provided batches, which snapshot database state without
+    /// holding the database set's locks (see [`db::Shared::read`] for guard
+    /// discipline).
     fn verify(
         &mut self,
         context: (E, Self::Context),
