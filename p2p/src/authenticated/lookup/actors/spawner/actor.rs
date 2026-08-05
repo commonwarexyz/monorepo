@@ -111,6 +111,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, Si: Sink, St: Stre
                                 return;
                             }
 
+                            // Register peer with the router
                             let Some(channels) = router.ready(peer.clone(), messenger).await else {
                                 debug!(?peer, "router rejected peer during setup");
                                 drop(reservation);
