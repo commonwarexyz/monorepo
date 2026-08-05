@@ -2459,6 +2459,57 @@ mod tests {
         }
     }
 
+    /// A blob atomically deleted as a non-anchor (ring ordinal != 0) participant of a multi-blob
+    /// group must not reopen with its pre-delete contents after a crash that interrupts the
+    /// descending tombstone-unlink phase. The coordinator correctly reports the blob removed, but
+    /// a non-anchor tombstone cannot self-clean (only ordinal zero resumes the frontier) and there
+    /// is no global startup scan, so its name lingers. The open-by-name path then discards the
+    /// `removed` verdict and resolves the lingering tombstone via the committed-root fallback that
+    /// `State::recover` intentionally keeps for already-open handles -- resurrecting the blob.
+    #[tokio::test]
+    async fn nonanchor_tombstone_does_not_resurrect_on_open() {
+        use crate::AtomicStorage as _;
+
+        let root = TestRoot::new("nonanchor-tombstone-open");
+        let mut blobs = vec![
+            TestBlob::create(root.path(), b"a", 14, b"a-old"),
+            TestBlob::create(root.path(), b"b", 34, b"b-old"),
+            TestBlob::create(root.path(), b"c", 54, b"c-old"),
+        ];
+        let group = stage_group(&mut blobs, &[Role::Delete, Role::Delete, Role::Delete]);
+        group.write_all(&blobs);
+        materialize_decision_participants(root.path(), &group.decision).unwrap();
+
+        // Crash after the highest-ordinal tombstone (c) is durably unlinked, before b (ordinal 1).
+        // The surviving frontier is the descending prefix {a(0), b(1)}; b's successor c is gone, so
+        // its ring cannot be reconstructed and, as a non-anchor, it cannot clean up its own name.
+        fs::remove_file(&blobs[2].path).unwrap();
+        sync_directory(&root.path().join(PARTITION)).unwrap();
+
+        // The coordinator reports b removed, but the non-anchor tombstone lingers on disk.
+        assert!(
+            recover_from(root.path(), &blobs[1]),
+            "b is logically deleted"
+        );
+        assert!(blobs[1].path.exists(), "non-anchor tombstone name lingers");
+        drop(blobs);
+
+        // Open b by name via the real storage API. b was atomically deleted; it must not come back
+        // with its pre-delete "b-old" contents.
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let storage = crate::storage::tokio::Storage::new(
+            crate::storage::tokio::Config::new(root.path().to_path_buf(), 2 * 1024 * 1024),
+            pool,
+        );
+        let (_blob, len) = storage.open_atomic(PARTITION, b"b").await.unwrap();
+        assert_eq!(
+            len, 0,
+            "deleted non-anchor blob b reopened with its pre-delete contents instead of a fresh \
+             empty generation",
+        );
+    }
+
     #[test]
     fn every_mixed_delete_frontier_recovers_in_descending_order() {
         const NAMES: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];

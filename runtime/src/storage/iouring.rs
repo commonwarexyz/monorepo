@@ -938,7 +938,9 @@ impl Storage {
         let parent = self.storage_directory.join(&stored_partition);
         let path = parent.join(hex(name));
 
-        if super::batch::recover_named_embedded(&self.storage_directory, &stored_partition, name)? {
+        let removed =
+            super::batch::recover_named_embedded(&self.storage_directory, &stored_partition, name)?;
+        if removed {
             self.namespace
                 .invalidate_operations(&[super::batch::Operation::Remove(
                     crate::RemoveTarget::Blob {
@@ -949,8 +951,17 @@ impl Storage {
         }
 
         // Open existing first so stale sidecars are durably discarded before create_new makes a
-        // replacement user name visible.
-        let mut file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+        // replacement user name visible. A durably-removed participant whose namespace cleanup was
+        // deferred -- a non-anchor tombstone left by a crash during a multi-blob deletion, whose
+        // name only ordinal-zero recovery can unlink -- must not reopen as a live blob. Treat it as
+        // absent so a fresh generation replaces it (via create_live's rename) rather than
+        // resurrecting the pre-delete committed root that is retained only for open handles.
+        let existing_open = if removed {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        } else {
+            fs::OpenOptions::new().read(true).write(true).open(&path)
+        };
+        let mut file = match existing_open {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 super::atomic::discard(&self.storage_directory, &stored_partition, name)?;

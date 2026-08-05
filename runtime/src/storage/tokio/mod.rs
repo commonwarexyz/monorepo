@@ -1179,7 +1179,7 @@ impl Storage {
             .ok_or_else(|| Error::PartitionCreationFailed(partition.into()))?;
 
         #[cfg(unix)]
-        {
+        let removed = {
             let root = self.cfg.storage_directory.clone();
             let recovery_partition = stored_partition.clone();
             let recovery_name = name.to_vec();
@@ -1200,15 +1200,26 @@ impl Storage {
                         },
                     )]);
             }
-        }
+            removed
+        };
+        #[cfg(not(unix))]
+        let removed = false;
 
         // Open existing first so stale sidecars are durably discarded before create_new makes a
-        // replacement user name visible.
-        let existing_open = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .await;
+        // replacement user name visible. A durably-removed participant whose namespace cleanup was
+        // deferred -- a non-anchor tombstone left by a crash during a multi-blob deletion, whose
+        // name only ordinal-zero recovery can unlink -- must not reopen as a live blob. Treat it as
+        // absent so a fresh generation replaces it (via create_live's rename) rather than
+        // resurrecting the pre-delete committed root that is retained only for open handles.
+        let existing_open = if removed {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        } else {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .await
+        };
         let (mut file, _new_name) = match existing_open {
             Ok(file) => (file, false),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
