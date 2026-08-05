@@ -266,6 +266,7 @@ mod tests {
     impl DatabaseSet<deterministic::Context> for WedgeSet {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
+        type ReadLocked = u64;
         type Readers = ();
         type Config = u64;
         type SyncTargets = u64;
@@ -278,7 +279,11 @@ mod tests {
             0
         }
 
-        async fn new_batches(&self) -> Self::Unmerkleized {
+        async fn lock_read(&self) -> Self::ReadLocked {
+            self.0
+        }
+
+        fn new_batches(_databases: Self::ReadLocked) -> Self::Unmerkleized {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
@@ -300,8 +305,8 @@ mod tests {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn committed_targets(&self) -> Self::SyncTargets {
-            self.0
+        fn committed_targets(databases: &Self::ReadLocked) -> Self::SyncTargets {
+            *databases
         }
 
         async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
@@ -457,7 +462,8 @@ mod tests {
             .await;
 
             assert_eq!(startup.sync.anchor.height, Height::new(2));
-            assert_eq!(startup.sync.databases.committed_targets().await, 2);
+            let locked = startup.sync.databases.lock_read().await;
+            assert_eq!(WedgeSet::committed_targets(&locked), 2);
             assert_eq!(startup.skip_finalized_until, Some(Height::new(2)));
         });
     }

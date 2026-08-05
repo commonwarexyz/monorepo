@@ -218,8 +218,10 @@ where
 /// - Acquiring: `finalizing` is set and the batch is not secured. The exact
 ///   winner replay and compatible descendants may still publish.
 /// - Secured: `finalizing` is set and the batch is secured. The winner is not
-///   reinserted, while compatible descendants may publish against pending or
-///   applied winner state.
+///   reinserted. Compatible descendants may publish from pending state, while
+///   work that needs the applied winner waits for every database to reflect it.
+/// - Applied: the database set reflects the winner, so waiting descendants may
+///   fork from applied state while the application hook runs.
 ///
 /// Finishing finalization advances `last_processed` and returns to Idle.
 struct ExecutionState<A, E>
@@ -235,6 +237,10 @@ where
     finalizing: Option<Anchor<PendingDigest<A, E>>>,
     /// Whether finalization has taken or reconstructed the winner's batch.
     finalizing_batch_secured: bool,
+    /// Whether every database reflects the finalizing winner.
+    finalizing_databases_applied: bool,
+    /// Work waiting to fork from the applied finalizing winner.
+    finalizing_apply_waiters: Vec<oneshot::Sender<()>>,
     /// Winner and descendants allowed to publish during finalization.
     finalizing_compatible: HashSet<PendingDigest<A, E>>,
 }
@@ -361,14 +367,14 @@ enum ReplayClaim<D: Copy + Ord> {
     Wait(ReplayWaiter<D>),
 }
 
-/// Outcome of taking a finalizing block's cached batches or joining an active
+/// Outcome of finding a finalizing block's cached batches or joining an active
 /// replay that may produce them.
 enum FinalizationBatch<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    Ready(PendingBatches<A, E>),
+    Ready,
     Wait(ReplayWaiter<PendingDigest<A, E>>),
     Missing,
 }
@@ -497,7 +503,7 @@ impl<T> Prune<T> {
     ///
     /// Every finalize barrier through `barrier_height` is durable before this runs. The marshal
     /// prune that follows retains every later block a restart could replay.
-    pub(super) async fn run<E, DBs, S, V>(self, databases: &mut DBs, marshal: &MarshalMailbox<S, V>)
+    pub(super) async fn run<E, DBs, S, V>(self, databases: &DBs, marshal: &MarshalMailbox<S, V>)
     where
         E: Rng + Spawner + Metrics + Clock,
         DBs: DatabaseSet<E, SyncTargets = T>,
@@ -637,6 +643,8 @@ where
                     last_processed,
                     finalizing: None,
                     finalizing_batch_secured: false,
+                    finalizing_databases_applied: false,
+                    finalizing_apply_waiters: Vec::new(),
                     finalizing_compatible: HashSet::new(),
                 })),
                 metrics,
@@ -681,11 +689,6 @@ where
     /// Returns a reference to the database set.
     pub(super) const fn databases(&self) -> &A::Databases {
         &self.execution.databases
-    }
-
-    /// Returns a mutable reference to the database set.
-    pub(super) const fn databases_mut(&mut self) -> &mut A::Databases {
-        &mut self.execution.databases
     }
 
     #[cfg(test)]
@@ -891,10 +894,10 @@ where
         let pending = loop {
             match self
                 .execution
-                .take_finalization_batch(&self.replays, digest)
+                .find_finalization_batch(&self.replays, digest)
             {
-                FinalizationBatch::Ready(batch) => break Some(batch),
-                FinalizationBatch::Missing => break None,
+                FinalizationBatch::Ready => break true,
+                FinalizationBatch::Missing => break false,
                 FinalizationBatch::Wait(mut waiter) => match (&mut waiter.completion).await {
                     Ok(Ok(())) | Err(_) => continue,
                     Ok(Err(error)) => {
@@ -903,38 +906,35 @@ where
                             ?error,
                             "finalization could not reuse active verification replay"
                         );
-                        break None;
+                        break false;
                     }
                 },
             }
         };
-        let batch = match pending {
-            Some(batch) => batch,
-            None => {
-                let batches = self.execution.databases.new_batches().await;
-                let batch = self
-                    .app
-                    .apply(
-                        (context.child("finalize_replay"), block_context),
-                        block,
-                        batches,
-                    )
-                    .await;
-                assert!(
-                    A::Databases::matches_sync_targets(&batch, &sync_targets),
-                    "finalize replay state root must match block commitments",
-                );
-                batch
-            }
+        let replayed = if pending {
+            None
+        } else {
+            let batches = self.execution.new_batches().await;
+            let batch = self
+                .app
+                .apply(
+                    (context.child("finalize_replay"), block_context),
+                    block,
+                    batches,
+                )
+                .await;
+            assert!(
+                A::Databases::matches_sync_targets(&batch, &sync_targets),
+                "finalize replay state root must match block commitments",
+            );
+            Some(batch)
         };
 
-        // Retained verifications fork from the secured winner on the promise
-        // that the finalize writer is already queued ahead of their database
-        // reads (see `fork_batches`). Keep securing and the first poll of the
-        // database write in one poll: no await may separate the next two
-        // statements.
-        self.execution.prune_pending_for_finalization();
+        // Once the winner leaves pending state, work that needs it waits until
+        // every database has applied it before rebuilding from committed state.
+        let batch = self.execution.secure_finalization_batch(digest, replayed);
         let barrier = self.execution.databases.finalize(batch).await;
+        self.execution.finish_database_apply();
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -989,25 +989,42 @@ where
             "finalization must be serialized",
         );
         assert!(!state.finalizing_batch_secured);
+        assert!(!state.finalizing_databases_applied);
+        assert!(state.finalizing_apply_waiters.is_empty());
         assert!(state.finalizing_compatible.is_empty());
         state.finalizing_compatible = compatible;
     }
 
-    /// Release batches that cannot descend from the finalizing winner.
+    /// Secure the winner for database application and release batches that
+    /// cannot descend from it.
     ///
     /// The winner's batch has already been secured, so exact-block replay no longer needs its
     /// pending ancestry. The compatibility set remains live until finalization completes so
     /// retained descendants can continue publishing.
-    fn prune_pending_for_finalization(&self) {
+    fn secure_finalization_batch(
+        &self,
+        digest: PendingDigest<A, E>,
+        replayed: Option<PendingBatches<A, E>>,
+    ) -> PendingBatches<A, E> {
         let mut state = self.state.lock();
-        assert!(state.finalizing.is_some(), "finalization must be active");
+        assert_eq!(
+            state.finalizing.map(|anchor| anchor.digest),
+            Some(digest),
+            "secured batch must match active finalization",
+        );
         assert!(!state.finalizing_batch_secured);
+        assert!(!state.finalizing_databases_applied);
         state.finalizing_batch_secured = true;
         let ExecutionState {
             pending,
             finalizing_compatible,
             ..
         } = &mut *state;
+        let batch = pending
+            .remove(&digest)
+            .map(|entry| entry.merkleized)
+            .or(replayed)
+            .expect("finalization must have a cached or replayed batch");
         let before = pending.len();
         pending.retain(|candidate_digest, _| finalizing_compatible.contains(candidate_digest));
         let pruned = before - pending.len();
@@ -1015,6 +1032,21 @@ where
         drop(state);
         self.metrics.pruned_forks.inc_by(pruned as u64);
         let _ = self.metrics.pending_blocks.try_set(pending);
+        batch
+    }
+
+    /// Publish that every database now reflects the secured winner.
+    fn finish_database_apply(&self) {
+        let mut state = self.state.lock();
+        assert!(state.finalizing.is_some(), "finalization must be active");
+        assert!(state.finalizing_batch_secured);
+        assert!(!state.finalizing_databases_applied);
+        state.finalizing_databases_applied = true;
+        let waiters = std::mem::take(&mut state.finalizing_apply_waiters);
+        drop(state);
+        for waiter in waiters {
+            waiter.send_lossy(());
+        }
     }
 
     /// Publish the finalized anchor after its application hook completes.
@@ -1022,7 +1054,10 @@ where
         let mut state = self.state.lock();
         assert_eq!(state.finalizing.take(), Some(finalized));
         assert!(state.finalizing_batch_secured);
+        assert!(state.finalizing_databases_applied);
+        assert!(state.finalizing_apply_waiters.is_empty());
         state.finalizing_batch_secured = false;
+        state.finalizing_databases_applied = false;
         state.finalizing_compatible.clear();
         state.last_processed = finalized;
     }
@@ -1104,19 +1139,19 @@ where
         true
     }
 
-    /// Takes a cached winner batch or waits for an active replay producing it.
+    /// Finds a cached winner batch or waits for an active replay producing it.
     ///
     /// Replay completion only tells the caller to check the cache again: the
     /// owner publishes before notifying its waiters. Execution state is always
     /// locked before the replay registry when both are inspected.
-    fn take_finalization_batch(
+    fn find_finalization_batch(
         &self,
         replays: &ReplayFlights<PendingDigest<A, E>>,
         digest: PendingDigest<A, E>,
     ) -> FinalizationBatch<E, A> {
-        let mut state = self.state.lock();
-        if let Some(entry) = state.pending.remove(&digest) {
-            return FinalizationBatch::Ready(entry.merkleized);
+        let state = self.state.lock();
+        if state.pending.contains_key(&digest) {
+            return FinalizationBatch::Ready;
         }
 
         let mut entries = replays.entries.lock();
@@ -1165,29 +1200,53 @@ where
         })
     }
 
+    /// Creates batches from explicitly read-locked applied state.
+    async fn new_batches(&self) -> <A::Databases as DatabaseSet<E>>::Unmerkleized {
+        let databases = self.databases.clone();
+        let locked = databases.lock_read().await;
+        A::Databases::new_batches(locked)
+    }
+
     /// Forks batches from a known parent.
     async fn fork_batches(
         &self,
         parent: &PendingDigest<A, E>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError> {
-        {
-            let state = self.state.lock();
-            if let Some(entry) = state.pending.get(parent) {
-                return Ok(A::Databases::fork_batches(&entry.merkleized));
-            }
-            let finalizing_parent = state.finalizing_batch_secured
-                && state
-                    .finalizing
-                    .is_some_and(|finalizing| finalizing.digest == *parent);
-            if state.last_processed.digest != *parent && !finalizing_parent {
-                return Err(PrepareBatchesError::Invalid);
+        loop {
+            let waiter = {
+                let mut state = self.state.lock();
+                if let Some(entry) = state.pending.get(parent) {
+                    return Ok(A::Databases::fork_batches(&entry.merkleized));
+                }
+                if state.last_processed.digest == *parent {
+                    None
+                } else if state.finalizing_batch_secured
+                    && state
+                        .finalizing
+                        .is_some_and(|finalizing| finalizing.digest == *parent)
+                {
+                    // The winner's per-database batches are unavailable while
+                    // independent finalizers apply them. Rebuild only after
+                    // every database exposes the winner as committed state.
+                    if state.finalizing_databases_applied {
+                        None
+                    } else {
+                        let (sender, receiver) = oneshot::channel();
+                        state.finalizing_apply_waiters.push(sender);
+                        Some(receiver)
+                    }
+                } else {
+                    return Err(PrepareBatchesError::Invalid);
+                }
+            };
+
+            let Some(waiter) = waiter else {
+                return Ok(self.new_batches().await);
+            };
+            if waiter.await.is_err() {
+                return Err(PrepareBatchesError::Cancelled);
             }
         }
-
-        // The database finalization writer is polled before retained verification work resumes.
-        // Its lock therefore makes this batch fork observe the secured winner after the winner's
-        // pending entry has been consumed.
-        Ok(self.databases.new_batches().await)
     }
 
     /// Replays one certified block and caches its commitment-matching state.
@@ -2442,6 +2501,42 @@ mod tests {
                 .await
                 .expect("finalized block should be newly applied");
             assert!(barrier.durable().await, "finalize flush must complete");
+        });
+    }
+
+    #[test]
+    fn execution_fallback_waits_until_finalizing_winner_is_applied() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let winner = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let databases = harness.processor.databases().clone();
+            let read = databases.read().await;
+            let execution = harness.processor.execution.clone();
+
+            let mut finalize = Box::pin(
+                harness
+                    .processor
+                    .finalize(harness.context_cell.as_present(), &winner),
+            );
+            assert!(futures::poll!(&mut finalize).is_pending());
+
+            let winner_digest = winner.digest();
+            let mut fork = Box::pin(execution.fork_batches(&winner_digest));
+            assert!(
+                futures::poll!(&mut fork).is_pending(),
+                "committed fallback must wait until every database reflects the winner",
+            );
+
+            drop(read);
+            let Applied { barrier, .. } = finalize
+                .await
+                .expect("finalized block should be newly applied");
+            assert!(barrier.durable().await, "finalize flush must complete");
+            assert!(
+                fork.await.is_ok(),
+                "fallback should resume after database apply"
+            );
         });
     }
 

@@ -360,7 +360,7 @@ where
         // pruning or exposing the databases to other actors.
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
-            prune.run(processor.databases_mut(), &self.marshal).await;
+            prune.run(processor.databases(), &self.marshal).await;
         }
 
         // Attach the resolvers to the initialized databases before starting the processor,

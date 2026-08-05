@@ -27,8 +27,11 @@ use core::ops::{Deref, DerefMut};
 pub use parking_lot::{
     Condvar, MappedMutexGuard, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
+use std::sync::Arc;
 pub use tokio::sync::{
-    Barrier, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, RwLock as AsyncRwLock,
+    Barrier, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify,
+    OwnedRwLockReadGuard as OwnedAsyncRwLockReadGuard,
+    OwnedRwLockWriteGuard as OwnedAsyncRwLockWriteGuard, RwLock as AsyncRwLock,
     RwLockReadGuard as AsyncRwLockReadGuard, RwLockWriteGuard as AsyncRwLockWriteGuard,
 };
 
@@ -64,7 +67,16 @@ impl<T> TracedAsyncMutex<T> {
 /// specific lock.
 pub struct TracedAsyncRwLock<T> {
     name: &'static str,
-    inner: tokio::sync::RwLock<T>,
+    inner: Arc<tokio::sync::RwLock<T>>,
+}
+
+impl<T> Clone for TracedAsyncRwLock<T> {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name,
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<T> TracedAsyncRwLock<T> {
@@ -72,7 +84,7 @@ impl<T> TracedAsyncRwLock<T> {
     pub fn new(name: &'static str, value: T) -> Self {
         Self {
             name,
-            inner: tokio::sync::RwLock::new(value),
+            inner: Arc::new(tokio::sync::RwLock::new(value)),
         }
     }
 
@@ -82,10 +94,22 @@ impl<T> TracedAsyncRwLock<T> {
         self.inner.read().await
     }
 
+    /// Acquire shared read access without borrowing the lock.
+    #[tracing::instrument(name = "utils.rwlock.read", level = "info", skip_all, fields(lock = self.name))]
+    pub async fn read_owned(&self) -> OwnedAsyncRwLockReadGuard<T> {
+        self.inner.clone().read_owned().await
+    }
+
     /// Acquire an exclusive write guard, recording lock-wait time.
     #[tracing::instrument(name = "utils.rwlock.write", level = "info", skip_all, fields(lock = self.name))]
     pub async fn write(&self) -> AsyncRwLockWriteGuard<'_, T> {
         self.inner.write().await
+    }
+
+    /// Acquire exclusive write access without borrowing the lock.
+    #[tracing::instrument(name = "utils.rwlock.write", level = "info", skip_all, fields(lock = self.name))]
+    pub async fn write_owned(&self) -> OwnedAsyncRwLockWriteGuard<T> {
+        self.inner.clone().write_owned().await
     }
 }
 
@@ -248,6 +272,25 @@ mod tests {
             *writer += 1;
 
             assert_eq!(*writer, 101);
+        });
+    }
+
+    #[test]
+    fn test_traced_async_rwlock_owned_guards_share_lock() {
+        futures::executor::block_on(async {
+            let lock = TracedAsyncRwLock::new("test", 100u64);
+            let reader = lock.read_owned().await;
+            let writer_lock = lock.clone();
+            let writer = writer_lock.write_owned();
+            pin_mut!(writer);
+            assert!(writer.as_mut().now_or_never().is_none());
+
+            drop(reader);
+            let mut writer = writer.await;
+            *writer += 1;
+            drop(writer);
+
+            assert_eq!(*lock.read().await, 101);
         });
     }
 

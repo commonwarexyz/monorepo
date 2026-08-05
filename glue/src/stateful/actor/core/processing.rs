@@ -86,7 +86,7 @@ where
     pub async fn start(mut self) {
         let mut pending_prune = None;
         let mut deferred_message = None;
-        let mut deferred_prune_retries = Vec::<VerificationRequest<E, A>>::new();
+        let mut deferred_retries = Vec::<VerificationRequest<E, A>>::new();
         let mut verifications = Verifications::new(self.marshal.clone());
         for request in std::mem::take(&mut self.deferred_verifications) {
             verifications.schedule(self.processor.verifier(), request);
@@ -109,14 +109,14 @@ where
                     }
                 }
 
-                // Verification results must not overtake deferred finalization or
-                // mailbox work queued while pruning, which may invalidate them.
+                // Verification results and mutation retries must not overtake
+                // finalization work that may invalidate them.
                 let finalization_deferred = matches!(
                     deferred_message.as_ref(),
                     Some(Message::Finalized { .. }),
                 );
-                let prune_retries_deferred = !deferred_prune_retries.is_empty();
-                if !finalization_deferred && !prune_retries_deferred {
+                let retries_deferred = !deferred_retries.is_empty();
+                if !finalization_deferred && !retries_deferred {
                     verifications.complete_ready();
                 }
 
@@ -129,12 +129,12 @@ where
                         // A message is ready: handle it now, regardless of any queued prune.
                         Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
                         Err(TryRecvError::Empty) => {
-                            for request in std::mem::take(&mut deferred_prune_retries) {
+                            for request in std::mem::take(&mut deferred_retries) {
                                 if !request.verification.is_cancelled() {
                                     verifications.schedule(self.processor.verifier(), request);
                                 }
                             }
-                            if prune_retries_deferred {
+                            if retries_deferred {
                                 verifications.complete_ready();
                             }
                             match pending_prune.take() {
@@ -339,9 +339,7 @@ where
                         for verification in reject {
                             verification.respond(false);
                         }
-                        for request in retry {
-                            verifications.schedule(self.processor.verifier(), request);
-                        }
+                        deferred_retries.extend(retry);
                     }
                 }
                 Step::Message(Message::SubscribeDatabases { response }) => {
@@ -369,9 +367,9 @@ where
                         "verification replay remained active after quiescence"
                     );
                     prune
-                        .run(self.processor.databases_mut(), &self.marshal)
+                        .run(self.processor.databases(), &self.marshal)
                         .await;
-                    deferred_prune_retries.extend(retry);
+                    deferred_retries.extend(retry);
                 }
             },
         }
@@ -1869,6 +1867,100 @@ mod tests {
             );
             assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
             assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
+        });
+    }
+
+    #[test]
+    fn finalization_retries_wait_for_queued_finalization() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let losing = TestBlock::child(&first, 2);
+            let winner = TestBlock::child(&first, 3);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"finalize-retry-order", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "finalize-retry-order",
+                scheme,
+                &genesis,
+                NZUsize!(2),
+                true,
+            )
+            .await;
+            let (replay_gate, replay_started, replay_release) = application_gate();
+            let (finalized_gate, finalized_started, finalized_release) = application_gate();
+            let app = ReplayGatedApp {
+                gates: Arc::new(Mutex::new(VecDeque::from([replay_gate]))),
+                verify_gate: Arc::new(Mutex::new(None)),
+                finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
+                gate_height: first.height(),
+                apply_calls: Arc::new(AtomicUsize::new(0)),
+                verify_calls: Arc::new(AtomicUsize::new(0)),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            let mut first_verifier = mailbox.clone();
+            let mut first_attempt = Box::pin(first_verifier.verify(
+                (context.child("first_attempt"), losing.context()),
+                ancestry::from_iter([Arc::new(losing.clone()), Arc::new(first.clone())]),
+            ));
+            assert!(poll!(&mut first_attempt).is_pending());
+            replay_started.await.expect("winner replay should start");
+
+            let mut retried_verifier = mailbox.clone();
+            let mut retried = Box::pin(retried_verifier.verify(
+                (context.child("retried"), losing.context()),
+                ancestry::from_iter([Arc::new(losing), Arc::new(first.clone())]),
+            ));
+            assert!(poll!(&mut retried).is_pending());
+            context.sleep(Duration::from_millis(10)).await;
+
+            let (acknowledgement, first_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(first), acknowledgement));
+            replay_release
+                .send(())
+                .expect("finalization should retain the replay owner");
+            finalized_started
+                .await
+                .expect("first finalization hook should start");
+            assert!(first_attempt.await);
+
+            let (acknowledgement, winner_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            finalized_release
+                .send(())
+                .expect("first finalization hook should remain active");
+
+            assert!(
+                !retried.await,
+                "finalization retry must observe the queued finalization",
+            );
+            first_waiter
+                .await
+                .expect("first block should be acknowledged");
+            winner_waiter.await.expect("winner should be acknowledged");
+            actor.abort();
+            drop(marshal.guards);
         });
     }
 

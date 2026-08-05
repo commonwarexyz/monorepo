@@ -939,7 +939,12 @@ mod certification_tests {
             qmdb_config("certify-chain-builder", page_cache),
         )
         .await;
-        let mut batches = databases.new_batches().await;
+        let mut batches = {
+            let locked = databases.lock_read().await;
+            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
+                deterministic::Context,
+            >>::new_batches(locked)
+        };
         let mut parent = genesis.clone();
         let mut chain = Vec::with_capacity(blocks as usize);
         // QMDB descendants retain uncommitted ancestry by weak reference after

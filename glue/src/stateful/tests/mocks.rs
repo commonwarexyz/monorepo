@@ -125,7 +125,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
+    fn new_batch(_database: &Self, _shared: Shared<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 

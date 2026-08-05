@@ -516,11 +516,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: &Self, shared: Shared<Self>) -> Self::Unmerkleized {
         AnyUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
         }
     }
@@ -620,11 +619,10 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: &Self, shared: Shared<Self>) -> Self::Unmerkleized {
         AnyUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
         }
     }
@@ -829,7 +827,7 @@ mod tests {
             let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
-            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let mut seed = db.new_batch_for_test::<_>().await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
@@ -853,7 +851,7 @@ mod tests {
             let upserts = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
-            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let mut explicit = db.new_batch_for_test::<_>().await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
             for (slot, value) in &indexed_updates {
                 explicit = explicit.write(read_keys[*slot], *value);
@@ -868,7 +866,7 @@ mod tests {
                     .root();
 
             // Staged path, with metadata set on the staged handle.
-            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let staged_batch = db.new_batch_for_test::<_>().await;
             let split = 2;
             let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
             let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
@@ -885,9 +883,7 @@ mod tests {
             assert_eq!(explicit_root, staged_root);
 
             // Metadata set before staging must be carried through to staged merkleize.
-            let carried_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
-                .with_metadata(metadata);
+            let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
             let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
             let carried_root = staged
                 .merkleize(indexed_updates.clone(), upserts.clone())
@@ -931,9 +927,7 @@ mod tests {
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
-            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
-                .write(key, Some(value));
+            let batch = db.new_batch_for_test::<_>().await.write(key, Some(value));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
