@@ -1670,6 +1670,7 @@ pub(crate) fn recover_partition_embedded(root: &Path, partition: &str) -> io::Re
         Err(error) if path_is_missing(&error) => return Ok(()),
         Err(error) => return Err(error),
     };
+    let mut cleaned = false;
     for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
@@ -1688,7 +1689,24 @@ pub(crate) fn recover_partition_embedded(root: &Path, partition: &str) -> io::Re
         if hex(&name) != file_name {
             continue;
         }
-        recover_named_embedded(root, &partition, &name)?;
+        if recover_named_embedded(root, &partition, &name)? {
+            // A confirmed-removed name whose tombstone still lingers: its group's descending
+            // frontier was interrupted, and a recreated peer can strand it from ordinal-zero
+            // cleanup. Unlink it directly so namespace enumeration never returns a durably-deleted
+            // blob. A full partition sweep cleans every removed verdict, so it does not depend on
+            // the ring or the descending order remaining intact. recover_named_embedded reports
+            // removed only for the exact deleted incarnation, so a blob recreated at the same name
+            // is left intact.
+            let path = root.join(&partition).join(hex(&name));
+            match fs::remove_file(&path) {
+                Ok(()) => cleaned = true,
+                Err(error) if path_is_missing(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    if cleaned {
+        sync_directory(&root.join(&partition))?;
     }
     Ok(())
 }
@@ -2540,6 +2558,54 @@ mod tests {
         assert_eq!(
             len, 0,
             "ordinary open of a removed non-anchor blob must create a fresh generation",
+        );
+    }
+
+    /// Reopening a lower non-anchor recreates it with a new incarnation, which breaks the
+    /// ordinal-zero frontier walk (it stops at the recreated incarnation). A later scan must still
+    /// not enumerate a higher tombstone whose deletion `start_apply` already reported durable:
+    /// partition recovery has to clean every removed verdict, not rely on the ring staying intact.
+    #[tokio::test]
+    async fn scan_does_not_return_a_stranded_non_anchor_tombstone() {
+        use crate::{AtomicStorage as _, Storage as _};
+
+        let root = TestRoot::new("stranded-non-anchor-tombstone");
+        let mut blobs = vec![
+            TestBlob::create(root.path(), b"a", 14, b"a-old"),
+            TestBlob::create(root.path(), b"b", 34, b"b-old"),
+            TestBlob::create(root.path(), b"c", 54, b"c-old"),
+            TestBlob::create(root.path(), b"d", 74, b"d-old"),
+        ];
+        // Retain ordinal 0 (a); delete ordinals 1, 2, 3 (b, c, d).
+        let group = stage_group(
+            &mut blobs,
+            &[
+                Role::Retain(b"a-new".to_vec()),
+                Role::Delete,
+                Role::Delete,
+                Role::Delete,
+            ],
+        );
+        group.write_all(&blobs);
+        materialize_decision_participants(root.path(), &group.decision).unwrap();
+        // Crash after the highest-ordinal tombstone (d) is durably unlinked, before c and b.
+        fs::remove_file(&blobs[3].path).unwrap();
+        sync_directory(&root.path().join(PARTITION)).unwrap();
+        drop(blobs);
+
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let storage = crate::storage::tokio::Storage::new(
+            crate::storage::tokio::Config::new(root.path().to_path_buf(), 2 * 1024 * 1024),
+            pool,
+        );
+        // Reopen the lower non-anchor b, recreating it and stranding c from ordinal-zero cleanup.
+        let _ = storage.open_atomic(PARTITION, b"b").await.unwrap();
+
+        let names = storage.scan(PARTITION).await.unwrap();
+        assert!(
+            !names.contains(&b"c".to_vec()),
+            "scan returned durably-deleted non-anchor blob c: {names:?}",
         );
     }
 
