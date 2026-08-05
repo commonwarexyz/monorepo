@@ -56,6 +56,9 @@ type Task<P> = (Channel, P, Recipients<P>, IoBuf);
 /// Overhead from prepending a channel identifier to an application payload.
 pub const MAX_PAYLOAD_OVERHEAD: u32 = Channel::SIZE as u32;
 
+/// Maximum supported application payload size.
+pub const MAX_SIZE: u32 = u32::MAX - MAX_PAYLOAD_OVERHEAD;
+
 struct RegistrationGuard {
     active: Arc<AtomicBool>,
 }
@@ -121,7 +124,8 @@ struct PeerRefCounts {
 pub struct Config {
     /// Maximum size allowed for an application payload provided to a sender.
     ///
-    /// Providing a larger payload panics. Exchanged messages are larger due to framing overhead.
+    /// Must not exceed [`MAX_SIZE`]. Providing a larger payload panics. Exchanged messages are
+    /// larger due to framing overhead.
     pub max_size: u32,
 
     /// True if peers should disconnect upon being blocked. While production networking would
@@ -201,7 +205,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// # Panics
     ///
-    /// Panics if [`Config::max_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
+    /// Panics if [`Config::max_size`] exceeds [`MAX_SIZE`].
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");
@@ -1557,14 +1561,14 @@ mod tests {
         });
     }
 
-    /// [`Config::max_size`] must leave enough frame capacity for internal overhead.
+    /// [`Config::max_size`] cannot exceed [`MAX_SIZE`].
     #[test]
     #[should_panic(expected = "maximum frame size overflow")]
     fn test_max_size_overflow_panics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: u32::MAX,
+                max_size: MAX_SIZE + 1,
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             };

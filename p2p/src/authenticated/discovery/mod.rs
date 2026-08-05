@@ -247,7 +247,10 @@ mod metrics;
 mod network;
 mod types;
 
-pub use crate::authenticated::channels::{Error, Receiver, Sender};
+pub use crate::authenticated::{
+    MAX_SIZE,
+    channels::{Error, Receiver, Sender},
+};
 pub use actors::tracker::Oracle;
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
@@ -644,7 +647,7 @@ mod tests {
                 ed25519::PrivateKey::from_seed(0),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
                 Vec::new(),
-                u32::MAX,
+                MAX_SIZE + 1,
             );
             let _ = Network::new(context.child("network"), config);
         });

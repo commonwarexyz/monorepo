@@ -56,7 +56,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if [`Config::max_message_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
+    /// Panics if [`Config::max_message_size`] exceeds [`MAX_SIZE`](super::MAX_SIZE).
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let max_frame_size = cfg
             .max_message_size

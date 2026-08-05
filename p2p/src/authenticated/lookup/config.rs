@@ -46,6 +46,7 @@ pub struct Config<C: Signer> {
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
+    /// Must not exceed [`MAX_SIZE`](super::MAX_SIZE).
     pub max_message_size: u32,
 
     /// Message backlog allowed for internal actors.

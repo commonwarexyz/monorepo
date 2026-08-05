@@ -49,6 +49,9 @@ pub(crate) const DATA_PREFIX: u8 = 0;
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_OVERHEAD: u32 = 1 + 10 + 5;
 
+/// Maximum supported application payload size.
+pub const MAX_SIZE: u32 = u32::MAX - MAX_PAYLOAD_OVERHEAD;
+
 /// Pre-encoded data ready for transmission.
 ///
 /// Contains the channel ID (for metrics) and the pre-encoded payload bytes.
