@@ -2,7 +2,7 @@
 
 use crate::{
     CertifiableBlock,
-    marshal::{coding::types::CodedBlock, core::RetentionUpdate},
+    marshal::{coding::types::CodedBlock, core::Retirement},
     types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -97,8 +97,8 @@ where
     /// A request to retire cached blocks and reconstruction state after durable application
     /// progress.
     Retire {
-        /// The atomic retention update.
-        update: RetentionUpdate<Commitment>,
+        /// The retirement to apply.
+        update: Retirement<Commitment>,
     },
 }
 
@@ -335,14 +335,14 @@ where
 
     /// Retire cached blocks and reconstruction state after durable application progress.
     ///
-    /// Entries last observed at or before [`RetentionUpdate::round_floor`] are eligible for
-    /// retirement. Entries in [`RetentionUpdate::exact_retirements`] are eligible regardless of
+    /// Entries last observed at or before [`Retirement::round_floor`] are eligible for
+    /// retirement. Entries in [`Retirement::exact_retirements`] are eligible regardless of
     /// observation round.
     ///
     /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
     /// close only for exact retirements. Other block subscriptions remain open for local ingress.
     /// Digest subscriptions remain open, and later consensus notifications may recreate state.
-    pub fn retire(&self, update: RetentionUpdate<Commitment>) {
+    pub fn retire(&self, update: Retirement<Commitment>) {
         let _ = self.sender.enqueue(Message::Retire { update });
     }
 }

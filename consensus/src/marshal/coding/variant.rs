@@ -6,7 +6,7 @@ use crate::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
         },
-        core::{Buffer, CommitmentFallback, Mailbox, RetentionUpdate, Variant},
+        core::{Buffer, CommitmentFallback, Mailbox, Retirement, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
@@ -155,7 +155,7 @@ where
         Some(self.subscribe(commitment))
     }
 
-    fn retire(&self, update: RetentionUpdate<Commitment>) {
+    fn retire(&self, update: Retirement<Commitment>) {
         Self::retire(self, update);
     }
 

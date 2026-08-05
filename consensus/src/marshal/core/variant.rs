@@ -19,12 +19,12 @@ use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, marker::PhantomData, sync::Arc};
 
-/// An atomic update to a buffer's retained state.
+/// An atomic retirement from a buffer's retained state.
 ///
 /// The round floor and exact retirements are independent eligibility signals
 /// carried together so implementations apply one coherent update.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RetentionUpdate<C> {
+pub struct Retirement<C> {
     /// The inclusive floor for entries owned by their last observation round.
     pub round_floor: Round,
     /// Commitments to retire regardless of their last observation round.
@@ -182,11 +182,11 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
 
     /// Retire entries made eligible by durable application progress.
     ///
-    /// [`RetentionUpdate::round_floor`] is nondecreasing and inclusive.
-    /// [`RetentionUpdate::exact_retirements`] may be empty, sparse, or batched.
+    /// [`Retirement::round_floor`] is increasing and inclusive.
+    /// [`Retirement::exact_retirements`] may be empty, sparse, or batched.
     /// Implementations must apply both fields as one update and must not infer
     /// that they describe the same finalization.
-    fn retire(&self, update: RetentionUpdate<V::Commitment>);
+    fn retire(&self, update: Retirement<V::Commitment>);
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: Arc<V::Block>, recipients: Recipients<Self::PublicKey>);
@@ -242,7 +242,7 @@ where
         None
     }
 
-    fn retire(&self, _: RetentionUpdate<V::Commitment>) {}
+    fn retire(&self, _: Retirement<V::Commitment>) {}
 
     fn send(&self, _: Round, _: Arc<V::Block>, _: Recipients<Self::PublicKey>) {}
 }

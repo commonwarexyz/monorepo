@@ -148,7 +148,7 @@ use crate::{
             types::{CodedBlock, Shard},
             validation::{ReconstructionError as InvariantError, validate_reconstruction},
         },
-        core::RetentionUpdate,
+        core::Retirement,
     },
     types::{Epoch, Round, coding::Commitment},
 };
@@ -304,9 +304,9 @@ where
     phase: CommitmentPhase<B, C, H, P>,
 }
 
-/// Whether a commitment already has an owned lifecycle record.
+/// The current lifecycle status of a commitment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CommitmentPresence {
+enum CommitmentStatus {
     /// No record exists for the commitment.
     Absent,
     /// The commitment is accumulating or validating shards.
@@ -850,10 +850,10 @@ where
         // redundant, unless notarized recovery created leaderless state first.
         // In that case, the leader announcement must still populate the
         // leader-dependent path.
-        let Some(presence) = self.observe_existing_commitment(commitment, round) else {
+        let Some(status) = self.observe_existing_commitment(commitment, round) else {
             return;
         };
-        if presence == CommitmentPresence::Cached
+        if status == CommitmentStatus::Cached
             && self
                 .records
                 .get(&commitment)
@@ -910,13 +910,13 @@ where
         commitment: Commitment,
         round: Round,
     ) {
-        let Some(presence) = self.observe_existing_commitment(commitment, round) else {
+        let Some(status) = self.observe_existing_commitment(commitment, round) else {
             return;
         };
-        if presence == CommitmentPresence::Cached {
+        if status == CommitmentStatus::Cached {
             return;
         }
-        if presence == CommitmentPresence::Reconstructing {
+        if status == CommitmentStatus::Reconstructing {
             let buffered_progress = self.ingest_buffered_shards(commitment);
             if buffered_progress {
                 self.try_advance(sender, commitment);
@@ -1027,16 +1027,16 @@ where
 
     /// Records a consensus observation on an existing commitment owner.
     ///
-    /// Returns the record's phase, [`CommitmentPresence::Absent`] if it has no
+    /// Returns the record's phase, [`CommitmentStatus::Absent`] if it has no
     /// owner yet, or `None` when its owner is bound to a different epoch.
     fn observe_existing_commitment(
         &mut self,
         commitment: Commitment,
         round: Round,
-    ) -> Option<CommitmentPresence> {
+    ) -> Option<CommitmentStatus> {
         let observed_epoch = round.epoch();
         let Some(record) = self.records.get_mut(&commitment) else {
-            return Some(CommitmentPresence::Absent);
+            return Some(CommitmentStatus::Absent);
         };
         if let Err(existing_epoch) = record.observe(round) {
             warn!(
@@ -1048,9 +1048,9 @@ where
             return None;
         }
         Some(if record.block().is_some() {
-            CommitmentPresence::Cached
+            CommitmentStatus::Cached
         } else {
-            CommitmentPresence::Reconstructing
+            CommitmentStatus::Reconstructing
         })
     }
 
@@ -1062,7 +1062,7 @@ where
         reconstruction: ReconstructionState<P, C, H>,
     ) {
         let Entry::Vacant(entry) = self.records.entry(commitment) else {
-            unreachable!("commitment presence was checked as absent");
+            unreachable!("commitment status was checked as absent");
         };
         entry.insert(CommitmentRecord::reconstructing(round, reconstruction));
         self.metrics.reconstruction_states_count.inc();
@@ -1390,8 +1390,8 @@ where
     ///
     /// Retirement waits for durable progress because a Byzantine leader may produce multiple
     /// valid commitments in one round.
-    fn retire(&mut self, update: RetentionUpdate<Commitment>) {
-        let RetentionUpdate {
+    fn retire(&mut self, update: Retirement<Commitment>) {
+        let Retirement {
             round_floor,
             exact_retirements,
         } = update;
@@ -2584,7 +2584,7 @@ mod tests {
 
             // The authoritative retirement floor removes every earlier candidate and the exact
             // processed commitment, even when that commitment was observed above the floor.
-            peer.mailbox.retire(RetentionUpdate {
+            peer.mailbox.retire(Retirement {
                 round_floor: Round::new(Epoch::zero(), View::new(3)),
                 exact_retirements: vec![processed_commitment],
             });
@@ -2650,7 +2650,7 @@ mod tests {
             let mut state_later_sub = peer.mailbox.subscribe(state_later);
             context.sleep(Duration::from_millis(10)).await;
 
-            peer.mailbox.retire(RetentionUpdate {
+            peer.mailbox.retire(Retirement {
                 round_floor: floor,
                 exact_retirements: vec![unseen],
             });
@@ -2713,7 +2713,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
             assert!(matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)));
 
-            peer.mailbox.retire(RetentionUpdate {
+            peer.mailbox.retire(Retirement {
                 round_floor: floor,
                 exact_retirements: vec![unseen],
             });
@@ -3056,7 +3056,7 @@ mod tests {
                 non_participant,
                 Round::new(Epoch::zero(), View::new(10)),
             );
-            receiver.mailbox.retire(RetentionUpdate {
+            receiver.mailbox.retire(Retirement {
                 round_floor: Round::new(Epoch::zero(), View::new(5)),
                 exact_retirements: vec![unrelated],
             });
@@ -3111,7 +3111,7 @@ mod tests {
             receiver
                 .mailbox
                 .notarized(incomplete_commitment, conflicting_round);
-            receiver.mailbox.retire(RetentionUpdate {
+            receiver.mailbox.retire(Retirement {
                 round_floor: Round::new(Epoch::zero(), View::new(5)),
                 exact_retirements: vec![unrelated],
             });
@@ -3519,7 +3519,7 @@ mod tests {
                     .mailbox
                     .notarized(live_commitment, Round::new(Epoch::zero(), View::new(4)));
                 context.sleep(Duration::from_millis(10)).await;
-                peers[receiver_idx].mailbox.retire(RetentionUpdate {
+                peers[receiver_idx].mailbox.retire(Retirement {
                     round_floor: Round::new(Epoch::zero(), View::new(3)),
                     exact_retirements: vec![finalized_commitment],
                 });
@@ -3646,7 +3646,7 @@ mod tests {
 
                 let prune_round = Round::new(Epoch::zero(), View::new(3));
                 for &receiver_idx in &receivers {
-                    peers[receiver_idx].mailbox.retire(RetentionUpdate {
+                    peers[receiver_idx].mailbox.retire(Retirement {
                         round_floor: prune_round,
                         exact_retirements: vec![finalized_commitment],
                     });
@@ -3756,7 +3756,7 @@ mod tests {
                     peers[2].mailbox.get(commitment_b).await.is_some(),
                     "local proposal should be cached before pruning"
                 );
-                peers[2].mailbox.retire(RetentionUpdate {
+                peers[2].mailbox.retire(Retirement {
                     round_floor: round_b,
                     exact_retirements: vec![commitment_b],
                 });

@@ -175,7 +175,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn retire(&self, _update: core::RetentionUpdate<Commitment>) {}
+        fn retire(&self, _update: core::Retirement<Commitment>) {}
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
@@ -1838,7 +1838,7 @@ mod tests {
     /// through core marshal's verified cache, while a post-retirement `discovered`
     /// announcement must recreate shard state needed before notarization.
     #[test_traced("WARN")]
-    fn test_coding_reproposal_survives_exact_retirement_orderings() {
+    fn test_coding_reproposal_recreates_shard_state_after_retirement() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1911,7 +1911,7 @@ mod tests {
 
             // Exact retirement with a round floor below the commitment's observed
             // round: only the exact commitment list can retire it.
-            shards.retire(core::RetentionUpdate {
+            shards.retire(core::Retirement {
                 round_floor: Round::new(Epoch::zero(), View::new(1)),
                 exact_retirements: vec![boundary_commitment],
             });
@@ -1953,7 +1953,7 @@ mod tests {
             // Retiring again after verification removes the newly recreated shard
             // state, but not the block persisted in core marshal. Certification and
             // caller-owned core subscriptions must remain live through that cache.
-            shards.retire(core::RetentionUpdate {
+            shards.retire(core::Retirement {
                 round_floor: Round::new(Epoch::zero(), View::new(1)),
                 exact_retirements: vec![boundary_commitment],
             });
@@ -2335,7 +2335,7 @@ mod tests {
             // Ensure the certification gate task has registered its subscription, then
             // force cancellation by pruning the missing commitment.
             context.sleep(Duration::from_millis(100)).await;
-            shards.retire(core::RetentionUpdate {
+            shards.retire(core::Retirement {
                 round_floor: round,
                 exact_retirements: vec![missing_payload],
             });
@@ -2415,7 +2415,7 @@ mod tests {
 
             // Prune the missing commitment in the shard engine, which should cancel
             // the underlying buffer subscription.
-            shards.retire(core::RetentionUpdate {
+            shards.retire(core::Retirement {
                 round_floor: round,
                 exact_retirements: vec![missing_commitment],
             });

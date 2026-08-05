@@ -193,7 +193,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn retire(&self, _update: crate::marshal::core::RetentionUpdate<Digest>) {}
+        fn retire(&self, _update: crate::marshal::core::Retirement<Digest>) {}
 
         fn send(&self, _round: Round, _block: Arc<TestBlock>, _recipients: Recipients<PublicKey>) {}
     }

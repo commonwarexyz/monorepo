@@ -1,5 +1,5 @@
 use super::{
-    Buffer, RetentionUpdate, Variant,
+    Buffer, Retirement, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
@@ -576,7 +576,7 @@ where
 
         // The round is an inclusive floor. Retire every exact commitment even if
         // sparse certificates leave it above that floor.
-        buffer.retire(RetentionUpdate {
+        buffer.retire(Retirement {
             round_floor: processed_round,
             exact_retirements: processed_commitments,
         });
@@ -1312,7 +1312,7 @@ where
                 .update_processed_round_floor(height, finalization.round(), resolver)
                 .await;
             let commitments = self.take_superseded_ack_commitments();
-            buffer.retire(RetentionUpdate {
+            buffer.retire(Retirement {
                 round_floor: self.floor.round(),
                 exact_retirements: commitments,
             });
@@ -1369,7 +1369,7 @@ where
         // The active floor retires round-bound entries and every commitment whose
         // acknowledgement it superseded.
         let commitments = self.take_superseded_ack_commitments();
-        buffer.retire(RetentionUpdate {
+        buffer.retire(Retirement {
             round_floor: self.floor.round(),
             exact_retirements: commitments,
         });
