@@ -364,7 +364,7 @@ impl<
         // Every reported gap sits above the floor, and a cached nullification
         // covering a view above the floor is also stored in [State], so a
         // reported gap is never settled.
-        debug_assert!(!self.settled(view, ask.kind));
+        assert!(!self.settled(view, ask.kind));
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
@@ -457,10 +457,11 @@ impl<
     /// Selects a certificate to serve for `view`.
     ///
     /// The request does not say which certificate it wants, so when both a
-    /// notarization and a covering nullification are held either may be the one
-    /// the requester needs. The choice is random: a fixed preference
+    /// certified notarization and a covering nullification are held either may
+    /// be the one the requester needs. The choice is random: a fixed preference
     /// would answer every retry from a requester wanting the other
-    /// kind with the same useless certificate.
+    /// kind with the same useless certificate. A notarization awaiting its
+    /// verdict is never served.
     fn produce_certificate(&mut self, view: View) -> Option<Bytes> {
         // A finalization settles either kind, so weaker evidence would only
         // delay the requester.
@@ -1488,6 +1489,42 @@ mod tests {
     }
 
     #[test_async]
+    async fn late_verdict_after_finalization_promotes_nothing() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(5);
+
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, view)),
+            );
+            assert!(actor.uncertified_notarizations.contains_key(&view));
+
+            // A covering finalization prunes the payload awaiting its verdict.
+            actor.updated(
+                &mut resolver,
+                Certificate::Finalization(build_finalization(
+                    &schemes,
+                    &verifier,
+                    EPOCH,
+                    view.next(),
+                )),
+            );
+            assert!(actor.uncertified_notarizations.is_empty());
+
+            // The late verdict finds nothing to promote: a notarization at or
+            // below finalization never becomes servable.
+            actor.certified(&mut resolver, view, true);
+            assert!(actor.notarization_responses.is_empty());
+        });
+    }
+
+    #[test_async]
     async fn nullification_satisfies_target_at_certified_floor() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -1891,6 +1928,10 @@ mod tests {
                 &mut resolver,
             );
             assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+
+            // The duplicate is not re-cached as uncertified: no second verdict
+            // would ever clear it.
+            assert!(actor.uncertified_notarizations.is_empty());
         });
     }
 

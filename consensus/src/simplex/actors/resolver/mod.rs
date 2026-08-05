@@ -28,13 +28,18 @@
 //!
 //! Background repair cannot detect a split where one participant certifies a notarization while
 //! another holds a covering nullification. Proposal verification exposes the missing ancestry and
-//! targets the first gap at the proposal's leader. Matching evidence or finalization retires that
-//! request, whereas a certified-floor raise retires only background work.
+//! targets the first gap at the proposal's leader. Matching evidence, finalization, or a failed
+//! certification verdict retires that request, whereas a certified-floor raise retires only
+//! background work.
 //!
-//! The wire key names only the view. A responder holding both a notarization and a covering
-//! nullification cannot tell which one the requester wants, so it serves one at random. The
-//! requester recognizes a response that does not settle its ask and retries without faulting the
-//! peer.
+//! The wire key names only the view. A responder holding both a certified notarization and a
+//! covering nullification cannot tell which one the requester wants, so it serves one at random.
+//! The requester recognizes a response that does not settle its ask and retries without faulting
+//! the peer.
+//!
+//! A notarization is served only after local certification succeeds. Possession still settles the
+//! holder's own ask, because certification judges evidence already in hand. A failed verdict also
+//! settles it, since no copy of that notarization can certify anywhere.
 //!
 //! # Mid-Term Floor Raises
 //!
