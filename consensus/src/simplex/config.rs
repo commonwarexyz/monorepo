@@ -208,9 +208,6 @@ where
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
-    /// Number of concurrent requests to make at once.
-    pub fetch_concurrent: NonZeroUsize,
-
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.
     pub forwarding: ForwardingPolicy,

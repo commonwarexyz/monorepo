@@ -2243,7 +2243,6 @@ mod tests {
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(6),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_concurrent: NZUsize!(3),
                     forwarding: ForwardingPolicy::Disabled,
                     track_historical_votes: false,
                 },
