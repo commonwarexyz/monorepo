@@ -67,9 +67,8 @@ where
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
-    /// Live verify requests held during state sync and scheduled when
-    /// processing starts.
-    pub(super) initial_verifications: Vec<VerificationRequest<E, A>>,
+    /// Verification requests deferred until processing starts.
+    pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
@@ -88,7 +87,7 @@ where
         let mut pending_prune = None;
         let mut deferred_message = None;
         let mut verifications = Verifications::new(self.marshal.clone());
-        for request in std::mem::take(&mut self.initial_verifications) {
+        for request in std::mem::take(&mut self.deferred_verifications) {
             verifications.schedule(self.processor.verifier(), request);
         }
 
@@ -620,7 +619,7 @@ mod tests {
             provider: (),
             marshal: marshal.mailbox,
             processor,
-            initial_verifications: Vec::new(),
+            deferred_verifications: Vec::new(),
             skip_finalized_until: None,
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
@@ -690,7 +689,7 @@ mod tests {
             provider: (),
             marshal: marshal.mailbox,
             processor,
-            initial_verifications: Vec::new(),
+            deferred_verifications: Vec::new(),
             skip_finalized_until: None,
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
@@ -1344,7 +1343,7 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                initial_verifications: Vec::new(),
+                deferred_verifications: Vec::new(),
                 skip_finalized_until: Some(finalized.height()),
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
@@ -1393,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_verifications_resolve_after_handoff() {
+    fn deferred_verification_resumes_after_sync() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (gate, started, release) = application_gate();
             let app = GatedApp {
@@ -1403,10 +1402,11 @@ mod tests {
                 observed_contexts: Arc::default(),
             };
             let mut signing = context.child("signing");
-            let scheme = scheme_mocks::fixture(&mut signing, b"held-verify", 1).schemes[0].clone();
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"deferred-verify", 1).schemes[0].clone();
             let marshal = fixtures::marshal_fixture(
                 context.child("marshal"),
-                "held-verify",
+                "deferred-verify",
                 scheme,
                 None,
                 NZUsize!(1),
@@ -1421,13 +1421,13 @@ mod tests {
                 None,
             );
 
-            // A verify request arrives while the sync actor still owns the
-            // mailbox, so no loop is draining it yet.
+            // Defer a verification as the syncing actor does before its
+            // database set is ready.
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
-            let held = context.child("held").spawn(move |task_context| {
+            let deferred = context.child("deferred").spawn(move |task_context| {
                 let consensus_context = block.context();
                 async move {
                     mailbox
@@ -1450,27 +1450,30 @@ mod tests {
                     ancestry,
                     verification,
                 },
-                _ => panic!("held verify request must arrive"),
+                _ => panic!("deferred verification request must arrive"),
             };
 
-            // Hand the held request to processing, as the sync actor does on
-            // completion.
+            // Resume the deferred verification after state sync.
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                initial_verifications: vec![request],
+                deferred_verifications: vec![request],
                 skip_finalized_until: Some(Height::new(0)),
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
-            started.await.expect("held verification should start");
+            started.await.expect("deferred verification should resume");
             release
                 .send(())
-                .expect("held verification should remain active");
-            assert!(held.await.expect("held verification should resolve"));
+                .expect("deferred verification should remain active");
+            assert!(
+                deferred
+                    .await
+                    .expect("deferred verification should resolve")
+            );
             actor.abort();
             drop(marshal.guards);
         });
@@ -1523,7 +1526,7 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                initial_verifications: Vec::new(),
+                deferred_verifications: Vec::new(),
                 skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
@@ -1621,7 +1624,7 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                initial_verifications: Vec::new(),
+                deferred_verifications: Vec::new(),
                 skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
@@ -1710,7 +1713,7 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox,
                 processor,
-                initial_verifications: Vec::new(),
+                deferred_verifications: Vec::new(),
                 skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
@@ -1818,7 +1821,7 @@ mod tests {
                 provider: (),
                 marshal: marshal.mailbox.clone(),
                 processor,
-                initial_verifications: Vec::new(),
+                deferred_verifications: Vec::new(),
                 skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());

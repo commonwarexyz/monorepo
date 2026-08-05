@@ -18,7 +18,7 @@ use rand_core::Rng;
 use std::{collections::BTreeMap, future::Future};
 use tracing::{Instrument as _, Span, info_span};
 
-/// A verification request retained across actor state transitions.
+/// A verification request that can be deferred or retried.
 pub(super) struct Request<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,

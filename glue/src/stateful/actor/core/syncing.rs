@@ -74,8 +74,8 @@ where
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
 
-    /// Verify requests held while syncing.
-    pub(super) held_verify_requests: Vec<VerificationRequest<E, A>>,
+    /// Verification requests deferred until state sync completes.
+    pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 
     /// Open subscriptions to the synced databases.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
@@ -113,7 +113,7 @@ where
         select_loop! {
             self.context,
             on_start => {
-                self.held_verify_requests
+                self.deferred_verifications
                     .retain(|request| !request.verification.is_cancelled());
                 self.database_subscribers
                     .retain(|subscriber| !subscriber.is_closed());
@@ -152,10 +152,10 @@ where
                     ancestry,
                     verification,
                 } => {
-                    let process = info_span!(parent: &span, "stateful.actor.hold_verify");
-                    self.held_verify_requests
+                    let process = info_span!(parent: &span, "stateful.actor.verify.defer");
+                    self.deferred_verifications
                         .retain(|request| !request.verification.is_cancelled());
-                    self.held_verify_requests.push(VerificationRequest {
+                    self.deferred_verifications.push(VerificationRequest {
                         span,
                         context,
                         ancestry,
@@ -163,8 +163,8 @@ where
                     });
                     process.in_scope(|| {
                         debug!(
-                            held_verify_requests = self.held_verify_requests.len(),
-                            "verify held: state sync in progress"
+                            deferred_verifications = self.deferred_verifications.len(),
+                            "verification deferred: state sync in progress"
                         );
                     });
                 }
@@ -381,7 +381,7 @@ where
             provider: self.provider,
             marshal: self.marshal,
             processor,
-            initial_verifications: self.held_verify_requests,
+            deferred_verifications: self.deferred_verifications,
             skip_finalized_until: Some(completed_height),
         }
         .start()
@@ -557,7 +557,7 @@ mod tests {
                     marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
-                    held_verify_requests: Vec::new(),
+                    deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
                     artifact: None,
                     resolvers: NoopResolver,
@@ -611,7 +611,7 @@ mod tests {
                     marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
-                    held_verify_requests: Vec::new(),
+                    deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
                     artifact: Some(SyncResult {
                         databases: test_databases(),

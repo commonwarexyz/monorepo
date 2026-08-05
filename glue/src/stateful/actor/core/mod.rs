@@ -268,7 +268,7 @@ where
             marshal,
             sync_metadata,
             syncer: syncer_mailbox,
-            held_verify_requests: Vec::new(),
+            deferred_verifications: Vec::new(),
             database_subscribers: Vec::new(),
             artifact: None,
             resolvers: self.resolvers,
@@ -309,7 +309,7 @@ where
             provider: self.provider,
             marshal,
             processor,
-            initial_verifications: Vec::new(),
+            deferred_verifications: Vec::new(),
             skip_finalized_until,
         }
         .start()
