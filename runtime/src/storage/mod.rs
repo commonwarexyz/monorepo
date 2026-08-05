@@ -209,6 +209,7 @@ pub(crate) mod tests {
         test_direct_sync_transitions_to_and_from_a_group(&storage).await;
         test_apply_batch_validates_atomically(&storage).await;
         test_apply_batch_validates_all_rewinds_before_mutating(&storage).await;
+        test_apply_batch_invalid_integrity_rewind_does_not_poison(&storage).await;
         test_apply_batch_conflicts_are_atomic(&storage).await;
         test_apply_batch_rejects_stale_handle(&storage).await;
     }
@@ -1314,6 +1315,45 @@ pub(crate) mod tests {
         );
         assert_eq!(first.read_at(0, 3).await.unwrap().coalesce(), b"abc");
         assert_eq!(second.read_at(0, 3).await.unwrap().coalesce(), b"xyz");
+    }
+
+    /// Rejecting an integrity-sensitive rewind before I/O leaves every participant usable.
+    async fn test_apply_batch_invalid_integrity_rewind_does_not_poison<S>(storage: &S)
+    where
+        S: BatchStorage + Send + Sync,
+        S::AtomicBlob: Send + Sync,
+    {
+        let (invalid, _) = storage
+            .open_atomic("batch_integrity_rewind_validation", b"invalid")
+            .await
+            .unwrap();
+        let initial = invalid.integrity_snapshot().await.unwrap();
+        invalid
+            .append_integrity(initial.token, b"unit", IntegrityBoundary::Complete, None)
+            .await
+            .unwrap();
+        invalid.sync().await.unwrap();
+
+        let (peer, _) = storage
+            .open_atomic("batch_integrity_rewind_validation", b"peer")
+            .await
+            .unwrap();
+        peer.append(b"pending").await.unwrap();
+
+        let result = storage
+            .apply(vec![
+                BatchOperation::Rewind {
+                    blob: invalid.clone(),
+                    len: 1,
+                },
+                BatchOperation::Publish(peer.clone()),
+            ])
+            .await;
+        assert!(
+            matches!(result, Err(crate::Error::Io(err)) if err.kind() == std::io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(invalid.append(b"ok").await.unwrap(), 8);
+        assert_eq!(peer.append(b"ok").await.unwrap(), 7);
     }
 
     /// Conflicting blob mutations reject the entire batch without changing blob state.

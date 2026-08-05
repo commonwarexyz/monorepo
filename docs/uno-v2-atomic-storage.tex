@@ -306,7 +306,7 @@
   \note{This is the final cleanup. The atomic core no longer manipulates filesystem payload or root bytes directly. It receives an ordinary V1-geometry Blob whose logical zero is immediately after the filesystem's immutable 4 KiB typed envelope. UNO reserves that backing blob's first 4 KiB for its alternating roots and exposes only the encoded payload to AtomicBlob callers. Thus the stable physical V2 layout remains an immutable 4 KiB envelope, one 4 KiB root page, and payload at 8 KiB, while the protocol itself depends only on Blob. The filesystem header is deliberately narrow: it distinguishes the container kind, application version, and exact incarnation so namespace recovery cannot confuse a recreated name.}
 \end{frame}
 
-\begin{frame}[t]{One blob: the durable decision fits in one barrier}
+\begin{frame}[t]{Filesystem hot path: one blob fits in one barrier}
   \vspace{0.14cm}
   \begin{tikzpicture}[node distance=.7cm]
     \node[box,minimum width=2.7cm,minimum height=1.0cm] (append) {\texttt{Blob::write\_at}\\\scriptsize payload at final offset};
@@ -339,7 +339,7 @@
   \end{columns}
 
   \vfill
-  \takeaway{The self-link is the durable decision; later compatible epochs alternate and supersede it.}
+  \takeaway{Filesystem: the self-link decides in one barrier. Memory uses a simpler two-barrier publisher.}
 
   \note{The one-barrier claim is for the compatible append-only filesystem hot path. Blob::start_sync drives the same publication asynchronously. An overlapping prior decision may have to finish before a shared participant can advance. Large or non-contiguous pending epochs may also preflush immutable payload before the root is staged, but they do not copy or rewrite that payload. The generic memory publisher deliberately uses a simpler correctness-first sequence; the filesystem publisher is the one-barrier protocol path measured later.}
 \end{frame}
@@ -603,7 +603,7 @@
   \note{Only a completed fdatasync-equivalent advances the trusted frontier F; sync_file_range or another writeback hint never does. Background preflush is coalesced while the producer continues, and it writes no root. At publication, each participant waits only for any durability frontier it must rely on. Its local witness names that trusted prefix and carries CRC32C for the remaining tail; tail budgets sum to at most 64 MiB across the group. This publication checksum is independent of the long-lived integrity-unit footer or open-unit CRC. The final participant barriers run concurrently. A very large append followed immediately by sync may still wait for a payload preflush and then the root barrier, but payload is never copied or written twice. Before root staging, a crash can expose only old. Once staging begins, the ordinary indeterminate window applies: old or complete new.}
 \end{frame}
 
-\begin{frame}[t]{Independent groups have no temporal dependency}
+\begin{frame}[t]{The protocol imposes no order between independent groups}
   \vspace{0.03cm}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.56\textwidth}
@@ -622,13 +622,13 @@
     \end{column}
     \begin{column}{0.42\textwidth}
       \begin{tikzpicture}
-        \node[warn,text width=5.15cm] {\textbf{No protocol-wide order}\\\scriptsize no root WAL, coordinator, LSN, or commit sequence\\[.1cm]\textbf{What this avoids}\\\scriptsize no global transaction lock, WAL, or volume layer};
+        \node[warn,text width=5.15cm] {\textbf{No durable protocol-wide order}\\\scriptsize no root WAL, coordinator, LSN, or commit sequence\\[.1cm]\textbf{Current implementation}\\\scriptsize one process-local namespace lock serializes filesystem groups};
       \end{tikzpicture}
     \end{column}
   \end{columns}
 
   \vspace{0.12cm}
-  \eyebrow{Crash states for independently started A and B}
+  \eyebrow{Protocol-permitted crash states---not a current concurrency guarantee}
 
   \vspace{0.06cm}
   \noindent\hfill\small old A / old B
@@ -652,7 +652,7 @@
   \hfill\null
 
   \vfill
-  \takeaway{Independent groups are independent; encode a real dependency in one group or wait for the earlier durable edge.}
+  \takeaway{UNO defines no cross-group order; current filesystem publishers still serialize \texttt{start\_apply}.}
 
   \note{Two disjoint start_apply calls have no shared sequence number; the protocol permits their durable frontiers to cross in either order. Current backends may serialize namespace work as an implementation constraint, but that creates no semantic dependency. UNO does not interpose a global transaction lock, WAL, or volume-like layer on ordinary blobs. Opening one participant follows and repairs only its exact linked ring; recovery does not scan or order unrelated groups. If B semantically depends on A, either stage both pending mutations and publish them in one group, or do not begin B's separate group until A's durable decision is proven. start_apply returning Ok proves durability; awaiting its handle additionally waits for activation and namespace cleanup. A workload that truly needs one total order can still add a higher-level root WAL.}
 \end{frame}

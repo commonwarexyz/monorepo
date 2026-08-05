@@ -754,7 +754,7 @@ impl Storage {
             if let Some(len) =
                 rewind_lengths.get(&(blob.partition().to_string(), blob.name().to_vec()))
             {
-                state.validate_rewind(*len)?;
+                let _ = state.rewind_integrity_source(*len, None)?;
             }
         }
         let mut participants = Vec::new();

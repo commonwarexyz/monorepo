@@ -468,7 +468,7 @@ impl Storage {
             .collect::<BTreeMap<_, _>>();
         for (blob, state) in &locked {
             if let Some(len) = rewind_lengths.get(&(blob.partition.clone(), blob.name.clone())) {
-                state.validate_rewind(*len)?;
+                let _ = state.rewind_integrity_source(*len, None)?;
             }
         }
         let mut participants = Vec::new();
