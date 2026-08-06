@@ -153,11 +153,11 @@
 //!
 //! Outgoing message submissions can be rejected when a peer's send buffer is full, preventing slow
 //! peers from blocking sends to other peers. Incoming application messages are enqueued without
-//! waiting. Each channel has one mailbox shared by all peers and sized for one configured quota
-//! burst from every peer allowed by [`Config::max_peers`]. When it is full, the arriving message is
-//! dropped and queued messages remain. This allows protocol messages (BitVec, Peers) to continue
-//! flowing, but provides no per-peer reservation or fairness. See [`Network::register`] for
-//! details.
+//! waiting. Each channel has one mailbox shared by all peers and sized from [`Config::max_peers`],
+//! leaving room for one configured quota burst from every remote peer. When it is full, the
+//! arriving message is dropped and queued messages remain. This allows protocol messages (BitVec,
+//! Peers) to continue flowing, but provides no per-peer reservation or fairness. See
+//! [`Network::register`] for details.
 //!
 //! # Example
 //!
@@ -206,7 +206,7 @@
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
 //!     bootstrappers,
-//!     NZUsize!(3),
+//!     NZUsize!(4),
 //!     MAX_MESSAGE_SIZE,
 //! );
 //!
@@ -590,7 +590,7 @@ mod tests {
                     bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
-                config.max_peers = NonZeroUsize::new(n - 1).unwrap();
+                config.max_peers = NonZeroUsize::new(n).unwrap();
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers at separate indices

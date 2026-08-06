@@ -337,6 +337,11 @@ impl<C: PublicKey> Record<C> {
             && matches!(self.status, Status::Inert)
     }
 
+    /// Returns `true` if this identity is configured locally.
+    pub const fn configured(&self) -> bool {
+        self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
+    }
+
     /// Returns `true` if this peer is eligible for connection.
     ///
     /// A peer is eligible if:
@@ -344,12 +349,7 @@ impl<C: PublicKey> Record<C> {
     /// - It is part of at least one primary peer set, at least one secondary peer set, or is
     ///   persistent
     pub const fn eligible(&self) -> bool {
-        match self.address {
-            Address::Myself(_) => false,
-            Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
-                self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
-            }
-        }
+        !matches!(self.address, Address::Myself(_)) && self.configured()
     }
 }
 #[cfg(test)]
@@ -932,16 +932,21 @@ mod tests {
         let peer_info = create_peer_info::<PrivateKey>(16, test_socket(), 100);
 
         // Myself is never eligible
-        assert!(!Record::myself(peer_info.clone()).eligible());
+        let myself = Record::myself(peer_info.clone());
+        assert!(myself.configured());
+        assert!(!myself.eligible());
 
         // Persistent records (Bootstrapper) are allowed even with sets=0
-        assert!(Record::<PublicKey>::bootstrapper(test_socket()).eligible());
+        let bootstrapper = Record::<PublicKey>::bootstrapper(test_socket());
+        assert!(bootstrapper.configured());
+        assert!(bootstrapper.eligible());
         let mut record_pers = Record::<PublicKey>::bootstrapper(test_socket());
         assert!(record_pers.update(peer_info.clone()));
         assert!(record_pers.eligible());
 
         // Non-persistent records (Unknown, Discovered) require sets > 0
         let mut record_unknown = Record::<PublicKey>::unknown();
+        assert!(!record_unknown.configured());
         assert!(!record_unknown.eligible()); // primary_sets = 0, !persistent
         record_unknown.increment_primary(); // primary_sets = 1
         assert!(record_unknown.eligible()); // primary_sets > 0

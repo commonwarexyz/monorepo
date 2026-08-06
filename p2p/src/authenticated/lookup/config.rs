@@ -48,14 +48,14 @@ pub struct Config<C: Signer> {
     /// the limit, so the resulting network message will be larger.
     pub max_message_size: u32,
 
-    /// Maximum number of distinct remote identities eligible for connection.
+    /// Maximum number of distinct identities retained by the network.
     ///
     /// This applies to distinct peers across the union of all retained primary and secondary peer
-    /// sets. The local identity does not consume a slot. Peer-set registration panics if this limit
-    /// is exceeded.
+    /// sets. The local identity consumes one slot. Peer-set registration panics if this limit is
+    /// exceeded.
     ///
-    /// This sizes every application channel's inbound mailbox to hold one quota burst from each
-    /// peer. Every channel contributes that same capacity to the shared outbound router mailbox.
+    /// This value also sizes every application channel's inbound mailbox and its contribution to
+    /// the shared outbound router mailbox.
     pub max_peers: NonZeroUsize,
 
     /// Capacity for internal actor mailboxes.

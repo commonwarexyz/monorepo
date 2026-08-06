@@ -23,7 +23,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- Configuration ----------
-    /// The maximum number of distinct remote peer identities.
+    /// The maximum number of distinct peer identities.
     max_peers: usize,
 
     // ---------- Message-Passing ----------
@@ -345,7 +345,7 @@ mod tests {
             let signer = PrivateKey::from_seed(0);
             let myself = signer.public_key();
             let (mut cfg, _) = test_config(signer, false);
-            cfg.max_peers = NZUsize!(1);
+            cfg.max_peers = NZUsize!(2);
             let TestHarness {
                 mailbox,
                 mut oracle,
@@ -809,7 +809,7 @@ mod tests {
 
             let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
             cfg.tracked_peer_sets = NZUsize!(1);
-            cfg.max_peers = NZUsize!(1);
+            cfg.max_peers = NZUsize!(2);
 
             let TestHarness {
                 mailbox,

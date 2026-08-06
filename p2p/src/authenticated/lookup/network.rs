@@ -108,20 +108,19 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// capacity. When the mailbox is full, the arriving message is dropped and queued messages
     /// remain. There is no per-peer reservation or fairness.
     ///
-    /// The mailbox holds one `rate.burst_size()` burst for each of the configured
-    /// [`Config::max_peers`]. This includes honest traffic since protocol events can synchronize
-    /// honest senders, but does not cover receiver stalls or sustained ingress above the
-    /// receiver's drain rate.
+    /// The mailbox holds `max_peers * rate.burst_size()` messages, leaving room for one quota burst
+    /// from every configured remote identity. This includes honest traffic since protocol events
+    /// can synchronize honest senders, but does not cover receiver stalls or sustained ingress
+    /// above the receiver's drain rate.
     ///
     /// Outbound send invocations from all channels share one router mailbox. The final mailbox
     /// capacity is [`Config::mailbox_size`] plus every registered channel's derived inbound
     /// capacity. This capacity is pooled rather than reserved per channel, and each send uses one
     /// slot regardless of its number of recipients.
     ///
-    /// The derived capacity budgets per-recipient quota bursts across at most
-    /// [`Config::max_peers`] configured peer identities. It does not reserve space for arbitrary
-    /// offline recipient identities, so bursts to those identities may be rejected under
-    /// backpressure.
+    /// The derived capacity budgets per-recipient quota bursts for every configured remote
+    /// identity. It does not reserve space for arbitrary offline recipient identities, so bursts
+    /// to those identities may be rejected under backpressure.
     ///
     /// For memory budgeting, each inbound queue can retain roughly `max_peers * burst_size *
     /// max_message_size` bytes, in addition to queue and allocator overhead.

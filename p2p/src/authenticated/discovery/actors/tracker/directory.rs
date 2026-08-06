@@ -392,12 +392,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         )
     }
 
-    /// Returns the number of distinct remote identities in retained peer sets or persistent
-    /// records. Temporarily blocked peers remain part of this configured total.
+    /// Returns the number of distinct configured identities, including the local identity.
+    /// Temporarily blocked peers remain part of this total.
     pub fn peer_count(&self) -> usize {
         self.peers
             .values()
-            .filter(|record| record.eligible())
+            .filter(|record| record.configured())
             .count()
     }
 

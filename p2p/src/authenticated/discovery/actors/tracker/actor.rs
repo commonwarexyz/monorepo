@@ -39,7 +39,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// The maximum number of peers in a set.
     max_peer_set_size: u64,
 
-    /// The maximum number of distinct remote peer identities.
+    /// The maximum number of distinct peer identities.
     max_peers: usize,
 
     /// The maximum number of [types::Info] allowable in a single message.
@@ -504,7 +504,7 @@ mod tests {
             let bootstrapper_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             let mut cfg =
                 default_test_config(signer, vec![(bootstrapper, bootstrapper_addr.into())]);
-            cfg.max_peers = NZUsize!(2);
+            cfg.max_peers = NZUsize!(3);
             let TestHarness {
                 mailbox,
                 mut oracle,
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "peer count exceeds max_peers")]
-    fn test_bootstrappers_exceed_max_peers() {
+    fn test_initial_peer_count_exceeds_max_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let bootstrappers = [1, 2]
@@ -535,7 +535,7 @@ mod tests {
                 })
                 .into();
             let mut cfg = default_test_config(PrivateKey::from_seed(0), bootstrappers);
-            cfg.max_peers = NZUsize!(1);
+            cfg.max_peers = NZUsize!(2);
 
             let _ = Actor::new(context.child("actor"), cfg);
         });
@@ -733,7 +733,7 @@ mod tests {
         executor.start(|context| async move {
             let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
             cfg.tracked_peer_sets = NZUsize!(1);
-            cfg.max_peers = NZUsize!(1);
+            cfg.max_peers = NZUsize!(2);
             let TestHarness {
                 mailbox,
                 mut oracle,
