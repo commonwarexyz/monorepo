@@ -1452,9 +1452,8 @@ mod tests {
             );
 
             let floor = View::new(6);
-            let notarization = Certificate::Notarization(build_notarization(
-                &schemes, &verifier, EPOCH, floor,
-            ));
+            let notarization =
+                Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, floor));
             let expected = notarization.encode();
             actor.updated(&mut resolver, notarization);
             actor.certified(&mut resolver, floor, true);
