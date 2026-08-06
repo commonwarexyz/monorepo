@@ -321,8 +321,9 @@ struct StagedKeys<K> {
     /// Slot -> distinct-key id (1:1 with `keys`).
     slots: Vec<usize>,
     /// Key -> distinct-key id backing `slots`, retained so a later
-    /// [`expand`](Staged::expand) chunk assigns consistent ids to keys staged again. Only
-    /// probed, never iterated.
+    /// [`expand`](Staged::expand) chunk assigns consistent ids to keys staged again and so
+    /// [`resolve_updates`](Staged::resolve_updates) can detect overlapping upserts. Only probed,
+    /// never iterated.
     ids: AHashMap<K, usize>,
 }
 
@@ -352,16 +353,6 @@ impl<K: Clone + Eq + core::hash::Hash> StagedKeys<K> {
     /// Number of staged slots.
     const fn len(&self) -> usize {
         self.keys.len()
-    }
-
-    /// The key staged at `slot`.
-    fn key(&self, slot: usize) -> &K {
-        &self.keys[slot]
-    }
-
-    /// The distinct-key id assigned to `slot`.
-    fn id(&self, slot: usize) -> usize {
-        self.slots[slot]
     }
 
     /// Number of distinct staged keys, bounding the id space.
@@ -1511,42 +1502,47 @@ where
             return (Self::apply_upserts(batch, upserts), staged_updates);
         }
 
-        // Resolve last-write-wins per distinct key without hashing on the merkleize path:
-        // each staged slot carries its distinct-key id, so a forward walk leaves each id's
-        // final write (the same winner as a newest-first scan). Overlapping updates for upsert
-        // keys are dropped (upserts are applied last and win). Detecting the overlap is the
-        // one remaining hash probe, skipped entirely for the common upsert-free call.
-        // `touched` records each id on first write so the walks below stay proportional to
-        // the updates actually submitted, not the full staged read set.
-        let upsert_keys: AHashSet<&U::Key> = upserts.iter().map(|(key, _)| key).collect();
-        let mut winners: Vec<Option<(usize, Option<U::Value>)>> = vec![None; keys.distinct()];
+        // Resolve last-write-wins per distinct key without hashing each update: every staged slot
+        // carries its distinct-key id, so a forward walk leaves each id's final write (the same
+        // winner as a newest-first scan). `touched` records each id on first write so the walks
+        // below stay proportional to the updates actually submitted, not the full staged read set.
+        let StagedKeys { keys, slots, ids } = keys;
+        let mut winners: Vec<Option<(usize, Option<U::Value>)>> = vec![None; ids.len()];
         let mut touched: Vec<usize> = Vec::with_capacity(updates.len());
         for (slot, value) in updates {
             assert!(slot < keys.len(), "update index out of staged read range");
-            if !upsert_keys.is_empty() && upsert_keys.contains(keys.key(slot)) {
-                continue;
-            }
-            let id = keys.id(slot);
+            let id = slots[slot];
             if winners[id].is_none() {
                 touched.push(id);
             }
             winners[id] = Some((slot, value));
         }
 
+        // Upserts are applied last and win over overlapping staged updates. Reuse the staged key
+        // index for overlap detection instead of building a second hash table, then release it
+        // before allocating the remaining merkleization bookkeeping.
+        for (key, _) in &upserts {
+            if let Some(&id) = ids.get(key) {
+                winners[id] = None;
+            }
+        }
+        drop(ids);
+
         // Split the winners: updates whose slot resolved to a location become staged
         // updates, the rest fall back to batch mutations. A surviving staged write must not
         // also emit an older batch mutation for the same key, so it is removed here. The
         // probe is skipped when the batch had no mutations before this call: each distinct
         // key is visited at most once (winners are per key id), so a staged winner can never
-        // chase a fallback inserted by this same loop.
+        // chase a fallback inserted by this same loop. `touched` may also contain ids whose
+        // winners were cleared because an upsert supersedes them; those ids are skipped.
         let had_mutations = !batch.mutations.is_empty();
         let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(touched.len());
         for &id in &touched {
             let winner = &mut winners[id];
             let Some((slot, value)) = winner else {
-                unreachable!("touched ids hold a winner");
+                continue;
             };
-            let key = keys.key(*slot);
+            let key = &keys[*slot];
             match &resolutions[*slot] {
                 Some((sloc, _)) if value.is_some() || U::STAGES_DELETES => {
                     if had_mutations {
@@ -1570,11 +1566,11 @@ where
         staged_updates = order
             .iter()
             .map(|&(_, slot)| {
-                let (_, value) = winners[keys.id(slot)]
+                let (_, value) = winners[slots[slot]]
                     .take()
                     .expect("winner recorded for staged slot");
                 let (sloc, payload) = resolutions[slot].take().expect("resolution checked above");
-                (keys.key(slot).clone(), sloc, payload, value)
+                (keys[slot].clone(), sloc, payload, value)
             })
             .collect();
         (Self::apply_upserts(batch, upserts), staged_updates)
