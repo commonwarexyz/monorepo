@@ -320,6 +320,12 @@ impl ConsensusApplication<deterministic::Context> for InlineApp {
         }
         let expected_parent = consensus_context.parent.1;
         let expected_height = Height::new(consensus_context.round.view().get());
+        if !FixedEpocher::new(BLOCKS_PER_EPOCH)
+            .containing(expected_height)
+            .is_some_and(|info| info.epoch() == consensus_context.round.epoch())
+        {
+            return None;
+        }
         match self.propose_result.clone() {
             None => None,
             Some(block)
@@ -748,5 +754,31 @@ mod tests {
                 },
             ],
         });
+    }
+
+    #[test]
+    fn out_of_epoch_propose_does_not_arm_certification() {
+        let input = MarshalActorStandardInput {
+            raw_bytes: vec![0],
+            app_propose_idx: Some(21),
+            app_verify_result: true,
+            events: vec![
+                InlineEvent::Seed {
+                    block_idx: 20,
+                    seed: InlineSeed::Verified,
+                },
+                InlineEvent::Propose {
+                    parent_idx: 20,
+                    await_result: true,
+                },
+                InlineEvent::Certify {
+                    block_idx: 21,
+                    await_result: true,
+                },
+            ],
+        };
+        for kind in [WrapperKind::Inline, WrapperKind::Deferred] {
+            fuzz_marshal_actor_standard(input.clone(), kind);
+        }
     }
 }
