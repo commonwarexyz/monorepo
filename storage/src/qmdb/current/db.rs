@@ -912,8 +912,8 @@ where
     Operation<F, U>: Codec,
 {
     /// Capture an owned immutable snapshot of the database's operations log, with bounds
-    /// frozen at capture. It serves the ops-tree proofs state sync needs; grafted activity
-    /// proofs read the live bitmap, which keeps no history, so those remain live-only.
+    /// frozen at capture. It serves the ops-tree proofs state sync needs. Grafted
+    /// proofs require the live bitmap, which keeps no history, so those remain live-only.
     pub async fn snapshot(
         mut self,
     ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
