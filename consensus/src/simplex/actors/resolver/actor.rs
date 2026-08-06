@@ -1397,11 +1397,8 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut responder = build_actor(
-                context.child("responder"),
-                verifier.clone(),
-                TERM_LENGTH,
-            );
+            let mut responder =
+                build_actor(context.child("responder"), verifier.clone(), TERM_LENGTH);
             let mut responder_resolver = RecordingResolver::default();
 
             let requested = View::new(3);
@@ -1457,11 +1454,7 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(
-                context.child("actor"),
-                verifier.clone(),
-                TERM_LENGTH,
-            );
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let view = View::new(3);
             let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
@@ -1681,11 +1674,7 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(
-                context.child("actor"),
-                verifier.clone(),
-                TERM_LENGTH,
-            );
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let view = View::new(6);
 
@@ -1947,11 +1936,7 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(
-                context.child("actor"),
-                verifier.clone(),
-                TERM_LENGTH,
-            );
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
 
             let requested = View::new(4);

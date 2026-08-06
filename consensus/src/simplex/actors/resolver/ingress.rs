@@ -171,12 +171,8 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                         )
                 }
                 (
-                    Self::Certified {
-                        view: new_view, ..
-                    },
-                    Self::Certified {
-                        view: old_view, ..
-                    },
+                    Self::Certified { view: new_view, .. },
+                    Self::Certified { view: old_view, .. },
                 ) => new_view == old_view,
                 (
                     Self::Resolve {
@@ -236,13 +232,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Request proposal ancestry from its leader.
-    pub(crate) fn resolve(
-        &mut self,
-        proposal: View,
-        view: View,
-        kind: Kind,
-        target: S::PublicKey,
-    ) {
+    pub(crate) fn resolve(&mut self, proposal: View, view: View, kind: Kind, target: S::PublicKey) {
         let _ = self.sender.enqueue(MailboxMessage::Resolve {
             span: info_span!(
                 "simplex.resolver.mailbox.resolve",
