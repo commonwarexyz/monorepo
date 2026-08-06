@@ -69,7 +69,7 @@ type QmdbA<E> =
 
 /// The compact (witness-only) QMDB used as DB-B, so the suite drives deep rewind,
 /// pruning, and state sync through the compact path as well.
-type QmdbB<E> =
+pub(super) type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
 /// A single QMDB database behind a lock.
@@ -79,16 +79,60 @@ type DbB<E> = Shared<QmdbB<E>>;
 /// A full and a compact QMDB as a tuple.
 pub(crate) type MultiDatabaseSet<E> = (DbA<E>, DbB<E>);
 
+/// Builds the full and compact QMDB configurations used by multi-database tests.
+pub(super) fn qmdb_config(
+    prefix: &str,
+    page_cache: CacheRef,
+) -> (
+    FixedConfig<TwoCap, Sequential>,
+    immutable::fixed::CompactConfig<Sequential>,
+) {
+    let db_a = FixedConfig {
+        merkle_config: MmrJournalConfig {
+            journal_partition: format!("{prefix}-qmdb-a-mmr-journal"),
+            metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
+            items_per_blob: NZU64!(11),
+            write_buffer: IO_BUFFER_SIZE,
+            strategy: Sequential,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: FixedLogConfig {
+            partition: format!("{prefix}-qmdb-a-log-journal"),
+            items_per_blob: NZU64!(7),
+            page_cache: page_cache.clone(),
+            write_buffer: IO_BUFFER_SIZE,
+        },
+        translator: TwoCap,
+        init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
+    };
+    // One witness entry per section so periodic pruning drops entries.
+    let db_b = immutable::fixed::CompactConfig {
+        strategy: Sequential,
+        witness: VariableLogConfig {
+            partition: format!("{prefix}-qmdb-b-witness"),
+            items_per_section: NZU64!(1),
+            compression: None,
+            codec_config: (),
+            page_cache,
+            write_buffer: IO_BUFFER_SIZE,
+        },
+        commit_codec_config: (),
+    };
+    (db_a, db_b)
+}
+
 /// A block carrying state from two QMDB databases.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Block {
-    context: Context<sha256::Digest, ed25519::PublicKey>,
-    parent: sha256::Digest,
-    height: Height,
-    root_a: sha256::Digest,
-    range_a: NonEmptyRange<Location>,
-    root_b: sha256::Digest,
-    range_b: NonEmptyRange<Location>,
+    pub(super) context: Context<sha256::Digest, ed25519::PublicKey>,
+    pub(super) parent: sha256::Digest,
+    pub(super) height: Height,
+    pub(super) root_a: sha256::Digest,
+    pub(super) range_a: NonEmptyRange<Location>,
+    pub(super) root_b: sha256::Digest,
+    pub(super) range_b: NonEmptyRange<Location>,
 }
 
 impl Write for Block {
@@ -160,7 +204,7 @@ impl CertifiableBlock for Block {
 }
 
 impl Block {
-    fn genesis(
+    pub(super) fn genesis(
         root_a: sha256::Digest,
         range_a: NonEmptyRange<Location>,
         root_b: sha256::Digest,
@@ -187,17 +231,17 @@ impl Block {
 /// DB-A stores a counter incremented each block.
 /// DB-B stores height markers (height -> height_val).
 #[derive(Clone)]
-struct App {
+pub(super) struct App {
     genesis: Block,
 }
 
 impl App {
-    fn new(genesis: Block) -> Self {
+    pub(super) fn new(genesis: Block) -> Self {
         Self { genesis }
     }
 
     /// Execute a block against two databases.
-    async fn execute<E: Rng + Spawner + StorageContext>(
+    pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         batches: (
             <DbA<E> as DatabaseSet<E>>::Unmerkleized,
@@ -411,42 +455,7 @@ impl EngineDefinition for MultiDbEngine {
         let partition_prefix = format!("validator-{index}");
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
-        // QMDB database configs (one per database)
-        let db_config_a = FixedConfig {
-            merkle_config: MmrJournalConfig {
-                journal_partition: format!("{partition_prefix}-qmdb-a-mmr-journal"),
-                metadata_partition: format!("{partition_prefix}-qmdb-a-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
-                strategy: Sequential,
-                page_cache: page_cache.clone(),
-            },
-            journal_config: FixedLogConfig {
-                partition: format!("{partition_prefix}-qmdb-a-log-journal"),
-                items_per_blob: NZU64!(7),
-                page_cache: page_cache.clone(),
-                write_buffer: IO_BUFFER_SIZE,
-            },
-            translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
-            init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
-        };
-        // One witness entry per section so the periodic prune actually drops entries
-        // (pruning is section-aligned).
-        let db_config_b = immutable::fixed::CompactConfig {
-            strategy: Sequential,
-            witness: VariableLogConfig {
-                partition: format!("{partition_prefix}-qmdb-b-witness"),
-                items_per_section: NZU64!(1),
-                compression: None,
-                codec_config: (),
-                page_cache: page_cache.clone(),
-                write_buffer: IO_BUFFER_SIZE,
-            },
-            commit_codec_config: (),
-        };
-        let db_config = (db_config_a, db_config_b);
+        let db_config = qmdb_config(&partition_prefix, page_cache.clone());
 
         // Destructure the 7 channels.
         let mut channels = channels.into_iter();
