@@ -264,10 +264,13 @@ where
     /// violate invariants or lose durable progress.
     ///
     /// Verification may overlap finalization while its batches remain valid.
-    /// Stateful retries or rejects requests that cannot safely overlap it. Read
-    /// through the provided batches, which snapshot database state without
-    /// holding the database set's locks (see [`db::Shared::read`] for guard
-    /// discipline).
+    /// Stateful retries or rejects requests that cannot safely overlap it.
+    /// Read through the provided batches without holding the database set's
+    /// locks. Batches may be branch-scoped views rather than historical
+    /// snapshots: retained ancestor overlays preserve same-branch state, while
+    /// unresolved reads may fall through to the live applied database. Such
+    /// batches remain valid only while applied state advances along their branch
+    /// (see [`db::Shared::read`] for guard discipline).
     fn verify(
         &mut self,
         context: (E, Self::Context),
