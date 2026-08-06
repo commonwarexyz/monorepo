@@ -247,8 +247,13 @@ where
     {
         let base = self.base.size;
 
-        // Capture the DB boundary before `self` is consumed below.
-        let boundary = self.db();
+        let live_ancestors: Vec<_> =
+            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+                .collect();
+        let boundary = batch_chain::effective_db_boundary(
+            self.db(),
+            live_ancestors.last().map(|oldest| oldest.bounds.base),
+        );
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
@@ -278,9 +283,7 @@ where
         // Compute the batch chain bounds.
         let mut ancestor_diffs = Vec::new();
         let mut ancestors = Vec::new();
-        for batch in
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
-        {
+        for batch in live_ancestors {
             ancestor_diffs.push(Arc::clone(&batch.diff));
             ancestors.push(batch_chain::AncestorBounds {
                 floor: batch.bounds.inactivity_floor,

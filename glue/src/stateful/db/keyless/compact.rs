@@ -110,6 +110,25 @@ where
     db: Shared<CompactDb<F, E, V, H, C, S>>,
 }
 
+impl<F, E, V, H, S, C> Clone for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, V>: EncodeShared,
+    Operation<F, V>: CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            db: self.db.clone(),
+        }
+    }
+}
+
 impl<F, E, V, H, S, C> Deref for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
 where
     F: Family,

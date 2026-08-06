@@ -347,7 +347,8 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// Constrained so that [`Merkleized::new_batch`] produces the same
     /// [`Unmerkleized`] type as [`ManagedDb::new_batch`](Self::new_batch).
-    type Merkleized: Merkleized<Unmerkleized = Self::Unmerkleized>;
+    /// Cloning must preserve the same sealed branch state and should be cheap.
+    type Merkleized: Clone + Merkleized<Unmerkleized = Self::Unmerkleized>;
 
     /// The error type returned by fallible operations.
     type Error: Debug + Send;
@@ -509,7 +510,8 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     type Unmerkleized: Send;
 
     /// Tuple of [`ManagedDb::Merkleized`] for every database in the set.
-    type Merkleized: Send + Sync;
+    /// Cloning must preserve the same sealed branch state and should be cheap.
+    type Merkleized: Clone + Send + Sync;
 
     /// Read-only handles for observing the applied database state.
     ///

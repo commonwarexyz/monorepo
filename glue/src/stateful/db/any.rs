@@ -171,6 +171,25 @@ where
     db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
 }
 
+impl<F, E, C, I, H, U, S> Clone for AnyMerkleized<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            db: self.db.clone(),
+        }
+    }
+}
+
 impl<F, E, C, I, H, U, S> Deref for AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -808,6 +827,35 @@ mod tests {
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         }
+    }
+
+    #[test]
+    fn unmerkleized_batch_falls_through_to_applied_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("unordered-fixed-live-fallback", &context);
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"winner"]);
+            let pre_finalization = db.new_batch_for_test::<_>().await;
+            let winner = db.new_batch_for_test::<_>().await.write(key, Some(value));
+            let winner = crate::stateful::db::Unmerkleized::merkleize(winner)
+                .await
+                .unwrap();
+
+            let (slot, database) = db.write().await;
+            let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database, winner)
+                .await
+                .unwrap();
+            slot.put(database);
+            sync.await.expect("finalize flush failed");
+
+            // The batch commitment does not provide a historical database view.
+            assert_eq!(pre_finalization.get(&key).await.unwrap(), Some(value));
+        });
     }
 
     /// The glue staged wrapper (`AnyUnmerkleized::stage` -> `AnyStaged::expand` ->

@@ -1391,19 +1391,10 @@ where
             v.extend(parent.ancestors());
             v
         });
-        // The DB boundary is inherited unless older ancestors were applied and freed, truncating
-        // the weak parent chain. The oldest live ancestor's base then names the boundary directly.
-        // For A -> B -> C with A applied and dropped, `ancestors()` yields [B]. B's items start at
-        // A's size, so B's `base` is the boundary.
-        let inherited = self.base.db();
-        let db_state = ancestors.last().map_or(inherited, |oldest| {
-            let oldest_base = oldest.bounds.base;
-            if oldest_base.size > inherited.size {
-                oldest_base
-            } else {
-                inherited
-            }
-        });
+        let db_state = batch_chain::effective_db_boundary(
+            self.base.db(),
+            ancestors.last().map(|oldest| oldest.bounds.base),
+        );
         let m = Merkleizer {
             journal_batch: self.journal_batch,
             ancestors,

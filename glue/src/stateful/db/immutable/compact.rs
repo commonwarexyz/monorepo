@@ -115,6 +115,26 @@ where
     db: Shared<CompactDb<F, E, K, V, H, C, S>>,
 }
 
+impl<F, E, K, V, H, S, C> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, K, V>: EncodeShared,
+    Operation<F, K, V>: CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            db: self.db.clone(),
+        }
+    }
+}
+
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
 where
     F: Family,
