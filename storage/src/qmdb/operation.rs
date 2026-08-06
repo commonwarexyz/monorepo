@@ -1,3 +1,5 @@
+//! Shared traits and codecs for QMDB operations.
+
 use crate::merkle::{Family, Location};
 use commonware_codec::{
     CodecShared, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
@@ -48,9 +50,6 @@ pub trait Committable {
     /// If this operation is a commit operation.
     fn is_commit(&self) -> bool;
 }
-
-// Commit operations are shared across the `any`, `immutable`, and `keyless` families: every commit
-// carries optional metadata and an inactivity floor, encoded identically.
 
 /// On-disk size of a fixed-encoded commit operation.
 pub(crate) const fn commit_fixed_operation_size<V: FixedSize>() -> usize {
