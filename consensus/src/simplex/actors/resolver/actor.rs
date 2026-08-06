@@ -470,6 +470,8 @@ impl<
             return Some(certificate.encode());
         }
 
+        // Clone the cheap `Bytes` handles so random selection can mutably use
+        // the actor's context without retaining borrows into either cache.
         let notarization = self.certified_notarizations.get(&view).cloned();
         let nullification = self.covering_nullification(view).cloned();
         match (notarization, nullification) {
@@ -656,6 +658,7 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"resolver-actor";
     const EPOCH: Epoch = Epoch::new(9);
+    const TERM_LENGTH: TermLength = TermLength::new(NZU32!(5));
 
     type TestScheme = ed25519::Scheme;
     type TestActor =
@@ -771,11 +774,7 @@ mod tests {
         }
     }
 
-    fn build_actor(context: deterministic::Context, scheme: TestScheme) -> TestActor {
-        build_actor_with_term_length(context, scheme, TermLength::new(NZU32!(5)))
-    }
-
-    fn build_actor_with_term_length(
+    fn build_actor(
         context: deterministic::Context,
         scheme: TestScheme,
         term_length: TermLength,
@@ -1179,7 +1178,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
 
             // The first certificate emits requests at the term anchors.
@@ -1231,7 +1230,7 @@ mod tests {
                 verifier,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let requested = View::new(3);
 
@@ -1398,11 +1397,10 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let term_length = TermLength::new(NZU32!(5));
-            let mut responder = build_actor_with_term_length(
+            let mut responder = build_actor(
                 context.child("responder"),
                 verifier.clone(),
-                term_length,
+                TERM_LENGTH,
             );
             let mut responder_resolver = RecordingResolver::default();
 
@@ -1459,7 +1457,11 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context.child("actor"), verifier.clone());
+            let mut actor = build_actor(
+                context.child("actor"),
+                verifier.clone(),
+                TERM_LENGTH,
+            );
             let mut resolver = RecordingResolver::default();
             let view = View::new(3);
             let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
@@ -1492,7 +1494,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let view = View::new(5);
 
@@ -1531,7 +1533,7 @@ mod tests {
                 verifier,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor_with_term_length(
+            let mut actor = build_actor(
                 context,
                 verifier.clone(),
                 TermLength::ONE,
@@ -1600,7 +1602,7 @@ mod tests {
                 verifier,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let floor = View::new(6);
 
@@ -1638,7 +1640,7 @@ mod tests {
                 verifier,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let view = View::new(5);
 
@@ -1679,7 +1681,11 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context.child("actor"), verifier.clone());
+            let mut actor = build_actor(
+                context.child("actor"),
+                verifier.clone(),
+                TERM_LENGTH,
+            );
             let mut resolver = RecordingResolver::default();
             let view = View::new(6);
 
@@ -1717,7 +1723,7 @@ mod tests {
                 participants,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let view = View::new(6);
 
@@ -1760,7 +1766,7 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, mut voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let view = View::new(6);
 
@@ -1816,7 +1822,7 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
 
             // The local requirement is intentionally absent from a delivery.
@@ -1850,7 +1856,7 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
 
             let requested = View::new(4);
@@ -1886,7 +1892,7 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
 
             let view = View::new(6);
@@ -1941,7 +1947,11 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
             let mut voter = voter::Mailbox::new(voter_tx);
-            let mut actor = build_actor(context.child("actor"), verifier.clone());
+            let mut actor = build_actor(
+                context.child("actor"),
+                verifier.clone(),
+                TERM_LENGTH,
+            );
             let mut resolver = RecordingResolver::default();
 
             let requested = View::new(4);
@@ -1976,8 +1986,8 @@ mod tests {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-            assert!(View::new(6).same_term(View::new(10), TermLength::new(NZU32!(5))));
-            let mut actor = build_actor(context, verifier);
+            assert!(View::new(6).same_term(View::new(10), TERM_LENGTH));
+            let mut actor = build_actor(context, verifier, TERM_LENGTH);
 
             let validated = actor.validate(
                 View::new(10),
@@ -1999,7 +2009,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(10));
 
             let validated = actor.validate(
@@ -2018,7 +2028,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(9));
 
             let validated = actor.validate(
@@ -2037,7 +2047,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let failed = View::new(7);
             actor.updated(
@@ -2073,7 +2083,7 @@ mod tests {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone());
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let finalization =
                 build_finalization(&schemes, &verifier, Epoch::new(10), View::new(7));
 
