@@ -47,7 +47,7 @@ use crate::{
     Context,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
@@ -354,26 +354,12 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, V>>), Error<F>> {
-        if op_count > self.journal.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
-        }
-
-        let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
-
-        Ok(self
-            .journal
-            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
-            .await?)
+        crate::qmdb::historical_proof(&self.journal, op_count, start_loc, max_ops).await
     }
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
@@ -619,10 +605,32 @@ where
     }
 }
 
+impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Snapshottable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
+        let log;
+        (self.journal, log) = self.journal.snapshot().await?;
+        Ok((self, log))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::qmdb::verify_proof;
+    use commonware_codec::Encode as _;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
     use commonware_runtime::{Supervisor as _, deterministic};
@@ -649,6 +657,90 @@ pub(crate) mod tests {
         fn make(i: u64) -> Self {
             Self::new(i * 10 + 1)
         }
+    }
+
+    /// A proof snapshot stays byte-stable and verifiable against its captured root while the
+    /// live database applies batches, commits, and prunes past it.
+    #[boxed]
+    pub(crate) async fn test_keyless_db_snapshot<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Snapshottable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared + std::fmt::Debug,
+    {
+        const ELEMENTS: u64 = 50;
+
+        {
+            let mut batch = db.new_batch();
+            for i in 0..ELEMENTS {
+                batch = batch.append(V::Value::make(i));
+            }
+            let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let root = db.root();
+        let op_count = db.bounds().end;
+
+        let snapshot;
+        (db, snapshot) = db.snapshot().await.unwrap();
+        assert_eq!(snapshot.size(), op_count);
+
+        let (proof, ops) =
+            crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                .await
+                .unwrap();
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &root,
+        ));
+
+        // Advance the live database past the capture by applying another batch with a raised
+        // inactivity floor, commit, and prune.
+        {
+            let mut batch = db.new_batch();
+            for i in 0..ELEMENTS {
+                batch = batch.append(V::Value::make(i + ELEMENTS));
+            }
+            let merkleized = batch.merkleize(&db, None, Location::new(40)).await;
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let boundary = db.sync_boundary();
+        db = db.prune(boundary).await.unwrap();
+        assert_ne!(db.root(), root);
+        assert!(db.bounds().start > Location::new(0));
+
+        // The snapshot still serves the identical proof, verifiable against the captured
+        // root, including for operations the live database has since pruned.
+        let (proof2, ops2) =
+            crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                .await
+                .unwrap();
+        assert_eq!(proof.encode(), proof2.encode());
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof2,
+            Location::new(0),
+            &ops2,
+            &root,
+        ));
+
+        // Anything at or above the frozen size is rejected.
+        assert!(
+            crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1))
+                .await
+                .is_err()
+        );
+
+        db.destroy().await.unwrap();
     }
 
     #[boxed]

@@ -429,7 +429,7 @@ pub(super) struct Storage<
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
-    S: StorageTrait<F, Digest = H::Digest>,
+    S: StorageTrait<Family = F, Digest = H::Digest>,
 > {
     grafted_tree: &'a G,
     grafting_height: u32,
@@ -442,7 +442,7 @@ impl<
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
-    S: StorageTrait<F, Digest = H::Digest>,
+    S: StorageTrait<Family = F, Digest = H::Digest>,
 > Storage<'a, F, H, G, S>
 {
     /// Creates a new [Storage] instance.
@@ -494,9 +494,10 @@ impl<
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest, Error = merkle::Error<F>>,
-    S: StorageTrait<F, Digest = H::Digest>,
-> StorageTrait<F> for Storage<'_, F, H, G, S>
+    S: StorageTrait<Family = F, Digest = H::Digest>,
+> StorageTrait for Storage<'_, F, H, G, S>
 {
+    type Family = F;
     type Digest = H::Digest;
 
     fn size(&self) -> Position<F> {

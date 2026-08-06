@@ -30,7 +30,7 @@ where
     Op: EncodeShared + 'static,
 {
     let first_leaf = batch.leaves();
-    let mem = merkle.snapshot();
+    let mem = merkle.mem();
     let strategy = merkle.strategy().clone();
     strategy
         .spawn(move |strategy| {

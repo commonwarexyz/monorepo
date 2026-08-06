@@ -951,7 +951,7 @@ where
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.ancestors.is_empty() {
             for key in mutations.keys() {
-                locations.extend(db.snapshot.get(key).copied());
+                locations.extend(db.index.get(key).copied());
             }
         } else {
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
@@ -966,7 +966,7 @@ where
                         locations.push(*loc);
                         if include_active_collision_siblings {
                             locations.extend(
-                                db.snapshot
+                                db.index
                                     .get(key)
                                     .copied()
                                     .filter(move |loc| Some(*loc) != *base_old_loc),
@@ -974,7 +974,7 @@ where
                         }
                     }
                     None => {
-                        locations.extend(db.snapshot.get(key).copied());
+                        locations.extend(db.index.get(key).copied());
                     }
                 }
             }
@@ -1175,7 +1175,7 @@ where
                                 }
                                 Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
                                     || {
-                                        if db.snapshot.get(key).any(|&l| l == candidate) {
+                                        if db.index.get(key).any(|&l| l == candidate) {
                                             FloorOutcome::MoveNew {
                                                 base_old_loc: Some(candidate),
                                             }
@@ -1689,7 +1689,7 @@ where
             .iter()
             .map(|(key, _)| key)
             .chain(self.batch.mutations.keys())
-            .filter(|&key| db.snapshot.get(key).next().is_some())
+            .filter(|&key| db.index.get(key).next().is_some())
             .count();
         let steps_bound = resolved_updates + existing_writes + 1;
 
@@ -2362,7 +2362,7 @@ where
             .map(|(k, _)| k)
             .chain(created.iter().map(|(k, _, _)| k))
         {
-            let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = db.index.prev_translated_key(key) else {
                 continue;
             };
             prev_locations.extend(iter.copied());
@@ -2860,7 +2860,7 @@ where
                 // Fast path: no ancestors to merge, no fixups to look up.
                 for (key, entry) in batch.diff.iter() {
                     apply_diff(
-                        &mut self.snapshot,
+                        &mut self.index,
                         &mut bitmap,
                         key,
                         entry,
@@ -2889,7 +2889,7 @@ where
                             .resolve(key)
                             .map(DiffEntry::loc)
                             .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
                     }
                 } else {
                     let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
@@ -2916,7 +2916,7 @@ where
                             },
                             DiffEntry::loc,
                         );
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
                     }
                 }
             }
@@ -4454,7 +4454,7 @@ mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
+            let committed_loc = db.index.get(&key_db).next().copied().unwrap();
 
             // Create a parent batch with a second key (in-memory ancestor).
             let parent = db

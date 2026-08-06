@@ -8,7 +8,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         Error as JournalError, authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{Family, Location, Proof},
     qmdb::{
@@ -87,13 +87,13 @@ pub struct Db<
     /// The location of the last commit operation.
     pub(crate) last_commit_loc: Location<F>,
 
-    /// A snapshot of all currently active operations in the form of a map from each key to the
-    /// location in the log containing its most recent update.
+    /// An index of all currently active operations, mapping each key to the location in the
+    /// log containing its most recent update.
     ///
     /// # Invariant
     ///
     /// - Only references `Operation::Update`s.
-    pub(crate) snapshot: I,
+    pub(crate) index: I,
 
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
@@ -206,7 +206,7 @@ where
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
         let mut result = None;
         for loc in locs {
             let op = self.log.read(*loc).await?;
@@ -307,7 +307,7 @@ where
         // Probe the in-memory index. Each key may map to multiple locations due to hash
         // collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        self.snapshot
+        self.index
             .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
 
         // Sort by position and deduplicate for the batched cache read.
@@ -397,11 +397,7 @@ where
         &self,
         loc: Location<F>,
     ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
-        self.log
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.log.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 }
 
@@ -504,19 +500,7 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
-        if historical_size > self.log.size() {
-            return Err(crate::qmdb::Error::Merkle(
-                crate::merkle::Error::RangeOutOfBounds(historical_size),
-            ));
-        }
-
-        let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
-        let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
-            .await
-            .map_err(Into::into)
+        crate::qmdb::historical_proof(&self.log, historical_size, start_loc, max_ops).await
     }
 
     pub async fn proof(
@@ -668,16 +652,16 @@ where
                         if new_loc < rewind_size {
                             bitmap.set_bit(*new_loc, true);
                         }
-                        update_known_loc(&mut self.snapshot, &key, old_loc, new_loc);
+                        update_known_loc(&mut self.index, &key, old_loc, new_loc);
                     }
                     SnapshotUndo::Remove { key, old_loc } => {
-                        delete_known_loc(&mut self.snapshot, &key, old_loc)
+                        delete_known_loc(&mut self.index, &key, old_loc)
                     }
                     SnapshotUndo::Insert { key, new_loc } => {
                         if new_loc < rewind_size {
                             bitmap.set_bit(*new_loc, true);
                         }
-                        self.snapshot.insert(&key, new_loc);
+                        self.index.insert(&key, new_loc);
                     }
                 }
             }
@@ -818,7 +802,7 @@ where
             log,
             root,
             inactivity_floor_loc,
-            snapshot: index,
+            index,
             last_commit_loc,
             active_keys,
             bitmap,
@@ -902,5 +886,27 @@ where
         // retaining the entire `self` in the future.
         let Self { log, .. } = self;
         log.destroy().await.map_err(Into::into)
+    }
+}
+
+impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    C: Snapshottable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), crate::qmdb::Error<F>> {
+        let log;
+        (self.log, log) = self.log.snapshot().await?;
+        Ok((self, log))
     }
 }

@@ -88,11 +88,11 @@ where
         )
         .await?;
 
-        let mut snapshot: Index<T, Location<F>> =
+        let mut index: Index<T, Location<F>> =
             Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.journal.bounds();
+            let bounds = journal.items.bounds();
             let last_commit_loc = Location::<F>::new(
                 bounds
                     .end
@@ -100,7 +100,7 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &journal.journal,
+                &journal.items,
                 Location::new(bounds.end),
             )
             .await?;
@@ -108,8 +108,8 @@ where
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
-                &journal.journal,
-                &mut snapshot,
+                &journal.items,
+                &mut index,
                 db_config.init_buffer,
                 db_config.init_cache_size,
                 |_, _| {},
@@ -125,7 +125,7 @@ where
         let db = Self {
             journal,
             root,
-            snapshot,
+            index,
             last_commit_loc,
             inactivity_floor_loc,
             metrics,
