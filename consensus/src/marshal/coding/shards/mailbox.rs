@@ -2,7 +2,7 @@
 
 use crate::{
     CertifiableBlock,
-    marshal::coding::types::CodedBlock,
+    marshal::{coding::types::CodedBlock, core::Retirement},
     types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -64,9 +64,9 @@ where
     },
     /// A request to open a subscription for assigned shard verification.
     ///
-    /// For participants, this resolves once the leader-delivered shard for
-    /// the local participant index has been verified. Reconstructing the full
-    /// block from gossiped shards does not resolve this subscription: that
+    /// For participants, this resolves once the shard for the local participant
+    /// index has been verified. Reconstructing the full block from gossiped
+    /// shards does not resolve this subscription: that
     /// block may still be used for later certification, but it is not enough
     /// to claim the participant received the shard it is expected to echo.
     ///
@@ -94,10 +94,11 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to evict cached blocks and reconstruction state relative to a commitment.
-    Prune {
-        /// Inclusive prune target [`Commitment`].
-        through: Commitment,
+    /// A request to retire cached blocks and reconstruction state after durable application
+    /// progress.
+    Retire {
+        /// The retirement to apply.
+        update: Retirement<Commitment>,
     },
 }
 
@@ -119,7 +120,7 @@ where
             Self::Proposed { .. }
             | Self::Discovered { .. }
             | Self::Notarized { .. }
-            | Self::Prune { .. } => false,
+            | Self::Retire { .. } => false,
         }
     }
 }
@@ -238,6 +239,11 @@ where
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
+    ///
+    /// `round` MUST come from a trusted consensus observation, and its epoch
+    /// MUST be validated for `commitment`. The engine classifies the commitment's
+    /// shards against that epoch's participant set, so an unvalidated epoch can
+    /// misclassify shards from honest peers.
     pub fn discovered(&self, commitment: Commitment, leader: P, round: Round) {
         let _ = self.sender.enqueue(Message::Discovered {
             commitment,
@@ -247,6 +253,9 @@ where
     }
 
     /// Inform the engine that a [`Commitment`] was notarized.
+    ///
+    /// `round` MUST come from a trusted consensus observation, and its epoch
+    /// MUST be validated for `commitment`.
     ///
     /// This is the leaderless reconstruction signal used by certification. It
     /// lets the engine drain sender-indexed gossip shards from its peer buffers
@@ -279,9 +288,9 @@ where
 
     /// Subscribe to assigned shard verification for a commitment.
     ///
-    /// For participants, this resolves once the leader-delivered shard for
-    /// the local participant index has been verified. Reconstructing the full
-    /// block from gossiped shards does not resolve this subscription: that
+    /// For participants, this resolves once the shard for the local participant
+    /// index has been verified. Reconstructing the full block from gossiped
+    /// shards does not resolve this subscription: that
     /// block may still be used for later certification, but it is not enough
     /// to claim the participant received the shard it is expected to echo.
     ///
@@ -324,11 +333,16 @@ where
         receiver
     }
 
-    /// Evict cached blocks and reconstruction state through `through`.
+    /// Retire cached blocks and reconstruction state after durable application progress.
     ///
-    /// Assigned-shard and exact-commitment subscriptions for retired state are closed. Digest
-    /// subscriptions remain open, and later consensus notifications may recreate state.
-    pub fn prune(&self, through: Commitment) {
-        let _ = self.sender.enqueue(Message::Prune { through });
+    /// Entries last observed at or before [`Retirement::round_floor`] are eligible for
+    /// retirement. Entries in [`Retirement::exact_retirements`] are eligible regardless of
+    /// observation round.
+    ///
+    /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
+    /// close only for exact retirements. Other block subscriptions remain open for local ingress.
+    /// Digest subscriptions remain open, and later consensus notifications may recreate state.
+    pub fn retire(&self, update: Retirement<Commitment>) {
+        let _ = self.sender.enqueue(Message::Retire { update });
     }
 }
