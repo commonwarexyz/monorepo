@@ -216,54 +216,50 @@ impl<
         resolver: &mut R,
         certificate: Certificate<S, D>,
     ) {
-        let (finalized, nullified, notarized) = match &certificate {
-            Certificate::Finalization(finalization) => (Some(finalization.view()), None, None),
-            Certificate::Nullification(nullification) => (None, Some(nullification.view()), None),
-            Certificate::Notarization(notarization) => (None, None, Some(notarization.view())),
-        };
-
         let term_length = self.state.term_length();
 
         // Retain encoded certificates for as long as a peer can still ask for them.
         // [State] prunes at the floor, which rises sooner than finalization and
         // would hide this evidence from a peer still repairing the view.
-        if let Some(nullified) = nullified
-            && nullified.term_end(term_length) > self.last_finalized
-        {
-            self.nullifications.insert(nullified, certificate.encode());
-            let covered = nullified..=nullified.term_end(term_length);
-            Self::retire(resolver, move |view, ask| {
-                ask.kind == Kind::Nullification && covered.contains(&view)
-            });
-        }
-        if let Some(notarized) = notarized
-            && notarized > self.last_finalized
-            && !self.uncertifiable_notarizations.contains(&notarized)
-        {
-            if !self.certified_notarizations.contains_key(&notarized) {
-                self.pending_notarizations
-                    .insert(notarized, certificate.encode());
+        match &certificate {
+            Certificate::Nullification(nullification) => {
+                let view = nullification.view();
+                if view.term_end(term_length) > self.last_finalized {
+                    self.nullifications.insert(view, certificate.encode());
+                    let covered = view..=view.term_end(term_length);
+                    Self::retire(resolver, move |view, ask| {
+                        ask.kind == Kind::Nullification && covered.contains(&view)
+                    });
+                }
             }
-            Self::retire(resolver, move |view, ask| {
-                ask.kind == Kind::Notarization && view == notarized
-            });
-        }
-
-        // Finalization is the global retirement boundary: a valid proposal can no
-        // longer name ancestry at or below it, so nothing here can still be asked
-        // for.
-        if let Some(finalized) = finalized {
-            self.last_finalized = self.last_finalized.max(finalized);
-            let finalized = self.last_finalized;
-            self.nullifications
-                .retain(|view, _| view.term_end(term_length) > finalized);
-            self.pending_notarizations
-                .retain(|view, _| *view > finalized);
-            self.certified_notarizations
-                .retain(|view, _| *view > finalized);
-            self.uncertifiable_notarizations
-                .retain(|view| *view > finalized);
-            Self::retire(resolver, move |view, _| view <= finalized);
+            Certificate::Notarization(notarization) => {
+                let view = notarization.view();
+                if view > self.last_finalized && !self.uncertifiable_notarizations.contains(&view) {
+                    if !self.certified_notarizations.contains_key(&view) {
+                        self.pending_notarizations
+                            .insert(view, certificate.encode());
+                    }
+                    Self::retire(resolver, move |asked, ask| {
+                        ask.kind == Kind::Notarization && asked == view
+                    });
+                }
+            }
+            Certificate::Finalization(finalization) => {
+                // Finalization is the global retirement boundary: a valid proposal
+                // can no longer name ancestry at or below it, so nothing here can
+                // still be asked for.
+                self.last_finalized = self.last_finalized.max(finalization.view());
+                let finalized = self.last_finalized;
+                self.nullifications
+                    .retain(|view, _| view.term_end(term_length) > finalized);
+                self.pending_notarizations
+                    .retain(|view, _| *view > finalized);
+                self.certified_notarizations
+                    .retain(|view, _| *view > finalized);
+                self.uncertifiable_notarizations
+                    .retain(|view| *view > finalized);
+                Self::retire(resolver, move |view, _| view <= finalized);
+            }
         }
 
         // Certificate state owns floor selection and background repair.
