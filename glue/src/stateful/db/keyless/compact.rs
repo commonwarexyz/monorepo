@@ -406,7 +406,7 @@ mod tests {
         merkle::{full::Config as MerkleConfig, mmr},
         qmdb::keyless as storage_keyless,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+    use commonware_utils::{AtMost, NZU16, NZU64, NZUsize, sequence::U64};
     use futures::pin_mut;
     use std::time::Duration;
 
@@ -494,7 +494,7 @@ mod tests {
 
     const fn sync_config() -> SyncEngineConfig {
         SyncEngineConfig {
-            fetch_batch_size: NZU64!(1),
+            fetch_batch_size: AtMost!(NZU64!(1)),
             apply_batch_size: NZU64!(1),
             max_outstanding_requests: 1,
             update_channel_size: NZUsize!(1),

@@ -9,8 +9,9 @@
 
 mod channels;
 pub use channels::backlog;
+pub use commonware_utils::AtMost;
 mod data;
-pub use data::MAX_PAYLOAD_OVERHEAD;
+pub use data::{MAX_PAYLOAD_OVERHEAD, MAX_SIZE};
 pub(crate) mod dialing;
 pub mod discovery;
 pub mod lookup;

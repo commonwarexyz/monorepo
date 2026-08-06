@@ -575,7 +575,8 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
+        AtMost, Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, Within, ordered::Set, sync::Mutex,
+        test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -727,7 +728,7 @@ mod tests {
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
-                max_size: 1024 * 1024,
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -751,7 +752,7 @@ mod tests {
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: 1024 * 1024,
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -6168,16 +6169,15 @@ mod tests {
     {
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
-        let cases = twins::cases(
-            rng,
-            twins::Framework {
-                participants: n as usize,
-                faults,
-                rounds: campaign.rounds,
-                mode: campaign.mode,
-                max_cases: campaign.max_cases,
-            },
-        );
+        let framework = twins::Framework::new(
+            Within!(usize::try_from(n).expect("participant count should fit usize")),
+            NZUsize!(faults),
+            NZUsize!(campaign.rounds),
+            campaign.mode,
+            NZUsize!(campaign.max_cases),
+        )
+        .expect("faults must be less than participants");
+        let cases = twins::cases(rng, framework);
         assert!(
             !cases.is_empty(),
             "twins campaign should generate at least one case"

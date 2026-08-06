@@ -24,7 +24,7 @@ use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
 use commonware_stream::encrypted::{Config as StreamConfig, dial};
-use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
+use commonware_utils::{AtMost, NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -161,7 +161,7 @@ fn main() {
     let indexer_cfg = StreamConfig {
         signing_key: signer.clone(),
         namespace: INDEXER_NAMESPACE.to_vec(),
-        max_message_size: 1024 * 1024,
+        max_message_size: AtMost!(1024 * 1024),
         synchrony_bound: Duration::from_secs(1),
         max_handshake_age: Duration::from_secs(60),
         handshake_timeout: Duration::from_secs(5),
@@ -174,7 +174,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        1024 * 1024, // 1MB
+        AtMost!(1024 * 1024), // 1MB
     );
 
     // Start context

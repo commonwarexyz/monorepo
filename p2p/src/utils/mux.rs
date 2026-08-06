@@ -505,7 +505,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set};
+    use commonware_utils::{AtMost, NZUsize, ordered::Set};
     use std::{
         num::NonZeroU32,
         time::{Duration, SystemTime},
@@ -526,7 +526,7 @@ mod tests {
         let (network, oracle) = Network::new(
             context.child("network"),
             simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

@@ -39,7 +39,7 @@ use commonware_p2p::authenticated::{self, discovery};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZDuration, NZU64, NZUsize};
+use commonware_utils::{AtMost, NZDuration, NZU64, NZUsize};
 use futures::future::try_join_all;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
@@ -74,7 +74,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         node.listen,
         node.dial,
         network.bootstrappers(&local),
-        MAX_MESSAGE_SIZE,
+        AtMost!(MAX_MESSAGE_SIZE),
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
@@ -242,7 +242,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
-            max_serve_ops: NZU64!(16),
+            max_serve_ops: AtMost!(16),
             priority_requests: false,
             priority_responses: false,
         },

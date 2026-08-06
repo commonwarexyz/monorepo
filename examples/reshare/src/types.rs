@@ -42,8 +42,8 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU32, NZU64, NZUsize, ordered::Set, range::NonEmptyRange, sequence::U64,
-    sync::Mutex,
+    Acknowledgement, AtMost, NZU32, NZU64, NZUsize, ordered::Set, range::NonEmptyRange,
+    sequence::U64, sync::Mutex,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
@@ -480,7 +480,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequ
 /// QMDB state sync engine tuning.
 pub const fn sync_config() -> SyncEngineConfig {
     SyncEngineConfig {
-        fetch_batch_size: NZU64!(16),
+        fetch_batch_size: AtMost!(NZU64!(16)),
         apply_batch_size: NZU64!(64),
         max_outstanding_requests: 8,
         update_channel_size: NZUsize!(256),

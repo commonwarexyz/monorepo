@@ -104,7 +104,7 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        Acknowledgement as _, NZU16, NZU64, NZUsize,
+        Acknowledgement as _, AtMost, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, oneshot, oneshot::error::TryRecvError},
         ordered::{Quorum as _, Set},
@@ -6683,7 +6683,7 @@ mod tests {
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 simulated::Config {
-                    max_size: 1024 * 1024,
+                    max_size: AtMost!(1024 * 1024),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

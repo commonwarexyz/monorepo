@@ -333,7 +333,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
-        Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::mpsc,
+        Acknowledgement as _, AtMost, NZU64, NZUsize, acknowledgement::Exact, channel::mpsc,
     };
     use futures::FutureExt as _;
     use std::{convert::Infallible, time::Duration};
@@ -397,7 +397,7 @@ mod tests {
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
                     sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
+                        fetch_batch_size: AtMost!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NZUsize!(1),

@@ -13,7 +13,7 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_utils::{NZU32, TryCollect, ordered::Set, union};
+use commonware_utils::{AtMost, NZU32, TryCollect, ordered::Set, union};
 use futures::future::try_join_all;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
@@ -57,8 +57,7 @@ fn main() {
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
-    let mut config: Config =
-        serde_yaml::from_str(&config_file).expect("Could not parse config file");
+    let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
 
     // Parse config
     info!(peers = peers.len(), "loaded peers");
@@ -69,9 +68,6 @@ fn main() {
     // Initialize runtime
     let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
     let executor = tokio::Runner::new(cfg);
-
-    // Enforce minimum message size of 8 bytes for timestamp
-    config.message_size = config.message_size.max(8);
 
     // Start runtime
     executor.start(|context| async move {
@@ -104,7 +100,7 @@ fn main() {
             ?public_key,
             ?ip,
             port = config.port,
-            message_size = config.message_size,
+            message_size = config.message_size.get(),
             "loaded config"
         );
 
@@ -132,7 +128,7 @@ fn main() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),
             bootstrappers,
-            config.message_size,
+            AtMost!(config.message_size.get()),
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
 
@@ -161,7 +157,7 @@ fn main() {
                 let messages = context.counter("messages", "Sent messages");
                 loop {
                     // Create message with timestamp in first 8 bytes
-                    let mut msg = vec![0u8; config.message_size as usize];
+                    let mut msg = vec![0u8; config.message_size.get() as usize];
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()

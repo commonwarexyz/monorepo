@@ -94,7 +94,7 @@ mod tests {
         telemetry::traces::collector::TraceStorage,
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{NZU16, NZU32, NZUsize, sync::Mutex};
+    use commonware_utils::{AtMost, NZU16, NZU32, NZUsize, sync::Mutex};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
@@ -118,7 +118,7 @@ mod tests {
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             NConfig {
-                max_size: 1024 * 1024,
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -2478,7 +2478,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 NConfig {
-                    max_size: 1024 * 1024,
+                    max_size: AtMost!(1024 * 1024),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2587,7 +2587,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 NConfig {
-                    max_size: 1024 * 1024,
+                    max_size: AtMost!(1024 * 1024),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

@@ -198,6 +198,206 @@ commonware_macros::stability_scope!(BETA {
             nz_duration.0
         }
     }
+
+    /// An integer value no greater than `MAX`.
+    ///
+    /// The wrapped type can provide additional invariants. For example,
+    /// `AtMost<NonZeroU32, 1024>` represents values in `1..=1024`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::AtMost;
+    /// use core::num::NonZeroU32;
+    ///
+    /// type MessageSize = AtMost<NonZeroU32, 1024>;
+    ///
+    /// let size: MessageSize = AtMost!(512);
+    /// assert_eq!(size.get(), 512);
+    /// assert!(MessageSize::try_from(0).is_err());
+    /// assert!(MessageSize::try_from(1025).is_err());
+    /// ```
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    pub struct AtMost<T, const MAX: u32>(T);
+
+    /// Literal construction support for [`AtMost!`].
+    #[doc(hidden)]
+    pub trait __AtMostLiteral<const VALUE: i128>: Sized {
+        /// Primitive type accepted by the literal constructor.
+        type Input: Copy;
+
+        /// Validated `AtMost` value.
+        const OUTPUT: Self;
+    }
+
+    impl<T: Copy, const MAX: u32> AtMost<T, MAX> {
+        /// Returns the wrapped value.
+        pub const fn into_inner(self) -> T {
+            self.0
+        }
+    }
+
+    macro_rules! impl_at_most {
+        (primitive: $($ty:ty),+ $(,)?) => {
+            $(
+                impl<const MAX: u32> AtMost<$ty, MAX> {
+                    /// Returns the value.
+                    pub const fn get(self) -> $ty {
+                        self.0
+                    }
+
+                    /// Creates a value if it does not exceed `MAX`.
+                    pub const fn new(value: $ty) -> Option<Self> {
+                        if MAX as u128 >= <$ty>::MAX as u128 || value <= MAX as $ty {
+                            Some(Self(value))
+                        } else {
+                            None
+                        }
+                    }
+                }
+
+                impl<const MAX: u32> TryFrom<$ty> for AtMost<$ty, MAX> {
+                    type Error = $ty;
+
+                    fn try_from(value: $ty) -> Result<Self, Self::Error> {
+                        Self::new(value).ok_or(value)
+                    }
+                }
+
+                impl<const MAX: u32, const VALUE: i128> __AtMostLiteral<VALUE>
+                    for AtMost<$ty, MAX>
+                {
+                    type Input = $ty;
+
+                    const OUTPUT: Self = {
+                        Self::new(VALUE as $ty).expect("value exceeds maximum")
+                    };
+                }
+            )+
+        };
+        (nonzero: $(($ty:ty, $inner:ty)),+ $(,)?) => {
+            $(
+                impl<const MAX: u32> AtMost<$ty, MAX> {
+                    /// Returns the value.
+                    pub const fn get(self) -> $inner {
+                        self.0.get()
+                    }
+
+                    /// Creates a value if it does not exceed `MAX`.
+                    pub const fn new(value: $ty) -> Option<Self> {
+                        let value_inner = value.get();
+                        if MAX as u128 >= <$inner>::MAX as u128 || value_inner <= MAX as $inner {
+                            Some(Self(value))
+                        } else {
+                            None
+                        }
+                    }
+                }
+
+                impl<const MAX: u32> TryFrom<$ty> for AtMost<$ty, MAX> {
+                    type Error = $ty;
+
+                    fn try_from(value: $ty) -> Result<Self, Self::Error> {
+                        Self::new(value).ok_or(value)
+                    }
+                }
+
+                impl<const MAX: u32> TryFrom<$inner> for AtMost<$ty, MAX> {
+                    type Error = $inner;
+
+                    fn try_from(value: $inner) -> Result<Self, Self::Error> {
+                        <$ty>::new(value).and_then(Self::new).ok_or(value)
+                    }
+                }
+
+                impl<const MAX: u32, const VALUE: i128> __AtMostLiteral<VALUE>
+                    for AtMost<$ty, MAX>
+                {
+                    type Input = $inner;
+
+                    const OUTPUT: Self = {
+                        let value = <$ty>::new(VALUE as $inner)
+                            .expect("value violates wrapped type invariant");
+                        Self::new(value).expect("value exceeds maximum")
+                    };
+                }
+            )+
+        };
+    }
+
+    impl_at_most!(primitive: u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
+    impl_at_most!(nonzero:
+        (core::num::NonZeroU8, u8),
+        (core::num::NonZeroU16, u16),
+        (core::num::NonZeroU32, u32),
+        (core::num::NonZeroU64, u64),
+        (core::num::NonZeroU128, u128),
+        (core::num::NonZeroUsize, usize),
+        (core::num::NonZeroI8, i8),
+        (core::num::NonZeroI16, i16),
+        (core::num::NonZeroI32, i32),
+        (core::num::NonZeroI64, i64),
+        (core::num::NonZeroI128, i128),
+        (core::num::NonZeroIsize, isize),
+    );
+
+    /// An integer value within the inclusive range `MIN..=MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::Within;
+    ///
+    /// type Participants = Within<usize, 2, 64>;
+    ///
+    /// let participants: Participants = Within!(5);
+    /// assert_eq!(participants.get(), 5);
+    /// assert!(Participants::try_from(1).is_err());
+    /// assert!(Participants::try_from(65).is_err());
+    /// ```
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    pub struct Within<T, const MIN: u32, const MAX: u32>(T);
+
+    impl<T: Copy, const MIN: u32, const MAX: u32> Within<T, MIN, MAX> {
+        /// Returns the wrapped value.
+        pub const fn into_inner(self) -> T {
+            self.0
+        }
+    }
+
+    macro_rules! impl_within {
+        ($wide:ty; $($ty:ty),+ $(,)?) => {
+            $(
+                impl<const MIN: u32, const MAX: u32> Within<$ty, MIN, MAX> {
+                    /// Returns the value.
+                    pub const fn get(self) -> $ty {
+                        self.0
+                    }
+
+                    /// Creates a value if it is within `MIN..=MAX`.
+                    pub const fn new(value: $ty) -> Option<Self> {
+                        let value_wide = value as $wide;
+                        if value_wide >= MIN as $wide && value_wide <= MAX as $wide {
+                            Some(Self(value))
+                        } else {
+                            None
+                        }
+                    }
+                }
+
+                impl<const MIN: u32, const MAX: u32> TryFrom<$ty> for Within<$ty, MIN, MAX> {
+                    type Error = $ty;
+
+                    fn try_from(value: $ty) -> Result<Self, Self::Error> {
+                        Self::new(value).ok_or(value)
+                    }
+                }
+            )+
+        };
+    }
+
+    impl_within!(u128; u8, u16, u32, u64, u128, usize);
+    impl_within!(i128; i8, i16, i32, i64, i128, isize);
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod rng;
@@ -226,6 +426,174 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod thread_local;
     pub use thread_local::Cached;
 });
+
+/// Creates an [`AtMost`](struct@AtMost) value, panicking if the value exceeds its maximum.
+///
+/// Primitive and `NZU*` literals can be used in const contexts. The one-argument expression form
+/// infers the result type and validates at runtime.
+///
+/// # Panics
+///
+/// Panics if the value exceeds the encoded maximum or violates an invariant of the wrapped type.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_utils::{AtMost, NZU32};
+/// use core::num::NonZeroU32;
+///
+/// type MessageSize = AtMost<NonZeroU32, 1024>;
+/// const MESSAGE_SIZE: MessageSize = AtMost!(NZU32!(512));
+/// assert_eq!(MESSAGE_SIZE.get(), 512);
+///
+/// let inferred: MessageSize = AtMost!(256);
+/// assert_eq!(inferred.get(), 256);
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! AtMost {
+    (NZUsize!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroUsize, _>::new($crate::NZUsize!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZUsize!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroUsize, _>::new($crate::NZUsize!($val))
+            .expect("value exceeds maximum")
+    };
+    (NZU8!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroU8, _>::new($crate::NZU8!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZU8!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroU8, _>::new($crate::NZU8!($val))
+            .expect("value exceeds maximum")
+    };
+    (NZU16!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroU16, _>::new($crate::NZU16!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZU16!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroU16, _>::new($crate::NZU16!($val))
+            .expect("value exceeds maximum")
+    };
+    (NZU32!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroU32, _>::new($crate::NZU32!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZU32!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroU32, _>::new($crate::NZU32!($val))
+            .expect("value exceeds maximum")
+    };
+    (NZU64!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroU64, _>::new($crate::NZU64!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZU64!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroU64, _>::new($crate::NZU64!($val))
+            .expect("value exceeds maximum")
+    };
+    ($ty:ty, $val:literal) => {
+        const { $crate::AtMost::<$ty, _>::new($val).expect("value exceeds maximum") }
+    };
+    ($ty:ty, $val:expr) => {
+        $crate::AtMost::<$ty, _>::new($val).expect("value exceeds maximum")
+    };
+    ($val:literal) => {
+        const {
+            const fn infer_at_most_literal<const VALUE: i128, T, const MAX: u32>(
+                value: $crate::AtMost<T, MAX>,
+                _: <$crate::AtMost<T, MAX> as $crate::__AtMostLiteral<VALUE>>::Input,
+            ) -> $crate::AtMost<T, MAX>
+            where
+                $crate::AtMost<T, MAX>: $crate::__AtMostLiteral<VALUE>,
+            {
+                value
+            }
+
+            infer_at_most_literal::<{ $val as i128 }, _, _>(
+                <_ as $crate::__AtMostLiteral<{ $val as i128 }>>::OUTPUT,
+                $val,
+            )
+        }
+    };
+    ($val:expr) => {{
+        fn infer_at_most<T, const MAX: u32>(
+            value: $crate::AtMost<T, MAX>,
+        ) -> $crate::AtMost<T, MAX> {
+            value
+        }
+
+        infer_at_most(match ::core::convert::TryInto::try_into($val) {
+            ::core::result::Result::Ok(value) => value,
+            ::core::result::Result::Err(_) => panic!("value is outside allowed range"),
+        })
+    }};
+}
+
+/// Creates a [`Within`](struct@Within) value, panicking unless it is within the inclusive range.
+///
+/// Typed literals can be used in const contexts. The one-argument form infers the result type and
+/// validates at runtime.
+///
+/// # Panics
+///
+/// Panics if the value is outside the inclusive range.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_utils::Within;
+///
+/// type Participants = Within<usize, 2, 64>;
+/// const PARTICIPANTS: Participants = Within!(usize, 4);
+/// assert_eq!(PARTICIPANTS.get(), 4);
+///
+/// let inferred: Participants = Within!(8);
+/// assert_eq!(inferred.get(), 8);
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! Within {
+    ($ty:ty, $val:literal) => {
+        const { $crate::Within::<$ty, _, _>::new($val).expect("value is outside allowed range") }
+    };
+    ($ty:ty, $val:expr) => {
+        $crate::Within::<$ty, _, _>::new($val).expect("value is outside allowed range")
+    };
+    ($val:expr) => {{
+        fn infer_within<T, const MIN: u32, const MAX: u32>(
+            value: $crate::Within<T, MIN, MAX>,
+        ) -> $crate::Within<T, MIN, MAX> {
+            value
+        }
+
+        infer_within(match ::core::convert::TryInto::try_into($val) {
+            ::core::result::Result::Ok(value) => value,
+            ::core::result::Result::Err(_) => panic!("value is outside allowed range"),
+        })
+    }};
+}
+
 #[cfg(not(any(
     commonware_stability_GAMMA,
     commonware_stability_DELTA,
@@ -498,6 +866,105 @@ mod tests {
             NZDuration!(Duration::from_secs(1)).get(),
             Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn test_at_most_const_literal_inference() {
+        const VALUE: AtMost<u32, 21> = AtMost!(1);
+        const MAXIMUM: AtMost<u32, { u32::MAX }> = AtMost!(4_294_967_295);
+
+        assert_eq!(VALUE.get(), 1);
+        assert_eq!(MAXIMUM.get(), u32::MAX);
+    }
+
+    #[test]
+    fn test_at_most_const_negative_literal_inference() {
+        const PRIMITIVE: AtMost<i32, 21> = AtMost!(-1);
+        const NON_ZERO: AtMost<core::num::NonZeroI32, 21> = AtMost!(-1);
+        const LARGE: AtMost<i64, 21> = AtMost!(-2_147_483_649);
+        const MINIMUM: AtMost<i8, 21> = AtMost!(-128i8);
+
+        assert_eq!(PRIMITIVE.get(), -1);
+        assert_eq!(NON_ZERO.get(), -1);
+        assert_eq!(LARGE.get(), -2_147_483_649);
+        assert_eq!(MINIMUM.get(), i8::MIN);
+    }
+
+    #[test]
+    fn test_at_most_bounds() {
+        type MessageSize = AtMost<core::num::NonZeroU32, 1024>;
+        type OptionalSize = AtMost<u32, 1024>;
+
+        const MAXIMUM: MessageSize = AtMost!(NZU32!(1024));
+        const MAXIMUM_VALUE: u32 = MAXIMUM.get();
+        const MAXIMUM_INNER: core::num::NonZeroU32 = MAXIMUM.into_inner();
+        const ZERO: OptionalSize = AtMost!(u32, 0);
+
+        assert_eq!(MAXIMUM_VALUE, 1024);
+        assert_eq!(MAXIMUM_INNER, NZU32!(1024));
+        assert_eq!(ZERO.get(), 0);
+        assert_eq!(MessageSize::new(NZU32!(1)).unwrap().get(), 1);
+        assert_eq!(MessageSize::new(NZU32!(1025)), None);
+
+        let wrapped = MessageSize::try_from(512).unwrap();
+        assert_eq!(wrapped.get(), 512);
+        let inferred: MessageSize = AtMost!(512);
+        assert_eq!(inferred.get(), 512);
+        assert!(MessageSize::try_from(0).is_err());
+        assert!(MessageSize::try_from(1025).is_err());
+
+        let zero = 0;
+        let too_large = 1025;
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _: MessageSize = AtMost!(zero);
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _: OptionalSize = AtMost!(too_large);
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _: MessageSize = AtMost!(NZU32!(too_large));
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_within_bounds() {
+        type Participants = Within<usize, 2, 64>;
+        type SignedRange = Within<i16, 2, 64>;
+
+        const MINIMUM: Participants = Within!(usize, 2);
+        const MAXIMUM: Participants = Within!(usize, 64);
+        const MINIMUM_INNER: usize = MINIMUM.into_inner();
+
+        assert_eq!(MINIMUM.get(), 2);
+        assert_eq!(MAXIMUM.get(), 64);
+        assert_eq!(MINIMUM_INNER, 2);
+
+        let inferred: Participants = Within!(8);
+        assert_eq!(inferred.get(), 8);
+        assert!(Participants::try_from(1).is_err());
+        assert!(Participants::try_from(65).is_err());
+        assert!(SignedRange::try_from(-1).is_err());
+        assert_eq!(SignedRange::try_from(2).unwrap().get(), 2);
+        assert!(Within::<u32, 5, 4>::try_from(5).is_err());
+        assert!(Within::<u8, 256, 300>::try_from(u8::MAX).is_err());
+
+        for outside in [1, 65] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    let _: Participants = Within!(outside);
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]

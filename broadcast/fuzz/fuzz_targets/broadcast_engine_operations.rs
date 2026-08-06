@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Recipients, simulated::Network};
 use commonware_runtime::{Buf, BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
-use commonware_utils::{NZUsize, TestRng, channel::oneshot, futures::Pool, vec::Bounded};
+use commonware_utils::{AtMost, NZUsize, TestRng, channel::oneshot, futures::Pool, vec::Bounded};
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
@@ -226,7 +226,7 @@ fn fuzz(input: FuzzInput) {
         let (network, oracle) = Network::<deterministic::Context, PublicKey>::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block: false,
                 tracked_peer_sets: NZUsize!(1),
             },

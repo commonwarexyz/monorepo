@@ -245,7 +245,7 @@ mod tests {
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
     };
-    use commonware_utils::{NZU32, NZUsize};
+    use commonware_utils::{AtMost, NZU32, NZUsize};
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::Duration,
@@ -264,7 +264,7 @@ mod tests {
             let stream_cfg = StreamConfig {
                 signing_key: PrivateKey::from_seed(1),
                 namespace: b"test-rate-limit".to_vec(),
-                max_message_size: 1024,
+                max_message_size: AtMost!(1024),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_millis(5),
@@ -410,7 +410,7 @@ mod tests {
             let stream_cfg = StreamConfig {
                 signing_key: PrivateKey::from_seed(1),
                 namespace: b"test-private-ips".to_vec(),
-                max_message_size: 1024,
+                max_message_size: AtMost!(1024),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_millis(5),

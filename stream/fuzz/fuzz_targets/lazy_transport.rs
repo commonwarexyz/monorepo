@@ -3,6 +3,7 @@
 use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::encrypted::{Config, Receiver, Sender, dial, listen};
+use commonware_utils::AtMost;
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
@@ -29,7 +30,7 @@ thread_local! {
             let dialer_config = Config {
                 signing_key: dialer_crypto.clone(),
                 namespace: NAMESPACE.to_vec(),
-                max_message_size: MAX_MESSAGE_SIZE,
+                max_message_size: AtMost!(MAX_MESSAGE_SIZE),
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
                 handshake_timeout: Duration::from_secs(2),
@@ -38,7 +39,7 @@ thread_local! {
             let listener_config = Config {
                 signing_key: listener_crypto.clone(),
                 namespace: NAMESPACE.to_vec(),
-                max_message_size: MAX_MESSAGE_SIZE,
+                max_message_size: AtMost!(MAX_MESSAGE_SIZE),
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
                 handshake_timeout: Duration::from_secs(2),

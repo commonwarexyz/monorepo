@@ -16,10 +16,11 @@ use commonware_p2p::{
     simulated::{self, Link, Network},
 };
 use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, deterministic};
-use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set};
+use commonware_utils::{AtMost, NZUsize, TryCollect, channel::mpsc, ordered::Set};
 use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
+    num::NonZeroU32,
     ops::RangeInclusive,
     sync::{
         Arc,
@@ -68,7 +69,7 @@ pub struct Plan<D: EngineDefinition> {
     pub link: Link,
 
     /// Maximum size of a p2p message (bytes).
-    pub max_message_size: u32,
+    pub max_message_size: AtMost<NonZeroU32, { simulated::MAX_SIZE }>,
 
     /// Engine definition (how to wire up each validator).
     pub engine: D,
@@ -105,7 +106,7 @@ pub struct PlanBuilder<D: EngineDefinition> {
     seeds: Vec<u64>,
     participants: Vec<D::PublicKey>,
     link: Link,
-    max_message_size: u32,
+    max_message_size: AtMost<NonZeroU32, { simulated::MAX_SIZE }>,
     engine: D,
     crashes: Vec<Crash<D::PublicKey>>,
     required_finalizations: u64,
@@ -149,7 +150,9 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                 jitter: Duration::from_millis(5),
                 success_rate: 1.0,
             },
-            max_message_size: 1024 * 1024,
+            max_message_size: (1024 * 1024)
+                .try_into()
+                .expect("default max message size is valid"),
             engine,
             crashes: vec![],
             required_finalizations: 10,
@@ -181,7 +184,10 @@ impl<D: EngineDefinition> PlanBuilder<D> {
         self
     }
 
-    pub const fn max_message_size(mut self, size: u32) -> Self {
+    pub const fn max_message_size(
+        mut self,
+        size: AtMost<NonZeroU32, { simulated::MAX_SIZE }>,
+    ) -> Self {
         self.max_message_size = size;
         self
     }
@@ -1078,6 +1084,23 @@ mod tests {
                 ))
             })
         }
+    }
+
+    #[test]
+    fn max_message_size_is_validated_before_building() {
+        type MessageSize =
+            commonware_utils::AtMost<std::num::NonZeroU32, { commonware_p2p::simulated::MAX_SIZE }>;
+
+        assert!(MessageSize::try_from(0).is_err());
+        assert!(MessageSize::try_from(commonware_p2p::simulated::MAX_SIZE + 1).is_err());
+
+        let maximum: MessageSize = commonware_p2p::simulated::MAX_SIZE
+            .try_into()
+            .expect("simulated maximum should be valid");
+        let plan = PlanBuilder::new(FinalizingEngine::new(1, Duration::ZERO, 1))
+            .max_message_size(maximum)
+            .build();
+        assert_eq!(plan.max_message_size, maximum);
     }
 
     #[test]
