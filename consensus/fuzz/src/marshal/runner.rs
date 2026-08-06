@@ -771,6 +771,15 @@ mod tests {
                     parent_idx: 20,
                     await_result: true,
                 },
+                InlineEvent::Seed {
+                    block_idx: 21,
+                    seed: InlineSeed::Variant,
+                },
+                InlineEvent::Verify {
+                    block_idx: 21,
+                    context: InlineContext::Stored,
+                    await_result: true,
+                },
                 InlineEvent::Certify {
                     block_idx: 21,
                     await_result: true,
