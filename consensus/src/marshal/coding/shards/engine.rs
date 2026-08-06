@@ -1893,7 +1893,7 @@ mod tests {
                     simulated::Network::<deterministic::Context, P>::new_with_split_peers(
                         context.child("network"),
                         simulated::Config {
-                            max_size: MAX_SHARD_SIZE as u32,
+                            max_size: (MAX_SHARD_SIZE as u32).try_into().unwrap(),
                             disconnect_on_block: true,
                             tracked_peer_sets: NZUsize!(1),
                         },
@@ -3932,7 +3932,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
+                    max_size: (MAX_SHARD_SIZE as u32).try_into().unwrap(),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -4059,7 +4059,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
+                    max_size: (MAX_SHARD_SIZE as u32).try_into().unwrap(),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -4898,7 +4898,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
+                    max_size: (MAX_SHARD_SIZE as u32).try_into().unwrap(),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -5024,7 +5024,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
+                    max_size: (MAX_SHARD_SIZE as u32).try_into().unwrap(),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -5102,7 +5102,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
+                    max_size: (MAX_SHARD_SIZE as u32).try_into().unwrap(),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -5240,7 +5240,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
+                    max_size: (MAX_SHARD_SIZE as u32).try_into().unwrap(),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },

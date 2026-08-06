@@ -223,7 +223,7 @@ async fn setup_network<P: simplex::Simplex>(
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
         NetworkConfig {
-            max_size: 1024 * 1024,
+            max_size: (1024 * 1024u32).try_into().unwrap(),
             disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),
         },

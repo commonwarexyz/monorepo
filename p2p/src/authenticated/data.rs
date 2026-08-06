@@ -116,6 +116,18 @@ mod tests {
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
 
     #[test]
+    fn test_max_size_bounds() {
+        use commonware_utils::MaxSize;
+        use std::num::NonZeroU32;
+
+        assert_eq!(MAX_SIZE, u32::MAX - MAX_PAYLOAD_OVERHEAD);
+        let maximum: MaxSize<NonZeroU32, MAX_SIZE> = MAX_SIZE.try_into().unwrap();
+        assert_eq!(maximum.get().get(), MAX_SIZE);
+        assert!(MaxSize::<NonZeroU32, MAX_SIZE>::try_from(0u32).is_err());
+        assert!(MaxSize::<NonZeroU32, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
+    }
+
+    #[test]
     fn test_data_codec() {
         let original = Data {
             channel: 12345,

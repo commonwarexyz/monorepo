@@ -240,7 +240,7 @@ impl NetworkScheme for Discovery {
             peer.info.address,
             peer.info.address,
             bootstrappers,
-            MAX_MSG_SIZE,
+            MAX_MSG_SIZE.try_into().unwrap(),
         );
         // Override some settings for fuzzing environment
         config.mailbox_size = NZUsize!(100); // Small mailbox to encourage backpressure
@@ -311,7 +311,7 @@ impl NetworkScheme for Lookup {
             peer.info.private_key.clone(),
             b"fuzz_namespace",
             peer.info.address,
-            MAX_MSG_SIZE,
+            MAX_MSG_SIZE.try_into().unwrap(),
         );
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = NZUsize!(2 * peer.topo.tracked_peer_sets.get());

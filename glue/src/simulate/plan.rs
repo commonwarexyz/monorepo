@@ -472,7 +472,7 @@ impl<D: EngineDefinition> Plan<D> {
         let (network, oracle) = Network::<_, D::PublicKey>::new(
             ctx.child("network"),
             simulated::Config {
-                max_size: self.max_message_size,
+                max_size: self.max_message_size.try_into().unwrap(),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

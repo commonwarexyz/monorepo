@@ -1,4 +1,7 @@
-use crate::Ingress;
+use crate::{
+    Ingress,
+    authenticated::{MAX_SIZE, MaxSize},
+};
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 use commonware_utils::{NZU32, NZUsize};
@@ -52,8 +55,7 @@ pub struct Config<C: Signer> {
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
-    /// Must not exceed [`MAX_SIZE`](super::MAX_SIZE).
-    pub max_message_size: u32,
+    pub max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
 
     /// Message backlog allowed for internal actors.
     ///
@@ -153,7 +155,7 @@ impl<C: Signer> Config<C> {
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: u32,
+        max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,
@@ -197,7 +199,7 @@ impl<C: Signer> Config<C> {
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: u32,
+        max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,
@@ -234,7 +236,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: u32,
+        max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,

@@ -162,7 +162,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        MAX_MESSAGE_SIZE,
+        MAX_MESSAGE_SIZE.try_into().unwrap(),
     );
 
     // Start context

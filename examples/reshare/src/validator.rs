@@ -74,7 +74,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         node.listen,
         node.dial,
         network.bootstrappers(&local),
-        MAX_MESSAGE_SIZE,
+        MAX_MESSAGE_SIZE.try_into().unwrap(),
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);

@@ -226,7 +226,7 @@ fn fuzz(input: FuzzInput) {
         let (network, oracle) = Network::<deterministic::Context, PublicKey>::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: (1024 * 1024u32).try_into().unwrap(),
                 disconnect_on_block: false,
                 tracked_peer_sets: NZUsize!(1),
             },

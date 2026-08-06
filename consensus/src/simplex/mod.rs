@@ -727,7 +727,7 @@ mod tests {
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
-                max_size: 1024 * 1024,
+                max_size: (1024 * 1024u32).try_into().unwrap(),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -751,7 +751,7 @@ mod tests {
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: 1024 * 1024,
+                max_size: (1024 * 1024u32).try_into().unwrap(),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },

@@ -132,7 +132,7 @@ fn main() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),
             bootstrappers,
-            config.message_size,
+            config.message_size.try_into().unwrap(),
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
 

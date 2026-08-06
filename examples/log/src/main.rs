@@ -159,7 +159,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        1024 * 1024, // 1MB
+        (1024 * 1024u32).try_into().unwrap(), // 1MB
     );
 
     // Start context

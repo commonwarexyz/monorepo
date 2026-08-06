@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
     let num_peers = input.num_peers;
 
     let p2p_cfg = simulated::Config {
-        max_size: MAX_MSG_SIZE,
+        max_size: MAX_MSG_SIZE.try_into().unwrap(),
         disconnect_on_block: false,
         tracked_peer_sets: NZUsize!(1),
     };

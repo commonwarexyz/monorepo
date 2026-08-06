@@ -1,3 +1,4 @@
+use crate::authenticated::{MAX_SIZE, MaxSize};
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 use commonware_utils::{NZU32, NZUsize};
@@ -46,8 +47,7 @@ pub struct Config<C: Signer> {
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
-    /// Must not exceed [`MAX_SIZE`](super::MAX_SIZE).
-    pub max_message_size: u32,
+    pub max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
 
     /// Message backlog allowed for internal actors.
     ///
@@ -126,7 +126,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
-        max_message_size: u32,
+        max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,
@@ -160,7 +160,12 @@ impl<C: Signer> Config<C> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: u32) -> Self {
+    pub fn local(
+        crypto: C,
+        namespace: &[u8],
+        listen: SocketAddr,
+        max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
+    ) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
@@ -188,7 +193,11 @@ impl<C: Signer> Config<C> {
     }
 
     #[cfg(test)]
-    pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
+    pub fn test(
+        crypto: C,
+        listen: SocketAddr,
+        max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
+    ) -> Self {
         Self {
             crypto,
             namespace: b"test_namespace".to_vec(),

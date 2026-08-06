@@ -25,7 +25,7 @@ use commonware_runtime::{
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
-    NZUsize, TryCollect,
+    MaxSize, NZUsize, TryCollect,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
 };
@@ -37,7 +37,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroUsize,
+    num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     sync::{
         Arc,
@@ -123,10 +123,7 @@ struct PeerRefCounts {
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size allowed for an application payload provided to a sender.
-    ///
-    /// Must not exceed [`MAX_SIZE`]. Providing a larger payload panics. Exchanged messages are
-    /// larger due to framing overhead.
-    pub max_size: u32,
+    pub max_size: MaxSize<NonZeroU32, MAX_SIZE>,
 
     /// True if peers should disconnect upon being blocked. While production networking would
     /// typically disconnect, for testing purposes it may be useful to keep peers connected,
@@ -202,18 +199,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
-    ///
-    /// # Panics
-    ///
-    /// Panics if [`Config::max_size`] exceeds [`MAX_SIZE`].
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
-        let max_frame_size = cfg
-            .max_size
-            .checked_add(MAX_PAYLOAD_OVERHEAD)
-            .expect("maximum frame size overflow");
+        let max_size = cfg.max_size.get().get();
+        let max_frame_size = max_size + MAX_PAYLOAD_OVERHEAD;
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
@@ -221,7 +212,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         (
             Self {
                 context: ContextCell::new(context),
-                max_size: cfg.max_size,
+                max_size,
                 max_frame_size,
                 disconnect_on_block: cfg.disconnect_on_block,
                 tracked_peer_sets: cfg.tracked_peer_sets,
@@ -1489,7 +1480,9 @@ mod tests {
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
-    const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
+    const MAX_MESSAGE_SIZE: MaxSize<NonZeroU32, MAX_SIZE> =
+        MaxSize::<NonZeroU32, MAX_SIZE>::new(NonZeroU32::new(1024 * 1024).unwrap())
+            .unwrap();
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -1561,33 +1554,24 @@ mod tests {
         });
     }
 
-    /// [`Config::max_size`] cannot exceed [`MAX_SIZE`].
     #[test]
-    #[should_panic(expected = "maximum frame size overflow")]
-    fn test_max_size_overflow_panics() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                max_size: MAX_SIZE + 1,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            };
-            let _ = Network::<deterministic::Context, ed25519::PublicKey>::new(
-                context.child("network"),
-                cfg,
-            );
-        });
+    fn test_max_size_bounds() {
+        assert_eq!(MAX_SIZE, u32::MAX - MAX_PAYLOAD_OVERHEAD);
+        let maximum: MaxSize<NonZeroU32, MAX_SIZE> = MAX_SIZE.try_into().unwrap();
+        assert_eq!(maximum.get().get(), MAX_SIZE);
+        assert!(MaxSize::<NonZeroU32, MAX_SIZE>::try_from(0u32).is_err());
+        assert!(MaxSize::<NonZeroU32, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
     }
 
     /// [`Config::max_size`] limits the payload without counting the internal channel identifier.
     #[test]
     fn test_max_size_applies_to_payload() {
-        const MAX_SIZE: usize = 64;
+        const MAX_PAYLOAD_SIZE: usize = 64;
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: MAX_SIZE as u32,
+                max_size: (MAX_PAYLOAD_SIZE as u32).try_into().unwrap(),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             };
@@ -1627,7 +1611,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let message = vec![42; MAX_SIZE];
+            let message = vec![42; MAX_PAYLOAD_SIZE];
             send_when_ready(
                 &context,
                 &mut sender,
@@ -2377,7 +2361,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: 1024,
+                max_size: 1024u32.try_into().unwrap(),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(2),
             };

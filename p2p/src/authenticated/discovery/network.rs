@@ -61,14 +61,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     ///
-    /// # Panics
-    ///
-    /// Panics if [`Config::max_message_size`] exceeds [`MAX_SIZE`](super::MAX_SIZE).
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let max_frame_size = cfg
-            .max_message_size
-            .checked_add(MAX_PAYLOAD_OVERHEAD)
-            .expect("maximum frame size overflow");
+        let max_message_size = cfg.max_message_size.get().get();
+        let max_frame_size = max_message_size + MAX_PAYLOAD_OVERHEAD;
         let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
@@ -94,7 +89,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 mailbox_size: cfg.mailbox_size,
             },
         );
-        let channels = Channels::new(messenger, cfg.max_message_size);
+        let channels = Channels::new(messenger, max_message_size);
 
         (
             Self {

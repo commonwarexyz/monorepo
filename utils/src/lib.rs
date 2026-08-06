@@ -198,6 +198,106 @@ commonware_macros::stability_scope!(BETA {
             nz_duration.0
         }
     }
+
+    /// An integer value no greater than `MAX`.
+    ///
+    /// The wrapped type can provide additional invariants. For example,
+    /// `MaxSize<NonZeroU32, 1024>` represents values in `1..=1024`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::MaxSize;
+    /// use core::num::NonZeroU32;
+    ///
+    /// type MessageSize = MaxSize<NonZeroU32, 1024>;
+    ///
+    /// let size: MessageSize = 512u32.try_into().unwrap();
+    /// assert_eq!(size.get().get(), 512);
+    /// assert!(MessageSize::try_from(0u32).is_err());
+    /// assert!(MessageSize::try_from(1025u32).is_err());
+    /// ```
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    pub struct MaxSize<T, const MAX: u32>(T);
+
+    impl<T: Copy, const MAX: u32> MaxSize<T, MAX> {
+        /// Returns the wrapped value.
+        pub const fn get(self) -> T {
+            self.0
+        }
+    }
+
+    macro_rules! impl_max_size {
+        (primitive: $($ty:ty),+ $(,)?) => {
+            $(
+                impl<const MAX: u32> MaxSize<$ty, MAX> {
+                    /// Creates a value if it does not exceed `MAX`.
+                    pub const fn new(value: $ty) -> Option<Self> {
+                        if MAX as u128 >= <$ty>::MAX as u128 || value <= MAX as $ty {
+                            Some(Self(value))
+                        } else {
+                            None
+                        }
+                    }
+                }
+
+                impl<const MAX: u32> TryFrom<$ty> for MaxSize<$ty, MAX> {
+                    type Error = $ty;
+
+                    fn try_from(value: $ty) -> Result<Self, Self::Error> {
+                        Self::new(value).ok_or(value)
+                    }
+                }
+            )+
+        };
+        (nonzero: $(($ty:ty, $inner:ty)),+ $(,)?) => {
+            $(
+                impl<const MAX: u32> MaxSize<$ty, MAX> {
+                    /// Creates a value if it does not exceed `MAX`.
+                    pub const fn new(value: $ty) -> Option<Self> {
+                        let value_inner = value.get();
+                        if MAX as u128 >= <$inner>::MAX as u128 || value_inner <= MAX as $inner {
+                            Some(Self(value))
+                        } else {
+                            None
+                        }
+                    }
+                }
+
+                impl<const MAX: u32> TryFrom<$ty> for MaxSize<$ty, MAX> {
+                    type Error = $ty;
+
+                    fn try_from(value: $ty) -> Result<Self, Self::Error> {
+                        Self::new(value).ok_or(value)
+                    }
+                }
+
+                impl<const MAX: u32> TryFrom<$inner> for MaxSize<$ty, MAX> {
+                    type Error = $inner;
+
+                    fn try_from(value: $inner) -> Result<Self, Self::Error> {
+                        <$ty>::new(value).and_then(Self::new).ok_or(value)
+                    }
+                }
+            )+
+        };
+    }
+
+    impl_max_size!(primitive: u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
+    impl_max_size!(nonzero:
+        (core::num::NonZeroU8, u8),
+        (core::num::NonZeroU16, u16),
+        (core::num::NonZeroU32, u32),
+        (core::num::NonZeroU64, u64),
+        (core::num::NonZeroU128, u128),
+        (core::num::NonZeroUsize, usize),
+        (core::num::NonZeroI8, i8),
+        (core::num::NonZeroI16, i16),
+        (core::num::NonZeroI32, i32),
+        (core::num::NonZeroI64, i64),
+        (core::num::NonZeroI128, i128),
+        (core::num::NonZeroIsize, isize),
+    );
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod rng;
@@ -498,6 +598,22 @@ mod tests {
             NZDuration!(Duration::from_secs(1)).get(),
             Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn test_max_size_bounds() {
+        type MessageSize = MaxSize<core::num::NonZeroU32, 1024>;
+
+        const MAXIMUM: MessageSize = MessageSize::new(NZU32!(1024)).unwrap();
+
+        assert_eq!(MAXIMUM.get(), NZU32!(1024));
+        assert_eq!(MessageSize::new(NZU32!(1)).unwrap().get(), NZU32!(1));
+        assert_eq!(MessageSize::new(NZU32!(1025)), None);
+
+        let wrapped: MessageSize = 512u32.try_into().unwrap();
+        assert_eq!(wrapped.get(), NZU32!(512));
+        assert!(MessageSize::try_from(0u32).is_err());
+        assert!(MessageSize::try_from(1025u32).is_err());
     }
 
     #[test]
