@@ -192,11 +192,6 @@ where
                         self.database_subscribers.push(response);
                     }
                 }
-                #[cfg(test)]
-                Message::DriveVerifications { started, release } => {
-                    started.send_lossy(());
-                    let _ = release.await;
-                }
             },
         }
     }

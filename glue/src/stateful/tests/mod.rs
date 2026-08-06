@@ -1,25 +1,68 @@
 //! E2E tests for `stateful`
 
-use crate::simulate::{
-    action::{Action, Crash, Schedule},
-    engine::EngineDefinition,
-    exit::{ExitCondition, ProcessedHeightAtLeast},
-    plan::PlanBuilder,
-    processed::ProcessedHeight,
-    property::Property,
+use self::{
+    common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
+    multi_db_app::{
+        App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine, QmdbB,
+        qmdb_config as multi_qmdb_config,
+    },
+    single_db_app::{App, Block, Qmdb, SingleDatabaseSet, SingleDbEngine, qmdb_config},
 };
-use commonware_consensus::types::{Epoch, Round, View};
-use commonware_cryptography::{PublicKey, ed25519};
-use commonware_macros::{test_group, test_traced};
+use crate::{
+    simulate::{
+        action::{Action, Crash, Schedule},
+        engine::EngineDefinition,
+        exit::{ExitCondition, ProcessedHeightAtLeast},
+        plan::PlanBuilder,
+        processed::ProcessedHeight,
+        property::Property,
+    },
+    stateful::{
+        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
+        SyncPlan,
+        db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
+    },
+};
+use commonware_actor::Feedback;
+use commonware_consensus::{
+    CertifiableAutomaton as _, Reporter,
+    marshal::{
+        self,
+        ancestry::Ancestry,
+        core::Actor as MarshalActor,
+        resolver::handler,
+        standard::{Deferred, Standard},
+    },
+    simplex::{mocks::scheme as scheme_mocks, types::Context},
+    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+};
+use commonware_cryptography::{
+    Digestible as _, PublicKey, Signer as _, certificate::ConstantProvider, ed25519, sha256,
+};
+use commonware_macros::{select, test_group, test_traced};
 use commonware_p2p::simulated::Link;
-use commonware_runtime::deterministic;
-use multi_db_app::MultiDbEngine;
+use commonware_parallel::Sequential;
+use commonware_runtime::{
+    Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
+use commonware_storage::{
+    archive::prunable,
+    mmr,
+    qmdb::{
+        any::unordered::fixed,
+        immutable::fixed as immutable_fixed,
+        sync::{FeedbackTx, Request, Response, Source as QmdbSource},
+    },
+};
+use commonware_utils::{
+    Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
+    non_empty_range, sync::Mutex,
+};
 use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
 };
-use single_db_app::SingleDbEngine;
-use std::time::Duration;
+use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 mod common;
 pub(crate) mod fixtures;
@@ -794,756 +837,640 @@ where
         .unwrap();
 }
 
-mod certification_tests {
-    use super::{
-        common::*,
-        multi_db_app::{
-            App as MultiApp, Block as MultiBlock, MultiDatabaseSet, QmdbB,
-            qmdb_config as multi_qmdb_config,
+#[derive(Clone)]
+struct NoopQmdbResolver;
+
+impl QmdbSource for NoopQmdbResolver {
+    type Family = mmr::Family;
+    type Digest = sha256::Digest;
+    type Op = fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
+    type Error = Infallible;
+
+    fn serve<'a>(
+        &'a self,
+        _request: Request<Self::Family>,
+    ) -> impl Future<
+        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
+    > + Send
+    + 'a {
+        std::future::pending()
+    }
+}
+
+impl AttachableResolver<Qmdb<deterministic::Context>> for NoopQmdbResolver {
+    async fn attach_database(&self, _db: Shared<Qmdb<deterministic::Context>>) {}
+}
+
+#[derive(Clone)]
+struct NoopCompactQmdbResolver;
+
+impl QmdbSource for NoopCompactQmdbResolver {
+    type Family = mmr::Family;
+    type Digest = sha256::Digest;
+    type Op = immutable_fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
+    type Error = Infallible;
+
+    fn serve<'a>(
+        &'a self,
+        _request: Request<Self::Family>,
+    ) -> impl Future<
+        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
+    > + Send
+    + 'a {
+        std::future::pending()
+    }
+}
+
+impl AttachableResolver<QmdbB<deterministic::Context>> for NoopCompactQmdbResolver {
+    async fn attach_database(&self, _db: Shared<QmdbB<deterministic::Context>>) {}
+}
+
+#[derive(Clone)]
+struct NoopMarshalApplication;
+
+impl Reporter for NoopMarshalApplication {
+    type Activity = marshal::Update<Block>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        if let marshal::Update::Block(_, acknowledgement) = activity {
+            acknowledgement.acknowledge();
+        }
+        Feedback::Ok
+    }
+}
+
+#[derive(Clone)]
+struct NoopMultiMarshalApplication;
+
+impl Reporter for NoopMultiMarshalApplication {
+    type Activity = marshal::Update<MultiBlock>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        if let marshal::Update::Block(_, acknowledgement) = activity {
+            acknowledgement.acknowledge();
+        }
+        Feedback::Ok
+    }
+}
+
+struct ApplicationGate {
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+fn application_gate() -> (ApplicationGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (started, started_rx) = oneshot::channel();
+    let (release, release_rx) = oneshot::channel();
+    (
+        ApplicationGate {
+            started,
+            release: release_rx,
         },
-        single_db_app::{App, Block, Qmdb, SingleDatabaseSet, qmdb_config},
-    };
-    use crate::stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
-        SyncPlan,
-        db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
-    };
-    use commonware_actor::Feedback;
-    use commonware_consensus::{
-        CertifiableAutomaton as _, Reporter,
-        marshal::{
-            self,
-            ancestry::Ancestry,
-            core::Actor as MarshalActor,
-            resolver::handler,
-            standard::{Deferred, Standard},
-        },
-        simplex::{mocks::scheme as scheme_mocks, types::Context},
-        types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
-    };
-    use commonware_cryptography::{
-        Digestible as _, Signer as _, certificate::ConstantProvider, ed25519, sha256,
-    };
-    use commonware_macros::select;
-    use commonware_parallel::Sequential;
-    use commonware_resolver::{Fetch, Resolver as MarshalResolver, TargetedResolver};
-    use commonware_runtime::{
-        Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-    };
-    use commonware_storage::{
-        archive::prunable,
-        mmr,
-        qmdb::{
-            any::unordered::fixed,
-            immutable::fixed as immutable_fixed,
-            sync::{FeedbackTx, Request, Response, Source as QmdbSource},
-        },
-    };
-    use commonware_utils::{
-        Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-        non_empty_range, sync::Mutex, vec::NonEmptyVec,
-    };
-    use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
+        started_rx,
+        release,
+    )
+}
 
-    #[derive(Clone)]
-    struct NoopQmdbResolver;
+#[derive(Clone)]
+struct GatedMultiApp {
+    inner: MultiApp,
+    verify_gate: Arc<Mutex<Option<ApplicationGate>>>,
+    finalize_gate: Arc<Mutex<Option<ApplicationGate>>>,
+}
 
-    impl QmdbSource for NoopQmdbResolver {
-        type Family = mmr::Family;
-        type Digest = sha256::Digest;
-        type Op = fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
-        type Error = Infallible;
+impl Application<deterministic::Context> for GatedMultiApp {
+    type SigningScheme = <MultiApp as Application<deterministic::Context>>::SigningScheme;
+    type Context = <MultiApp as Application<deterministic::Context>>::Context;
+    type Block = MultiBlock;
+    type Databases = MultiDatabaseSet<deterministic::Context>;
+    type Provider = ();
+    type Input = ();
 
-        fn serve<'a>(
-            &'a self,
-            _request: Request<Self::Family>,
-        ) -> impl Future<
-            Output = Result<
-                (Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx),
-                Self::Error,
-            >,
-        > + Send
-        + 'a {
-            std::future::pending()
+    async fn genesis(&mut self) -> Self::Block {
+        <MultiApp as Application<deterministic::Context>>::genesis(&mut self.inner).await
+    }
+
+    async fn propose(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        input: Input<Self::Input, Self::Provider>,
+    ) -> Option<Proposed<Self, deterministic::Context>> {
+        let proposed = <MultiApp as Application<deterministic::Context>>::propose(
+            &mut self.inner,
+            context,
+            ancestry,
+            batches,
+            input,
+        )
+        .await?;
+        Some(Proposed {
+            block: proposed.block,
+            merkleized: proposed.merkleized,
+        })
+    }
+
+    async fn verify(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+        let result = <MultiApp as Application<deterministic::Context>>::verify(
+            &mut self.inner,
+            context,
+            ancestry,
+            batches,
+        )
+        .await;
+        let gate = self.verify_gate.lock().take();
+        if let Some(mut gate) = gate {
+            let _ = gate.started.send(());
+            let _ = (&mut gate.release).await;
+        }
+        result
+    }
+
+    async fn apply(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        block: &Self::Block,
+        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+        <MultiApp as Application<deterministic::Context>>::apply(
+            &mut self.inner,
+            context,
+            block,
+            batches,
+        )
+        .await
+    }
+
+    async fn finalized(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        block: &Self::Block,
+        readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+    ) {
+        <MultiApp as Application<deterministic::Context>>::finalized(
+            &mut self.inner,
+            context,
+            block,
+            readers,
+        )
+        .await;
+        let gate = self.finalize_gate.lock().take();
+        if let Some(mut gate) = gate {
+            let _ = gate.started.send(());
+            let _ = (&mut gate.release).await;
         }
     }
 
-    impl AttachableResolver<Qmdb<deterministic::Context>> for NoopQmdbResolver {
-        async fn attach_database(&self, _db: Shared<Qmdb<deterministic::Context>>) {}
+    fn sync_targets(
+        block: &Self::Block,
+    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+        <MultiApp as Application<deterministic::Context>>::sync_targets(block)
     }
+}
 
-    #[derive(Clone)]
-    struct NoopCompactQmdbResolver;
+async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, Vec<Block>) {
+    let initial_target =
+        <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+    let genesis = Block::genesis(initial_target.root, initial_target.range);
+    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
+        context.child("chain_builder"),
+        qmdb_config("certify-chain-builder", page_cache),
+    )
+    .await;
+    let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
+        deterministic::Context,
+    >>::new_batches(&databases)
+    .await;
+    let mut parent = genesis.clone();
+    let mut chain = Vec::with_capacity(blocks as usize);
+    // QMDB descendants retain uncommitted ancestry by weak reference after
+    // merkleization, so keep the complete speculative chain alive here.
+    let mut speculative = Vec::with_capacity(blocks as usize);
 
-    impl QmdbSource for NoopCompactQmdbResolver {
-        type Family = mmr::Family;
-        type Digest = sha256::Digest;
-        type Op = immutable_fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
-        type Error = Infallible;
-
-        fn serve<'a>(
-            &'a self,
-            _request: Request<Self::Family>,
-        ) -> impl Future<
-            Output = Result<
-                (Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx),
-                Self::Error,
-            >,
-        > + Send
-        + 'a {
-            std::future::pending()
-        }
-    }
-
-    impl AttachableResolver<QmdbB<deterministic::Context>> for NoopCompactQmdbResolver {
-        async fn attach_database(&self, _db: Shared<QmdbB<deterministic::Context>>) {}
-    }
-
-    #[derive(Clone)]
-    struct NoopMarshalResolver;
-
-    #[derive(Clone)]
-    struct NoopMarshalApplication;
-
-    impl Reporter for NoopMarshalApplication {
-        type Activity = marshal::Update<Block>;
-
-        fn report(&mut self, activity: Self::Activity) -> Feedback {
-            if let marshal::Update::Block(_, acknowledgement) = activity {
-                acknowledgement.acknowledge();
-            }
-            Feedback::Ok
-        }
-    }
-
-    #[derive(Clone)]
-    struct NoopMultiMarshalApplication;
-
-    impl Reporter for NoopMultiMarshalApplication {
-        type Activity = marshal::Update<MultiBlock>;
-
-        fn report(&mut self, activity: Self::Activity) -> Feedback {
-            if let marshal::Update::Block(_, acknowledgement) = activity {
-                acknowledgement.acknowledge();
-            }
-            Feedback::Ok
-        }
-    }
-
-    struct ApplicationGate {
-        started: oneshot::Sender<()>,
-        release: oneshot::Receiver<()>,
-    }
-
-    fn application_gate() -> (ApplicationGate, oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = oneshot::channel();
-        (
-            ApplicationGate {
-                started,
-                release: release_rx,
+    for height in 1..=blocks {
+        let height = Height::new(height);
+        let merkleized = App::execute(height, batches).await;
+        let bounds = merkleized.bounds();
+        let block = Block {
+            context: Context {
+                round: Round::new(Epoch::zero(), View::new(height.get())),
+                leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                parent: (parent.context.round.view(), parent.digest()),
             },
-            started_rx,
-            release,
-        )
-    }
-
-    #[derive(Clone)]
-    struct GatedMultiApp {
-        inner: MultiApp,
-        verify_gate: Arc<Mutex<Option<ApplicationGate>>>,
-        finalize_gate: Arc<Mutex<Option<ApplicationGate>>>,
-    }
-
-    impl Application<deterministic::Context> for GatedMultiApp {
-        type SigningScheme = <MultiApp as Application<deterministic::Context>>::SigningScheme;
-        type Context = <MultiApp as Application<deterministic::Context>>::Context;
-        type Block = MultiBlock;
-        type Databases = MultiDatabaseSet<deterministic::Context>;
-        type Provider = ();
-        type Input = ();
-
-        async fn genesis(&mut self) -> Self::Block {
-            <MultiApp as Application<deterministic::Context>>::genesis(&mut self.inner).await
-        }
-
-        async fn propose(
-            &mut self,
-            context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
-            batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-            input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
-            let proposed = <MultiApp as Application<deterministic::Context>>::propose(
-                &mut self.inner,
-                context,
-                ancestry,
-                batches,
-                input,
-            )
-            .await?;
-            Some(Proposed {
-                block: proposed.block,
-                merkleized: proposed.merkleized,
-            })
-        }
-
-        async fn verify(
-            &mut self,
-            context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
-            batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-            let result = <MultiApp as Application<deterministic::Context>>::verify(
-                &mut self.inner,
-                context,
-                ancestry,
-                batches,
-            )
-            .await;
-            let gate = self.verify_gate.lock().take();
-            if let Some(mut gate) = gate {
-                let _ = gate.started.send(());
-                let _ = (&mut gate.release).await;
-            }
-            result
-        }
-
-        async fn apply(
-            &mut self,
-            context: (deterministic::Context, Self::Context),
-            block: &Self::Block,
-            batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-            <MultiApp as Application<deterministic::Context>>::apply(
-                &mut self.inner,
-                context,
-                block,
-                batches,
-            )
-            .await
-        }
-
-        async fn finalized(
-            &mut self,
-            context: (deterministic::Context, Self::Context),
-            block: &Self::Block,
-            readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
-        ) {
-            <MultiApp as Application<deterministic::Context>>::finalized(
-                &mut self.inner,
-                context,
-                block,
-                readers,
-            )
-            .await;
-            let gate = self.finalize_gate.lock().take();
-            if let Some(mut gate) = gate {
-                let _ = gate.started.send(());
-                let _ = (&mut gate.release).await;
-            }
-        }
-
-        fn sync_targets(
-            block: &Self::Block,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            <MultiApp as Application<deterministic::Context>>::sync_targets(block)
-        }
-    }
-
-    impl MarshalResolver for NoopMarshalResolver {
-        type Key = handler::Key<sha256::Digest>;
-        type Subscriber = handler::Annotation;
-
-        fn fetch<F>(&mut self, _fetch: F) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn fetch_all<F>(&mut self, _fetches: Vec<F>) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-    }
-
-    impl TargetedResolver for NoopMarshalResolver {
-        type PublicKey = ed25519::PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            _fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-    }
-
-    async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, Vec<Block>) {
-        let initial_target =
-            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
-        let genesis = Block::genesis(initial_target.root, initial_target.range);
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
-        let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
-            context.child("chain_builder"),
-            qmdb_config("certify-chain-builder", page_cache),
-        )
-        .await;
-        let mut batches = {
-            let locked = databases.lock_read().await;
-            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
-                deterministic::Context,
-            >>::new_batches(locked)
+            parent: parent.digest(),
+            height,
+            state_root: merkleized.root(),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
         };
-        let mut parent = genesis.clone();
-        let mut chain = Vec::with_capacity(blocks as usize);
-        // QMDB descendants retain uncommitted ancestry by weak reference after
-        // merkleization, so keep the complete speculative chain alive here.
-        let mut speculative = Vec::with_capacity(blocks as usize);
-
-        for height in 1..=blocks {
-            let height = Height::new(height);
-            let merkleized = App::execute(height, batches).await;
-            let bounds = merkleized.bounds();
-            let block = Block {
-                context: Context {
-                    round: Round::new(Epoch::zero(), View::new(height.get())),
-                    leader: ed25519::PrivateKey::from_seed(0).public_key(),
-                    parent: (parent.context.round.view(), parent.digest()),
-                },
-                parent: parent.digest(),
-                height,
-                state_root: merkleized.root(),
-                range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            };
-            speculative.push(merkleized);
-            batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::fork_batches(
-                speculative.last().expect("speculative batch missing"),
-            );
-            parent = block.clone();
-            chain.push(block);
-        }
-
-        (genesis, chain)
-    }
-
-    async fn build_multi_chain(
-        context: &deterministic::Context,
-        blocks: u64,
-    ) -> (MultiBlock, Vec<MultiBlock>) {
-        let (initial_a, initial_b) =
-            <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
-        let genesis = MultiBlock::genesis(
-            initial_a.root,
-            initial_a.range,
-            initial_b.root,
-            non_empty_range!(mmr::Location::new(0), initial_b.size),
+        speculative.push(merkleized);
+        batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::fork_batches(
+            speculative.last().expect("speculative batch missing"),
         );
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
-        let databases = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
-            context.child("multi_chain_builder"),
-            multi_qmdb_config("certify-multi-chain-builder", page_cache),
-        )
-        .await;
-        let mut batches = {
-            let locked = databases.lock_read().await;
-            <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-                deterministic::Context,
-            >>::new_batches(locked)
-        };
-        let mut parent = genesis.clone();
-        let mut chain = Vec::with_capacity(blocks as usize);
-        let mut speculative = Vec::with_capacity(blocks as usize);
+        parent = block.clone();
+        chain.push(block);
+    }
 
-        for height in 1..=blocks {
-            let height = Height::new(height);
-            let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await;
-            let bounds_a = merkleized_a.bounds();
-            let bounds_b = merkleized_b.bounds();
-            let block = MultiBlock {
-                context: Context {
-                    round: Round::new(Epoch::zero(), View::new(height.get())),
-                    leader: ed25519::PrivateKey::from_seed(0).public_key(),
-                    parent: (parent.context.round.view(), parent.digest()),
+    (genesis, chain)
+}
+
+async fn build_multi_chain(
+    context: &deterministic::Context,
+    blocks: u64,
+) -> (MultiBlock, Vec<MultiBlock>) {
+    let (initial_a, initial_b) =
+        <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+    let genesis = MultiBlock::genesis(
+        initial_a.root,
+        initial_a.range,
+        initial_b.root,
+        non_empty_range!(mmr::Location::new(0), initial_b.size),
+    );
+    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let databases = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
+        context.child("multi_chain_builder"),
+        multi_qmdb_config("certify-multi-chain-builder", page_cache),
+    )
+    .await;
+    let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
+        deterministic::Context,
+    >>::new_batches(&databases)
+    .await;
+    let mut parent = genesis.clone();
+    let mut chain = Vec::with_capacity(blocks as usize);
+    let mut speculative = Vec::with_capacity(blocks as usize);
+
+    for height in 1..=blocks {
+        let height = Height::new(height);
+        let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await;
+        let bounds_a = merkleized_a.bounds();
+        let bounds_b = merkleized_b.bounds();
+        let block = MultiBlock {
+            context: Context {
+                round: Round::new(Epoch::zero(), View::new(height.get())),
+                leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                parent: (parent.context.round.view(), parent.digest()),
+            },
+            parent: parent.digest(),
+            height,
+            root_a: merkleized_a.root(),
+            range_a: non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size),
+            root_b: merkleized_b.root(),
+            range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size),
+        };
+        speculative.push((merkleized_a, merkleized_b));
+        batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::fork_batches(
+            speculative.last().expect("speculative batches missing"),
+        );
+        parent = block.clone();
+        chain.push(block);
+    }
+
+    (genesis, chain)
+}
+
+#[test]
+fn out_of_order_certifications_complete_on_qmdb() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        let (genesis, blocks) = build_chain(&context, 6).await;
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(
+            &mut signing_context,
+            b"_COMMONWARE_GLUE_QMDB_OUT_OF_ORDER_CERTIFY",
+            1,
+        );
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(
+                "certify-qmdb-marshal",
+                "finalizations",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = prunable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config("certify-qmdb-marshal", "blocks", page_cache.clone(), ()),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+        let (marshal_actor, marshal, floor) =
+            MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    start: marshal::Start::Genesis(genesis.clone()),
+                    partition_prefix: "certify-qmdb-marshal".to_string(),
+                    mailbox_size: NZUsize!(8),
+                    view_retention: ViewDelta::new(10),
+                    prunable_items_per_section: NZU64!(10),
+                    page_cache: page_cache.clone(),
+                    replay_buffer: IO_BUFFER_SIZE,
+                    key_write_buffer: IO_BUFFER_SIZE,
+                    value_write_buffer: IO_BUFFER_SIZE,
+                    block_codec_config: (),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
                 },
-                parent: parent.digest(),
-                height,
-                root_a: merkleized_a.root(),
-                range_a: non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size),
-                root_b: merkleized_b.root(),
-                range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size),
-            };
-            speculative.push((merkleized_a, merkleized_b));
-            batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::fork_batches(
-                speculative.last().expect("speculative batches missing"),
-            );
-            parent = block.clone();
-            chain.push(block);
+            )
+            .await;
+        let (resolver_receiver, _resolver_handler) =
+            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+        let marshal_actor = marshal_actor.start_unbuffered(
+            NoopMarshalApplication,
+            (resolver_receiver, fixtures::IgnoreResolver),
+        );
+
+        let plan = SyncPlan::init(&context, "certify-qmdb-stateful".to_string()).await;
+        let (stateful, stateful_mailbox) = StatefulActor::init(
+            context.child("stateful"),
+            StatefulConfig {
+                application: App::new(genesis),
+                db_config: qmdb_config("certify-qmdb-stateful", page_cache),
+                provider: (),
+                marshal: (marshal.clone(), floor),
+                mailbox_size: NZUsize!(1),
+                plan,
+                resolvers: NoopQmdbResolver,
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: 1,
+                    update_channel_size: NZUsize!(1),
+                    max_retained_roots: 1,
+                },
+                prune_config: None,
+            },
+        );
+        let stateful_actor = stateful.start();
+        let _databases = stateful_mailbox.subscribe_databases().await;
+
+        for block in &blocks {
+            assert!(marshal.verified(block.context.round, block.clone()).await);
         }
 
-        (genesis, chain)
-    }
+        let mut deferred = Deferred::new(
+            context.child("deferred"),
+            stateful_mailbox,
+            marshal,
+            FixedEpocher::new(EPOCH_LENGTH),
+        );
+        let mut certifications = Vec::with_capacity(blocks.len());
+        for index in [5, 1, 4, 0, 3, 2] {
+            let block = &blocks[index];
+            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+        }
 
-    #[test]
-    fn out_of_order_certifications_complete_on_qmdb() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (genesis, blocks) = build_chain(&context, 6).await;
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut signing_context = context.child("signing");
-            let fixture = scheme_mocks::fixture(
-                &mut signing_context,
-                b"_COMMONWARE_GLUE_QMDB_OUT_OF_ORDER_CERTIFY",
-                1,
-            );
-            let provider = ConstantProvider::new(fixture.schemes[0].clone());
-            let finalizations_by_height = prunable::Archive::init(
-                context.child("finalizations_by_height"),
-                archive_config(
-                    "certify-qmdb-marshal",
-                    "finalizations",
-                    page_cache.clone(),
-                    (),
-                ),
-            )
-            .await
-            .expect("failed to initialize finalizations archive");
-            let finalized_blocks = prunable::Archive::init(
-                context.child("finalized_blocks"),
-                archive_config("certify-qmdb-marshal", "blocks", page_cache.clone(), ()),
-            )
-            .await
-            .expect("failed to initialize blocks archive");
-            let (marshal_actor, marshal, floor) =
-                MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
-                    context.child("marshal"),
-                    finalizations_by_height,
-                    finalized_blocks,
-                    marshal::Config {
-                        provider,
-                        epocher: FixedEpocher::new(EPOCH_LENGTH),
-                        start: marshal::Start::Genesis(genesis.clone()),
-                        partition_prefix: "certify-qmdb-marshal".to_string(),
-                        mailbox_size: NZUsize!(8),
-                        view_retention: ViewDelta::new(10),
-                        prunable_items_per_section: NZU64!(10),
-                        page_cache: page_cache.clone(),
-                        replay_buffer: IO_BUFFER_SIZE,
-                        key_write_buffer: IO_BUFFER_SIZE,
-                        value_write_buffer: IO_BUFFER_SIZE,
-                        block_codec_config: (),
-                        max_repair: NZUsize!(10),
-                        max_pending_acks: NZUsize!(1),
-                        strategy: Sequential,
-                    },
-                )
-                .await;
-            let (resolver_receiver, _resolver_handler) =
-                handler::init(context.child("marshal_resolver"), NZUsize!(8));
-            let marshal_actor = marshal_actor.start_unbuffered(
-                NoopMarshalApplication,
-                (resolver_receiver, NoopMarshalResolver),
-            );
+        select! {
+            results = futures::future::join_all(certifications) => {
+                for result in results {
+                    assert!(result.expect("certification result missing"));
+                }
+            },
+            _ = context.sleep(Duration::from_secs(1)) => {
+                panic!("out-of-order QMDB certifications did not all complete");
+            },
+        }
 
-            let plan = SyncPlan::init(&context, "certify-qmdb-stateful".to_string()).await;
-            let (stateful, stateful_mailbox) = StatefulActor::init(
-                context.child("stateful"),
-                StatefulConfig {
-                    application: App::new(genesis),
-                    db_config: qmdb_config("certify-qmdb-stateful", page_cache),
-                    provider: (),
-                    marshal: (marshal.clone(), floor),
-                    mailbox_size: NZUsize!(1),
-                    plan,
-                    resolvers: NoopQmdbResolver,
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
-                    },
-                    prune_config: None,
+        stateful_actor.abort();
+        marshal_actor.abort();
+        let _ = stateful_actor.await;
+        let _ = marshal_actor.await;
+    });
+}
+
+#[test]
+fn overlapping_finalizations_complete_on_multi_qmdb() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        let (genesis, blocks) = build_multi_chain(&context, 6).await;
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(
+            &mut signing_context,
+            b"_COMMONWARE_GLUE_MULTI_QMDB_OVERLAPPING_FINALIZATION",
+            1,
+        );
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(
+                "certify-multi-qmdb-marshal",
+                "finalizations",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = prunable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(
+                "certify-multi-qmdb-marshal",
+                "blocks",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+        let (marshal_actor, marshal, floor) =
+            MarshalActor::<_, Standard<MultiBlock>, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    start: marshal::Start::Genesis(genesis.clone()),
+                    partition_prefix: "certify-multi-qmdb-marshal".to_string(),
+                    mailbox_size: NZUsize!(8),
+                    view_retention: ViewDelta::new(10),
+                    prunable_items_per_section: NZU64!(10),
+                    page_cache: page_cache.clone(),
+                    replay_buffer: IO_BUFFER_SIZE,
+                    key_write_buffer: IO_BUFFER_SIZE,
+                    value_write_buffer: IO_BUFFER_SIZE,
+                    block_codec_config: (),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
                 },
-            );
-            let stateful_actor = stateful.start();
-            let _databases = stateful_mailbox.subscribe_databases().await;
-
-            for block in &blocks {
-                assert!(marshal.verified(block.context.round, block.clone()).await);
-            }
-
-            let mut deferred = Deferred::new(
-                context.child("deferred"),
-                stateful_mailbox,
-                marshal,
-                FixedEpocher::new(EPOCH_LENGTH),
-            );
-            let mut certifications = Vec::with_capacity(blocks.len());
-            for index in [5, 1, 4, 0, 3, 2] {
-                let block = &blocks[index];
-                certifications.push(deferred.certify(block.context.round, block.digest()).await);
-            }
-
-            select! {
-                results = futures::future::join_all(certifications) => {
-                    assert_eq!(results.len(), blocks.len());
-                    for result in results {
-                        assert!(result.expect("certification result missing"));
-                    }
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("out-of-order QMDB certifications did not all complete");
-                },
-            }
-
-            stateful_actor.abort();
-            marshal_actor.abort();
-            let _ = stateful_actor.await;
-            let _ = marshal_actor.await;
-        });
-    }
-
-    #[test]
-    fn overlapping_finalizations_complete_on_multi_qmdb() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (genesis, blocks) = build_multi_chain(&context, 6).await;
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-            let mut signing_context = context.child("signing");
-            let fixture = scheme_mocks::fixture(
-                &mut signing_context,
-                b"_COMMONWARE_GLUE_MULTI_QMDB_OVERLAPPING_FINALIZATION",
-                1,
-            );
-            let provider = ConstantProvider::new(fixture.schemes[0].clone());
-            let finalizations_by_height = prunable::Archive::init(
-                context.child("finalizations_by_height"),
-                archive_config(
-                    "certify-multi-qmdb-marshal",
-                    "finalizations",
-                    page_cache.clone(),
-                    (),
-                ),
             )
-            .await
-            .expect("failed to initialize finalizations archive");
-            let finalized_blocks = prunable::Archive::init(
-                context.child("finalized_blocks"),
-                archive_config(
-                    "certify-multi-qmdb-marshal",
-                    "blocks",
-                    page_cache.clone(),
-                    (),
-                ),
-            )
-            .await
-            .expect("failed to initialize blocks archive");
-            let (marshal_actor, marshal, floor) =
-                MarshalActor::<_, Standard<MultiBlock>, _, _, _, _, _>::init(
-                    context.child("marshal"),
-                    finalizations_by_height,
-                    finalized_blocks,
-                    marshal::Config {
-                        provider,
-                        epocher: FixedEpocher::new(EPOCH_LENGTH),
-                        start: marshal::Start::Genesis(genesis.clone()),
-                        partition_prefix: "certify-multi-qmdb-marshal".to_string(),
-                        mailbox_size: NZUsize!(8),
-                        view_retention: ViewDelta::new(10),
-                        prunable_items_per_section: NZU64!(10),
-                        page_cache: page_cache.clone(),
-                        replay_buffer: IO_BUFFER_SIZE,
-                        key_write_buffer: IO_BUFFER_SIZE,
-                        value_write_buffer: IO_BUFFER_SIZE,
-                        block_codec_config: (),
-                        max_repair: NZUsize!(10),
-                        max_pending_acks: NZUsize!(1),
-                        strategy: Sequential,
-                    },
-                )
-                .await;
-            let (resolver_receiver, _resolver_handler) =
-                handler::init(context.child("marshal_resolver"), NZUsize!(8));
-            let marshal_actor = marshal_actor.start_unbuffered(
-                NoopMultiMarshalApplication,
-                (resolver_receiver, NoopMarshalResolver),
-            );
+            .await;
+        let (resolver_receiver, _resolver_handler) =
+            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+        let marshal_actor = marshal_actor.start_unbuffered(
+            NoopMultiMarshalApplication,
+            (resolver_receiver, fixtures::IgnoreResolver),
+        );
 
-            let verify_gate = Arc::new(Mutex::new(None));
-            let finalize_gate = Arc::new(Mutex::new(None));
-            let application = GatedMultiApp {
-                inner: MultiApp::new(genesis),
-                verify_gate: verify_gate.clone(),
-                finalize_gate: finalize_gate.clone(),
-            };
-            let plan = SyncPlan::init(&context, "certify-multi-qmdb-stateful".to_string()).await;
-            let (stateful, stateful_mailbox) = StatefulActor::init(
-                context.child("stateful"),
-                StatefulConfig {
-                    application,
-                    db_config: multi_qmdb_config("certify-multi-qmdb-stateful", page_cache),
-                    provider: (),
-                    marshal: (marshal.clone(), floor),
-                    mailbox_size: NZUsize!(1),
-                    plan,
-                    resolvers: (NoopQmdbResolver, NoopCompactQmdbResolver),
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
-                    },
-                    prune_config: None,
+        let verify_gate = Arc::new(Mutex::new(None));
+        let finalize_gate = Arc::new(Mutex::new(None));
+        let application = GatedMultiApp {
+            inner: MultiApp::new(genesis),
+            verify_gate: verify_gate.clone(),
+            finalize_gate: finalize_gate.clone(),
+        };
+        let plan = SyncPlan::init(&context, "certify-multi-qmdb-stateful".to_string()).await;
+        let (stateful, stateful_mailbox) = StatefulActor::init(
+            context.child("stateful"),
+            StatefulConfig {
+                application,
+                db_config: multi_qmdb_config("certify-multi-qmdb-stateful", page_cache),
+                provider: (),
+                marshal: (marshal.clone(), floor),
+                mailbox_size: NZUsize!(1),
+                plan,
+                resolvers: (NoopQmdbResolver, NoopCompactQmdbResolver),
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: 1,
+                    update_channel_size: NZUsize!(1),
+                    max_retained_roots: 1,
                 },
-            );
-            let stateful_actor = stateful.start();
-            let databases = stateful_mailbox.subscribe_databases().await;
+                prune_config: None,
+            },
+        );
+        let stateful_actor = stateful.start();
+        let databases = stateful_mailbox.subscribe_databases().await;
 
-            for block in &blocks {
-                assert!(marshal.verified(block.context.round, block.clone()).await);
-            }
+        for block in &blocks {
+            assert!(marshal.verified(block.context.round, block.clone()).await);
+        }
 
-            let mut deferred = Deferred::new(
-                context.child("deferred"),
-                stateful_mailbox.clone(),
-                marshal,
-                FixedEpocher::new(EPOCH_LENGTH),
-            );
-            // Cache the batches that will be finalized so the held descendant
-            // verification does not own their replay.
-            for block in &blocks[..3] {
-                let certification = deferred.certify(block.context.round, block.digest()).await;
-                assert!(
-                    certification
-                        .await
-                        .expect("priming certification result missing"),
-                );
-            }
-
-            let (gate, verify_started, verify_release) = application_gate();
+        let mut deferred = Deferred::new(
+            context.child("deferred"),
+            stateful_mailbox.clone(),
+            marshal,
+            FixedEpocher::new(EPOCH_LENGTH),
+        );
+        // Cache the batches that will be finalized so the held descendant
+        // verification does not own their replay.
+        for block in &blocks[..3] {
+            let certification = deferred.certify(block.context.round, block.digest()).await;
             assert!(
-                verify_gate.lock().replace(gate).is_none(),
-                "verification gate already installed",
+                certification
+                    .await
+                    .expect("priming certification result missing"),
             );
-            let (gate, finalize_started, finalize_release) = application_gate();
-            assert!(
-                finalize_gate.lock().replace(gate).is_none(),
-                "finalization gate already installed",
-            );
+        }
 
-            let mut certifications = Vec::with_capacity(3);
-            for index in [5, 3, 4] {
-                let block = &blocks[index];
-                certifications.push((
-                    index,
-                    deferred.certify(block.context.round, block.digest()).await,
-                ));
-            }
-            verify_started
-                .await
-                .expect("multi-QMDB verification should reach the application gate");
+        let (gate, verify_started, verify_release) = application_gate();
+        assert!(
+            verify_gate.lock().replace(gate).is_none(),
+            "verification gate already installed",
+        );
+        let (gate, finalize_started, finalize_release) = application_gate();
+        assert!(
+            finalize_gate.lock().replace(gate).is_none(),
+            "finalization gate already installed",
+        );
 
-            let finalized_tip = &blocks[2];
-            let _ = deferred.report(marshal::Update::Tip(
-                finalized_tip.context.round,
-                finalized_tip.height,
-                finalized_tip.digest(),
+        let mut certifications = Vec::with_capacity(3);
+        for index in [5, 3, 4] {
+            let block = &blocks[index];
+            certifications.push((
+                index,
+                deferred.certify(block.context.round, block.digest()).await,
             ));
-            let mut reporter = deferred;
-            let mut finalizations = Vec::with_capacity(3);
+        }
+        verify_started
+            .await
+            .expect("multi-QMDB verification should reach the application gate");
+
+        let finalized_tip = &blocks[2];
+        let _ = deferred.report(marshal::Update::Tip(
+            finalized_tip.context.round,
+            finalized_tip.height,
+            finalized_tip.digest(),
+        ));
+        let mut reporter = deferred;
+        let mut finalizations = Vec::with_capacity(3);
+        let (acknowledgement, waiter) = Exact::handle();
+        let _ = reporter.report(marshal::Update::Block(
+            Arc::new(blocks[0].clone()),
+            acknowledgement,
+        ));
+        finalizations.push(waiter);
+        finalize_started
+            .await
+            .expect("first multi-QMDB finalization should reach the application gate");
+        assert!(
+            !verify_release.is_closed(),
+            "the first finalization should retain descendant verification",
+        );
+
+        // The next finalization must quiesce compatible verification before
+        // the active finalization callback is allowed to return.
+        for block in &blocks[1..3] {
             let (acknowledgement, waiter) = Exact::handle();
             let _ = reporter.report(marshal::Update::Block(
-                Arc::new(blocks[0].clone()),
+                Arc::new(block.clone()),
                 acknowledgement,
             ));
             finalizations.push(waiter);
-            finalize_started
-                .await
-                .expect("first multi-QMDB finalization should reach the application gate");
-            assert!(
-                !verify_release.is_closed(),
-                "the first finalization should retain descendant verification",
-            );
+        }
 
-            // The next finalization must quiesce compatible verification before
-            // the active finalization callback is allowed to return.
-            for block in &blocks[1..3] {
-                let (acknowledgement, waiter) = Exact::handle();
-                let _ = reporter.report(marshal::Update::Block(
-                    Arc::new(block.clone()),
-                    acknowledgement,
-                ));
-                finalizations.push(waiter);
-            }
+        let mut verify_release = verify_release;
+        select! {
+            _ = verify_release.closed() => {},
+            _ = context.sleep(Duration::from_secs(1)) => {
+                panic!("queued finalization did not quiesce retained multi-QMDB verification");
+            },
+        }
+        drop(verify_release);
+        finalize_release
+            .send(())
+            .expect("first multi-QMDB finalization should remain active");
 
-            let mut verify_release = verify_release;
+        select! {
+            acknowledgements = futures::future::join_all(finalizations) => {
+                for acknowledgement in acknowledgements {
+                    acknowledgement.expect("finalized block should be durable");
+                }
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("multi-QMDB finalizations did not become durable");
+            },
+        }
+        for (index, certification) in certifications {
             select! {
-                _ = verify_release.closed() => {},
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("queued finalization did not quiesce retained multi-QMDB verification");
-                },
-            }
-            drop(verify_release);
-            finalize_release
-                .send(())
-                .expect("first multi-QMDB finalization should remain active");
-
-            select! {
-                acknowledgements = futures::future::join_all(finalizations) => {
-                    for acknowledgement in acknowledgements {
-                        acknowledgement.expect("finalized block should be durable");
-                    }
+                result = certification => {
+                    assert!(result.expect("certification result missing"));
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("multi-QMDB finalizations did not become durable");
+                    panic!("multi-QMDB certification {index} did not complete after finalization");
                 },
             }
-            for (index, certification) in certifications {
-                select! {
-                    result = certification => {
-                        assert!(result.expect("certification result missing"));
-                    },
-                    _ = context.sleep(Duration::from_secs(2)) => {
-                        panic!("multi-QMDB certification {index} did not complete after finalization");
-                    },
-                }
-            }
+        }
 
-            let committed = {
-                let locked = databases.lock_read().await;
-                <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-                    deterministic::Context,
-                >>::committed_targets(&locked)
-            };
-            let expected =
-                <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[2]);
-            assert_eq!(committed.0, expected.0, "full QMDB target diverged");
-            assert_eq!(committed.1, expected.1, "compact QMDB target diverged");
+        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
+            deterministic::Context,
+        >>::committed_targets(&databases)
+        .await;
+        let expected =
+            <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[2]);
+        assert_eq!(committed.0, expected.0, "full QMDB target diverged");
+        assert_eq!(committed.1, expected.1, "compact QMDB target diverged");
 
-            stateful_actor.abort();
-            marshal_actor.abort();
-            let _ = stateful_actor.await;
-            let _ = marshal_actor.await;
-        });
-    }
+        stateful_actor.abort();
+        marshal_actor.abort();
+        let _ = stateful_actor.await;
+        let _ = marshal_actor.await;
+    });
 }

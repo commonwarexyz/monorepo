@@ -100,8 +100,7 @@ impl TestDb {
         }
     }
 
-    /// A database whose every finalize flush parks until the test releases it and whose
-    /// prune records its target immediately, isolating the caller's own scheduling.
+    /// A database with test-controlled finalize flushes and pruning.
     pub(crate) fn gated(control: FlushControl) -> Self {
         Self {
             finalize: Mutex::new(None),

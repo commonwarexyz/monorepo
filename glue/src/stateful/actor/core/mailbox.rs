@@ -19,8 +19,10 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::{Span, info_span};
 
+type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
+
 /// A verification is scoped to its caller.
-pub(crate) struct Verification {
+pub(in crate::stateful::actor) struct Verification {
     response: oneshot::Sender<bool>,
 }
 
@@ -39,7 +41,7 @@ impl Verification {
 }
 
 /// Messages processed by the actor loop.
-pub(crate) enum Message<E, A>
+pub(super) enum Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -66,9 +68,7 @@ where
         span: Span,
         block: Arc<A::Block>,
         acknowledgement: Deferred,
-        /// Re-enqueues invalidated verifications behind work accepted while
-        /// finalization or pruning was active.
-        retry_mailbox: Arc<dyn Fn(Self) + Send + Sync>,
+        retry_mailbox: RetryMailbox<E, A>,
     },
 
     /// Requests the attached database set.
@@ -77,13 +77,6 @@ where
     /// serving stateful actor, or immediately if that has already happened.
     SubscribeDatabases {
         response: oneshot::Sender<A::Databases>,
-    },
-
-    /// Test-only work that remains active while verification jobs are driven.
-    #[cfg(test)]
-    DriveVerifications {
-        started: oneshot::Sender<()>,
-        release: oneshot::Receiver<()>,
     },
 }
 
@@ -98,13 +91,11 @@ where
             Self::Verify { verification, .. } => verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
-            #[cfg(test)]
-            Self::DriveVerifications { .. } => false,
         }
     }
 }
 
-pub(crate) struct Pending<E, A>(VecDeque<Message<E, A>>)
+pub(super) struct Pending<E, A>(VecDeque<Message<E, A>>)
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>;
@@ -170,7 +161,7 @@ where
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
-    retry_mailbox: Arc<dyn Fn(Message<E, A>) + Send + Sync>,
+    retry_mailbox: RetryMailbox<E, A>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -192,7 +183,7 @@ where
     A: Application<E>,
 {
     /// Create a mailbox from the send half of the actor's message channel.
-    pub(crate) fn new(sender: Sender<Message<E, A>>) -> Self {
+    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
         let retry_sender = sender.clone();
         let retry_mailbox = Arc::new(move |message| {
             let _ = retry_sender.enqueue(message);
@@ -318,19 +309,5 @@ where
         };
 
         self.sender.enqueue(message)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn verification_cancels_with_caller() {
-        let (response, receiver) = oneshot::channel();
-        let verification = Verification { response };
-        assert!(!verification.is_cancelled());
-        drop(receiver);
-        assert!(verification.is_cancelled());
     }
 }

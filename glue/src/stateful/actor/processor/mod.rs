@@ -76,6 +76,7 @@ struct ReplayGeneration;
 struct ReplayFlight {
     generation: Arc<ReplayGeneration>,
     waiters: ReplayWaiterSlots,
+    vacant_slots: Vec<usize>,
 }
 
 /// Last observed phase used to classify live verification across finalization.
@@ -320,7 +321,7 @@ struct ReplayFlights<D: Copy + Ord> {
 #[derive(Clone, Copy)]
 struct ReplayTracking<'a, D: Copy + Ord> {
     flights: &'a ReplayFlights<D>,
-    progress: Option<&'a VerificationProgress<D>>,
+    progress: &'a VerificationProgress<D>,
 }
 
 impl<D: Copy + Ord> Default for ReplayFlights<D> {
@@ -339,8 +340,15 @@ impl<D: Copy + Ord> ReplayFlights<D> {
     fn waiter(&self, digest: D, flight: &mut ReplayFlight) -> ReplayWaiter<D> {
         let (sender, completion) = oneshot::channel();
         let waiters = &mut flight.waiters;
-        let slot = if let Some(slot) = waiters.iter().position(Option::is_none) {
-            waiters[slot] = Some(sender);
+        let slot = if let Some(slot) = flight.vacant_slots.pop() {
+            assert!(
+                waiters
+                    .get_mut(slot)
+                    .expect("vacant replay waiter slot must exist")
+                    .replace(sender)
+                    .is_none(),
+                "vacant replay waiter slot must be empty",
+            );
             slot
         } else {
             let slot = waiters.len();
@@ -398,8 +406,6 @@ impl<D: Copy + Ord> Drop for ReplayWaiter<D> {
             return;
         }
 
-        // A slot is cleared only by its own waiter's drop and the tail trim
-        // removes only cleared slots, so a live waiter's slot must be present.
         let waiters = &mut flight.waiters;
         let waiter = waiters
             .get_mut(self.slot)
@@ -408,9 +414,7 @@ impl<D: Copy + Ord> Drop for ReplayWaiter<D> {
             waiter.take().is_some(),
             "live replay waiter slot must hold its sender",
         );
-        while waiters.last().is_some_and(Option::is_none) {
-            waiters.pop();
-        }
+        flight.vacant_slots.push(self.slot);
     }
 }
 
@@ -455,7 +459,7 @@ impl<D: Copy + Ord> Drop for ReplayOwner<D> {
 
 /// Errors while preparing parent-relative batches for propose/verify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PrepareBatchesError {
+enum PrepareBatchesError {
     /// Parent ancestry is provably invalid.
     Invalid,
     /// Parent ancestry ended before validity could be proven.
@@ -465,7 +469,7 @@ pub(super) enum PrepareBatchesError {
 }
 
 /// Provides a cancellation signal for speculative actor work.
-pub(super) trait Cancellation {
+trait Cancellation {
     fn cancelled(&mut self) -> impl Future<Output = ()> + Send;
 }
 
@@ -809,7 +813,7 @@ where
         skip_all,
         fields(parent = %parent.digest())
     )]
-    pub(super) async fn prepare_batches<S, V, C>(
+    async fn prepare_batches<S, V, C>(
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
@@ -829,7 +833,7 @@ where
 
     /// Fork unmerkleized batches from known parent state.
     #[cfg(test)]
-    pub(super) async fn fork_batches(
+    async fn fork_batches(
         &self,
         parent: &<A::Block as Digestible>::Digest,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError> {
@@ -838,7 +842,7 @@ where
 
     /// Rebuild missing pending ancestry up to `target` lazily from a block provider.
     #[cfg(test)]
-    pub(super) async fn rebuild_pending<P, C>(
+    async fn rebuild_pending<P, C>(
         &mut self,
         context: &E,
         provider: P,
@@ -914,7 +918,7 @@ where
         let replayed = if pending {
             None
         } else {
-            let batches = self.execution.new_batches().await;
+            let batches = self.execution.databases.new_batches().await;
             let batch = self
                 .app
                 .apply(
@@ -1188,6 +1192,7 @@ where
                     ReplayFlight {
                         generation: Arc::clone(&generation),
                         waiters: Vec::new(),
+                        vacant_slots: Vec::new(),
                     },
                 )
                 .is_none(),
@@ -1198,13 +1203,6 @@ where
             generation,
             result: None,
         })
-    }
-
-    /// Creates batches from explicitly read-locked applied state.
-    async fn new_batches(&self) -> <A::Databases as DatabaseSet<E>>::Unmerkleized {
-        let databases = self.databases.clone();
-        let locked = databases.lock_read().await;
-        A::Databases::new_batches(locked)
     }
 
     /// Forks batches from a known parent.
@@ -1241,7 +1239,7 @@ where
             };
 
             let Some(waiter) = waiter else {
-                return Ok(self.new_batches().await);
+                return Ok(self.databases.new_batches().await);
             };
             if waiter.await.is_err() {
                 return Err(PrepareBatchesError::Cancelled);
@@ -1323,9 +1321,7 @@ where
             match self.claim_replay(replay.flights, digest) {
                 ReplayClaim::Ready => return Ok(()),
                 ReplayClaim::Owner(owner) => {
-                    if let Some(progress) = replay.progress {
-                        progress.replaying(digest, parent, round, true);
-                    }
+                    replay.progress.replaying(digest, parent, round, true);
                     let result = self
                         .replay_block(
                             app,
@@ -1341,9 +1337,7 @@ where
                     return result;
                 }
                 ReplayClaim::Wait(mut waiter) => {
-                    if let Some(progress) = replay.progress {
-                        progress.replaying(digest, parent, round, false);
-                    }
+                    replay.progress.replaying(digest, parent, round, false);
                     let Some(completion) =
                         await_or_cancel(cancellation, &mut waiter.completion).await
                     else {
@@ -1543,10 +1537,7 @@ where
 
 /// Read the next ancestry item unless the request is cancelled.
 #[tracing::instrument(name = "stateful.processor.fetch_ancestor", level = "info", skip_all)]
-pub(super) async fn fetch_ancestor<C, T, S>(
-    cancellation: &mut C,
-    stream: &mut S,
-) -> Option<Option<T>>
+async fn fetch_ancestor<C, T, S>(cancellation: &mut C, stream: &mut S) -> Option<Option<T>>
 where
     S: Stream<Item = T> + Unpin,
     C: Cancellation,
@@ -1555,7 +1546,7 @@ where
 }
 
 /// Wait for `future` unless the request is cancelled.
-pub(super) async fn await_or_cancel<C, T, F>(cancellation: &mut C, future: F) -> Option<T>
+async fn await_or_cancel<C, T, F>(cancellation: &mut C, future: F) -> Option<T>
 where
     F: Future<Output = T>,
     C: Cancellation,
@@ -2631,7 +2622,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: Some(&owner_progress),
+                    progress: &owner_progress,
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2645,7 +2636,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: Some(&waiter_progress),
+                    progress: &waiter_progress,
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2727,7 +2718,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: Some(&owner_progress),
+                    progress: &owner_progress,
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2741,7 +2732,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: Some(&waiter_progress),
+                    progress: &waiter_progress,
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2800,6 +2791,7 @@ mod tests {
             let mut owner_app = harness.processor.app.clone();
             let replay_context = harness.context_cell.as_present();
             let (mut owner_cancellation, owner_alive) = oneshot::channel::<()>();
+            let owner_progress = VerificationProgress::default();
 
             let mut owner = Box::pin(execution.replay_block_shared(
                 &mut owner_app,
@@ -2809,7 +2801,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: None,
+                    progress: &owner_progress,
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -3011,9 +3003,50 @@ mod tests {
                     .entries
                     .lock()
                     .get(&digest)
-                    .is_some_and(|flight| flight.waiters.is_empty()),
-                "dropped replay waiters must not remain retained behind the owner",
+                    .is_some_and(|flight| flight.waiters.iter().all(Option::is_none)
+                        && flight.vacant_slots.len() == 2),
+                "dropped replay waiters must leave reusable vacant slots",
             );
+            drop(owner);
+            assert!(replays.is_empty());
+        });
+    }
+
+    #[test]
+    fn replay_waiter_reuses_most_recent_vacant_slot() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = Harness::new(context).await;
+            let replays = ReplayFlights::default();
+            let digest = u64_to_digest(999);
+
+            let owner = match harness.processor.execution.claim_replay(&replays, digest) {
+                ReplayClaim::Owner(owner) => owner,
+                _ => panic!("first replay claim should own the flight"),
+            };
+            let first = match harness.processor.execution.claim_replay(&replays, digest) {
+                ReplayClaim::Wait(waiter) => waiter,
+                _ => panic!("duplicate replay claim should wait for the owner"),
+            };
+            let second = match harness.processor.execution.claim_replay(&replays, digest) {
+                ReplayClaim::Wait(waiter) => waiter,
+                _ => panic!("duplicate replay claim should wait for the owner"),
+            };
+            let third = match harness.processor.execution.claim_replay(&replays, digest) {
+                ReplayClaim::Wait(waiter) => waiter,
+                _ => panic!("duplicate replay claim should wait for the owner"),
+            };
+            assert_eq!((first.slot, second.slot, third.slot), (0, 1, 2));
+
+            drop(first);
+            drop(third);
+            let replacement = match harness.processor.execution.claim_replay(&replays, digest) {
+                ReplayClaim::Wait(waiter) => waiter,
+                _ => panic!("duplicate replay claim should wait for the owner"),
+            };
+            assert_eq!(replacement.slot, 2);
+
+            drop(second);
+            drop(replacement);
             drop(owner);
             assert!(replays.is_empty());
         });
@@ -3099,6 +3132,10 @@ mod tests {
                 let (mut second_cancellation, second_live) = oneshot::channel::<bool>();
                 let (mut third_cancellation, third_live) = oneshot::channel::<bool>();
                 let (mut fourth_cancellation, fourth_live) = oneshot::channel::<bool>();
+                let first_progress = VerificationProgress::default();
+                let second_progress = VerificationProgress::default();
+                let third_progress = VerificationProgress::default();
+                let fourth_progress = VerificationProgress::default();
 
                 let mut first = Box::pin(first_execution.rebuild_pending(
                     &mut first_app,
@@ -3108,7 +3145,7 @@ mod tests {
                     &mut first_cancellation,
                     Some(ReplayTracking {
                         flights: &first_replays,
-                        progress: None,
+                        progress: &first_progress,
                     }),
                 ));
                 select! {
@@ -3124,7 +3161,7 @@ mod tests {
                     &mut second_cancellation,
                     Some(ReplayTracking {
                         flights: &second_replays,
-                        progress: None,
+                        progress: &second_progress,
                     }),
                 ));
                 let mut third = Box::pin(third_execution.rebuild_pending(
@@ -3135,7 +3172,7 @@ mod tests {
                     &mut third_cancellation,
                     Some(ReplayTracking {
                         flights: &third_replays,
-                        progress: None,
+                        progress: &third_progress,
                     }),
                 ));
                 let mut fourth = Box::pin(fourth_execution.rebuild_pending(
@@ -3146,7 +3183,7 @@ mod tests {
                     &mut fourth_cancellation,
                     Some(ReplayTracking {
                         flights: &fourth_replays,
-                        progress: None,
+                        progress: &fourth_progress,
                     }),
                 ));
                 let mut waiters_registered = false;
@@ -3197,7 +3234,10 @@ mod tests {
                         .entries
                         .lock()
                         .get(&block1.digest())
-                        .is_some_and(|flight| flight.waiters.len() == 2),
+                        .is_some_and(|flight| {
+                            flight.waiters.iter().flatten().count() == 2
+                                && flight.vacant_slots.len() == 1
+                        }),
                     "cancelled waiter must unregister while the owner remains active",
                 );
 

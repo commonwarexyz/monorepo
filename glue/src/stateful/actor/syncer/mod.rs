@@ -426,14 +426,10 @@ where
     // we attempt to repair by rewinding the databases back to the marshal floor. If
     // the rewind fails to produce a consistent state, we must crash. This can occur
     // if the databases were corrupted or pruned too aggressively.
-    let committed = {
-        let locked = databases.lock_read().await;
-        A::Databases::committed_targets(&locked)
-    };
+    let committed = databases.committed_targets().await;
     if committed != processed_targets {
         databases.rewind_to_targets(processed_targets.clone()).await;
-        let locked = databases.lock_read().await;
-        let rewound_targets = A::Databases::committed_targets(&locked);
+        let rewound_targets = databases.committed_targets().await;
         assert!(
             rewound_targets == processed_targets,
             "databases must be consistent with marshal floor after rewind"

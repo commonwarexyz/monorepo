@@ -15,7 +15,10 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
 use rand_core::Rng;
-use std::{collections::BTreeMap, future::Future};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future::Future,
+};
 use tracing::{Instrument as _, Span, info_span};
 
 /// A verification request that can be deferred or retried.
@@ -35,8 +38,15 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    Finished { id: u64 },
-    Invalidated { id: u64, request: Request<E, A> },
+    Finished {
+        id: u64,
+        request: Request<E, A>,
+        valid: Option<bool>,
+    },
+    Invalidated {
+        id: u64,
+        request: Request<E, A>,
+    },
 }
 
 impl<E, A> JobResult<E, A>
@@ -46,7 +56,7 @@ where
 {
     const fn id(&self) -> u64 {
         match self {
-            Self::Finished { id } | Self::Invalidated { id, .. } => *id,
+            Self::Finished { id, .. } | Self::Invalidated { id, .. } => *id,
         }
     }
 }
@@ -66,6 +76,7 @@ where
 {
     marshal: MarshalMailbox<S, V>,
     jobs: Pool<JobResult<E, A>>,
+    completed: VecDeque<JobResult<E, A>>,
     controls: BTreeMap<u64, JobControl<PendingDigest<A, E>>>,
     next_id: u64,
 }
@@ -82,6 +93,7 @@ where
         Self {
             marshal,
             jobs: Pool::default(),
+            completed: VecDeque::new(),
             controls: BTreeMap::new(),
             next_id: 0,
         }
@@ -112,24 +124,16 @@ where
         self.jobs.push(
             async move {
                 let ancestry = request.ancestry.clone();
-                let result = select! {
-                    _ = invalidated => None,
-                    result = verifier.run(
+                select! {
+                    _ = invalidated => JobResult::Invalidated { id, request },
+                    valid = verifier.run(
                         &request.context.0,
                         marshal,
                         request.context.1.clone(),
                         ancestry,
                         &progress,
                         &mut request.verification,
-                    ) => Some(result),
-                };
-                match result {
-                    Some(Some(valid)) => {
-                        request.verification.respond(valid);
-                        JobResult::Finished { id }
-                    }
-                    Some(None) => JobResult::Finished { id },
-                    None => JobResult::Invalidated { id, request },
+                    ) => JobResult::Finished { id, request, valid },
                 }
             }
             .instrument(process),
@@ -137,13 +141,16 @@ where
     }
 
     pub(super) fn complete_ready(&mut self) {
+        while let Some(result) = self.completed.pop_front() {
+            self.handle(result);
+        }
         while let Some(result) = self.jobs.next_completed().now_or_never() {
             self.handle(result);
         }
     }
 
     pub(super) async fn next_completed(&mut self) {
-        let result = self.jobs.next_completed().await;
+        let result = self.next_result().await;
         self.handle(result);
     }
 
@@ -185,34 +192,46 @@ where
 
         let mut retry = Vec::with_capacity(pending.len());
         let mut reject = Vec::with_capacity(pending.len());
+        // Retained completions remain unpublished until every selected job stops.
+        let mut retained = VecDeque::new();
         while !pending.is_empty() {
-            let result = self.jobs.next_completed().await;
+            let result = self.next_result().await;
             let id = result.id();
-            let disposition = pending.remove(&id);
+            let Some(disposition) = pending.remove(&id) else {
+                retained.push_back(result);
+                continue;
+            };
             let control = self
                 .controls
                 .remove(&id)
                 .expect("completed verification must have an invalidation handle");
-            match result {
-                JobResult::Finished { .. } => {}
-                JobResult::Invalidated { request, .. } => {
-                    let disposition = disposition.expect("verification must be invalidated");
-                    assert!(control.invalidation.is_none());
-                    match disposition {
-                        Disposition::Retain => {
-                            unreachable!("retained verification cannot be invalidated")
-                        }
-                        Disposition::Retry => {
-                            if !request.verification.is_cancelled() {
-                                retry.push(request);
-                            }
-                        }
-                        Disposition::Reject => reject.push(request.verification),
+            assert!(control.invalidation.is_none());
+            let request = match result {
+                JobResult::Finished { request, .. } | JobResult::Invalidated { request, .. } => {
+                    request
+                }
+            };
+            match disposition {
+                Disposition::Retain => {
+                    unreachable!("retained verification cannot be invalidated")
+                }
+                Disposition::Retry => {
+                    if !request.verification.is_cancelled() {
+                        retry.push(request);
                     }
                 }
+                Disposition::Reject => reject.push(request.verification),
             }
         }
+        self.completed.extend(retained);
         (retry, reject)
+    }
+
+    async fn next_result(&mut self) -> JobResult<E, A> {
+        match self.completed.pop_front() {
+            Some(result) => result,
+            None => self.jobs.next_completed().await,
+        }
     }
 
     fn handle(&mut self, result: JobResult<E, A>) {
@@ -221,9 +240,11 @@ where
             .remove(&result.id())
             .expect("completed verification must have an invalidation handle");
         assert!(control.invalidation.is_some());
-        assert!(
-            matches!(result, JobResult::Finished { .. }),
-            "verification cannot finish through the actor loop after invalidation",
-        );
+        let JobResult::Finished { request, valid, .. } = result else {
+            panic!("verification cannot finish through the actor loop after invalidation");
+        };
+        if let Some(valid) = valid {
+            request.verification.respond(valid);
+        }
     }
 }

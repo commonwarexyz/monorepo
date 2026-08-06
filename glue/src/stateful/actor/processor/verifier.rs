@@ -263,7 +263,7 @@ where
                 verification,
                 Some(ReplayTracking {
                     flights: &self.replays,
-                    progress: Some(progress),
+                    progress,
                 }),
             )
             .await
@@ -326,7 +326,7 @@ where
             self.app.verify(
                 (
                     context.child("application").child("verify_attempt"),
-                    consensus_context.clone(),
+                    consensus_context,
                 ),
                 ancestry,
                 parent.batches,

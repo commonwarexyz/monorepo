@@ -85,10 +85,7 @@ use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, resche
 use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
-    sync::{
-        AsyncRwLockReadGuard, AsyncRwLockWriteGuard, OwnedAsyncRwLockReadGuard,
-        OwnedAsyncRwLockWriteGuard, TracedAsyncRwLock,
-    },
+    sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
 use futures::{
     future::{Either, pending, try_join_all},
@@ -124,7 +121,7 @@ pub struct Shared<DB>(Inner<DB>);
 
 /// The lock wrapped by [`Shared`]. Storage implements its sync source traits on
 /// this shape, so [`Shared`]'s source impls delegate to it.
-type Inner<DB> = TracedAsyncRwLock<Option<DB>>;
+type Inner<DB> = Arc<TracedAsyncRwLock<Option<DB>>>;
 
 impl<DB> Clone for Shared<DB> {
     fn clone(&self) -> Self {
@@ -139,7 +136,7 @@ const DB_LOST_MSG: &str =
 impl<DB> Shared<DB> {
     /// Create a cell holding `db`, identified by `label` in lock traces.
     pub fn new(label: &'static str, db: DB) -> Self {
-        Self(TracedAsyncRwLock::new(label, Some(db)))
+        Self(Arc::new(TracedAsyncRwLock::new(label, Some(db))))
     }
 
     /// Acquire shared read access to the database.
@@ -172,17 +169,11 @@ impl<DB> Shared<DB> {
         (WriteSlot(guard), db)
     }
 
-    async fn read_locked(&self) -> ReadLocked<DB> {
+    async fn read_locked(&self) -> ReadLocked<'_, DB> {
         ReadLocked {
-            database: self.0.read_owned().await,
-            shared: self.clone(),
+            database: self.0.read().await,
+            shared: self,
         }
-    }
-
-    async fn write_owned(&self) -> (OwnedWriteSlot<DB>, DB) {
-        let mut guard = self.0.write_owned().await;
-        let database = guard.take().expect(DB_LOST_MSG);
-        (OwnedWriteSlot(guard), database)
     }
 
     #[cfg(test)]
@@ -243,28 +234,17 @@ impl<DB> WriteSlot<'_, DB> {
 }
 
 /// Origin-bound read access used to construct a database batch.
-///
-/// [`DatabaseSet::new_batches`] consumes this capability so the lock cannot
-/// outlive batch construction or be paired with another database handle.
-pub struct ReadLocked<DB> {
-    database: OwnedAsyncRwLockReadGuard<Option<DB>>,
-    shared: Shared<DB>,
+struct ReadLocked<'a, DB> {
+    database: AsyncRwLockReadGuard<'a, Option<DB>>,
+    shared: &'a Shared<DB>,
 }
 
-impl<DB> ReadLocked<DB> {
+impl<DB> ReadLocked<'_, DB> {
     fn batch_context(&self) -> BatchContext<'_, DB> {
         BatchContext {
-            database: self,
-            shared: self.shared.clone(),
+            database: self.database.as_ref().expect(DB_LOST_MSG),
+            shared: Shared::clone(self.shared),
         }
-    }
-}
-
-impl<DB> Deref for ReadLocked<DB> {
-    type Target = DB;
-
-    fn deref(&self) -> &DB {
-        self.database.as_ref().expect(DB_LOST_MSG)
     }
 }
 
@@ -282,15 +262,6 @@ impl<'a, DB> BatchContext<'a, DB> {
     /// Split the capability into applied state and its matching shared handle.
     pub fn into_parts(self) -> (&'a DB, Shared<DB>) {
         (self.database, self.shared)
-    }
-}
-
-/// An owned exclusive lock whose [`Shared`] database has been taken out.
-struct OwnedWriteSlot<DB>(OwnedAsyncRwLockWriteGuard<Option<DB>>);
-
-impl<DB> OwnedWriteSlot<DB> {
-    fn put(mut self, db: DB) {
-        *self.0 = Some(db);
     }
 }
 
@@ -406,14 +377,6 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// This method must return without retaining `database`, releasing its read
     /// lock before the batch performs any lazy read-through work. Batch types
     /// can retain the matching handle returned by [`BatchContext::into_parts`].
-    ///
-    /// ```compile_fail
-    /// use commonware_glue::stateful::db::{ManagedDb, Shared};
-    ///
-    /// fn mismatched<E, T: ManagedDb<E>>(database: &T, other: Shared<T>) {
-    ///     let _ = <T as ManagedDb<E>>::new_batch(database, other);
-    /// }
-    /// ```
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized;
 
     /// Return true if a merkleized batch matches a sync target.
@@ -548,9 +511,6 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Tuple of [`ManagedDb::Merkleized`] for every database in the set.
     type Merkleized: Send + Sync;
 
-    /// Read-locked databases in the set.
-    type ReadLocked: Send;
-
     /// Read-only handles for observing the applied database state.
     ///
     /// Implementations must not expose mutation capabilities through this
@@ -577,14 +537,11 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Return the sync targets produced by a newly initialized database set.
     fn initial_sync_targets() -> Self::SyncTargets;
 
-    /// Acquire a read lock on every database in the set.
-    fn lock_read(&self) -> impl Future<Output = Self::ReadLocked> + Send;
-
-    /// Consume read-locked applied state to create unmerkleized batches.
+    /// Create unmerkleized batches from each database's applied state.
     ///
-    /// Consuming this origin-bound capability releases every read lock before
-    /// the returned batches can perform lazy reads.
-    fn new_batches(databases: Self::ReadLocked) -> Self::Unmerkleized;
+    /// Implementations must release every read lock before the returned
+    /// batches perform lazy reads.
+    fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Create child unmerkleized batches from a pending merkleized parent.
     ///
@@ -618,7 +575,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Return sync targets for the set's current applied state.
-    fn committed_targets(databases: &Self::ReadLocked) -> Self::SyncTargets;
+    fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 
     /// Rewind the set to the provided per-database targets.
     ///
@@ -764,10 +721,9 @@ where
 }
 
 /// Implement [`DatabaseSet`] for a single [`ManagedDb`] behind a lock.
-impl<E: Send + Sync + 'static, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
+impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     type Unmerkleized = T::Unmerkleized;
     type Merkleized = T::Merkleized;
-    type ReadLocked = ReadLocked<T>;
     type Readers = Reader<T>;
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
@@ -783,11 +739,8 @@ impl<E: Send + Sync + 'static, T: ManagedDb<E> + 'static> DatabaseSet<E> for Sha
         T::initial_sync_target()
     }
 
-    async fn lock_read(&self) -> Self::ReadLocked {
-        self.read_locked().await
-    }
-
-    fn new_batches(database: Self::ReadLocked) -> Self::Unmerkleized {
+    async fn new_batches(&self) -> Self::Unmerkleized {
+        let database = self.read_locked().await;
         T::new_batch(database.batch_context())
     }
 
@@ -814,8 +767,9 @@ impl<E: Send + Sync + 'static, T: ManagedDb<E> + 'static> DatabaseSet<E> for Sha
         prune_shared_or_panic::<E, T>(self, target, None).await;
     }
 
-    fn committed_targets(database: &Self::ReadLocked) -> Self::SyncTargets {
-        T::sync_target(database)
+    async fn committed_targets(&self) -> Self::SyncTargets {
+        let database = self.read().await;
+        T::sync_target(&database)
     }
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
@@ -988,12 +942,11 @@ where
 /// [`ManagedDb`] instances.
 macro_rules! impl_database_set {
     ($($T:ident : $idx:tt),+) => {
-        impl<E: Send + Sync + Metrics + 'static, $($T: ManagedDb<E> + 'static),+> DatabaseSet<E>
+        impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + 'static),+> DatabaseSet<E>
             for ($(Shared<$T>,)+)
         {
             type Unmerkleized = ($($T::Unmerkleized,)+);
             type Merkleized = ($($T::Merkleized,)+);
-            type ReadLocked = ($(ReadLocked<$T>,)+);
             type Readers = ($(Reader<$T>,)+);
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
@@ -1023,11 +976,8 @@ macro_rules! impl_database_set {
                 ($($T::initial_sync_target(),)+)
             }
 
-            async fn lock_read(&self) -> Self::ReadLocked {
-                join!($(self.$idx.read_locked(),)+)
-            }
-
-            fn new_batches(databases: Self::ReadLocked) -> Self::Unmerkleized {
+            async fn new_batches(&self) -> Self::Unmerkleized {
+                let databases = join!($(self.$idx.read_locked(),)+);
                 ($($T::new_batch(databases.$idx.batch_context()),)+)
             }
 
@@ -1074,7 +1024,8 @@ macro_rules! impl_database_set {
                 ),)+);
             }
 
-            fn committed_targets(databases: &Self::ReadLocked) -> Self::SyncTargets {
+            async fn committed_targets(&self) -> Self::SyncTargets {
+                let databases = join!($(self.$idx.read(),)+);
                 ($($T::sync_target(&databases.$idx),)+)
             }
 
@@ -1434,10 +1385,8 @@ macro_rules! impl_state_sync_set {
                 let Some((converged_anchor, converged_targets)) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };
-                let committed_targets = {
-                    let locked = <Self as DatabaseSet<E>>::lock_read(&synced).await;
-                    <Self as DatabaseSet<E>>::committed_targets(&locked)
-                };
+                let committed_targets =
+                    <Self as DatabaseSet<E>>::committed_targets(&synced).await;
                 if committed_targets != converged_targets {
                     return Err(
                         "state sync database targets do not match the coordinator target set"
@@ -1853,7 +1802,7 @@ async fn finalize_shared_or_panic<E, T: ManagedDb<E>>(
     batch: T::Merkleized,
     index: Option<usize>,
 ) -> Handle<()> {
-    let (slot, database) = shared.write_owned().await;
+    let (slot, database) = shared.write().await;
     let (database, handle) = finalize_or_panic(database, batch, index).await;
     slot.put(database);
     handle
@@ -1864,7 +1813,7 @@ async fn prune_shared_or_panic<E, T: ManagedDb<E>>(
     target: &T::SyncTarget,
     index: Option<usize>,
 ) {
-    let (slot, database) = shared.write_owned().await;
+    let (slot, database) = shared.write().await;
     slot.put(prune_or_panic(database, target, index).await);
 }
 
@@ -1873,7 +1822,7 @@ async fn rewind_shared_or_panic<E, T: ManagedDb<E>>(
     target: T::SyncTarget,
     index: Option<usize>,
 ) {
-    let (slot, database) = shared.write_owned().await;
+    let (slot, database) = shared.write().await;
     if T::sync_target(&database) == target {
         slot.put(database);
         return;
@@ -3657,7 +3606,7 @@ mod tests {
     }
 
     #[test]
-    fn tuple_lock_read_queues_reads_concurrently() {
+    fn tuple_new_batches_queues_reads_concurrently() {
         deterministic::Runner::default().start(|_context| async move {
             let db1 = Shared::new("test", TestDb);
             let db2 = Shared::new("test", TestDb);
@@ -3666,11 +3615,11 @@ mod tests {
             let (slot1, taken1) = db1.write().await;
             let (slot2, taken2) = db2.write().await;
 
-            let lock_read = <(Shared<TestDb>, Shared<TestDb>) as DatabaseSet<
+            let new_batches = <(Shared<TestDb>, Shared<TestDb>) as DatabaseSet<
                 deterministic::Context,
-            >>::lock_read(&databases);
-            pin_mut!(lock_read);
-            assert!(lock_read.as_mut().now_or_never().is_none());
+            >>::new_batches(&databases);
+            pin_mut!(new_batches);
+            assert!(new_batches.as_mut().now_or_never().is_none());
 
             slot2.put(taken2);
             {
@@ -3678,15 +3627,12 @@ mod tests {
                 pin_mut!(writer2_again);
                 assert!(
                     writer2_again.as_mut().now_or_never().is_none(),
-                    "tuple lock_read should queue reads for all databases concurrently"
+                    "tuple new_batches should queue reads for all databases concurrently"
                 );
             }
 
             slot1.put(taken1);
-            let locked = lock_read.await;
-            let _ = <(Shared<TestDb>, Shared<TestDb>) as DatabaseSet<
-                deterministic::Context,
-            >>::new_batches(locked);
+            let _ = new_batches.await;
         });
     }
 
@@ -3694,9 +3640,8 @@ mod tests {
     fn new_batches_releases_read_lock_before_returning() {
         deterministic::Runner::default().start(|_context| async move {
             let database = Shared::new("test", TestDb);
-            let locked =
-                <Shared<TestDb> as DatabaseSet<deterministic::Context>>::lock_read(&database).await;
-            let _ = <Shared<TestDb> as DatabaseSet<deterministic::Context>>::new_batches(locked);
+            let _ = <Shared<TestDb> as DatabaseSet<deterministic::Context>>::new_batches(&database)
+                .await;
 
             let writer = database.write();
             pin_mut!(writer);

@@ -417,19 +417,6 @@ where
                 Step::Message(Message::SubscribeDatabases { response }) => {
                     response.send_lossy(self.processor.databases().clone());
                 }
-                #[cfg(test)]
-                Step::Message(Message::DriveVerifications {
-                    started,
-                    mut release,
-                }) => {
-                    started.send_lossy(());
-                    loop {
-                        select! {
-                            _ = &mut release => break,
-                            _ = verifications.next_completed() => {},
-                        }
-                    }
-                }
                 Step::Prune((prune, retry_mailbox)) => {
                     // The prune target must be durable, but later blocks remain available in
                     // marshal for replay and do not delay maintenance.
@@ -2023,9 +2010,14 @@ mod tests {
 
             let (acknowledgement, first_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(first), acknowledgement));
+            let (acknowledgement, winner_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
             replay_release
                 .send(())
                 .expect("finalization should retain the replay owner");
+            verify_release
+                .send(())
+                .expect("retained verification should remain active");
             verify_started
                 .await
                 .expect("retained verification should start");
@@ -2033,11 +2025,6 @@ mod tests {
                 .await
                 .expect("first finalization hook should start");
 
-            let (acknowledgement, winner_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
-            verify_release
-                .send(())
-                .expect("retained verification should remain active");
             select! {
                 valid = &mut first_attempt => {
                     panic!("retained verification bypassed queued finalization: {valid}");
@@ -2202,14 +2189,13 @@ mod tests {
             )
             .await;
             let (verify_gate, verify_started, mut verify_release) = application_gate();
-            let verify_calls = Arc::new(AtomicUsize::new(0));
-            let app = ReplayGatedApp {
-                gates: Arc::default(),
-                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
-                finalized_gate: Arc::default(),
-                gate_height: Height::new(u64::MAX),
-                apply_calls: Arc::new(AtomicUsize::new(0)),
-                verify_calls: verify_calls.clone(),
+            let (proposal_gate, proposal_started, proposal_release) = application_gate();
+            let observed_contexts: Arc<Mutex<Vec<Name>>> = Arc::default();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
+                verify_valid: true,
+                observed_contexts: observed_contexts.clone(),
             };
             let control = FlushControl::default();
             let (prune_started, prune_release) = control.gate_prune();
@@ -2231,7 +2217,6 @@ mod tests {
                 Some(pruning),
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let retry_sender = sender.clone();
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
@@ -2272,46 +2257,42 @@ mod tests {
             verify_release.closed().await;
 
             let (acknowledgement, winner_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
-
-            let (first_started, first_started_rx) = oneshot::channel();
-            let (first_release, first_release_rx) = oneshot::channel();
-            let _ = retry_sender.enqueue(Message::DriveVerifications {
-                started: first_started,
-                release: first_release_rx,
-            });
+            let _ = mailbox.report(Update::Block(Arc::new(winner.clone()), acknowledgement));
+            let proposal_context = TestBlock::child(&winner, 5).context();
+            let mut proposer = mailbox.clone();
+            let mut proposal = Box::pin(proposer.propose(
+                (context.child("propose"), proposal_context),
+                ancestry::from_iter([Arc::new(winner)]),
+                (),
+            ));
+            assert!(poll!(&mut proposal).is_pending());
             prune_release.send(()).expect("prune should remain active");
+            proposal_started
+                .await
+                .expect("proposal queued behind finalization should start");
 
-            first_started_rx
-                .await
-                .expect("queued work should follow finalization");
-            let (second_started, second_started_rx) = oneshot::channel();
-            let (second_release, second_release_rx) = oneshot::channel();
-            let _ = retry_sender.enqueue(Message::DriveVerifications {
-                started: second_started,
-                release: second_release_rx,
-            });
-            first_release
-                .send(())
-                .expect("queued work should remain active");
-            second_started_rx
-                .await
-                .expect("later work should start after the retry boundary");
+            let subscriber = mailbox.clone();
+            let mut databases = Box::pin(subscriber.subscribe_databases());
+            assert!(poll!(&mut databases).is_pending());
 
             let result = select! {
                 valid = &mut verify => Some(valid),
                 _ = context.sleep(Duration::from_millis(100)) => None,
             };
-            second_release
-                .send(())
-                .expect("later work should remain active");
             assert_eq!(
                 result,
                 Some(false),
-                "later arrivals must not starve a prune retry",
+                "prune retry must observe the queued finalization",
             );
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+            assert!(poll!(&mut databases).is_pending());
+            assert_eq!(observed_contexts.lock().len(), 1);
             assert_eq!(control.pruned.lock().as_slice(), [1]);
+
+            proposal_release
+                .send(())
+                .expect("proposal should remain active");
+            assert!(proposal.await.is_none());
+            drop(databases.await);
 
             while control.flushes.lock().len() < 2 {
                 context.sleep(Duration::from_millis(10)).await;
