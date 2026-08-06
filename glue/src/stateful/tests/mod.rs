@@ -16,7 +16,7 @@ use commonware_runtime::deterministic;
 use multi_db_app::MultiDbEngine;
 use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
-    MarshalPrunedBelow, QmdbPruned,
+    MarshalPrunedBelow, QmdbPruned, StorageRootAgreement,
 };
 use single_db_app::SingleDbEngine;
 use std::time::Duration;
@@ -25,6 +25,7 @@ mod common;
 pub(crate) mod fixtures;
 pub(crate) mod mocks;
 mod multi_db_app;
+mod ownership;
 mod properties;
 mod single_db_app;
 
@@ -211,6 +212,7 @@ where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
     D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    StorageRootAgreement: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
     finalize_plan(engine).run().unwrap();
@@ -221,6 +223,7 @@ where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
     D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    StorageRootAgreement: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
     let participants = engine.participants();
@@ -238,12 +241,14 @@ where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
     D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    StorageRootAgreement: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
         .exit_condition(ProcessedHeightAtLeast::new(100))
         .property(BlockAgreementAtHeight::new(100))
+        .property(StorageRootAgreement)
 }
 
 fn storage_fault_config() -> deterministic::FaultConfig {

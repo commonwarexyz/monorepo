@@ -1,11 +1,11 @@
 use super::{
     BlockDigest, SyncResult,
-    mailbox::{Mailbox, Message},
+    mailbox::{Artifact, Mailbox, Message},
     resolve_state_sync_floor,
 };
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
@@ -70,8 +70,8 @@ where
     /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
 
-    /// The produced state sync artifact, if complete.
-    artifact: Option<SyncResult<E, A>>,
+    /// Set once the completed artifact has been handed to the stateful actor.
+    delivered: bool,
 
     /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
@@ -108,7 +108,7 @@ where
             Self {
                 context: ContextCell::new(config.context),
                 mailbox: receiver,
-                artifact: None,
+                delivered: false,
                 db_config: config.db_config,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
@@ -148,12 +148,10 @@ where
             },
             result = &mut state_sync_task => match result {
                 Ok((databases, anchor)) => {
-                    Self::publish_artifact(
-                        &mut self.artifact,
-                        &mut self.sync_complete,
-                        databases,
-                        anchor,
-                    );
+                    self.delivered = true;
+                    if let Some(sync_complete) = self.sync_complete.take() {
+                        sync_complete.send_lossy(SyncResult { databases, anchor });
+                    }
                     state_sync_task = None.into();
 
                     // A tip update enqueued after the coordinator's final drain has no
@@ -171,13 +169,15 @@ where
                 break;
             } => match message {
                 Message::UpdateTargets { update, response } => {
-                    if let Some(artifact) = self.artifact.clone() {
-                        response.send_lossy(Some(artifact));
+                    if self.delivered {
+                        // The artifact already went out on the completion channel or with
+                        // an earlier response; the caller collects it from there.
+                        response.send_lossy(Some(Artifact::Announced));
                         continue;
                     }
 
                     // If sync had already completed, the state-sync branch above would
-                    // have published `self.artifact` before this mailbox branch ran.
+                    // have marked delivery before this mailbox branch ran.
                     let tip_updates = tip_updates_tx
                         .as_mut()
                         .expect("ring sender lives until the artifact is published");
@@ -188,20 +188,23 @@ where
                         // publish its artifact", not as a hard failure.
                         match (&mut state_sync_task).await {
                             Ok((databases, anchor)) => {
-                                Self::publish_artifact(
-                                    &mut self.artifact,
-                                    &mut self.sync_complete,
+                                self.delivered = true;
+                                state_sync_task = None.into();
+                                // The artifact travels with this response, so the completion
+                                // channel must never fire: drop its sender so any protocol
+                                // violation surfaces as the caller's loud expect instead of
+                                // an Announced reply that hangs awaiting a silent channel.
+                                self.sync_complete = None;
+                                response.send_lossy(Some(Artifact::Delivered(SyncResult {
                                     databases,
                                     anchor,
-                                );
-                                state_sync_task = None.into();
+                                })));
                             }
                             Err(err) => {
                                 panic!("state sync task failed: {err:?}");
                             }
                         }
                         tip_updates_tx = None;
-                        response.send_lossy(self.artifact.clone());
                         continue;
                     }
                     response.send_lossy(None);
@@ -209,28 +212,15 @@ where
             },
         }
     }
-
-    fn publish_artifact(
-        artifact: &mut Option<SyncResult<E, A>>,
-        sync_complete: &mut Option<oneshot::Sender<SyncResult<E, A>>>,
-        databases: A::Databases,
-        anchor: Anchor<BlockDigest<A, E>>,
-    ) {
-        let sync_result = SyncResult { databases, anchor };
-        *artifact = Some(sync_result.clone());
-        if let Some(sync_complete) = sync_complete.take() {
-            sync_complete.send_lossy(sync_result);
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Syncer, resolve_state_sync_floor};
+    use super::{Artifact, Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
         Application, Input, Proposed,
         actor::syncer::{StateSyncMetadata, init_databases_from_marshal},
-        db::{Anchor, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
+        db::{Anchor, Barrier, DatabaseSet, SetSource, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor},
@@ -266,8 +256,12 @@ mod tests {
     impl DatabaseSet<deterministic::Context> for WedgeSet {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
+        type Snapshot = ();
+        type Sources = ();
         type Config = u64;
         type SyncTargets = u64;
+
+        fn member_sources(_source: SetSource<Self::Snapshot>) -> Self::Sources {}
 
         async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
             Self(config)
@@ -277,7 +271,7 @@ mod tests {
             0
         }
 
-        async fn new_batches(&self) -> Self::Unmerkleized {
+        fn new_batches(&self) -> Self::Unmerkleized {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
@@ -289,20 +283,25 @@ mod tests {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn finalize(&self, _batches: Self::Merkleized) -> Barrier {
+        async fn finalize(self, _batches: Self::Merkleized) -> (Self, Self::Snapshot, Barrier) {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn prune(&self, _targets: &Self::SyncTargets) {
+        async fn snapshot(self) -> (Self, Self::Snapshot) {
+            (self, ())
+        }
+
+        async fn prune(self, _targets: &Self::SyncTargets) -> Self {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn committed_targets(&self) -> Self::SyncTargets {
+        fn applied_targets(&self) -> Self::SyncTargets {
             self.0
         }
 
-        async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
+        async fn rewind_to_targets(self, targets: Self::SyncTargets) -> Self {
             assert_eq!(targets, self.0, "test database cannot rewind");
+            self
         }
     }
 
@@ -352,6 +351,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -362,6 +362,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
+            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             unreachable!("WedgeApp only serves the syncer harness")
@@ -371,6 +372,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
+            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
         ) -> TestMerkleized {
             unreachable!("WedgeApp only serves the syncer harness")
@@ -454,7 +456,7 @@ mod tests {
             .await;
 
             assert_eq!(startup.sync.anchor.height, Height::new(2));
-            assert_eq!(startup.sync.databases.committed_targets().await, 2);
+            assert_eq!(startup.sync.databases.applied_targets(), 2);
             assert_eq!(startup.skip_finalized_until, Some(Height::new(2)));
         });
     }
@@ -768,7 +770,11 @@ mod tests {
                 .spawn(move |_| async move { mailbox.update_targets(anchor(1, 1), 1).await });
             let result = update.await.expect("update task failed");
             assert!(
-                matches!(&result, Some(artifact) if artifact.anchor.height == Height::zero()),
+                matches!(
+                    &result,
+                    Some(Artifact::Delivered(artifact))
+                        if artifact.anchor.height == Height::zero()
+                ),
                 "stranded update must resolve to the completed artifact",
             );
 

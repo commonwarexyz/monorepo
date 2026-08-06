@@ -6,7 +6,7 @@ use crate::stateful::{
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, AttachableResolverSet},
+    db::{Anchor, DatabaseSet, Publisher, SnapshotOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -53,13 +53,12 @@ pub(super) struct PendingFinalization<B> {
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
-pub(super) struct Syncing<E, A, S, V, R>
+pub(super) struct Syncing<E, A, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -85,15 +84,12 @@ where
     /// Verify requests held while syncing.
     pub(super) held_verify_requests: Vec<HeldVerifyRequest<E, A>>,
 
-    /// Open subscriptions to the synced databases.
-    pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
-
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// The state sync resolvers used for state sync fetching and post-bootstrap
-    /// serving.
-    pub(super) resolvers: R,
+    /// Publication slot for serving snapshots. The synced state installs as
+    /// generation zero during the transition to processing.
+    pub(super) publisher: Publisher<SnapshotOf<A::Databases, E>>,
 
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
@@ -108,13 +104,12 @@ where
     pub(super) metrics: StatefulMetrics,
 }
 
-impl<E, A, S, V, R> Syncing<E, A, S, V, R>
+impl<E, A, S, V> Syncing<E, A, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
@@ -123,8 +118,6 @@ where
             on_start => {
                 self.held_verify_requests
                     .retain(|request| !request.response.is_closed());
-                self.database_subscribers
-                    .retain(|subscriber| !subscriber.is_closed());
             },
             on_stopped => {
                 debug!("processor received shutdown signal");
@@ -192,13 +185,6 @@ where
                         return;
                     }
                 }
-                Message::SubscribeDatabases { response } => {
-                    self.database_subscribers
-                        .retain(|subscriber| !subscriber.is_closed());
-                    if !response.is_closed() {
-                        self.database_subscribers.push(response);
-                    }
-                }
             },
         }
     }
@@ -259,8 +245,17 @@ where
                 A::sync_targets(block.as_ref()),
             ) => artifact,
         };
-        if let Some(artifact) = artifact {
-            self.artifact = Some(artifact);
+        match artifact {
+            Some(syncer::Artifact::Delivered(artifact)) => self.artifact = Some(artifact),
+            Some(syncer::Artifact::Announced) => {
+                // The syncer already published on the completion channel; collect it so
+                // the pending window can hand off against the newest recorded target.
+                let artifact = (&mut self.sync_completed)
+                    .await
+                    .expect("announced sync artifact must arrive on the completion channel");
+                self.artifact = Some(artifact);
+            }
+            None => {}
         }
         (self, true)
     }
@@ -322,9 +317,14 @@ where
         let mut completed_height = artifact.anchor.height;
 
         let _ = self.metrics.sync_done.try_set(1);
+        // Install the synced committed state as generation zero so serving can begin
+        // before the first finalization; synced state is durable by construction.
+        let mut publisher = self.publisher;
+        let (databases, synced) = artifact.databases.snapshot().await;
+        publisher.install_durable(synced);
         let mut processor = Processor::new(
             self.application,
-            artifact.databases,
+            databases,
             artifact.anchor,
             self.metrics,
             self.pruning,
@@ -342,17 +342,25 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let Applied { barrier, prune } = processor
+                    let (returned, applied) = processor
                         .finalize(self.context.as_present(), block.as_ref())
-                        .await
-                        .expect("sync handoff block cannot be a duplicate");
+                        .await;
+                    processor = returned;
+                    let Applied {
+                        snapshot,
+                        barrier,
+                        prune,
+                    } = applied.expect("sync handoff block cannot be a duplicate");
 
                     // The processing loop's flush pool does not exist yet, so observe the
                     // deferred flush inline. Keep state-sync metadata in progress until every
-                    // handoff block is durable.
+                    // handoff block is durable, and install each staged snapshot only once
+                    // its flush proves durable.
+                    let staged = publisher.stage(snapshot);
                     if !barrier.durable().await {
                         return;
                     }
+                    staged.install();
                     acknowledgement.acknowledge();
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
@@ -368,19 +376,7 @@ where
         // pruning or exposing the databases to other actors.
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
-            prune.run(processor.databases_mut(), &self.marshal).await;
-        }
-
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs.
-        self.resolvers
-            .attach_databases(processor.databases().clone())
-            .await;
-
-        // `subscribe_databases` promises a database set that is already attached to the
-        // serving actor, so keep subscribers waiting until the resolver handoff is complete.
-        for subscriber in self.database_subscribers.drain(..) {
-            subscriber.send_lossy(processor.databases().clone());
+            processor = processor.prune_databases(prune, &self.marshal).await;
         }
 
         for request in self.held_verify_requests.drain(..) {
@@ -403,6 +399,7 @@ where
             provider: self.provider,
             marshal: self.marshal,
             processor,
+            publisher,
             skip_finalized_until: Some(completed_height),
         }
         .start()
@@ -422,7 +419,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, AttachableResolver, Shared},
+        db::{Anchor, Publisher, Single},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -456,18 +453,11 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct NoopResolver;
-
-    impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
-        async fn attach_database(&self, _db: Shared<DB>) {}
-    }
-
     struct TestHarness<E>
     where
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
-        syncing: Syncing<E, TestApp, TestScheme, TestVariant, NoopResolver>,
+        syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -579,9 +569,8 @@ mod tests {
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
-                    database_subscribers: Vec::new(),
                     artifact: None,
-                    resolvers: NoopResolver,
+                    publisher: Publisher::new(&syncing_context).0,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
@@ -633,12 +622,11 @@ mod tests {
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
-                    database_subscribers: Vec::new(),
                     artifact: Some(SyncResult {
                         databases: test_databases(),
                         anchor,
                     }),
-                    resolvers: NoopResolver,
+                    publisher: Publisher::new(&syncing_context).0,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
@@ -747,7 +735,7 @@ mod tests {
                 .artifact
                 .as_mut()
                 .expect("harness must contain a sync artifact")
-                .databases = Shared::new("test", TestDb::gated(control.clone()));
+                .databases = Single::from(TestDb::gated(control.clone()));
 
             // Completion metadata must not be written until the handoff batch is durable.
             pending.arm();
@@ -822,10 +810,9 @@ mod tests {
     fn aborted_handoff_flush_keeps_ack_pending_and_sync_incomplete() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
-            let databases = Shared::new(
-                "test",
-                TestDb::with_finalize(Handle::ready(Err(RuntimeError::Aborted))),
-            );
+            let databases = Single::from(TestDb::with_finalize(Handle::ready(Err(
+                RuntimeError::Aborted,
+            ))));
             harness
                 .syncing
                 .artifact
@@ -889,10 +876,10 @@ mod tests {
             assert!(poll!(&mut waiter).is_pending());
             assert!(
                 response
-                    .send(Some(SyncResult {
+                    .send(Some(syncer::Artifact::Delivered(SyncResult {
                         databases: test_databases(),
                         anchor: anchor(7, 9),
-                    }))
+                    })))
                     .is_ok(),
                 "target update must still await its response",
             );

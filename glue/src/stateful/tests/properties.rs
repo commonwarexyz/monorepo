@@ -2,7 +2,11 @@ use super::common::MockValidatorState;
 use crate::simulate::{processed::ProcessedHeight, property::Property, tracker::ProgressTracker};
 use commonware_consensus::marshal::core::Variant;
 use commonware_cryptography::{Digestible, ed25519, sha256};
-use std::{future::Future, pin::Pin};
+use std::{
+    collections::{BTreeMap, btree_map::Entry},
+    future::Future,
+    pin::Pin,
+};
 
 /// Post-run property: all validators agree on the finalized block at `height`.
 #[derive(Clone, Copy)]
@@ -250,6 +254,65 @@ where
                 "no validator re-entered state sync after a crash and then advanced beyond the synced height; observed [{}]",
                 observed.join(", "),
             ))
+        })
+    }
+}
+
+/// Post-run property that validators whose databases committed the same operation
+/// counts report identical storage roots for every database in the set.
+///
+/// The root is a pure function of the committed operation history, so equal
+/// op counts with unequal roots means state diverged. Fails if no two
+/// validators share an op-count profile, so the agreement check cannot
+/// silently pass without comparing anything.
+#[derive(Clone, Copy)]
+pub(crate) struct StorageRootAgreement;
+
+impl<V> Property<ed25519::PublicKey, MockValidatorState<V>> for StorageRootAgreement
+where
+    V: Variant,
+    V::ApplicationBlock: Digestible<Digest = sha256::Digest>,
+    MockValidatorState<V>: Send + Sync,
+{
+    fn name(&self) -> &str {
+        "storage_root_agreement"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a MockValidatorState<V>],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut by_counts: BTreeMap<Vec<u64>, (usize, Vec<sha256::Digest>)> = BTreeMap::new();
+            for (index, state) in states.iter().enumerate() {
+                let observed = state.storage_roots().await;
+                let (counts, roots): (Vec<u64>, Vec<sha256::Digest>) = observed.into_iter().unzip();
+                match by_counts.entry(counts) {
+                    Entry::Vacant(entry) => {
+                        entry.insert((index, roots));
+                    }
+                    Entry::Occupied(entry) => {
+                        let (first, expected) = entry.get();
+                        if roots != *expected {
+                            return Err(format!(
+                                "storage root disagreement at op counts {:?}: \
+                                 validator {index} diverges from validator {first}",
+                                entry.key(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            if by_counts.len() == states.len() && states.len() > 1 {
+                return Err(
+                    "no two validators share an op-count profile; root agreement not exercised"
+                        .into(),
+                );
+            }
+
+            Ok(())
         })
     }
 }

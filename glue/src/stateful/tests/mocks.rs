@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{ManagedDb, Merkleized, MerkleizedOf, SyncTargetsOf, Unmerkleized, UnmerkleizedOf},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,51 +12,74 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, marker::PhantomData, sync::Arc};
 
-pub(crate) type TestDatabases = Shared<TestDb>;
+pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
-#[derive(Clone, Copy)]
-pub(crate) struct TestUnmerkleized;
+/// No-op batch for mock databases, parameterized by the owning database type
+/// so every mock satisfies `ManagedDb::Unmerkleized: Unmerkleized<Db = Self>`.
+pub(crate) struct TestUnmerkleized<D = TestDb, T = u64>(PhantomData<fn(D, T)>);
 
-#[derive(Clone, Copy)]
-pub(crate) struct TestMerkleized;
+pub(crate) struct TestMerkleized<D = TestDb, T = u64>(PhantomData<fn(D, T)>);
 
-impl Unmerkleized for TestUnmerkleized {
-    type Merkleized = TestMerkleized;
-    type Error = Infallible;
-
-    async fn merkleize(self) -> Result<Self::Merkleized, Self::Error> {
-        Ok(TestMerkleized)
+impl<D, T> TestUnmerkleized<D, T> {
+    pub(crate) const fn new() -> Self {
+        Self(PhantomData)
     }
 }
 
-impl Merkleized for TestMerkleized {
+impl<D, T> TestMerkleized<D, T> {
+    pub(crate) const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<D, T> Clone for TestUnmerkleized<D, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D, T> Copy for TestUnmerkleized<D, T> {}
+
+impl<D, T> Clone for TestMerkleized<D, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D, T> Copy for TestMerkleized<D, T> {}
+
+impl<D: Send + Sync, T: Clone + PartialEq + Send + Sync> Unmerkleized for TestUnmerkleized<D, T> {
+    type Merkleized = TestMerkleized<D, T>;
+    type Db = D;
+    type Error = Infallible;
+
+    async fn merkleize(self, _db: &Self::Db) -> Result<Self::Merkleized, Self::Error> {
+        Ok(TestMerkleized::new())
+    }
+}
+
+impl<D: Send + Sync, T: Clone + PartialEq + Send + Sync> Merkleized for TestMerkleized<D, T> {
     type Digest = Sha256Digest;
-    type Unmerkleized = TestUnmerkleized;
+    type Unmerkleized = TestUnmerkleized<D, T>;
+    type SyncTarget = T;
 
     fn root(&self) -> Self::Digest {
         Sha256Digest::from([0; 32])
     }
 
     fn new_batch(&self) -> Self::Unmerkleized {
-        TestUnmerkleized
+        TestUnmerkleized::new()
     }
-}
 
-/// Completes one parked flush when released by the test.
-pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
-
-/// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
-/// prune targets.
-#[derive(Clone, Default)]
-pub(crate) struct FlushControl {
-    pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
-    pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+    fn matches(&self, _target: &Self::SyncTarget) -> bool {
+        true
+    }
 }
 
 #[derive(Default)]
@@ -89,6 +112,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Error = Infallible;
     type Config = ();
     type SyncTarget = u64;
+    type Snapshot = ();
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+        Ok((self, ()))
+    }
 
     fn initial_sync_target() -> Self::SyncTarget {
         unreachable!("TestDb is constructed directly in tests")
@@ -98,26 +126,25 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
-        TestUnmerkleized
+    fn new_batch(&self) -> Self::Unmerkleized {
+        TestUnmerkleized::new()
     }
 
-    fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-        true
-    }
-
-    async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+    async fn finalize(
+        self,
+        _batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
-            return Ok((self, Handle::from_receiver(released)));
+            return Ok((self, (), Handle::from_receiver(released)));
         }
         let handle = self
             .finalize
             .lock()
             .take()
             .unwrap_or_else(|| Handle::ready(Ok(())));
-        Ok((self, handle))
+        Ok((self, (), handle))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
@@ -234,7 +261,7 @@ impl<
     type Provider = ();
     type Input = ();
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
         block.height().get()
     }
 
@@ -246,7 +273,8 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _databases: &Self::Databases,
+        _batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         None
@@ -256,8 +284,9 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        _databases: &Self::Databases,
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Option<MerkleizedOf<Self::Databases, E>> {
         None
     }
 
@@ -265,14 +294,15 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        TestMerkleized
+        _databases: &Self::Databases,
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> MerkleizedOf<Self::Databases, E> {
+        TestMerkleized::new()
     }
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb::default())
+    TestDb::default().into()
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {
@@ -280,5 +310,75 @@ pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Ancho
         height: Height::new(height),
         round: commonware_consensus::types::Round::new(Epoch::zero(), View::new(height)),
         digest: Sha256Digest::from([digest_byte; 32]),
+    }
+}
+
+/// Completes one parked flush when released by the test.
+pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
+
+/// Shared observer for [`GatedFlushDb`]: parked flush releases and
+/// recorded prune targets.
+#[derive(Clone, Default)]
+pub(crate) struct FlushControl {
+    pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
+    pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+}
+
+/// Database whose finalize flush completes only when the test releases it.
+///
+/// Its `prune` records immediately, eliding the impl-side barrier real
+/// databases provide (pruning waits for pending flushes, pinned in
+/// `stateful::db::any` tests), so the actor's own scheduling is exposed.
+pub(crate) struct GatedFlushDb {
+    pub(crate) control: FlushControl,
+}
+
+impl ManagedDb<deterministic::Context> for GatedFlushDb {
+    type Unmerkleized = TestUnmerkleized<Self>;
+    type Merkleized = TestMerkleized<Self>;
+    type Error = Infallible;
+    type Config = ();
+    type SyncTarget = u64;
+    type Snapshot = ();
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+        Ok((self, ()))
+    }
+
+    fn initial_sync_target() -> Self::SyncTarget {
+        unreachable!("GatedFlushDb is constructed directly in tests")
+    }
+
+    async fn init(
+        _context: deterministic::Context,
+        _config: Self::Config,
+    ) -> Result<Self, Self::Error> {
+        unreachable!("GatedFlushDb is constructed directly in tests")
+    }
+
+    fn new_batch(&self) -> Self::Unmerkleized {
+        TestUnmerkleized::new()
+    }
+
+    async fn finalize(
+        self,
+        _batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+        let (release, released) = oneshot::channel();
+        self.control.flushes.lock().push(release);
+        Ok((self, (), Handle::from_receiver(released)))
+    }
+
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
+        self.control.pruned.lock().push(*target);
+        Ok(self)
+    }
+
+    fn sync_target(&self) -> Self::SyncTarget {
+        0
+    }
+
+    async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
+        Ok(self)
     }
 }

@@ -1,11 +1,11 @@
 //! Resolver service actor for QMDB sync over P2P.
 
 use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
-use crate::stateful::db::Shared;
+use crate::stateful::db::ServeSource;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{
@@ -26,15 +26,16 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Op<DB> = <Shared<DB> as Source>::Op;
-type DatabaseRoot<DB> = <Shared<DB> as Source>::Digest;
-type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
-type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>;
-type PendingSubs<F, DB> =
-    BTreeMap<Request<F>, Vec<mailbox::ResponseTx<F, Op<DB>, DatabaseRoot<DB>>>>;
+type Serve<Src> = <Src as ServeSource>::Serve;
+type Op<Src> = <Serve<Src> as Source>::Op;
+type SourceRoot<Src> = <Serve<Src> as Source>::Digest;
+type SyncMailbox<F, Src> = Mailbox<Src, F, Op<Src>, SourceRoot<Src>>;
+type SyncMessage<F, Src> = mailbox::Message<Src, F, Op<Src>, SourceRoot<Src>>;
+type PendingSubs<F, Src> =
+    BTreeMap<Request<F>, Vec<mailbox::ResponseTx<F, Op<Src>, SourceRoot<Src>>>>;
 
 /// Configuration for [`Actor`].
-pub struct Config<P, D, B, DB>
+pub struct Config<P, D, B>
 where
     P: PublicKey,
     D: Provider<PublicKey = P>,
@@ -45,9 +46,6 @@ where
 
     /// Blocker used when peers send invalid data.
     pub blocker: B,
-
-    /// Local database used to serve incoming requests when available.
-    pub database: Option<Shared<DB>>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -75,11 +73,11 @@ where
 }
 
 /// Runtime serving state for the resolver actor.
-enum State<DB> {
-    /// Database is not attached yet.
-    NoDb,
-    /// Database is attached and can serve incoming requests.
-    HasDb(Shared<DB>),
+enum State<Src> {
+    /// No serving source is attached yet.
+    NoSource,
+    /// A serving source is attached and incoming requests can be served.
+    HasSource(Src),
 }
 
 /// An action dispatched by incoming mailbox messages.
@@ -90,43 +88,39 @@ enum MailboxAction<F: Family> {
 }
 
 /// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
-pub struct Actor<E, P, D, B, F, DB>
+pub struct Actor<E, P, D, B, F, Src>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    DB: Send + Sync + 'static,
-    Shared<DB>: Source<Family = F>,
-    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    Src: ServeSource,
+    Serve<Src>: Source<Family = F>,
+    Op<Src>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
-    config: Config<P, D, B, DB>,
-    mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB>>,
-    state: State<DB>,
+    config: Config<P, D, B>,
+    mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, Src>>,
+    state: State<Src>,
     metrics: ResolverMetrics,
-    pending: PendingSubs<F, DB>,
+    pending: PendingSubs<F, Src>,
 }
 
-impl<E, P, D, B, F, DB> Actor<E, P, D, B, F, DB>
+impl<E, P, D, B, F, Src> Actor<E, P, D, B, F, Src>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    DB: Send + Sync + 'static,
-    Shared<DB>: Source<Family = F>,
-    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    Src: ServeSource,
+    Serve<Src>: Source<Family = F>,
+    Op<Src>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
-    pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
+    pub fn new(context: E, cfg: Config<P, D, B>) -> (Self, SyncMailbox<F, Src>) {
         let metrics = ResolverMetrics::new(&context);
-        let state = cfg.database.take().map_or(State::NoDb, |db| {
-            let _ = metrics.has_database.try_set(1i64);
-            State::HasDb(db)
-        });
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_tx);
@@ -134,7 +128,7 @@ where
             context: ContextCell::new(context),
             config: cfg,
             mailbox_rx,
-            state,
+            state: State::NoSource,
             metrics,
             pending: BTreeMap::new(),
         };
@@ -224,13 +218,13 @@ where
     }
 
     /// Process a mailbox message. Returns a request to fetch if a new key was registered.
-    fn handle_mailbox_message(&mut self, message: SyncMessage<F, DB>) -> MailboxAction<F> {
+    fn handle_mailbox_message(&mut self, message: SyncMessage<F, Src>) -> MailboxAction<F> {
         match message {
-            mailbox::Message::AttachDatabase(db) => {
-                let replacing_existing = matches!(self.state, State::HasDb(_));
-                info!(replacing_existing, "attached resolver database");
-                self.state = State::HasDb(db);
-                let _ = self.metrics.has_database.try_set(1i64);
+            mailbox::Message::AttachSource(source) => {
+                let replacing_existing = matches!(self.state, State::HasSource(_));
+                info!(replacing_existing, "attached resolver source");
+                self.state = State::HasSource(source);
+                let _ = self.metrics.has_source.try_set(1i64);
                 MailboxAction::None
             }
             mailbox::Message::GetOperations { request, response } => {
@@ -288,7 +282,7 @@ where
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
 
         let cfg = (key.max_ops().get() as usize, ());
-        let response = match Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &cfg) {
+        let response = match Response::<F, Op<Src>, SourceRoot<Src>>::decode_cfg(value, &cfg) {
             Ok(response)
                 if matches!(
                     (&key, &response),
@@ -341,13 +335,13 @@ where
         feedback_tx.send_lossy(peer_valid);
     }
 
-    /// Serve a peer's request by querying the local database.
+    /// Serve a peer's request from the latest published snapshot.
     async fn handle_produce(
         &mut self,
         key: Request<F>,
-        response_tx: oneshot::Sender<bytes::Bytes>,
+        mut response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
-        let State::HasDb(database) = &self.state else {
+        let State::HasSource(source) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
@@ -357,7 +351,27 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let result = database.serve(key).await;
+        // Declines before the first installation and after the publisher drops.
+        let Some(handle) = source.serve() else {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
+            return;
+        };
+
+        // The handle is an owned snapshot, so serving reads frozen state and never touches
+        // the live database. Abandon the read when the requester or the runtime goes away.
+        let serve = handle.serve(key);
+        futures::pin_mut!(serve);
+        let result = select! {
+            result = &mut serve => result,
+            _ = response_tx.closed() => {
+                self.metrics.serve_cancelled.inc();
+                return;
+            },
+            _ = self.context.stopped() => {
+                self.metrics.serve_cancelled.inc();
+                return;
+            },
+        };
 
         let Ok((response, _feedback_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
@@ -386,7 +400,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, channel::oneshot};
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     #[derive(Clone, Debug)]
     struct DummyProvider;
@@ -424,7 +438,31 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Shared<TestDb> as Source>::Op;
+    type TestOp = <TestDb as Source>::Op;
+
+    /// A source that always serves the same frozen database handle.
+    #[derive(Clone)]
+    struct StaticSource(Arc<TestDb>);
+
+    impl ServeSource for StaticSource {
+        type Serve = Arc<TestDb>;
+
+        fn serve(&self) -> Option<Arc<TestDb>> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// A source with nothing to serve yet.
+    #[derive(Clone)]
+    struct EmptySource;
+
+    impl ServeSource for EmptySource {
+        type Serve = Arc<TestDb>;
+
+        fn serve(&self) -> Option<Arc<TestDb>> {
+            None
+        }
+    }
 
     type TestActor = Actor<
         deterministic::Context,
@@ -432,16 +470,13 @@ mod tests {
         DummyProvider,
         DummyBlocker,
         mmr::Family,
-        TestDb,
+        StaticSource,
     >;
 
-    fn test_config(
-        database: Option<Shared<TestDb>>,
-    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
+    fn test_config() -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker> {
         Config {
             peer_provider: DummyProvider,
             blocker: DummyBlocker,
-            database,
             mailbox_size: NZUsize!(16),
             me: None,
             initial: Duration::from_millis(10),
@@ -495,11 +530,15 @@ mod tests {
         }
     }
 
-    async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
+    async fn init_source(
+        context: deterministic::Context,
+        suffix: &str,
+    ) -> (StaticSource, Location) {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
             .expect("db init should succeed");
-        Shared::new("test", db)
+        let size = db.bounds().end;
+        (StaticSource(Arc::new(db)), size)
     }
 
     fn encoded_fetch_payload() -> Bytes {
@@ -517,7 +556,29 @@ mod tests {
     #[test]
     fn produce_denied_before_attach() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
+
+            let (response_tx, response_rx) = oneshot::channel();
+            actor
+                .handle_produce(test_request_at(Location::new(1)), response_tx)
+                .await;
+            assert!(response_rx.await.is_err());
+        });
+    }
+
+    #[test]
+    fn produce_denied_when_source_is_empty() {
+        deterministic::Runner::default().start(|context| async move {
+            type EmptyActor = Actor<
+                deterministic::Context,
+                ed25519::PublicKey,
+                DummyProvider,
+                DummyBlocker,
+                mmr::Family,
+                EmptySource,
+            >;
+            let (mut actor, _mailbox) = EmptyActor::new(context.child("actor"), test_config());
+            actor.handle_mailbox_message(mailbox::Message::AttachSource(EmptySource));
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -530,10 +591,10 @@ mod tests {
     #[test]
     fn same_request_served_after_attach() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
-            let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
-            let size = db.read().await.bounds().end;
-            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
+            let (source, size) =
+                init_source(context.child("resolver_db"), "resolver-after-attach").await;
+            actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -550,10 +611,10 @@ mod tests {
     #[test]
     fn produce_rejects_request_above_max_serve_ops() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
-            let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
-            let size = db.read().await.bounds().end;
-            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config());
+            let (source, size) =
+                init_source(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
+            actor.handle_mailbox_message(mailbox::Message::AttachSource(source));
 
             let request = Request::Operations {
                 size,
@@ -570,7 +631,7 @@ mod tests {
     #[test]
     fn deliver_with_dropped_response_receiver_is_treated_as_valid() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, subscriber_rx) = test_subscriber();
@@ -589,7 +650,7 @@ mod tests {
     #[test]
     fn deliver_with_rejected_subscriber_blocks_peer() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (sub1_tx, sub1_rx) = test_subscriber();
@@ -622,7 +683,7 @@ mod tests {
     #[test]
     fn deliver_ignores_dropped_subscriber_approval() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (sub1_tx, sub1_rx) = test_subscriber();
@@ -652,7 +713,7 @@ mod tests {
     #[test]
     fn failed_then_deliver_clears_pending_and_allows_retry() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, _subscriber_rx) = test_subscriber();
@@ -671,7 +732,7 @@ mod tests {
     #[test]
     fn get_operations_refetches_when_pending_subscribers_are_closed() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let (stale_tx, stale_rx) = test_subscriber();
@@ -694,7 +755,7 @@ mod tests {
     #[test]
     fn deliver_rejects_answer_shaped_unlike_its_question() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = Request::Boundary {
                 size: Location::new(1),
                 start: Location::new(0),
@@ -717,7 +778,7 @@ mod tests {
     #[test]
     fn cancel_operations_cancels_pruned_request() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let (mut actor, _mailbox) = TestActor::new(context, test_config());
             let request = test_request_at(Location::new(1));
 
             let action =

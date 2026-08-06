@@ -4,6 +4,7 @@ use crate::stateful::{
         core::mailbox::Message,
         processor::{Applied, Processor},
     },
+    db::{Publisher, SnapshotOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -17,7 +18,7 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, futures::Pool};
+use commonware_utils::futures::Pool;
 use futures::{
     FutureExt as _,
     future::{Either, ready},
@@ -63,6 +64,10 @@ where
 
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
+
+    /// Publication slot for serving snapshots; generations install only once
+    /// their flush proves durable.
+    pub(super) publisher: Publisher<SnapshotOf<A::Databases, E>>,
 
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
@@ -189,56 +194,69 @@ where
                     acknowledgement,
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
-                    async {
-                        if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                            self.processor
-                                .notify_finalized(self.context.as_present(), block.as_ref())
-                                .await;
-                            acknowledgement.acknowledge();
-                            return;
-                        }
-                        let Some(Applied { barrier, prune }) =
-                            self.processor.finalize(&self.context, block.as_ref()).await
-                        else {
+                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                        self.processor
+                            .notify_finalized(self.context.as_present(), block.as_ref())
+                            .instrument(process)
+                            .await;
+                        acknowledgement.acknowledge();
+                    } else {
+                        // The processor owns the databases, so finalize consumes it and
+                        // hands it back alongside the applied artifacts.
+                        let (processor, applied) = self
+                            .processor
+                            .finalize(&self.context, block.as_ref())
+                            .instrument(process.clone())
+                            .await;
+                        self.processor = processor;
+                        // Keep the publication bookkeeping under the same span.
+                        let _process = process.entered();
+                        if let Some(Applied {
+                            snapshot,
+                            barrier,
+                            prune,
+                        }) = applied
+                        {
+                            debug!(
+                                height = block.height().get(),
+                                "applied finalized database batch"
+                            );
+
+                            // Acknowledge marshal only once the batch's flush
+                            // completes, so marshal's processed floor never runs
+                            // ahead of flushed database state (the startup rewind
+                            // contract), without blocking the loop on the flush.
+                            // Marshal's ack window bounds the flush backlog. A
+                            // false `Barrier::durable` leaves the block
+                            // unacknowledged, and marshal redelivers it on
+                            // restart. The staged snapshot installs only
+                            // alongside that acknowledgement, so a published
+                            // generation never exposes state a crash could roll
+                            // back.
+                            let staged = self.publisher.stage(snapshot);
+                            let height = block.height();
+                            assert!(
+                                pending_syncs.insert(height),
+                                "finalize flush height must be unique",
+                            );
+                            syncs.push(async move {
+                                let durable = barrier.durable().await;
+                                if durable {
+                                    staged.install();
+                                    acknowledgement.acknowledge();
+                                }
+                                (height, durable)
+                            });
+                            if let Some(prune) = prune {
+                                pending_prune = Some(prune);
+                            }
+                        } else {
                             // Duplicate report: marshal redelivers a processed
                             // height only after a restart, where startup aligned
                             // the databases to durable state.
                             acknowledgement.acknowledge();
-                            return;
-                        };
-                        debug!(
-                            height = block.height().get(),
-                            "applied finalized database batch"
-                        );
-
-                        // Acknowledge marshal only once the batch's flush
-                        // completes, so marshal's processed floor never runs
-                        // ahead of flushed database state (the startup rewind
-                        // contract), without blocking the loop on the flush.
-                        // Marshal's ack window bounds the flush backlog. A
-                        // false `Barrier::durable` leaves the block
-                        // unacknowledged, and marshal redelivers it on restart.
-                        let height = block.height();
-                        assert!(
-                            pending_syncs.insert(height),
-                            "finalize flush height must be unique",
-                        );
-                        syncs.push(async move {
-                            let durable = barrier.durable().await;
-                            if durable {
-                                acknowledgement.acknowledge();
-                            }
-                            (height, durable)
-                        });
-                        if let Some(prune) = prune {
-                            pending_prune = Some(prune);
                         }
                     }
-                    .instrument(process)
-                    .await;
-                }
-                Step::Message(Message::SubscribeDatabases { response }) => {
-                    response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
                     // The prune target must be durable, but later blocks remain available in
@@ -252,9 +270,7 @@ where
                             return;
                         }
                     }
-                    prune
-                        .run(self.processor.databases_mut(), &self.marshal)
-                        .await;
+                    self.processor = self.processor.prune_databases(prune, &self.marshal).await;
                 }
             },
         }
@@ -285,7 +301,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::Shared,
+        db::{Publisher, Single},
         tests::{
             fixtures,
             mocks::{FlushControl, TestApp, TestBlock, TestDb, anchor},
@@ -332,7 +348,7 @@ mod tests {
         .await;
 
         let control = FlushControl::default();
-        let databases = Shared::new("test", TestDb::gated(control.clone()));
+        let databases = Single::from(TestDb::gated(control.clone()));
         let pruning = prune_config
             .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
         let processor = Processor::new(
@@ -343,12 +359,14 @@ mod tests {
             pruning,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let (publisher, _source) = Publisher::new(context);
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
             processor,
+            publisher,
             skip_finalized_until: None,
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
