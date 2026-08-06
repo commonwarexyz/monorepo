@@ -32,10 +32,11 @@
 //! certification verdict retires that request, whereas a certified-floor raise retires only
 //! background work.
 //!
-//! The wire key names only the view. A responder holding both a certified notarization and a
-//! covering nullification cannot tell which one the requester wants, so it serves one at random.
-//! The requester recognizes a response that does not settle its ask and retries without faulting
-//! the peer.
+//! The wire key names only the view, but serving follows the same evidence preference as proposal
+//! construction: finalization, then a certified notarization, then a covering nullification. An
+//! honest leader builds on a nullification only when it lacks certification, so a targeted request
+//! to that leader asks for the strongest ancestry it could have used. The requester still treats a
+//! valid response that does not settle its ask as ambiguous and retries without faulting the peer.
 //!
 //! A notarization is served only after local certification succeeds. Possession still settles the
 //! holder's own ask, because certification judges evidence already in hand. A failed verdict also
