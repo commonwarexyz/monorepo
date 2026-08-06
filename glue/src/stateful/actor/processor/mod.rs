@@ -337,6 +337,8 @@ impl<D: Copy + Ord> ReplayFlights<D> {
         }
     }
 
+    /// Registers an owner through the caller-held registry guard, keeping the
+    /// existing-flight check and insertion in one critical section.
     fn register_owner(&self, digest: D, entries: &mut BTreeMap<D, ReplayFlight>) -> ReplayOwner<D> {
         let generation = Arc::new(ReplayGeneration);
         assert!(
