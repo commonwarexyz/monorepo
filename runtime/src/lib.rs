@@ -436,9 +436,20 @@ stability_scope!(BETA {
         fn current(&self) -> SystemTime;
 
         /// Sleep for the given duration.
+        ///
+        /// The duration starts when this method is called rather than when the
+        /// returned future is first polled. A zero duration is immediately
+        /// eligible to complete, but may yield when scheduler cooperation
+        /// budget is exhausted.
         fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
 
         /// Sleep until the given deadline.
+        ///
+        /// The wake target is fixed when this method is called rather than when
+        /// the returned future is first polled. Later changes to the system
+        /// clock do not move that target. A deadline at or before the current
+        /// time is immediately eligible to complete, but may yield when
+        /// scheduler cooperation budget is exhausted.
         fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 
         /// Await a future with a timeout, returning `Error::Timeout` if it expires.
@@ -955,6 +966,49 @@ mod tests {
             // After run, time should have advanced
             let end = context.current();
             assert!(end.duration_since(start).unwrap() >= sleep_duration);
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_clock_zero_and_past_sleeps_are_immediately_ready<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Clock,
+    {
+        runner.start(|context| async move {
+            // Construct both boundary cases without yielding to the runtime. The
+            // first poll must be enough to observe their completed state.
+            let zero = context.sleep(Duration::ZERO);
+            let past = context.sleep_until(
+                context
+                    .current()
+                    .checked_sub(Duration::from_secs(1))
+                    .expect("current time should be after the Unix epoch"),
+            );
+
+            // `now_or_never` performs exactly one poll.
+            assert!(zero.now_or_never().is_some());
+            assert!(past.now_or_never().is_some());
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    fn test_clock_sleep_duration_starts_at_construction<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Clock,
+    {
+        runner.start(|context| async move {
+            // Construct a short sleep without polling it, then advance beyond its
+            // deadline with an independently constructed longer sleep.
+            let unpolled = context.sleep(Duration::from_millis(10));
+            context.sleep(Duration::from_millis(20)).await;
+
+            // A single poll must now observe completion. Recomputing the deadline
+            // on first poll would incorrectly leave this future pending.
+            assert!(unpolled.now_or_never().is_some());
         });
     }
 

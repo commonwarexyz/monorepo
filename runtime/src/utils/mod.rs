@@ -65,14 +65,33 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
+/// Panic payload whose diagnostic was emitted before unwinding a task.
+#[derive(Debug)]
+struct ReportedPanic(&'static str);
+
+/// Resumes unwinding without invoking the process panic hook again.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+pub(crate) fn resume_reported_panic(message: &'static str) -> ! {
+    std::panic::resume_unwind(Box::new(ReportedPanic(message)))
+}
+
+/// Returns whether a panic payload has already been reported.
+fn is_reported_panic(err: &(dyn Any + Send)) -> bool {
+    err.is::<ReportedPanic>()
+}
+
+/// Extracts a stable message from an arbitrary panic payload.
 pub(crate) fn extract_panic_message(err: &(dyn Any + Send)) -> String {
-    err.downcast_ref::<&str>().map_or_else(
-        || {
-            err.downcast_ref::<String>()
-                .map_or_else(|| format!("{err:?}"), |s| s.clone())
-        },
-        |s| s.to_string(),
-    )
+    match (
+        err.downcast_ref::<&str>(),
+        err.downcast_ref::<String>(),
+        err.downcast_ref::<ReportedPanic>(),
+    ) {
+        (Some(message), _, _) => (*message).to_string(),
+        (_, Some(message), _) => message.clone(),
+        (_, _, Some(reported)) => reported.0.to_string(),
+        _ => "non-string panic".to_string(),
+    }
 }
 
 /// Synchronization primitive that enables a thread to block until a waker delivers a signal.
@@ -122,7 +141,41 @@ impl ArcWake for Blocker {
 mod tests {
     use super::*;
     use futures::task::waker;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn panic_message_extraction_handles_supported_payloads() {
+        let borrowed: Box<dyn Any + Send> = Box::new("borrowed panic");
+        let owned: Box<dyn Any + Send> = Box::new("owned panic".to_string());
+        let opaque: Box<dyn Any + Send> = Box::new(7_u64);
+        let reported = catch_unwind(AssertUnwindSafe(|| {
+            resume_reported_panic("reported panic");
+        }))
+        .expect_err("reported panic did not unwind");
+
+        let messages = [
+            extract_panic_message(&*borrowed),
+            extract_panic_message(&*owned),
+            extract_panic_message(&*opaque),
+            extract_panic_message(&*reported),
+        ];
+
+        // Strings remain intact and opaque payloads use stable classifications.
+        assert_eq!(
+            messages,
+            [
+                "borrowed panic",
+                "owned panic",
+                "non-string panic",
+                "reported panic"
+            ]
+        );
+        assert!(!is_reported_panic(&*opaque));
+        assert!(is_reported_panic(&*reported));
+    }
 
     #[test]
     fn test_blocker_waits_until_wake() {

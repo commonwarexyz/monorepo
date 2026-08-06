@@ -23,6 +23,7 @@
 //! ```
 
 mod runtime;
+mod timer;
 pub use runtime::*;
 pub mod telemetry;
 pub mod tracing;

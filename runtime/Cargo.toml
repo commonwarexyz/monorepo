@@ -31,7 +31,7 @@ futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
 libc.workspace = true
-loom = { workspace = true, optional = true }
+loom = { workspace = true, features = ["futures"], optional = true }
 opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
@@ -106,3 +106,12 @@ name = "iobuf"
 harness = false
 path = "src/iobuf/benches/bench.rs"
 required-features = ["bench"]
+
+[[bench]]
+name = "timer"
+harness = false
+path = "src/tokio/timer/benches/main.rs"
+
+[[test]]
+name = "timer_bench"
+path = "src/tokio/timer/benches/tests.rs"
