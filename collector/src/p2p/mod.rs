@@ -66,7 +66,7 @@ mod tests {
         Clock, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{NZU32, NZUsize, ordered::Set};
+    use commonware_utils::{AtMost, NZU32, NZUsize, ordered::Set};
     use std::{num::NonZeroUsize, time::Duration};
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -105,7 +105,7 @@ mod tests {
         let (network, oracle) = Network::new(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: (1024 * 1024).try_into().unwrap(),
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

@@ -553,7 +553,7 @@ mod test {
         Config {
             signing_key,
             namespace: NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE.try_into().unwrap(),
+            max_message_size: AtMost!(MAX_MESSAGE_SIZE),
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
@@ -566,7 +566,7 @@ mod test {
 
         assert_eq!(MAX_SIZE, u32::MAX - TAG_SIZE);
 
-        let maximum: MessageSize = MAX_SIZE.try_into().unwrap();
+        let maximum: MessageSize = AtMost!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);
         assert!(MessageSize::try_from(0).is_err());
         assert!(MessageSize::try_from(MAX_SIZE + 1).is_err());
@@ -1023,7 +1023,7 @@ mod test {
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
             let mut listener_config = transport_config(listener_crypto);
-            listener_config.max_message_size = (1024 * 1024).try_into().unwrap();
+            listener_config.max_message_size = AtMost!(1024 * 1024);
 
             // Advertise a frame that is one byte larger than the encoded public
             // key and send no payload. The old behavior accepted this because it
@@ -1062,7 +1062,7 @@ mod test {
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
             let mut dialer_config = transport_config(dialer_crypto);
-            dialer_config.max_message_size = (1024 * 1024).try_into().unwrap();
+            dialer_config.max_message_size = AtMost!(1024 * 1024);
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.

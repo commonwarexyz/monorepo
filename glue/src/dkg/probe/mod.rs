@@ -246,7 +246,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
+        AtMost, N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot,
+        ordered::Set,
     };
     use std::{num::NonZeroU64, time::Duration};
 
@@ -309,7 +310,7 @@ mod tests {
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 NetworkConfig {
-                    max_size: (1024 * 1024).try_into().unwrap(),
+                    max_size: AtMost!(1024 * 1024),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

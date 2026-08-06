@@ -575,7 +575,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
+        AtMost, Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -727,7 +727,7 @@ mod tests {
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
-                max_size: (1024 * 1024).try_into().unwrap(),
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -751,7 +751,7 @@ mod tests {
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: (1024 * 1024).try_into().unwrap(),
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },

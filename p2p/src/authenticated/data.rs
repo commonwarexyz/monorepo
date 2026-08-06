@@ -128,7 +128,7 @@ mod tests {
             commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD
         );
         assert_eq!(MAX_SIZE + MAX_PAYLOAD_OVERHEAD + tag_size, u32::MAX);
-        let maximum: AtMost<NonZeroU32, MAX_SIZE> = MAX_SIZE.try_into().unwrap();
+        let maximum: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);
         assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(0).is_err());
         assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());

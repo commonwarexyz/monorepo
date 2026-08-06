@@ -39,7 +39,8 @@ use commonware_runtime::{
     telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
-    NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, sync::Mutex, test_rng,
+    AtMost, NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, sync::Mutex,
+    test_rng,
 };
 use futures::future::pending;
 use std::{
@@ -350,7 +351,7 @@ pub(super) fn run_closed_network_receiver() {
         let (network, oracle) = Network::<_, ed25519::PublicKey>::new(
             context.child("network"),
             simulated::Config {
-                max_size: (1024 * 1024).try_into().unwrap(),
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

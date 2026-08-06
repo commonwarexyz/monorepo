@@ -1631,8 +1631,8 @@ mod tests {
     #[test]
     fn generated_cases_are_deterministic() {
         let framework = Framework {
-            participants: 5.try_into().unwrap(),
-            faults: 1.try_into().unwrap(),
+            participants: AtMost!(5),
+            faults: AtMost!(1),
             rounds: 3,
             mode: Mode::Sampled,
             max_cases: 50,
@@ -1649,8 +1649,8 @@ mod tests {
     #[test]
     fn sampled_cases_are_unique() {
         let framework = Framework {
-            participants: 7.try_into().unwrap(),
-            faults: 2.try_into().unwrap(),
+            participants: AtMost!(7),
+            faults: AtMost!(2),
             rounds: 3,
             mode: Mode::Sampled,
             max_cases: 64,
@@ -2005,8 +2005,8 @@ mod tests {
     #[test]
     fn sustained_cases_repeat_single_round() {
         let framework = Framework {
-            participants: 5.try_into().unwrap(),
-            faults: 1.try_into().unwrap(),
+            participants: AtMost!(5),
+            faults: AtMost!(1),
             rounds: 3,
             mode: Mode::Sustained,
             max_cases: 50,
@@ -2027,8 +2027,8 @@ mod tests {
         let _ = cases(
             &mut test_rng(),
             Framework {
-                participants: 4.try_into().unwrap(),
-                faults: 1.try_into().unwrap(),
+                participants: AtMost!(4),
+                faults: AtMost!(1),
                 rounds: 40,
                 mode: Mode::Sampled,
                 max_cases: 1,
@@ -2080,8 +2080,8 @@ mod tests {
     #[test]
     fn cases_fewer_than_naive_cross_product() {
         let framework = Framework {
-            participants: 5.try_into().unwrap(),
-            faults: 1.try_into().unwrap(),
+            participants: AtMost!(5),
+            faults: AtMost!(1),
             rounds: 1,
             mode: Mode::Sampled,
             max_cases: usize::MAX,
@@ -2101,11 +2101,11 @@ mod tests {
 
     #[test]
     fn framework_participants_enforce_construction_bounds() {
-        let minimum: AtMost<NonZeroUsize, 64> = 1.try_into().unwrap();
-        let maximum: AtMost<NonZeroUsize, 64> = MAX_PARTICIPANTS.try_into().unwrap();
+        let minimum: AtMost<NonZeroUsize, 64> = AtMost!(1);
+        let maximum: AtMost<NonZeroUsize, 64> = AtMost!(MAX_PARTICIPANTS);
         let framework = Framework {
             participants: maximum,
-            faults: 1.try_into().unwrap(),
+            faults: AtMost!(1),
             rounds: 1,
             mode: Mode::Sampled,
             max_cases: 1,
@@ -2119,10 +2119,10 @@ mod tests {
 
     #[test]
     fn framework_fault_count_enforces_construction_bounds() {
-        let minimum: AtMost<NonZeroUsize, 63> = 1.try_into().unwrap();
-        let maximum: AtMost<NonZeroUsize, 63> = 63.try_into().unwrap();
+        let minimum: AtMost<NonZeroUsize, 63> = AtMost!(1);
+        let maximum: AtMost<NonZeroUsize, 63> = AtMost!(63);
         let framework = Framework {
-            participants: MAX_PARTICIPANTS.try_into().unwrap(),
+            participants: AtMost!(MAX_PARTICIPANTS),
             faults: maximum,
             rounds: 1,
             mode: Mode::Sampled,
@@ -2141,8 +2141,8 @@ mod tests {
         let _ = cases(
             &mut test_rng(),
             Framework {
-                participants: 1.try_into().unwrap(),
-                faults: 1.try_into().unwrap(),
+                participants: AtMost!(1),
+                faults: AtMost!(1),
                 rounds: 1,
                 mode: Mode::Sampled,
                 max_cases: 1,
@@ -2156,8 +2156,8 @@ mod tests {
         let _ = cases(
             &mut test_rng(),
             Framework {
-                participants: 2.try_into().unwrap(),
-                faults: 2.try_into().unwrap(),
+                participants: AtMost!(2),
+                faults: AtMost!(2),
                 rounds: 1,
                 mode: Mode::Sampled,
                 max_cases: 1,
@@ -2223,8 +2223,8 @@ mod tests {
         let generated = cases(
             &mut test_rng(),
             Framework {
-                participants: MAX_PARTICIPANTS.try_into().unwrap(),
-                faults: 1.try_into().unwrap(),
+                participants: AtMost!(MAX_PARTICIPANTS),
+                faults: AtMost!(1),
                 rounds: 1,
                 mode: Mode::Sampled,
                 max_cases: 1,
@@ -2258,8 +2258,8 @@ mod tests {
     #[test]
     fn twins_elector_uses_scenario_leaders_then_fallback_suffix() {
         let framework = Framework {
-            participants: 5.try_into().unwrap(),
-            faults: 1.try_into().unwrap(),
+            participants: AtMost!(5),
+            faults: AtMost!(1),
             rounds: 3,
             mode: Mode::Sampled,
             max_cases: 1,

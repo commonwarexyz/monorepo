@@ -221,7 +221,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{AtMost, NZUsize};
     use std::{
         net::{Ipv4Addr, SocketAddr},
         time::Duration,
@@ -231,7 +231,7 @@ mod tests {
         StreamConfig {
             signing_key,
             namespace: b"test".to_vec(),
-            max_message_size: 1024.try_into().unwrap(),
+            max_message_size: AtMost!(1024),
             handshake_timeout: Duration::from_secs(5),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),

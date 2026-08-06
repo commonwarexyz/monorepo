@@ -42,7 +42,7 @@ const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 /// Configure the network for the estimator's static peer set.
 fn network_config() -> Config {
     Config {
-        max_size: MAX_SIZE.try_into().unwrap(),
+        max_size: AtMost!(MAX_SIZE),
         disconnect_on_block: true,
         tracked_peer_sets: NZUsize!(1),
     }

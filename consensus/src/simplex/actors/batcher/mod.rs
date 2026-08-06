@@ -86,7 +86,7 @@ mod tests {
         telemetry::traces::{TracedExt as _, collector::TraceStorage},
         tokio,
     };
-    use commonware_utils::{NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng};
+    use commonware_utils::{AtMost, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng};
     use std::{marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
     use tracing::{Level, Span};
 
@@ -136,7 +136,7 @@ mod tests {
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             NConfig {
-                max_size: (1024 * 1024).try_into().unwrap(),
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

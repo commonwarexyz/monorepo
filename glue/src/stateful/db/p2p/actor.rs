@@ -461,7 +461,7 @@ mod tests {
             initial: Duration::from_millis(10),
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
-            max_serve_ops: 16.try_into().unwrap(),
+            max_serve_ops: AtMost!(16),
             priority_requests: false,
             priority_responses: false,
         }

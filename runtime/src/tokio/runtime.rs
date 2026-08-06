@@ -457,7 +457,7 @@ impl crate::Runner for Runner {
                     read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
-                        size: IOURING_NETWORK_SIZE.try_into().unwrap(),
+                        size: commonware_utils::AtMost!(IOURING_NETWORK_SIZE),
                         max_request_timeout: self.cfg.network_cfg.read_write_timeout,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()

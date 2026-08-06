@@ -98,7 +98,7 @@ mod tests {
         deterministic::{self, Context},
     };
     use commonware_utils::{
-        NZU16, NZU64, NZUsize,
+        AtMost, NZU16, NZU64, NZUsize,
         channel::{fallible::OneshotExt, oneshot},
     };
     use futures::future::join_all;
@@ -217,7 +217,7 @@ mod tests {
         let (network, mut oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: (1024 * 1024).try_into().unwrap(),
+                max_size: AtMost!(1024 * 1024),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -435,7 +435,7 @@ mod tests {
                 let (network, mut oracle) = Network::new_with_peers(
                     context.child("network"),
                     commonware_p2p::simulated::Config {
-                        max_size: (1024 * 1024).try_into().unwrap(),
+                        max_size: AtMost!(1024 * 1024),
                         disconnect_on_block: true,
                         tracked_peer_sets: NZUsize!(1),
                     },
@@ -855,7 +855,7 @@ mod tests {
             let (network, mut oracle) = Network::new_with_peers(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
-                    max_size: (1024 * 1024).try_into().unwrap(),
+                    max_size: AtMost!(1024 * 1024),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

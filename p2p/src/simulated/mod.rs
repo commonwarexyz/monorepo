@@ -59,7 +59,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::simulated::{Config, Link, Network};
+//! use commonware_p2p::simulated::{AtMost, Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner, Supervisor};
 //! use commonware_utils::{NZU32, NZUsize};
@@ -75,7 +75,7 @@
 //!
 //! // Configure network
 //! let p2p_cfg = Config {
-//!     max_size: (1024 * 1024).try_into().unwrap(), // 1MB
+//!     max_size: AtMost!(1024 * 1024), // 1MB
 //!     disconnect_on_block: true,
 //!     tracked_peer_sets: NZUsize!(3),
 //! };

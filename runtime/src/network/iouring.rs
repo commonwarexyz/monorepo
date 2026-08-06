@@ -88,7 +88,7 @@ impl Default for Config {
             connect_timeout: Duration::from_secs(10),
             read_write_timeout: iouring_config.max_request_timeout,
             iouring_config,
-            read_buffer_size: DEFAULT_READ_BUFFER_SIZE.try_into().unwrap(),
+            read_buffer_size: AtMost!(DEFAULT_READ_BUFFER_SIZE),
             thread_stack_size: utils::thread::system_thread_stack_size(),
         }
     }
@@ -667,7 +667,7 @@ mod tests {
         tests::stress_test_network_trait(|| {
             test_network(Config {
                 iouring_config: iouring::Config {
-                    size: 256.try_into().unwrap(),
+                    size: AtMost!(256),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -751,7 +751,7 @@ mod tests {
         // Verify disabling the internal read buffer preserves direct recv behavior.
         // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
         let network = test_network(Config {
-            read_buffer_size: 0.try_into().unwrap(),
+            read_buffer_size: AtMost!(0),
             ..Default::default()
         })
         .expect("Failed to start io_uring");
@@ -975,7 +975,7 @@ mod tests {
         // Verify reads that are at least as large as the internal buffer go
         // straight into the caller-owned output buffer.
         let network = test_network(Config {
-            read_buffer_size: 8.try_into().unwrap(),
+            read_buffer_size: AtMost!(8),
             ..Default::default()
         })
         .expect("Failed to start io_uring");

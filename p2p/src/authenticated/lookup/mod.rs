@@ -118,7 +118,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_utils::{NZU32, ordered::Map};
+//! use commonware_utils::{AtMost, NZU32, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
 //! // Configure context
@@ -154,7 +154,7 @@
 //!     my_sk.clone(),
 //!     application_namespace,
 //!     my_addr,
-//!     1_024.try_into().unwrap(), // 1KB
+//!     AtMost!(1_024), // 1KB
 //! );
 //!
 //! // Start context

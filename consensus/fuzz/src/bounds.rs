@@ -80,17 +80,12 @@ mod tests {
 
     #[test]
     fn configuration_counts_enforce_construction_bounds() {
-        let minimum: AtMost<NonZeroU32, 21> = 1.try_into().unwrap();
-        let maximum: AtMost<NonZeroU32, 21> = 21.try_into().unwrap();
-        let zero: AtMost<u32, 21> = 0.try_into().unwrap();
-        let maximum_subset: AtMost<u32, 21> = 21.try_into().unwrap();
+        let minimum: AtMost<NonZeroU32, 21> = AtMost!(1);
+        let maximum: AtMost<NonZeroU32, 21> = AtMost!(21);
+        let zero: AtMost<u32, 21> = AtMost!(0);
+        let maximum_subset: AtMost<u32, 21> = AtMost!(21);
 
-        assert_eq!(
-            Configuration::new(minimum, zero, 1.try_into().unwrap())
-                .n
-                .get(),
-            1
-        );
+        assert_eq!(Configuration::new(minimum, zero, AtMost!(1)).n.get(), 1);
         let configuration = Configuration::new(maximum, zero, maximum_subset);
         assert_eq!(configuration.n.get(), 21);
         assert_eq!(configuration.faults.get(), 0);
@@ -103,27 +98,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "faults must not exceed n")]
     fn configuration_rejects_faults_greater_than_nodes() {
-        let _ = Configuration::new(
-            4.try_into().unwrap(),
-            5.try_into().unwrap(),
-            0.try_into().unwrap(),
-        );
+        let _ = Configuration::new(AtMost!(4), AtMost!(5), AtMost!(0));
     }
 
     #[test]
     #[should_panic(expected = "faults + correct must equal n")]
     fn configuration_rejects_mismatched_counts() {
-        let _ = Configuration::new(
-            4.try_into().unwrap(),
-            1.try_into().unwrap(),
-            2.try_into().unwrap(),
-        );
+        let _ = Configuration::new(AtMost!(4), AtMost!(1), AtMost!(2));
     }
 
     #[test]
     fn test_hardcoded_values_match_upstream() {
         for n in 1..=21u32 {
-            let count = n.try_into().unwrap();
+            let count = AtMost!(n);
             let expected_f = max_faults(count);
             let expected_q = quorum(count);
             let actual_f = N3f1::max_faults(n);
@@ -156,14 +143,14 @@ mod tests {
     #[test]
     fn test_specific_configurations() {
         // N4F1C3: 4 nodes, 1 faulty, 3 correct
-        assert_eq!(max_faults(4.try_into().unwrap()), 1);
-        assert_eq!(quorum(4.try_into().unwrap()), 3);
+        assert_eq!(max_faults(AtMost!(4)), 1);
+        assert_eq!(quorum(AtMost!(4)), 3);
 
         // Standard BFT configurations
-        assert_eq!(max_faults(3.try_into().unwrap()), 0); // 3f+1 = 1, so f=0
-        assert_eq!(max_faults(4.try_into().unwrap()), 1); // 3f+1 = 4, so f=1
-        assert_eq!(max_faults(7.try_into().unwrap()), 2); // 3f+1 = 7, so f=2
-        assert_eq!(max_faults(10.try_into().unwrap()), 3); // 3f+1 = 10, so f=3
+        assert_eq!(max_faults(AtMost!(3)), 0); // 3f+1 = 1, so f=0
+        assert_eq!(max_faults(AtMost!(4)), 1); // 3f+1 = 4, so f=1
+        assert_eq!(max_faults(AtMost!(7)), 2); // 3f+1 = 7, so f=2
+        assert_eq!(max_faults(AtMost!(10)), 3); // 3f+1 = 10, so f=3
     }
 
     #[test]
@@ -177,25 +164,13 @@ mod tests {
         assert!(!N4F3C1.can_finalize());
 
         // Edge cases
-        let zero_faults = Configuration::new(
-            4.try_into().unwrap(),
-            0.try_into().unwrap(),
-            4.try_into().unwrap(),
-        );
+        let zero_faults = Configuration::new(AtMost!(4), AtMost!(0), AtMost!(4));
         assert!(zero_faults.can_finalize()); // 0 <= 1
 
-        let exact_max = Configuration::new(
-            4.try_into().unwrap(),
-            1.try_into().unwrap(),
-            3.try_into().unwrap(),
-        );
+        let exact_max = Configuration::new(AtMost!(4), AtMost!(1), AtMost!(3));
         assert!(exact_max.can_finalize()); // 1 <= 1
 
-        let over_max = Configuration::new(
-            4.try_into().unwrap(),
-            2.try_into().unwrap(),
-            2.try_into().unwrap(),
-        );
+        let over_max = Configuration::new(AtMost!(4), AtMost!(2), AtMost!(2));
         assert!(!over_max.can_finalize()); // 2 > 1
     }
 }

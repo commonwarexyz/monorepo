@@ -1555,7 +1555,7 @@ mod tests {
     #[test]
     fn test_max_size_bounds() {
         assert_eq!(MAX_SIZE, u32::MAX - MAX_PAYLOAD_OVERHEAD);
-        let maximum: AtMost<NonZeroU32, MAX_SIZE> = MAX_SIZE.try_into().unwrap();
+        let maximum: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);
         assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(0).is_err());
         assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
@@ -1569,7 +1569,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: MAX_PAYLOAD_SIZE.try_into().unwrap(),
+                max_size: AtMost!(MAX_PAYLOAD_SIZE),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             };
@@ -2359,7 +2359,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: 1024.try_into().unwrap(),
+                max_size: AtMost!(1024),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(2),
             };

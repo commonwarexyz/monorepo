@@ -212,7 +212,7 @@ commonware_macros::stability_scope!(BETA {
     ///
     /// type MessageSize = AtMost<NonZeroU32, 1024>;
     ///
-    /// let size: MessageSize = 512.try_into().unwrap();
+    /// let size: MessageSize = AtMost!(512);
     /// assert_eq!(size.get(), 512);
     /// assert!(MessageSize::try_from(0).is_err());
     /// assert!(MessageSize::try_from(1025).is_err());
@@ -339,12 +339,12 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
 /// Creates an [`AtMost`] value, panicking if the value exceeds its maximum.
 ///
-/// For literal values, validation occurs at compile time. For expressions, validation occurs at
-/// runtime.
+/// Typed literals and `NZU*` literals can be used in const contexts. The one-argument primitive
+/// form infers the result type and validates at runtime.
 ///
 /// # Panics
 ///
-/// Panics if the value exceeds the maximum encoded in the result type.
+/// Panics if the value exceeds the encoded maximum or violates an invariant of the wrapped type.
 ///
 /// # Examples
 ///
@@ -355,6 +355,9 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 /// type MessageSize = AtMost<NonZeroU32, 1024>;
 /// const MESSAGE_SIZE: MessageSize = AtMost!(NZU32!(512));
 /// assert_eq!(MESSAGE_SIZE.get(), 512);
+///
+/// let inferred: MessageSize = AtMost!(256);
+/// assert_eq!(inferred.get(), 256);
 /// ```
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -420,6 +423,18 @@ macro_rules! AtMost {
     ($ty:ty, $val:expr) => {
         $crate::AtMost::<$ty, _>::new($val).expect("value exceeds maximum")
     };
+    ($val:expr) => {{
+        fn infer_at_most<T, const MAX: u32>(
+            value: $crate::AtMost<T, MAX>,
+        ) -> $crate::AtMost<T, MAX> {
+            value
+        }
+
+        infer_at_most(match ::core::convert::TryInto::try_into($val) {
+            ::core::result::Result::Ok(value) => value,
+            ::core::result::Result::Err(_) => panic!("value is outside allowed range"),
+        })
+    }};
 }
 
 #[cfg(not(any(
@@ -712,15 +727,24 @@ mod tests {
         assert_eq!(MessageSize::new(NZU32!(1)).unwrap().get(), 1);
         assert_eq!(MessageSize::new(NZU32!(1025)), None);
 
-        let wrapped: MessageSize = 512.try_into().unwrap();
+        let wrapped = MessageSize::try_from(512).unwrap();
         assert_eq!(wrapped.get(), 512);
+        let inferred: MessageSize = AtMost!(512);
+        assert_eq!(inferred.get(), 512);
         assert!(MessageSize::try_from(0).is_err());
         assert!(MessageSize::try_from(1025).is_err());
 
+        let zero = 0;
         let too_large = 1025;
         assert!(
             std::panic::catch_unwind(|| {
-                let _: OptionalSize = AtMost!(u32, too_large);
+                let _: MessageSize = AtMost!(zero);
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _: OptionalSize = AtMost!(too_large);
             })
             .is_err()
         );

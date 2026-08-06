@@ -164,7 +164,7 @@
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_utils::{ordered::Set, NZU32};
+//! use commonware_utils::{AtMost, NZU32, ordered::Set};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
 //! // Configure context
@@ -204,7 +204,7 @@
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
 //!     bootstrappers,
-//!     1_024.try_into().unwrap(), // 1KB
+//!     AtMost!(1_024), // 1KB
 //! );
 //!
 //! // Start context

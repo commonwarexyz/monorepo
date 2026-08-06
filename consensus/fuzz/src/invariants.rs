@@ -282,7 +282,7 @@ where
 mod tests {
     use super::*;
     use crate::simplex::SimplexEd25519;
-    use commonware_utils::NZU32;
+    use commonware_utils::{AtMost, NZU32};
     use std::{collections::HashMap, panic};
 
     #[test]
@@ -314,7 +314,7 @@ mod tests {
 
         let result = panic::catch_unwind(|| {
             check::<SimplexEd25519>(
-                4.try_into().unwrap(),
+                AtMost!(4),
                 TermLength::new(NZU32!(5)),
                 vec![(notarizations, nullifications, finalizations)],
             );
