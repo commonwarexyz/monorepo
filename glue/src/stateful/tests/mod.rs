@@ -62,7 +62,7 @@ use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
 };
-use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
+use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 mod common;
 pub(crate) mod fixtures;
@@ -934,7 +934,7 @@ fn application_gate() -> (ApplicationGate, oneshot::Receiver<()>, oneshot::Sende
 #[derive(Clone)]
 struct GatedMultiApp {
     inner: MultiApp,
-    verify_gate: Arc<Mutex<Option<ApplicationGate>>>,
+    verify_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
     finalize_gate: Arc<Mutex<Option<ApplicationGate>>>,
 }
 
@@ -984,7 +984,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
             batches,
         )
         .await;
-        let gate = self.verify_gate.lock().take();
+        let gate = self.verify_gates.lock().pop_front();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
@@ -1318,11 +1318,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
-        let verify_gate = Arc::new(Mutex::new(None));
+        let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
         let finalize_gate = Arc::new(Mutex::new(None));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
-            verify_gate: verify_gate.clone(),
+            verify_gates: verify_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(&context, "certify-multi-qmdb-stateful".to_string()).await;
@@ -1370,11 +1370,14 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             );
         }
 
-        let (gate, verify_started, verify_release) = application_gate();
-        assert!(
-            verify_gate.lock().replace(gate).is_none(),
-            "verification gate already installed",
-        );
+        let mut verify_started = Vec::with_capacity(3);
+        let mut verify_releases = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let (gate, started, release) = application_gate();
+            verify_gates.lock().push_back(gate);
+            verify_started.push(started);
+            verify_releases.push(release);
+        }
         let (gate, finalize_started, finalize_release) = application_gate();
         assert!(
             finalize_gate.lock().replace(gate).is_none(),
@@ -1389,9 +1392,17 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 deferred.certify(block.context.round, block.digest()).await,
             ));
         }
-        verify_started
-            .await
-            .expect("multi-QMDB verification should reach the application gate");
+        for started in verify_started {
+            started
+                .await
+                .expect("multi-QMDB verification should reach the application gate");
+        }
+        for (_, certification) in &mut certifications {
+            assert!(
+                futures::poll!(certification).is_pending(),
+                "multi-QMDB certification completed before finalization",
+            );
+        }
 
         let finalized_tip = &blocks[2];
         let _ = deferred.report(marshal::Update::Tip(
@@ -1411,8 +1422,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             .await
             .expect("first multi-QMDB finalization should reach the application gate");
         assert!(
-            !verify_release.is_closed(),
-            "the first finalization should retain descendant verification",
+            verify_releases.iter().all(|release| !release.is_closed()),
+            "the first finalization should retain descendant verifications",
         );
 
         // The next finalization must quiesce compatible verification before
@@ -1426,14 +1437,15 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             finalizations.push(waiter);
         }
 
-        let mut verify_release = verify_release;
         select! {
-            _ = verify_release.closed() => {},
+            _ = futures::future::join_all(
+                verify_releases.iter_mut().map(|release| release.closed()),
+            ) => {},
             _ = context.sleep(Duration::from_secs(1)) => {
-                panic!("queued finalization did not quiesce retained multi-QMDB verification");
+                panic!("queued finalization did not quiesce retained multi-QMDB verifications");
             },
         }
-        drop(verify_release);
+        drop(verify_releases);
         finalize_release
             .send(())
             .expect("first multi-QMDB finalization should remain active");
