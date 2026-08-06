@@ -54,7 +54,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    ///
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let max_message_size = cfg.max_message_size.get();
         let max_frame_size: AtMost<NonZeroU32, STREAM_MAX_SIZE> = (max_message_size

@@ -63,13 +63,13 @@ const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
 /// Number of nodes supported by the fuzz harness.
-pub type NodeCount = AtMost<NonZeroU32, 21>;
+pub type Nodes = AtMost<NonZeroU32, 21>;
 
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Configuration {
     /// Total number of nodes.
-    n: NodeCount,
+    n: Nodes,
     /// Number of faulty (Byzantine) nodes.
     faults: AtMost<u32, 21>,
     /// Number of correct (honest) nodes.
@@ -82,7 +82,7 @@ impl Configuration {
     /// # Panics
     ///
     /// Panics if `faults` exceeds `n` or if `faults + correct` does not equal `n`.
-    pub const fn new(n: NodeCount, faults: AtMost<u32, 21>, correct: AtMost<u32, 21>) -> Self {
+    pub const fn new(n: Nodes, faults: AtMost<u32, 21>, correct: AtMost<u32, 21>) -> Self {
         let node_count = n.get();
         let fault_count = faults.get();
         let correct_count = correct.get();
@@ -95,7 +95,7 @@ impl Configuration {
     }
 
     /// Returns the total number of nodes.
-    pub const fn n(&self) -> NodeCount {
+    pub const fn n(&self) -> Nodes {
         self.n
     }
 

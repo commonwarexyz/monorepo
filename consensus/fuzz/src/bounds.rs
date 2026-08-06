@@ -3,7 +3,7 @@
 //! These values serve as regression protection - if the upstream `N3f1`
 //! implementation is accidentally modified, assertions here will catch it.
 
-use crate::NodeCount;
+use crate::Nodes;
 
 /// Hardcoded max_faults values for n=1..=21.
 ///
@@ -60,13 +60,13 @@ const QUORUM: [u32; 21] = [
 ];
 
 /// Returns the maximum faults for n participants using hardcoded values.
-pub fn max_faults(n: NodeCount) -> u32 {
+pub fn max_faults(n: Nodes) -> u32 {
     let n = n.get();
     MAX_FAULTS[(n - 1) as usize]
 }
 
 /// Returns the quorum size for n participants using hardcoded values.
-pub fn quorum(n: NodeCount) -> u32 {
+pub fn quorum(n: Nodes) -> u32 {
     let n = n.get();
     QUORUM[(n - 1) as usize]
 }
