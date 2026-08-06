@@ -1561,6 +1561,7 @@ where
             }
         }
         drop(winner_of);
+        drop(slots);
 
         // Locations are unique after last-write-wins dedup (each key resolves to exactly one
         // location, committed or ancestor), so the parallel sort is deterministic. Sorting
