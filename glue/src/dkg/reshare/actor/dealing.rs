@@ -303,8 +303,7 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, AtMost, NZU16, NZU32, NZU64, NZUsize, acknowledgement::Exact,
-        ordered::Set,
+        Acknowledgement, AtMost, NZU16, NZU32, NZU64, NZUsize, acknowledgement::Exact, ordered::Set,
     };
     use std::{
         collections::VecDeque,

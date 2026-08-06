@@ -1088,10 +1088,8 @@ mod tests {
 
     #[test]
     fn max_message_size_is_validated_before_building() {
-        type MessageSize = commonware_utils::AtMost<
-            std::num::NonZeroU32,
-            { commonware_p2p::simulated::MAX_SIZE },
-        >;
+        type MessageSize =
+            commonware_utils::AtMost<std::num::NonZeroU32, { commonware_p2p::simulated::MAX_SIZE }>;
 
         assert!(MessageSize::try_from(0).is_err());
         assert!(MessageSize::try_from(commonware_p2p::simulated::MAX_SIZE + 1).is_err());

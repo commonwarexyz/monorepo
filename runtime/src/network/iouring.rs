@@ -619,8 +619,8 @@ mod tests {
         type ReadBufferSize = AtMost<usize, { u32::MAX }>;
 
         let zero = ReadBufferSize::try_from(0).unwrap();
-        let maximum = ReadBufferSize::try_from(usize::try_from(u32::MAX).unwrap_or(usize::MAX))
-            .unwrap();
+        let maximum =
+            ReadBufferSize::try_from(usize::try_from(u32::MAX).unwrap_or(usize::MAX)).unwrap();
 
         if let Ok(too_large) = usize::try_from(u64::from(u32::MAX) + 1) {
             assert!(ReadBufferSize::try_from(too_large).is_err());

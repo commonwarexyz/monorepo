@@ -101,8 +101,7 @@ mod tests {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, AtMost, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng,
-        acknowledgement::Exact,
-        ordered::Set,
+        acknowledgement::Exact, ordered::Set,
     };
     use std::{sync::Arc, time::Duration};
 
