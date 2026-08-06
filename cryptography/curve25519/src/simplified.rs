@@ -730,6 +730,7 @@ impl GAffineVec {
     }
 
     /// Untransposes backend lanes into scalar affine points.
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub(crate) fn untranspose(self) -> [GAffine; LANES] {
         let x = self.x.untranspose();
         let y = self.y.untranspose();
@@ -835,6 +836,9 @@ pub(crate) trait WithBackend {
 // Now, a module for each backend.
 #[cfg(target_arch = "x86_64")]
 mod avx512;
+#[cfg(target_arch = "aarch64")]
+mod neon;
+#[cfg(any(test, not(target_arch = "aarch64")))]
 mod portable;
 #[cfg(test)]
 mod test;
@@ -872,11 +876,36 @@ fn test_avx512_against_portable() {
     });
 }
 
+#[cfg(all(test, target_arch = "aarch64"))]
+#[test]
+fn test_neon() {
+    // The fully inlined NEON group formulas need more than the test harness's default stack in
+    // unoptimized builds.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            commonware_invariants::minifuzz::test(|u| test::fuzz_backend(u, neon::Backend::new()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+#[test]
+fn test_neon_against_portable() {
+    let backend = neon::Backend::new();
+    test::check_backend_at_bounds(portable::Backend::new(), backend);
+    commonware_invariants::minifuzz::test(|u| {
+        test::fuzz_backend_against(u, portable::Backend::new(), backend)
+    });
+}
+
 /// Run a computation with the best [`Backend`] this CPU supports.
 ///
-/// This is the only way to gain access to a backend: the runtime feature
-/// detection here is what justifies constructing the accelerated backends,
-/// so every use is forced through this single gate.
+/// This is the only way to gain access to a backend. AVX-512 requires runtime feature detection;
+/// AArch64 includes NEON in its baseline ISA. Every use is forced through this single gate so an
+/// accelerated backend is only constructed where its instructions are guaranteed to be available.
 pub(crate) fn with_backend<F: WithBackend>(f: F) -> F::Output {
     #[cfg(target_arch = "x86_64")]
     {
@@ -886,6 +915,14 @@ pub(crate) fn with_backend<F: WithBackend>(f: F) -> F::Output {
             return unsafe { backend.call(f) };
         }
     }
-    // Portable fallback, available everywhere.
-    f.call(portable::Backend::new())
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NEON is part of the AArch64 baseline, so no runtime feature check is needed.
+        f.call(neon::Backend::new())
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // Portable fallback, available everywhere.
+        f.call(portable::Backend::new())
+    }
 }

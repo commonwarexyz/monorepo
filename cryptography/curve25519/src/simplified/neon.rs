@@ -1,4 +1,10 @@
 //! The Arm NEON backend: two lanes of an [`super::FVec`] limb row per 128-bit register.
+//!
+//! The generic field kernels stay entirely in NEON. A scalar-plus-NEON design only becomes useful
+//! when independent operations are scheduled across a complete point formula; dividing one
+//! [`super::FVec`] operation between both domains adds setup and synchronization costs on Apple
+//! M-series CPUs. Products split radix-`2^51` limbs into alternating 26/25-bit digits only while
+//! multiplying, keeping the surrounding group formulas in their compact five-limb representation.
 
 use super::{F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES};
 use core::arch::aarch64::*;
@@ -68,23 +74,44 @@ fn store(regs: Regs, limbs: &mut [[u64; LANES]; 5], tile: usize) {
 /// # Correctness
 ///
 /// `z` must be less than `2^59` per lane so the shifts do not discard significant bits.
+///
+/// The explicit instruction sequence prevents LLVM from recognizing a packed `u64` multiplication
+/// and scalarizing it through general-purpose registers. NEON has no packed `u64` multiply, while
+/// these shifts and additions stay in vector registers and measured better on Apple M-series CPUs.
 #[inline(always)]
 fn mul19(z: uint64x2_t) -> uint64x2_t {
-    // SAFETY: AArch64 targets provide NEON.
-    unsafe { vaddq_u64(vaddq_u64(vshlq_n_u64(z, 4), vshlq_n_u64(z, 1)), z) }
+    #[cfg(miri)]
+    {
+        // Miri cannot execute inline assembly, so use equivalent intrinsics for semantic coverage.
+        // SAFETY: AArch64 targets provide NEON.
+        unsafe { vaddq_u64(vaddq_u64(vshlq_n_u64(z, 4), vshlq_n_u64(z, 1)), z) }
+    }
+    #[cfg(not(miri))]
+    {
+        let result;
+        // SAFETY: AArch64 targets provide NEON. The instructions only read their register input,
+        // write their register outputs, and preserve the bounds documented above.
+        unsafe {
+            core::arch::asm!(
+                "shl {doubled:v}.2d, {z:v}.2d, #1",
+                "shl {times16:v}.2d, {z:v}.2d, #4",
+                "add {doubled:v}.2d, {doubled:v}.2d, {times16:v}.2d",
+                "add {result:v}.2d, {doubled:v}.2d, {z:v}.2d",
+                z = in(vreg) z,
+                doubled = out(vreg) _,
+                times16 = out(vreg) _,
+                result = lateout(vreg) result,
+                options(pure, nomem, nostack),
+            );
+        }
+        result
+    }
 }
 
 #[derive(Clone, Copy)]
 struct Pair {
     lo: uint32x2_t,
     hi: uint32x2_t,
-}
-
-#[derive(Clone, Copy)]
-struct Triple {
-    p0: uint64x2_t,
-    p1: uint64x2_t,
-    p2: uint64x2_t,
 }
 
 #[inline(always)]
@@ -114,65 +141,6 @@ fn split_pairs(a: Regs) -> [Pair; 5] {
                 hi: vshrn_n_u64(a[4], 26),
             },
         ]
-    }
-}
-
-/// Computes the three base-`2^26` coefficients with four widening products.
-#[inline(always)]
-fn triple_product(a: Pair, b: Pair) -> Triple {
-    // SAFETY: AArch64 targets provide NEON. Pair components are below `2^27`, so every
-    // product and the sum of the two middle products fit in `u64`.
-    unsafe {
-        Triple {
-            p0: vmull_u32(a.lo, b.lo),
-            p1: vaddq_u64(vmull_u32(a.lo, b.hi), vmull_u32(a.hi, b.lo)),
-            p2: vmull_u32(a.hi, b.hi),
-        }
-    }
-}
-
-#[inline(always)]
-fn triple_square(a: Pair) -> Triple {
-    // SAFETY: AArch64 targets provide NEON, and all coefficients fit in `u64`.
-    unsafe {
-        Triple {
-            p0: vmull_u32(a.lo, a.lo),
-            p1: vshlq_n_u64(vmull_u32(a.lo, a.hi), 1),
-            p2: vmull_u32(a.hi, a.hi),
-        }
-    }
-}
-
-#[inline(always)]
-fn triple_add(a: Triple, b: Triple) -> Triple {
-    // SAFETY: AArch64 targets provide NEON, and the caller-maintained bounds fit in `u64`.
-    unsafe {
-        Triple {
-            p0: vaddq_u64(a.p0, b.p0),
-            p1: vaddq_u64(a.p1, b.p1),
-            p2: vaddq_u64(a.p2, b.p2),
-        }
-    }
-}
-
-#[inline(always)]
-fn triple_double(a: Triple) -> Triple {
-    // SAFETY: AArch64 targets provide NEON, and the doubled coefficients fit in `u64`.
-    unsafe {
-        Triple {
-            p0: vshlq_n_u64(a.p0, 1),
-            p1: vshlq_n_u64(a.p1, 1),
-            p2: vshlq_n_u64(a.p2, 1),
-        }
-    }
-}
-
-#[inline(always)]
-fn triple_mul19(a: Triple) -> Triple {
-    Triple {
-        p0: mul19(a.p0),
-        p1: mul19(a.p1),
-        p2: mul19(a.p2),
     }
 }
 
@@ -224,7 +192,10 @@ fn reduce_columns(mut c: [uint64x2_t; 10]) -> Regs {
         c[7] = vandq_u64(c[7], mask25);
         c[9] = vaddq_u64(c[9], vshrq_n_u64(c[8], 26));
         c[8] = vandq_u64(c[8], mask26);
-        c[0] = vaddq_u64(c[0], mul19(vshrq_n_u64(c[9], 25)));
+        // The multiplication column bounds keep this carry below `2^31`, so narrowing is lossless
+        // and enables one widening multiply instead of the longer packed-u64 shift/add sequence.
+        let top = vmovn_u64(vshrq_n_u64(c[9], 25));
+        c[0] = vaddq_u64(c[0], vmull_n_u32(top, 19));
         c[9] = vandq_u64(c[9], mask25);
         c[1] = vaddq_u64(c[1], vshrq_n_u64(c[0], 26));
         c[0] = vandq_u64(c[0], mask26);
@@ -235,27 +206,6 @@ fn reduce_columns(mut c: [uint64x2_t; 10]) -> Regs {
             vorrq_u64(c[6], vshlq_n_u64(c[7], 26)),
             vorrq_u64(c[8], vshlq_n_u64(c[9], 26)),
         ]
-    }
-}
-
-#[inline(always)]
-fn reduce_triples(c: [Triple; 5]) -> Regs {
-    // The top coefficient of limb k is worth twice the low coefficient of limb k+1 because
-    // `2^52 = 2*2^51`. Limb 4's top coefficient wraps modulo `2^255-19`.
-    // SAFETY: AArch64 targets provide NEON, and all additions remain below `2^63`.
-    unsafe {
-        reduce_columns([
-            vaddq_u64(c[0].p0, vshlq_n_u64(mul19(c[4].p2), 1)),
-            c[0].p1,
-            vaddq_u64(c[1].p0, vshlq_n_u64(c[0].p2, 1)),
-            c[1].p1,
-            vaddq_u64(c[2].p0, vshlq_n_u64(c[1].p2, 1)),
-            c[2].p1,
-            vaddq_u64(c[3].p0, vshlq_n_u64(c[2].p2, 1)),
-            c[3].p1,
-            vaddq_u64(c[4].p0, vshlq_n_u64(c[3].p2, 1)),
-            c[4].p1,
-        ])
     }
 }
 
@@ -386,37 +336,120 @@ fn mul_regs(a: Regs, b: Regs) -> Regs {
     reduce_columns([c0, c1, c2, c3, c4, c5, c6, c7, c8, c9])
 }
 
+/// Accumulates one term of a direct ten-digit square.
+#[inline(always)]
+fn square_column_mac<const COLUMN: usize, const SCALE: u32, const DOUBLE: bool>(
+    c: &mut [uint64x2_t; 10],
+    a: uint32x2_t,
+    b: uint32x2_t,
+) {
+    // SAFETY: AArch64 targets provide NEON. Every call uses a column below ten and a scale in
+    // {1, 2, 4, 19, 38}. A 26-bit digit scaled by at most 38 fits in `u32`; the doubled products
+    // and accumulated columns fit under the bounds documented by `square_regs`.
+    unsafe {
+        let b = match SCALE {
+            1 => b,
+            2 => vshl_n_u32(b, 1),
+            4 => vshl_n_u32(b, 2),
+            19 => digit_times19(b),
+            38 => vshl_n_u32(digit_times19(b), 1),
+            _ => unreachable!(),
+        };
+        let mut product = vmull_u32(a, b);
+        if DOUBLE {
+            product = vshlq_n_u64(product, 1);
+        }
+        c[COLUMN] = vaddq_u64(c[COLUMN], product);
+    }
+}
+
+/// Squares directly in the alternating 26/25-bit digit basis.
+///
+/// The coefficient of each distinct pair is doubled. A pair of odd-numbered digits gains another
+/// factor of two because their radix exponents sum one bit above the corresponding even digit,
+/// and terms beyond digit nine fold by `2^255 = 19`. Scales of 76 are represented as a 38-scaled
+/// `u32` operand followed by a doubled `u64` product. Every column is bounded by the corresponding
+/// general-multiplication column, at worst `267 * (2^26 - 1)^2 < 2^61`.
+///
+/// Keeping the 55 products explicit is deliberate: coefficients are applied while digits are
+/// still `u32`, avoiding packed-`u64` constant multiplications that LLVM scalarizes on Apple
+/// targets, while the independent columns expose enough instruction-level parallelism.
 #[inline(always)]
 fn square_regs(a: Regs) -> Regs {
-    let a = split_pairs(a);
-    let d0 = triple_square(a[0]);
-    let d1 = triple_square(a[1]);
-    let d2 = triple_square(a[2]);
-    let d3 = triple_square(a[3]);
-    let d4 = triple_square(a[4]);
-    let s01 = triple_product(a[0], a[1]);
-    let s02 = triple_product(a[0], a[2]);
-    let s03 = triple_product(a[0], a[3]);
-    let s04 = triple_product(a[0], a[4]);
-    let s12 = triple_product(a[1], a[2]);
-    let s13 = triple_product(a[1], a[3]);
-    let s14 = triple_product(a[1], a[4]);
-    let s23 = triple_product(a[2], a[3]);
-    let s24 = triple_product(a[2], a[4]);
-    let s34 = triple_product(a[3], a[4]);
-    reduce_triples([
-        triple_add(d0, triple_mul19(triple_double(triple_add(s14, s23)))),
-        triple_add(
-            triple_double(s01),
-            triple_mul19(triple_add(triple_double(s24), d3)),
-        ),
-        triple_add(
-            triple_add(triple_double(s02), d1),
-            triple_mul19(triple_double(s34)),
-        ),
-        triple_add(triple_double(triple_add(s03, s12)), triple_mul19(d4)),
-        triple_add(triple_double(triple_add(s04, s13)), d2),
-    ])
+    let pairs = split_pairs(a);
+    let x = [
+        pairs[0].lo,
+        pairs[0].hi,
+        pairs[1].lo,
+        pairs[1].hi,
+        pairs[2].lo,
+        pairs[2].hi,
+        pairs[3].lo,
+        pairs[3].hi,
+        pairs[4].lo,
+        pairs[4].hi,
+    ];
+    // SAFETY: AArch64 targets provide NEON.
+    let zero = unsafe { vdupq_n_u64(0) };
+    let mut c = [zero; 10];
+
+    square_column_mac::<0, 1, false>(&mut c, x[0], x[0]);
+    square_column_mac::<1, 2, false>(&mut c, x[0], x[1]);
+    square_column_mac::<2, 2, false>(&mut c, x[0], x[2]);
+    square_column_mac::<3, 2, false>(&mut c, x[0], x[3]);
+    square_column_mac::<4, 2, false>(&mut c, x[0], x[4]);
+    square_column_mac::<5, 2, false>(&mut c, x[0], x[5]);
+    square_column_mac::<6, 2, false>(&mut c, x[0], x[6]);
+    square_column_mac::<7, 2, false>(&mut c, x[0], x[7]);
+    square_column_mac::<8, 2, false>(&mut c, x[0], x[8]);
+    square_column_mac::<9, 2, false>(&mut c, x[0], x[9]);
+    square_column_mac::<2, 2, false>(&mut c, x[1], x[1]);
+    square_column_mac::<3, 2, false>(&mut c, x[1], x[2]);
+    square_column_mac::<4, 4, false>(&mut c, x[1], x[3]);
+    square_column_mac::<5, 2, false>(&mut c, x[1], x[4]);
+    square_column_mac::<6, 4, false>(&mut c, x[1], x[5]);
+    square_column_mac::<7, 2, false>(&mut c, x[1], x[6]);
+    square_column_mac::<8, 4, false>(&mut c, x[1], x[7]);
+    square_column_mac::<9, 2, false>(&mut c, x[1], x[8]);
+    square_column_mac::<0, 38, true>(&mut c, x[1], x[9]);
+    square_column_mac::<4, 1, false>(&mut c, x[2], x[2]);
+    square_column_mac::<5, 2, false>(&mut c, x[2], x[3]);
+    square_column_mac::<6, 2, false>(&mut c, x[2], x[4]);
+    square_column_mac::<7, 2, false>(&mut c, x[2], x[5]);
+    square_column_mac::<8, 2, false>(&mut c, x[2], x[6]);
+    square_column_mac::<9, 2, false>(&mut c, x[2], x[7]);
+    square_column_mac::<0, 38, false>(&mut c, x[2], x[8]);
+    square_column_mac::<1, 38, false>(&mut c, x[2], x[9]);
+    square_column_mac::<6, 2, false>(&mut c, x[3], x[3]);
+    square_column_mac::<7, 2, false>(&mut c, x[3], x[4]);
+    square_column_mac::<8, 4, false>(&mut c, x[3], x[5]);
+    square_column_mac::<9, 2, false>(&mut c, x[3], x[6]);
+    square_column_mac::<0, 38, true>(&mut c, x[3], x[7]);
+    square_column_mac::<1, 38, false>(&mut c, x[3], x[8]);
+    square_column_mac::<2, 38, true>(&mut c, x[3], x[9]);
+    square_column_mac::<8, 1, false>(&mut c, x[4], x[4]);
+    square_column_mac::<9, 2, false>(&mut c, x[4], x[5]);
+    square_column_mac::<0, 38, false>(&mut c, x[4], x[6]);
+    square_column_mac::<1, 38, false>(&mut c, x[4], x[7]);
+    square_column_mac::<2, 38, false>(&mut c, x[4], x[8]);
+    square_column_mac::<3, 38, false>(&mut c, x[4], x[9]);
+    square_column_mac::<0, 38, false>(&mut c, x[5], x[5]);
+    square_column_mac::<1, 38, false>(&mut c, x[5], x[6]);
+    square_column_mac::<2, 38, true>(&mut c, x[5], x[7]);
+    square_column_mac::<3, 38, false>(&mut c, x[5], x[8]);
+    square_column_mac::<4, 38, true>(&mut c, x[5], x[9]);
+    square_column_mac::<2, 19, false>(&mut c, x[6], x[6]);
+    square_column_mac::<3, 38, false>(&mut c, x[6], x[7]);
+    square_column_mac::<4, 38, false>(&mut c, x[6], x[8]);
+    square_column_mac::<5, 38, false>(&mut c, x[6], x[9]);
+    square_column_mac::<4, 38, false>(&mut c, x[7], x[7]);
+    square_column_mac::<5, 38, false>(&mut c, x[7], x[8]);
+    square_column_mac::<6, 38, true>(&mut c, x[7], x[9]);
+    square_column_mac::<6, 19, false>(&mut c, x[8], x[8]);
+    square_column_mac::<7, 38, false>(&mut c, x[8], x[9]);
+    square_column_mac::<8, 38, false>(&mut c, x[9], x[9]);
+
+    reduce_columns(c)
 }
 
 /// Reduces each radix-`2^51` lane with one parallel carry pass.
