@@ -28,7 +28,6 @@ use commonware_runtime::{
 use commonware_utils::{
     channel::fallible::OneshotExt, ordered::Quorum, sequence::U64, vec::NonEmptyVec,
 };
-use rand::RngExt as _;
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -455,38 +454,29 @@ impl<
             .map(|(_, nullification)| nullification)
     }
 
-    /// Selects a certificate to serve for `view`.
+    /// Selects the best certificate to serve for `view`.
     ///
-    /// The request does not say which certificate it wants, so when both a
-    /// certified notarization and a covering nullification are held either may
-    /// be the one the requester needs. The choice is random: a fixed preference
-    /// would answer every retry from a requester wanting the other
-    /// kind with the same useless certificate. A notarization awaiting its
-    /// verdict is never served.
-    fn produce_certificate(&mut self, view: View) -> Option<Bytes> {
+    /// A notarization is served only after successful certification. Pending
+    /// and failed notarizations are never served.
+    fn produce_certificate(&self, view: View) -> Option<Bytes> {
         // A finalization settles either kind, so weaker evidence would only
         // delay the requester.
         if let Some(certificate @ Certificate::Finalization(_)) = self.state.get(view) {
             return Some(certificate.encode());
         }
 
-        // Clone the cheap `Bytes` handles so random selection can mutably use
-        // the actor's context without retaining borrows into either cache.
-        let notarization = self.certified_notarizations.get(&view).cloned();
-        let nullification = self.covering_nullification(view).cloned();
-        match (notarization, nullification) {
-            (Some(notarization), Some(nullification)) => {
-                Some(if self.context.random_range(0..2) == 0 {
-                    notarization
-                } else {
-                    nullification
-                })
-            }
-            (Some(certificate), None) | (None, Some(certificate)) => Some(certificate),
-            // Either cached response also serves ordinary backfill, so the floor
-            // adds no response the requester could not already have.
-            (None, None) => self.state.get(view).map(|certificate| certificate.encode()),
+        // Follow the proposal-parent hierarchy. An honest proposer builds on a
+        // nullification only when it has no certified notarization to use.
+        if let Some(notarization) = self.certified_notarizations.get(&view) {
+            return Some(notarization.clone());
         }
+        if let Some(nullification) = self.covering_nullification(view) {
+            return Some(nullification.clone());
+        }
+
+        // Cached ancestry also serves ordinary backfill. Only fall back to the
+        // resolver floor when no retained ancestry is available.
+        self.state.get(view).map(|certificate| certificate.encode())
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
@@ -1391,7 +1381,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn concurrent_kindless_retries_serve_required_ancestry() {
+    async fn certified_notarization_is_preferred_over_covering_nullification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1419,28 +1409,20 @@ mod tests {
             );
             responder.certified(&mut responder_resolver, floor, true);
 
-            let mut first_saw_nullification = false;
-            let mut second_saw_parent = false;
-            for _ in 0..32 {
-                // Interleave two requesters so a shared two-class rotation
-                // would pin each one to the evidence needed by the other.
-                first_saw_nullification |= responder
-                    .produce_certificate(requested)
-                    .expect("responder has ancestry")
-                    == expected_nullification;
-                second_saw_parent |= responder
-                    .produce_certificate(requested)
-                    .expect("responder has ancestry")
-                    == expected_parent;
-            }
-
-            assert!(
-                first_saw_nullification,
-                "first requester stayed pinned to the exact parent"
+            assert_eq!(
+                responder.covering_nullification(requested),
+                Some(&expected_nullification)
             );
-            assert!(
-                second_saw_parent,
-                "second requester stayed pinned to the nullification"
+            assert_eq!(
+                responder.certified_notarizations.get(&requested),
+                Some(&expected_parent)
+            );
+
+            // A certified notarization is the preferred proposal parent, so it
+            // is the best certificate while both remain available.
+            assert_eq!(
+                responder.produce_certificate(requested),
+                Some(expected_parent)
             );
         });
     }
