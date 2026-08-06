@@ -206,13 +206,8 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         }
     }
 
-    /// Share the current tip. Prior handles stay valid when a persist installs a new tip.
-    pub(crate) fn tip(&self) -> Arc<Tip<F, Op, D>> {
-        Arc::clone(&self.tip)
-    }
-
-    /// Borrow the current tip.
-    pub(crate) fn tip_ref(&self) -> &Tip<F, Op, D> {
+    /// The current tip.
+    pub(crate) const fn tip(&self) -> &Arc<Tip<F, Op, D>> {
         &self.tip
     }
 
@@ -524,8 +519,8 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
     }
 }
 
-/// Install `op` as the Merkle's tip leaf and build the resulting tip, encoding `op`
-/// exactly once. The Merkle is pruned to its frontier afterward.
+/// Append `op` as the Merkle's final leaf, build the resulting [`Tip`], and prune the Merkle
+/// to its frontier.
 ///
 /// Returns [`Error::DataCorrupted`] if `op` is not a commit.
 pub(crate) fn import_tip<F, H, S, Op>(

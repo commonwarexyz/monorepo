@@ -997,9 +997,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let mem = Arc::clone(&self.mem);
         Ok((self, Snapshot { mem, flushed }))
     }
-}
 
-impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return an inclusion proof for the element at the location `loc` against a historical
     /// state with `leaves` leaves.
     ///
