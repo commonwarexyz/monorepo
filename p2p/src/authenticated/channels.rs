@@ -251,6 +251,8 @@ mod tests {
             let inbound = channels.receivers.get(&1).unwrap().1.clone();
             let peer = PrivateKey::from_seed(1).public_key();
 
+            // Two peers can each contribute a two-message quota burst. Overflow leaves the four
+            // accepted messages queued.
             for _ in 0..4 {
                 assert!(
                     inbound
@@ -278,6 +280,7 @@ mod tests {
             let _ = channels.register(1, quota, context.child("first"));
             let _ = channels.register(2, quota, context.child("second"));
 
+            // Two units of base headroom plus two channels with four slots each.
             assert_eq!(channels.outbound_mailbox_size(NZUsize!(2)), NZUsize!(10));
         });
     }

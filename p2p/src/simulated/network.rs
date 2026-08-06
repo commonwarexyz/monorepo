@@ -254,10 +254,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// This is a convenience for test setups that would otherwise call
     /// [`crate::Manager::track`] immediately after construction.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the initial peer set contains more than [`Config::max_peers`] distinct identities.
     pub async fn new_with_peers<I>(context: E, cfg: Config, peers: I) -> (Self, Oracle<P, E>)
     where
         I: IntoIterator<Item = P>,
@@ -269,11 +265,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Peers are tracked at peer set ID `0` as [`TrackedPeers`], matching the most common test
     /// setup.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the initial primary and secondary peer sets contain more than
-    /// [`Config::max_peers`] distinct identities in total.
     pub async fn new_with_split_peers<I, J>(
         context: E,
         cfg: Config,
@@ -394,6 +385,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
         }
 
+        // Enforce the configured maximum over all retained peer identities.
         let peer_count = self.peer_ref_counts.len();
         assert!(
             peer_count <= self.max_peers.get(),
@@ -1742,6 +1734,8 @@ mod tests {
             let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
             let peer_3 = ed25519::PrivateKey::from_seed(3).public_key();
 
+            // The second retained set overlaps on one identity, increasing the union from two to
+            // three.
             assert!(
                 network
                     .register_tracked_peer_set(
@@ -1779,6 +1773,8 @@ mod tests {
             let peer_1 = ed25519::PrivateKey::from_seed(1).public_key();
             let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
 
+            // Within a set, a primary identity is not also counted as secondary. Across retained
+            // sets, each identity may still hold one reference in each role.
             assert!(
                 network
                     .register_tracked_peer_set(
@@ -1828,6 +1824,8 @@ mod tests {
             let new_primary = ed25519::PrivateKey::from_seed(3).public_key();
             let new_secondary = ed25519::PrivateKey::from_seed(4).public_key();
 
+            // With one retained set, the replacement evicts both old identities before enforcing
+            // the limit.
             assert!(
                 network
                     .register_tracked_peer_set(

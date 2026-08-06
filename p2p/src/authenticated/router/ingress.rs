@@ -77,7 +77,7 @@ impl<P: PublicKey> Mailbox<P> {
 
     /// Notify the router that a peer is ready to communicate.
     ///
-    /// Returns `None` if the router rejects the peer or has shut down.
+    /// Returns `None` if the router has shut down.
     pub async fn ready(&self, peer: P, relay: Relay<EncodedData>) -> Option<Channels<P>> {
         let (channels, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Ready {
@@ -100,33 +100,37 @@ impl<P: PublicKey> Mailbox<P> {
     }
 }
 
-/// Sends messages containing content to the router to send to peers.
+// The router mailbox is created after channel registration determines its capacity.
+// Retain subscriptions made before then so binding can forward them.
 struct MessengerState<P: PublicKey> {
     mailbox: OnceLock<Mailbox<P>>,
-    subscriptions: Mutex<Vec<ring::Sender<Vec<P>>>>,
+    pending_subscriptions: Mutex<Vec<ring::Sender<Vec<P>>>>,
 }
 
 impl<P: PublicKey> MessengerState<P> {
     const fn new() -> Self {
         Self {
             mailbox: OnceLock::new(),
-            subscriptions: Mutex::new(Vec::new()),
+            pending_subscriptions: Mutex::new(Vec::new()),
         }
     }
 
     fn bind(&self, mailbox: Mailbox<P>) {
-        let mut subscriptions = self.subscriptions.lock();
+        // Publish the mailbox while holding this lock so each subscription is either
+        // drained here or observes the bound mailbox.
+        let mut pending_subscriptions = self.pending_subscriptions.lock();
         assert!(
             self.mailbox.set(mailbox).is_ok(),
             "router messenger already bound"
         );
         let mailbox = self.mailbox.get().unwrap();
-        for sender in subscriptions.drain(..) {
+        for sender in pending_subscriptions.drain(..) {
             let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
         }
     }
 }
 
+/// Sends messages containing content to the router to send to peers.
 #[derive(Clone)]
 pub struct Messenger<P: PublicKey> {
     pool: BufferPool,
@@ -198,12 +202,12 @@ impl<P: PublicKey> Connected for Messenger<P> {
             return receiver;
         }
 
-        let mut subscriptions = self.state.subscriptions.lock();
+        let mut pending_subscriptions = self.state.pending_subscriptions.lock();
         if let Some(mailbox) = self.state.mailbox.get() {
-            drop(subscriptions);
+            drop(pending_subscriptions);
             let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
         } else {
-            subscriptions.push(sender);
+            pending_subscriptions.push(sender);
         }
         receiver
     }

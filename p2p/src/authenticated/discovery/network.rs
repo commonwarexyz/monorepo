@@ -61,8 +61,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if [`Config::max_message_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`, or
-    /// if the number of distinct remote bootstrappers exceeds [`Config::max_peers`].
+    /// Panics if [`Config::max_message_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let max_frame_size = cfg
             .max_message_size
@@ -162,8 +161,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
-    /// Registered senders are bound to the outbound router during this call; submissions made
-    /// before it are accepted and dropped.
     pub fn start(mut self) -> Handle<()> {
         let (router, router_mailbox, _) = router::Actor::new(
             self.context.child("router"),
@@ -171,6 +168,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 mailbox_size: self.channels.outbound_mailbox_size(self.cfg.mailbox_size),
             },
         );
+        // Bind registered senders after sizing the outbound router mailbox.
+        // Submissions made before this point are accepted and dropped.
         self.channels.bind(router_mailbox.clone());
         spawn_cell!(self.context, self.run(router, router_mailbox))
     }

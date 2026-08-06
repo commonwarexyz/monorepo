@@ -97,17 +97,10 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                     relay,
                     channels,
                 } => {
-                    if self.connections.contains_key(&peer) {
-                        debug!(?peer, "rejecting duplicate ready peer");
-                    } else {
-                        debug!(?peer, "peer ready");
-                        assert!(self.connections.insert(peer.clone(), relay).is_none());
-                        if channels.send(routing.clone()).is_err() {
-                            self.connections.remove(&peer);
-                        } else {
-                            self.notify_subscribers();
-                        }
-                    }
+                    debug!(?peer, "peer ready");
+                    self.connections.insert(peer, relay);
+                    let _ = channels.send(routing.clone());
+                    self.notify_subscribers();
                 }
                 Message::Release { peer } => {
                     debug!(?peer, "peer released");
@@ -152,55 +145,9 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{
-        Signer as _,
-        ed25519::{PrivateKey, PublicKey},
-    };
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_cryptography::ed25519::PublicKey;
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::NZUsize;
-    use futures::FutureExt as _;
-
-    #[test]
-    fn rejects_duplicate_peers_and_rolls_back_canceled_ready() {
-        deterministic::Runner::default().start(|context| async move {
-            let (actor, mailbox, _) = Actor::<deterministic::Context, PublicKey>::new(
-                context.child("router"),
-                Config {
-                    mailbox_size: NZUsize!(4),
-                },
-            );
-            let routing = Channels::new(
-                Messenger::unbound(context.network_buffer_pool().clone()),
-                1024,
-                NZUsize!(1),
-            );
-            let abandoned = PrivateKey::from_seed(0).public_key();
-            let (relay, _) = Relay::new(context.child("abandoned"), NZUsize!(1));
-            assert!(
-                mailbox
-                    .ready(abandoned.clone(), relay)
-                    .now_or_never()
-                    .is_none()
-            );
-
-            let handle = actor.start(routing);
-            let first = abandoned;
-            let second = PrivateKey::from_seed(2).public_key();
-
-            let (relay, _) = Relay::new(context.child("first"), NZUsize!(1));
-            assert!(mailbox.ready(first.clone(), relay).await.is_some());
-
-            let (relay, _) = Relay::new(context.child("duplicate"), NZUsize!(1));
-            assert!(mailbox.ready(first.clone(), relay).await.is_none());
-
-            let (relay, _) = Relay::new(context.child("second"), NZUsize!(1));
-            assert!(mailbox.ready(second, relay).await.is_some());
-
-            let _ = mailbox.release(first);
-
-            handle.abort();
-        });
-    }
 
     #[test]
     fn subscribe_retains_only_open_initial_sender() {
