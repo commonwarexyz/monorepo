@@ -733,6 +733,19 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.create_round(view).set_proposal(proposal)
     }
 
+    /// Returns the ancestry fetch a verification error justifies, if any.
+    const fn resolve_ancestry(&self, err: &ParentPayloadError) -> Option<(View, Kind)> {
+        match err {
+            ParentPayloadError::MissingNullification { missing_view, .. } => {
+                Some((*missing_view, Kind::Nullification))
+            }
+            ParentPayloadError::ParentNotCertified { parent_view, .. } => {
+                Some((*parent_view, Kind::Notarization))
+            }
+            _ => None,
+        }
+    }
+
     /// Attempt to verify a proposed block.
     ///
     /// Missing ancestry is requested from the proposal's elected leader.
@@ -759,16 +772,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         "proposal exists but ancestry is not yet certified"
                     );
                 }
-                let (missing, kind) = match err {
-                    ParentPayloadError::MissingNullification { missing_view, .. } => {
-                        (missing_view, Kind::Nullification)
-                    }
-                    ParentPayloadError::ParentNotCertified { parent_view, .. } => {
-                        (parent_view, Kind::Notarization)
-                    }
-                    ParentPayloadError::ParentNotBeforeProposal { .. }
-                    | ParentPayloadError::IntraTermProposalSkipsViews { .. }
-                    | ParentPayloadError::ParentBeforeFinalized { .. } => return Verify::Wait,
+                let Some((missing, kind)) = self.resolve_ancestry(&err) else {
+                    return Verify::Wait;
                 };
                 if !self
                     .views
