@@ -717,7 +717,6 @@ impl EngineDefinition for MultiDbEngine {
             view_retention: ViewDelta::new(10),
             skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
-            fetch_concurrent: NZUsize!(3),
             forwarding: ForwardingPolicy::Disabled,
             track_historical_votes: false,
         };

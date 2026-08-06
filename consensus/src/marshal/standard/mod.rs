@@ -2243,7 +2243,6 @@ mod tests {
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(6),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_concurrent: NZUsize!(3),
                     forwarding: ForwardingPolicy::Disabled,
                     track_historical_votes: false,
                 },
@@ -3818,7 +3817,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn finalized(&self, _commitment: D) {}
+        fn retire(&self, _update: crate::marshal::core::Retirement<D>) {}
 
         fn send(&self, round: Round, block: Arc<B>, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));

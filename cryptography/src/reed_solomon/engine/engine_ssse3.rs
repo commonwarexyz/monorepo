@@ -33,8 +33,7 @@ impl Ssse3 {
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
-        cpufeatures::new!(has_ssse3_for_engine, "ssse3");
-        assert!(has_ssse3_for_engine::get());
+        assert!(super::cpu_features::ssse3());
 
         let mul128 = tables::get_mul128();
         let skew = tables::get_skew();

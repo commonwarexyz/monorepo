@@ -118,9 +118,6 @@ pub struct SimplexConfig<L> {
     /// Time to wait for a peer to respond to a resolver request.
     pub fetch_timeout: Duration,
 
-    /// Number of concurrent resolver requests.
-    pub fetch_concurrent: NonZeroUsize,
-
     /// Number of views behind the finalized tip to retain validator activity.
     pub view_retention: ViewDelta,
 
@@ -722,7 +719,6 @@ where
                 certification_timeout: self.simplex.certification_timeout,
                 timeout_retry: self.simplex.timeout_retry,
                 fetch_timeout: self.simplex.fetch_timeout,
-                fetch_concurrent: self.simplex.fetch_concurrent,
                 view_retention: self.simplex.view_retention,
                 skip_timeout: self.simplex.skip_timeout,
                 forwarding: self.simplex.forwarding,

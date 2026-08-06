@@ -75,7 +75,7 @@
 //!    +----------------------+
 //!    | AwaitingQuorum       |
 //!    | - leader known       |
-//!    | - leader's shard     |  <--- verified immediately on receipt
+//!    | - assigned shard     |  <--- verified immediately on receipt
 //!    |   verified eagerly   |
 //!    | - other shards       |  <--- buffered in pending_shards
 //!    |   buffered           |
@@ -86,8 +86,10 @@
 //!    +----------------------+
 //!    | Ready                |
 //!    | - checked shards     |
-//!    | (frozen; no new      |
-//!    |  shards accepted)    |
+//!    | - no new gossip      |
+//!    |   shards accepted    |
+//!    | - assigned shard may |
+//!    |   still arrive late  |
 //!    +----------------------+
 //!               |
 //!               | checked_shards.len() >= minimum_shards
@@ -115,11 +117,8 @@
 //! The engine enforces strict validation to prevent Byzantine attacks:
 //!
 //! - All shards MUST be sent by participants in the current epoch.
-//! - If the sender is the leader: the shard index MUST match the recipient's
-//!   participant index (for participants) or the leader's index (for
-//!   non-participants).
-//! - If the sender is not the leader: the shard index MUST match the sender's
-//!   participant index (each participant can only gossip their own shard).
+//! - Any participant may deliver the recipient's assigned shard.
+//! - Any participant may gossip its own shard.
 //! - All shards MUST pass cryptographic verification against the commitment.
 //! - Each shard index may only contribute ONE shard per commitment.
 //! - Sending a second shard for the same index with different data
@@ -131,11 +130,11 @@
 //! tracked in reconstruction state. Once a block is already reconstructed and
 //! cached, additional shards for that commitment are ignored.
 //!
-//! _If the leader is not yet known, shards are buffered in fixed-size per-peer
-//! queues until consensus signals either the leader via [`Mailbox::discovered`]
+//! _Before proposal context is known, shards are buffered in fixed-size per-peer
+//! queues until consensus signals the proposal via [`Mailbox::discovered`]
 //! or a notarization via [`Mailbox::notarized`]. A notarization activates
 //! reconstruction interest without a leader, so only sender-indexed gossip
-//! shards can be ingested. Assigned shard verification still requires leader
+//! shards can be ingested. Other shards remain buffered until proposal
 //! discovery._
 
 use super::{
@@ -144,9 +143,12 @@ use super::{
 };
 use crate::{
     Block, CertifiableBlock, Heightable,
-    marshal::coding::{
-        types::{CodedBlock, Shard},
-        validation::{ReconstructionError as InvariantError, validate_reconstruction},
+    marshal::{
+        coding::{
+            types::{CodedBlock, Shard},
+            validation::{ReconstructionError as InvariantError, validate_reconstruction},
+        },
+        core::Retirement,
     },
     types::{Epoch, Round, coding::Commitment},
 };
@@ -165,7 +167,7 @@ use commonware_p2p::{
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
-    telemetry::metrics::{GaugeExt, HistogramExt},
+    telemetry::metrics::HistogramExt,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -174,7 +176,7 @@ use commonware_utils::{
 };
 use rand_core::Rng;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -268,15 +270,169 @@ where
     pub peer_provider: D,
 }
 
-/// A cached reconstructed block and the consensus round that produced it.
-struct ReconstructedBlock<B, C, H>
+/// The data currently owned for a consensus commitment.
+enum CommitmentPhase<B, C, H, P>
 where
     B: Block,
     C: CodingScheme,
     H: Hasher,
+    P: PublicKey,
+{
+    /// Shards are still being accumulated or validated.
+    Reconstructing(ReconstructionState<P, C, H>),
+    /// The block is cached. Reconstruction state remains only while shard-specific
+    /// evidence may still arrive.
+    Cached {
+        block: Arc<CodedBlock<B, C, H>>,
+        reconstruction: Option<ReconstructionState<P, C, H>>,
+    },
+}
+
+/// The single lifecycle owner for a consensus commitment.
+///
+/// The observation round determines both retention and the epoch whose participant
+/// scheme classifies shards. Keeping it outside the phase prevents cached and
+/// reconstructing views of the same commitment from diverging.
+struct CommitmentRecord<B, C, H, P>
+where
+    B: Block,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
 {
     round: Round,
-    block: Arc<CodedBlock<B, C, H>>,
+    phase: CommitmentPhase<B, C, H, P>,
+    proposed: bool,
+}
+
+/// The current lifecycle status of a commitment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommitmentStatus {
+    /// No record exists for the commitment.
+    Absent,
+    /// The commitment is accumulating or validating shards.
+    Reconstructing,
+    /// The commitment has an available block.
+    Cached,
+}
+
+/// Why a commitment is eligible for retirement.
+#[derive(Clone, Copy)]
+enum RetirementReason {
+    /// Durable progress explicitly retired the commitment.
+    Exact,
+    /// The commitment's last observation is covered by the durable round floor.
+    Floor,
+}
+
+impl<B, C, H, P> CommitmentRecord<B, C, H, P>
+where
+    B: Block,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    /// Creates a record that is reconstructing a commitment observed at `round`.
+    const fn reconstructing(round: Round, reconstruction: ReconstructionState<P, C, H>) -> Self {
+        Self {
+            round,
+            phase: CommitmentPhase::Reconstructing(reconstruction),
+            proposed: false,
+        }
+    }
+
+    /// Creates a record for a block already available at `round`.
+    const fn cached(round: Round, block: Arc<CodedBlock<B, C, H>>) -> Self {
+        Self {
+            round,
+            phase: CommitmentPhase::Cached {
+                block,
+                reconstruction: None,
+            },
+            proposed: false,
+        }
+    }
+
+    /// Returns the latest valid observation round.
+    const fn round(&self) -> Round {
+        self.round
+    }
+
+    /// Ensures that `round` uses the epoch that owns this commitment record.
+    fn validate_epoch(&self, round: Round) -> Result<(), Epoch> {
+        let existing_epoch = self.round.epoch();
+        if existing_epoch != round.epoch() {
+            return Err(existing_epoch);
+        }
+        Ok(())
+    }
+
+    /// Records a same-epoch observation without moving the retention round backward.
+    fn observe(&mut self, round: Round) -> Result<(), Epoch> {
+        self.validate_epoch(round)?;
+        self.round = self.round.max(round);
+        Ok(())
+    }
+
+    /// Returns the cached block, if available.
+    const fn block(&self) -> Option<&Arc<CodedBlock<B, C, H>>> {
+        match &self.phase {
+            CommitmentPhase::Reconstructing(_) => None,
+            CommitmentPhase::Cached { block, .. } => Some(block),
+        }
+    }
+
+    /// Returns shard reconstruction state retained for the commitment, if any.
+    const fn reconstruction(&self) -> Option<&ReconstructionState<P, C, H>> {
+        match &self.phase {
+            CommitmentPhase::Reconstructing(reconstruction) => Some(reconstruction),
+            CommitmentPhase::Cached { reconstruction, .. } => reconstruction.as_ref(),
+        }
+    }
+
+    /// Returns mutable shard reconstruction state retained for the commitment, if any.
+    const fn reconstruction_mut(&mut self) -> Option<&mut ReconstructionState<P, C, H>> {
+        match &mut self.phase {
+            CommitmentPhase::Reconstructing(reconstruction) => Some(reconstruction),
+            CommitmentPhase::Cached { reconstruction, .. } => reconstruction.as_mut(),
+        }
+    }
+
+    /// Returns whether the local validator can satisfy its assigned-shard obligation.
+    fn is_assigned_shard_ready(&self) -> bool {
+        self.proposed
+            || self
+                .reconstruction()
+                .is_some_and(ReconstructionState::is_assigned_shard_verified)
+    }
+
+    /// Records that the local validator built and cached this commitment.
+    const fn mark_proposed(&mut self) {
+        self.proposed = true;
+    }
+
+    /// Caches `block` while preserving reconstruction state needed for shard readiness.
+    ///
+    /// If a block is already cached, retains and returns the existing instance.
+    fn install_block(&mut self, block: Arc<CodedBlock<B, C, H>>) -> Arc<CodedBlock<B, C, H>> {
+        let previous = std::mem::replace(
+            &mut self.phase,
+            CommitmentPhase::Cached {
+                block: Arc::clone(&block),
+                reconstruction: None,
+            },
+        );
+        self.phase = match previous {
+            CommitmentPhase::Reconstructing(reconstruction) => CommitmentPhase::Cached {
+                block: Arc::clone(&block),
+                reconstruction: Some(reconstruction),
+            },
+            cached @ CommitmentPhase::Cached { .. } => cached,
+        };
+        self.block()
+            .cloned()
+            .expect("installing a block must leave a cached phase")
+    }
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
@@ -317,8 +473,8 @@ where
     /// The strategy used for parallel shard verification.
     strategy: T,
 
-    /// A map of [`Commitment`]s to [`ReconstructionState`]s.
-    state: BTreeMap<Commitment, ReconstructionState<P, C, H>>,
+    /// The cache and reconstruction lifecycle for each observed [`Commitment`].
+    records: BTreeMap<Commitment, CommitmentRecord<B, C, H, P>>,
 
     /// Per-peer ring buffers for shards received before leader announcement.
     ///
@@ -342,18 +498,12 @@ where
     /// Capacity of the background receiver channel.
     background_channel_capacity: NonZeroUsize,
 
-    /// An ephemeral cache of reconstructed blocks, keyed by commitment.
-    ///
-    /// These blocks are evicted after a durability signal from the marshal.
-    reconstructed_blocks: BTreeMap<Commitment, ReconstructedBlock<B, C, H>>,
-
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
     ///
-    /// For participants, readiness is satisfied once the leader-delivered
-    /// shard for the local participant index has been verified. Block
-    /// reconstruction from peer gossip is tracked separately and does not
-    /// satisfy this readiness condition.
+    /// For participants, readiness is satisfied once the shard for the local
+    /// participant index has been verified. Reconstruction from peer gossip is
+    /// tracked separately and does not satisfy this readiness condition.
     ///
     /// Proposers are a special case: they satisfy readiness once their local
     /// proposal is cached because they already hold all shards.
@@ -395,14 +545,13 @@ where
                 shard_codec_cfg: config.shard_codec_cfg,
                 block_codec_cfg: config.block_codec_cfg,
                 strategy: config.strategy,
-                state: BTreeMap::new(),
+                records: BTreeMap::new(),
                 peer_buffers: BTreeMap::new(),
                 peer_buffer_size: config.peer_buffer_size,
                 peer_provider: config.peer_provider,
                 aggregate_peers: Set::default(),
                 latest_primary_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
-                reconstructed_blocks: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
                 metrics,
@@ -444,15 +593,6 @@ where
         select_loop! {
             self.context,
             on_start => {
-                let _ = self
-                    .metrics
-                    .reconstruction_states_count
-                    .try_set(self.state.len());
-                let _ = self
-                    .metrics
-                    .reconstructed_blocks_cache_count
-                    .try_set(self.reconstructed_blocks.len());
-
                 // Clean up closed subscriptions.
                 self.block_subscriptions.retain(|_, subscribers| {
                     subscribers.retain(|tx| !tx.is_closed());
@@ -502,14 +642,16 @@ where
                         response,
                     } => {
                         let block = self
-                            .reconstructed_blocks
+                            .records
                             .get(&commitment)
-                            .map(|entry| entry.block.clone());
+                            .and_then(CommitmentRecord::block)
+                            .cloned();
                         response.send_lossy(block);
                     }
                     Message::GetByDigest { digest, response } => {
-                        let block = self.reconstructed_blocks.values().find_map(|entry| {
-                            (entry.block.digest() == digest).then_some(entry.block.clone())
+                        let block = self.records.values().find_map(|record| {
+                            let block = record.block()?;
+                            (block.digest() == digest).then(|| Arc::clone(block))
                         });
                         response.send_lossy(block);
                     }
@@ -534,8 +676,8 @@ where
                             response,
                         );
                     }
-                    Message::Prune { through } => {
-                        self.prune(through);
+                    Message::Retire { update } => {
+                        self.retire(update);
                     }
                 }
             },
@@ -562,8 +704,10 @@ where
             return;
         }
 
-        if let Some(existing) = self.state.get(&commitment) {
-            let round = existing.round();
+        if let Some(record) = self.records.get(&commitment)
+            && let Some(existing) = record.reconstruction()
+        {
+            let round = record.round();
             let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
                 warn!(%commitment, "no scheme for epoch, ignoring shard");
                 return;
@@ -580,18 +724,18 @@ where
                     .try_into()
                     .expect("participant index impossibly out of bounds");
                 if shard.index() != expected_index {
-                    // A mismatched shard is invalid for a non-leader, but it may be
-                    // the assigned shard if this peer later turns out to be the leader.
-                    // Keep it buffered until the sender's role is known.
+                    // A mismatched shard may be assigned to us, but it cannot be
+                    // classified until consensus supplies the proposal context.
                     self.buffer_peer_shard(peer, shard);
                     return;
                 }
             }
 
             let state = self
-                .state
+                .records
                 .get_mut(&commitment)
-                .expect("state checked as present");
+                .and_then(CommitmentRecord::reconstruction_mut)
+                .expect("reconstruction checked as present");
             let progressed = state.on_network_shard(
                 peer,
                 shard,
@@ -609,18 +753,16 @@ where
     /// Returns whether an incoming network shard should still be processed.
     ///
     /// Shards for reconstructed commitments are normally ignored. The only
-    /// exception is the late leader-delivered shard for the assigned index,
-    /// which we still accept so we can notify readiness and gossip it to
-    /// slower peers.
+    /// exception is a late shard for the assigned index, which we still accept
+    /// so we can notify readiness and gossip it to slower peers.
     fn should_handle_network_shard(&self, commitment: Commitment) -> bool {
-        if self.reconstructed_blocks.contains_key(&commitment) {
-            // State can be populated without a leader when a notarization arrives
-            // before the leader announcement, or when our assigned shard was not
-            // verified. Keep handling shards until the leader-dependent state is
-            // complete.
-            return self
-                .state
-                .get(&commitment)
+        if let Some(record) = self.records.get(&commitment)
+            && record.block().is_some()
+        {
+            // State can be populated before our assigned shard is verified. Keep
+            // handling shards until that state is complete.
+            return record
+                .reconstruction()
                 .is_some_and(|s| !s.is_assigned_shard_verified());
         }
         true
@@ -638,13 +780,16 @@ where
         &mut self,
         commitment: Commitment,
     ) -> Result<Option<Arc<CodedBlock<B, C, H>>>, Error<C>> {
-        if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
-            return Ok(Some(entry.block.clone()));
-        }
-        let Some(state) = self.state.get_mut(&commitment) else {
+        let Some(record) = self.records.get_mut(&commitment) else {
             return Ok(None);
         };
-        let round = state.round();
+        if let Some(block) = record.block() {
+            return Ok(Some(Arc::clone(block)));
+        }
+        let round = record.round();
+        let state = record
+            .reconstruction_mut()
+            .expect("an uncached commitment record must be reconstructing");
         if state.checked_shards().len() < usize::from(commitment.config().minimum_shards.get()) {
             debug!(%commitment, "not enough checked shards to reconstruct block");
             return Ok(None);
@@ -693,7 +838,9 @@ where
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
-        let block = self.cache_block(round, Arc::new(CodedBlock::new_trusted(inner, commitment)));
+        let block = self
+            .cache_block(round, Arc::new(CodedBlock::new_trusted(inner, commitment)))
+            .expect("reconstruction uses its commitment record's epoch");
         self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
     }
@@ -706,18 +853,6 @@ where
         leader: P,
         round: Round,
     ) {
-        // A reconstructed block normally makes duplicate leader announcements
-        // redundant, unless notarized recovery created leaderless state first.
-        // In that case, the leader announcement must still populate the
-        // leader-dependent path.
-        if self.reconstructed_blocks.contains_key(&commitment)
-            && self
-                .state
-                .get(&commitment)
-                .is_none_or(|state| state.leader().is_some())
-        {
-            return;
-        }
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, ignoring external proposal");
             return;
@@ -727,14 +862,37 @@ where
             warn!(?leader, %commitment, "leader update for non-participant, ignoring");
             return;
         }
-        if let Some(state) = self.state.get_mut(&commitment) {
+        // A reconstructed block normally makes duplicate leader announcements
+        // redundant, unless notarized recovery created leaderless state first.
+        // In that case, the leader announcement must still populate the
+        // leader-dependent path.
+        let Some(status) = self.observe_existing_commitment(commitment, round) else {
+            return;
+        };
+        if status == CommitmentStatus::Cached
+            && self
+                .records
+                .get(&commitment)
+                .and_then(CommitmentRecord::reconstruction)
+                .is_none_or(|state| state.leader().is_some())
+        {
+            return;
+        }
+        if let Some(state) = self
+            .records
+            .get_mut(&commitment)
+            .and_then(CommitmentRecord::reconstruction_mut)
+        {
             if let Some(existing) = state.leader() {
                 if existing != &leader {
-                    warn!(
+                    // A later leader is expected when this commitment is
+                    // re-proposed. Retaining the first does not impede participant
+                    // readiness because assigned shards are source-independent.
+                    debug!(
                         existing = ?existing,
                         ?leader,
                         %commitment,
-                        "conflicting leader update, ignoring"
+                        "commitment already has a leader, ignoring update"
                     );
                 }
                 return;
@@ -745,9 +903,10 @@ where
         } else {
             let participants_len = u64::try_from(participants.len())
                 .expect("participant count impossibly out of bounds");
-            self.state.insert(
+            self.insert_reconstruction_record(
                 commitment,
-                ReconstructionState::new(Some(leader), round, participants_len),
+                round,
+                ReconstructionState::new(Some(leader), participants_len),
             );
         }
         let buffered_progress = self.ingest_buffered_shards(commitment);
@@ -767,10 +926,13 @@ where
         commitment: Commitment,
         round: Round,
     ) {
-        if self.reconstructed_blocks.contains_key(&commitment) {
+        let Some(status) = self.observe_existing_commitment(commitment, round) else {
+            return;
+        };
+        if status == CommitmentStatus::Cached {
             return;
         }
-        if self.state.contains_key(&commitment) {
+        if status == CommitmentStatus::Reconstructing {
             let buffered_progress = self.ingest_buffered_shards(commitment);
             if buffered_progress {
                 self.try_advance(sender, commitment);
@@ -783,9 +945,10 @@ where
         };
         let participants_len = u64::try_from(scheme.participants().len())
             .expect("participant count impossibly out of bounds");
-        self.state.insert(
+        self.insert_reconstruction_record(
             commitment,
-            ReconstructionState::new(None, round, participants_len),
+            round,
+            ReconstructionState::new(None, participants_len),
         );
         let buffered_progress = self.ingest_buffered_shards(commitment);
         if buffered_progress {
@@ -817,19 +980,18 @@ where
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
     ///
-    /// The buffers are per sender and may contain shards from many peers. Before
-    /// the leader is known, the only actionable shard from each sender is the
-    /// one at that sender's participant index, because that is the shard a
-    /// non-leader is allowed to gossip. This still lets a notarized commitment
-    /// reconstruct from many peer-gossiped shards. The local assigned shard is
-    /// different: it is only valid when it came from the leader, and the leader's
-    /// identity is needed before it can be accepted as assigned-shard evidence.
+    /// Before proposal context is known, only sender-indexed gossip is
+    /// actionable. Once context exists, the local assigned index is valid from
+    /// any participant because its proof is bound to the commitment.
     fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
-        let state = self
-            .state
+        let record = self
+            .records
             .get(&commitment)
+            .expect("buffered shards can only be ingested with a commitment record");
+        let round = record.round();
+        let state = record
+            .reconstruction()
             .expect("buffered shards can only be ingested with reconstruction state");
-        let round = state.round();
         let leader_known = state.leader().is_some();
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, dropping buffered shards");
@@ -864,8 +1026,9 @@ where
         }
 
         let state = self
-            .state
+            .records
             .get_mut(&commitment)
+            .and_then(CommitmentRecord::reconstruction_mut)
             .expect("reconstruction state checked before buffered shard drain");
 
         // Ingest buffered shards into the active reconstruction state. Batch verification
@@ -878,22 +1041,74 @@ where
         progressed
     }
 
+    /// Records a consensus observation on an existing commitment owner.
+    ///
+    /// Returns the record's phase, [`CommitmentStatus::Absent`] if it has no
+    /// owner yet, or `None` when its owner is bound to a different epoch.
+    fn observe_existing_commitment(
+        &mut self,
+        commitment: Commitment,
+        round: Round,
+    ) -> Option<CommitmentStatus> {
+        let observed_epoch = round.epoch();
+        let Some(record) = self.records.get_mut(&commitment) else {
+            return Some(CommitmentStatus::Absent);
+        };
+        if let Err(existing_epoch) = record.observe(round) {
+            warn!(
+                %commitment,
+                %existing_epoch,
+                %observed_epoch,
+                "commitment observation has conflicting epoch, ignoring"
+            );
+            return None;
+        }
+        Some(if record.block().is_some() {
+            CommitmentStatus::Cached
+        } else {
+            CommitmentStatus::Reconstructing
+        })
+    }
+
+    /// Creates the first lifecycle record for a reconstructing commitment.
+    fn insert_reconstruction_record(
+        &mut self,
+        commitment: Commitment,
+        round: Round,
+        reconstruction: ReconstructionState<P, C, H>,
+    ) {
+        let Entry::Vacant(entry) = self.records.entry(commitment) else {
+            unreachable!("commitment status was checked as absent");
+        };
+        entry.insert(CommitmentRecord::reconstructing(round, reconstruction));
+        self.metrics.reconstruction_states_count.inc();
+    }
+
     /// Cache a block and notify all subscribers waiting on it.
     fn cache_block(
         &mut self,
         round: Round,
         block: Arc<CodedBlock<B, C, H>>,
-    ) -> Arc<CodedBlock<B, C, H>> {
+    ) -> Result<Arc<CodedBlock<B, C, H>>, Epoch> {
         let commitment = block.commitment();
-        self.reconstructed_blocks.insert(
-            commitment,
-            ReconstructedBlock {
-                round,
-                block: Arc::clone(&block),
-            },
-        );
-        self.notify_block_subscribers(Arc::clone(&block));
-        block
+        let cached = match self.records.entry(commitment) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().observe(round)?;
+                let newly_cached = entry.get().block().is_none();
+                let cached = entry.get_mut().install_block(block);
+                if newly_cached {
+                    self.metrics.reconstructed_blocks_cache_count.inc();
+                }
+                cached
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(CommitmentRecord::cached(round, Arc::clone(&block)));
+                self.metrics.reconstructed_blocks_cache_count.inc();
+                block
+            }
+        };
+        self.notify_block_subscribers(Arc::clone(&cached));
+        Ok(cached)
     }
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
@@ -907,6 +1122,18 @@ where
         block: Arc<CodedBlock<B, C, H>>,
     ) {
         let commitment = block.commitment();
+
+        if let Some(record) = self.records.get(&commitment)
+            && let Err(existing_epoch) = record.validate_epoch(round)
+        {
+            warn!(
+                %commitment,
+                %existing_epoch,
+                observed_epoch = %round.epoch(),
+                "local proposal has conflicting epoch, ignoring"
+            );
+            return;
+        }
 
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme available, cannot broadcast shards");
@@ -966,7 +1193,12 @@ where
         }
 
         // Cache the block so we don't have to reconstruct it again.
-        self.cache_block(round, block);
+        self.cache_block(round, block)
+            .expect("local proposal epoch was validated before broadcast");
+        self.records
+            .get_mut(&commitment)
+            .expect("caching a local proposal must create a commitment record")
+            .mark_proposed();
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
         // for "our valid shard arrived" still need a notification.
@@ -990,15 +1222,21 @@ where
         );
     }
 
-    /// Broadcasts any pending validated shard for the given commitment and attempts
-    /// reconstruction. If reconstruction succeeds or fails, the state is cleaned
-    /// up and subscribers are notified.
+    /// Broadcasts any pending validated shard and attempts reconstruction.
+    ///
+    /// Successful reconstruction caches the block while retaining any shard state
+    /// still needed for assigned-shard readiness. Failed reconstruction retires the
+    /// commitment and its commitment-specific subscriptions.
     fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
     ) {
-        if let Some(state) = self.state.get_mut(&commitment) {
+        if let Some(state) = self
+            .records
+            .get_mut(&commitment)
+            .and_then(CommitmentRecord::reconstruction_mut)
+        {
             match state.take_pending_action() {
                 Some(AssignedShardVerifiedAction::Broadcast(shard)) => {
                     self.broadcast_shard(sender, shard);
@@ -1016,8 +1254,8 @@ where
                 // Do not prune other reconstruction state here. A Byzantine
                 // leader can equivocate by proposing multiple commitments in
                 // the same round, so more than one block may be reconstructed
-                // for a given round. Pruning is deferred to `prune()`, which
-                // is called once a commitment is finalized.
+                // for a given round. Retirement is deferred until durable
+                // application progress supplies both eligibility signals.
                 debug!(
                     %commitment,
                     parent = %block.parent(),
@@ -1030,8 +1268,7 @@ where
             }
             Err(err) => {
                 warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
-                self.state.remove(&commitment);
-                self.drop_commitment_subscriptions(commitment);
+                self.retire_commitment(commitment, RetirementReason::Exact);
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -1039,28 +1276,18 @@ where
 
     /// Handles the registry of an assigned shard verification subscription.
     ///
-    /// For participants this is tied to verification of the leader-delivered
-    /// shard for the local index, not to generic block reconstruction.
+    /// For participants this is tied to verification of the shard for the local
+    /// index, not to generic block reconstruction.
     fn handle_assigned_shard_verified_subscription(
         &mut self,
         commitment: Commitment,
         response: oneshot::Sender<()>,
     ) {
-        // Answer immediately if our own shard has been verified.
-        let has_shard = self
-            .state
+        // Answer immediately if our own shard has been verified or we built the block.
+        if self
+            .records
             .get(&commitment)
-            .is_some_and(|state| state.is_assigned_shard_verified());
-        if has_shard {
-            response.send_lossy(());
-            return;
-        }
-
-        // When there is no reconstruction state but the block is already in
-        // the cache, the local node was the proposer. Proposers trivially
-        // have all shards, so resolve immediately.
-        if !self.state.contains_key(&commitment)
-            && self.reconstructed_blocks.contains_key(&commitment)
+            .is_some_and(CommitmentRecord::is_assigned_shard_ready)
         {
             response.send_lossy(());
             return;
@@ -1080,13 +1307,14 @@ where
     ) {
         let block = match key {
             BlockSubscriptionKey::Commitment(commitment) => self
-                .reconstructed_blocks
+                .records
                 .get(&commitment)
-                .map(|entry| &entry.block),
+                .and_then(CommitmentRecord::block),
             BlockSubscriptionKey::Digest(digest) => self
-                .reconstructed_blocks
+                .records
                 .values()
-                .find_map(|entry| (entry.block.digest() == digest).then_some(&entry.block)),
+                .filter_map(CommitmentRecord::block)
+                .find(|block| block.digest() == digest),
         };
 
         // Answer immediately if we have the block cached.
@@ -1140,50 +1368,57 @@ where
         }
     }
 
-    /// Drops subscriptions bound to an exact commitment.
-    ///
-    /// Before marshal accepts a block, a candidate can claim a digest it cannot reconstruct.
-    /// Retiring it therefore does not prove the digest unavailable.
-    fn drop_commitment_subscriptions(&mut self, commitment: Commitment) {
-        self.assigned_shard_verified_subscriptions
-            .remove(&commitment);
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Commitment(commitment));
+    /// Retires one commitment and applies the subscription policy for the cause.
+    fn retire_commitment(&mut self, commitment: Commitment, reason: RetirementReason) {
+        let had_reconstruction = self.records.remove(&commitment).is_some_and(|record| {
+            let had_reconstruction = record.reconstruction().is_some();
+            if had_reconstruction {
+                self.metrics.reconstruction_states_count.dec();
+            }
+            if record.block().is_some() {
+                self.metrics.reconstructed_blocks_cache_count.dec();
+            }
+            had_reconstruction
+        });
+
+        if matches!(reason, RetirementReason::Exact) || had_reconstruction {
+            self.assigned_shard_verified_subscriptions
+                .remove(&commitment);
+        }
+        if matches!(reason, RetirementReason::Exact) {
+            // Before marshal accepts a block, a candidate can claim a digest it cannot
+            // reconstruct. Retiring it therefore does not prove the digest unavailable.
+            self.block_subscriptions
+                .remove(&BlockSubscriptionKey::Commitment(commitment));
+        }
     }
 
-    /// Evicts cached blocks and reconstruction state through `through`.
+    /// Retires cached blocks and reconstruction state after durable application progress.
     ///
-    /// Pruning waits for finalization because a Byzantine leader may produce multiple valid
-    /// commitments in one round.
-    fn prune(&mut self, through: Commitment) {
-        let cached = self
-            .reconstructed_blocks
-            .get(&through)
-            .map(|entry| (entry.round, entry.block.height()));
-        if let Some((_, height)) = cached {
-            self.reconstructed_blocks
-                .retain(|_, entry| entry.block.height() > height);
+    /// Retirement waits for durable progress because a Byzantine leader may produce multiple
+    /// valid commitments in one round.
+    fn retire(&mut self, update: Retirement<Commitment>) {
+        let Retirement {
+            round_floor,
+            exact_retirements,
+        } = update;
+        // Durable processing makes existing exact-commitment and assigned-shard waits for these
+        // states obsolete. Digest waits are not commitment-specific.
+        for commitment in exact_retirements {
+            self.retire_commitment(commitment, RetirementReason::Exact);
         }
 
-        // Finalization makes existing exact-commitment and assigned-shard waits for these states
-        // obsolete. Digest waits are not commitment-specific.
-        self.drop_commitment_subscriptions(through);
-        let state_round = self.state.remove(&through).map(|state| state.round());
-        let cached_round = cached.map(|(round, _)| round);
-        let Some(round) = state_round.or(cached_round) else {
-            return;
-        };
-
-        let mut pruned_commitments = Vec::new();
-        self.state.retain(|c, s| {
-            let keep = s.round() > round;
-            if !keep {
-                pruned_commitments.push(*c);
-            }
-            keep
-        });
-        for pruned in pruned_commitments {
-            self.drop_commitment_subscriptions(pruned);
+        // Entries observed in later rounds may still be needed for certification. Block
+        // subscriptions remain open because local ingress can still satisfy them after a floor.
+        let retired = self
+            .records
+            .iter()
+            .filter_map(|(commitment, record)| {
+                (record.round() <= round_floor).then_some(*commitment)
+            })
+            .collect::<Vec<_>>();
+        for commitment in retired {
+            self.retire_commitment(commitment, RetirementReason::Floor);
         }
     }
 }
@@ -1195,11 +1430,11 @@ where
     C: CodingScheme,
     H: Hasher,
 {
-    /// Stage 1: accumulate shards. The leader's shard for our index is
-    /// verified immediately; all other shards are buffered until enough
-    /// are available for batch verification.
+    /// Stage 1: accumulate shards. The shard for our assigned index is verified
+    /// immediately. All other shards are buffered until enough are available
+    /// for batch verification.
     AwaitingQuorum(AwaitingQuorumState<P, C, H>),
-    /// Stage 2: batch validation passed; checked shards are available for
+    /// Stage 2: batch validation passed. Checked shards are available for
     /// reconstruction.
     Ready(ReadyState<P, C, H>),
 }
@@ -1237,21 +1472,19 @@ where
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a shard.
     contributed: BitMap,
-    /// The round for which this commitment was externally proposed.
-    round: Round,
     /// Raw shard data received per index, retained for equivocation detection.
     /// Keyed by shard index.
     received_shards: BTreeMap<u16, C::Shard>,
-    /// Whether the leader's shard for our assigned index has been verified.
+    /// Whether the shard for our assigned index has been verified.
     assigned_shard_verified: bool,
 }
 
 /// Phase data for `ReconstructionState::AwaitingQuorum`.
 ///
 /// In this phase, the leader may be unknown. Sender-indexed shards can still be
-/// buffered until enough are available to attempt batch validation. Once the
-/// leader is known, the leader's shard for our index is verified eagerly via
-/// `C::check`.
+/// buffered until enough are available to attempt batch validation. Once proposal
+/// context is known, the shard for our assigned index is verified eagerly via
+/// `C::check`, regardless of which participant delivered it.
 struct AwaitingQuorumState<P, C, H>
 where
     P: PublicKey,
@@ -1282,14 +1515,13 @@ where
     C: CodingScheme,
     H: Hasher,
 {
-    /// Create a new empty common state for the provided leader and round.
-    fn new(leader: Option<P>, round: Round, participants_len: u64) -> Self {
+    /// Create a new empty common state for the provided leader.
+    fn new(leader: Option<P>, participants_len: u64) -> Self {
         Self {
             leader,
             pending_action: None,
             checked_shards: Vec::new(),
             contributed: BitMap::zeroes(participants_len),
-            round,
             received_shards: BTreeMap::new(),
             assigned_shard_verified: false,
         }
@@ -1302,7 +1534,7 @@ where
     C: CodingScheme,
     H: Hasher,
 {
-    /// Verify the leader's shard for our index and store it.
+    /// Verify the assigned shard and store it.
     ///
     /// When `is_participant` is true, the validated shard is stored for
     /// broadcasting to peers. When false (non-participant), only subscriber
@@ -1326,7 +1558,7 @@ where
         let Ok(checked) = C::check(&commitment.config(), &commitment.root(), shard.index, data)
         else {
             self.received_shards.remove(&shard.index);
-            commonware_p2p::block!(blocker, sender, "invalid shard received from leader");
+            commonware_p2p::block!(blocker, sender, "invalid assigned shard received");
             return false;
         };
 
@@ -1392,12 +1624,9 @@ where
         }
 
         // Transition to Ready.
-        let round = self.common.round;
         let leader = self.common.leader.clone();
-        let common = std::mem::replace(
-            &mut self.common,
-            CommonState::new(leader, round, participants_len),
-        );
+        let common =
+            std::mem::replace(&mut self.common, CommonState::new(leader, participants_len));
         Some(ReadyState { common })
     }
 }
@@ -1440,9 +1669,9 @@ where
     H: Hasher,
 {
     /// Create an initial reconstruction state for a commitment.
-    fn new(leader: Option<P>, round: Round, participants_len: u64) -> Self {
+    fn new(leader: Option<P>, participants_len: u64) -> Self {
         Self::AwaitingQuorum(AwaitingQuorumState {
-            common: CommonState::new(leader, round, participants_len),
+            common: CommonState::new(leader, participants_len),
             pending_shards: BTreeMap::new(),
         })
     }
@@ -1477,14 +1706,9 @@ where
         Ok(())
     }
 
-    /// Returns whether the leader's shard for our index has been verified.
+    /// Returns whether the shard for our assigned index has been verified.
     const fn is_assigned_shard_verified(&self) -> bool {
         self.common().assigned_shard_verified
-    }
-
-    /// Return the proposal round associated with this state.
-    const fn round(&self) -> Round {
-        self.common().round
     }
 
     /// Returns all verified shards accumulated for reconstruction.
@@ -1494,7 +1718,7 @@ where
 
     /// Takes the pending action for this commitment's validated shard.
     ///
-    /// Returns [`None`] if the leader's shard hasn't been validated yet.
+    /// Returns [`None`] if the assigned shard hasn't been validated yet.
     const fn take_pending_action(&mut self) -> Option<AssignedShardVerifiedAction<C, H>> {
         self.common_mut().pending_action.take()
     }
@@ -1511,21 +1735,16 @@ where
     ///
     /// - MUST be sent by a participant in the current epoch. Non-participant
     ///   senders are blocked.
-    /// - If the sender is the leader: the shard index MUST match the
-    ///   recipient's own participant index (when the recipient is a
-    ///   participant) or the leader's participant index (when the recipient
-    ///   is a non-participant).
-    /// - If the sender is not the leader: the shard index MUST match the
-    ///   sender's participant index. Each non-leader participant may only
-    ///   gossip their own shard.
-    /// - Once the leader is known, a mismatched shard index results in
-    ///   blocking the sender.
+    /// - A participant's assigned index may be delivered by any participant.
+    /// - Other shards MUST match the sender's participant index.
+    /// - Once proposal context is known, any other shard index results in
+    ///   blocking.
     /// - Each shard index may only contribute ONE shard per commitment.
     ///   Sending a second shard for the same index with different data
     ///   (equivocation) results in blocking the sender.
-    /// - The leader's shard is verified eagerly via [`CodingScheme::check`].
-    ///   If verification fails, the leader is blocked.
-    /// - Non-leader shards are buffered in `pending_shards` and
+    /// - The assigned shard is verified eagerly via [`CodingScheme::check`].
+    ///   If verification fails, the sender is blocked.
+    /// - Own-index shards are buffered in `pending_shards` and
     ///   batch-validated when quorum is reached. Invalid shards discovered
     ///   during batch validation result in blocking their respective
     ///   senders.
@@ -1538,9 +1757,9 @@ where
     /// - Exact duplicate of a previously received shard for the same index.
     /// - The index has already been marked as contributed (via the bitmap,
     ///   e.g. after batch validation).
-    /// - Non-leader shards that arrive after the state has transitioned to
+    /// - Own-index shards that arrive after the state has transitioned to
     ///   [`ReconstructionState::Ready`] (i.e., batch validation has already
-    ///   passed). The leader's shard for our index is still accepted in
+    ///   passed). An assigned shard for our index is still accepted in
     ///   `Ready` state to ensure we verify and re-broadcast it.
     /// - Before a reconstruction state exists, shards are buffered at the
     ///   engine level in bounded per-peer queues until [`Mailbox::discovered`]
@@ -1567,29 +1786,31 @@ where
             data: shard.into_inner(),
         };
 
-        // Determine expected index based on sender role. Before the leader is
-        // known, only sender-indexed gossip shards are actionable; mismatched
-        // shards cannot be classified without the leader and do not satisfy
-        // assigned shard verification.
-        let leader = self.common().leader.as_ref();
-        let is_from_leader = leader.is_some_and(|leader| leader == &sender);
-        let expected_participant = if is_from_leader {
-            ctx.scheme.me().unwrap_or(sender_index)
-        } else {
-            sender_index
-        };
-        let expected_index: u16 = expected_participant
+        // A participant's assigned shard is source-independent because it is
+        // verified eagerly. Every other shard must be sender-owned so each sender
+        // contributes at most one shard before batch verification.
+        let sender_index: u16 = sender_index
             .get()
             .try_into()
             .expect("participant index impossibly out of bounds");
-        if indexed.index != expected_index {
-            if leader.is_some() {
+        let assigned_index: Option<u16> = ctx.scheme.me().map(|assigned_index| {
+            assigned_index
+                .get()
+                .try_into()
+                .expect("participant index impossibly out of bounds")
+        });
+        let is_from_leader = self.leader().is_some_and(|leader| leader == &sender);
+        let is_assigned_shard = assigned_index
+            .is_some_and(|assigned_index| indexed.index == assigned_index)
+            || assigned_index.is_none() && is_from_leader && indexed.index == sender_index;
+        let is_gossip_shard = indexed.index == sender_index;
+        if !is_assigned_shard && !is_gossip_shard {
+            if self.leader().is_some() {
                 commonware_p2p::block!(
                     blocker,
                     sender,
                     shard_index = indexed.index,
-                    expected_index,
-                    "shard index does not match expected index"
+                    "shard index is neither assigned nor sender-owned"
                 );
             }
             return false;
@@ -1608,10 +1829,9 @@ where
             return false;
         }
 
-        // Leader's shard for our index is always verified eagerly,
-        // even after transitioning to Ready. This ensures we broadcast
-        // our own shard to help slower peers reach quorum.
-        if is_from_leader && !self.common().assigned_shard_verified {
+        // The assigned shard is always verified eagerly, even after transitioning
+        // to Ready. This ensures we broadcast it to help slower peers reach quorum.
+        if is_assigned_shard && !self.common().assigned_shard_verified {
             let progressed = self.common_mut().verify_assigned_shard(
                 sender,
                 commitment,
@@ -1630,7 +1850,7 @@ where
             return progressed;
         }
 
-        // Non-leader shards are only accepted while awaiting quorum.
+        // Gossip shards are only accepted while awaiting quorum.
         let Self::AwaitingQuorum(state) = self else {
             return false;
         };
@@ -1844,6 +2064,8 @@ mod tests {
         num_peers: usize,
         /// Number of non-participant peers in the test network.
         num_non_participants: usize,
+        /// Additional epochs that use the fixture's participant set.
+        additional_scheme_epochs: Vec<Epoch>,
         /// Network link configuration.
         link: Link,
         /// Marker for the coding scheme type parameter.
@@ -1855,6 +2077,7 @@ mod tests {
             Self {
                 num_peers: 4,
                 num_non_participants: 0,
+                additional_scheme_epochs: Vec::new(),
                 link: DEFAULT_LINK,
                 _marker: PhantomData,
             }
@@ -1944,7 +2167,16 @@ mod tests {
                         private_keys[idx].clone(),
                     )
                     .expect("signer scheme should be created");
-                    let scheme_provider: Prov = MultiEpochProvider::single(scheme);
+                    let mut scheme_provider = MultiEpochProvider::single(scheme);
+                    for epoch in self.additional_scheme_epochs.iter().copied() {
+                        let scheme = Scheme::signer(
+                            SCHEME_NAMESPACE,
+                            participants.clone(),
+                            private_keys[idx].clone(),
+                        )
+                        .expect("signer scheme should be created");
+                        scheme_provider = scheme_provider.with_epoch(epoch, scheme);
+                    }
 
                     let config = Config {
                         scheme_provider,
@@ -1983,7 +2215,13 @@ mod tests {
                         .with_attribute("index", idx);
 
                     let scheme = Scheme::verifier(SCHEME_NAMESPACE, participants.clone());
-                    let scheme_provider: Prov = MultiEpochProvider::single(scheme);
+                    let mut scheme_provider = MultiEpochProvider::single(scheme);
+                    for epoch in self.additional_scheme_epochs.iter().copied() {
+                        scheme_provider = scheme_provider.with_epoch(
+                            epoch,
+                            Scheme::verifier(SCHEME_NAMESPACE, participants.clone()),
+                        );
+                    }
 
                     let config = Config {
                         scheme_provider,
@@ -2285,69 +2523,221 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_durable_prunes_reconstructed_blocks() {
+    fn test_retire_uses_inclusive_retirement_floor() {
         let fixture = Fixture::<C>::default();
         fixture.start(|_, context, _, mut peers, _, coding_config| async move {
-            // Create 3 blocks at heights 1, 2, 3.
-            let block1 = CodedBlock::<B, C, H>::new(
+            // The processed commitment was re-proposed above the retirement floor. A malicious
+            // candidate was observed below it.
+            let processed = CodedBlock::<B, C, H>::new(
                 B::new(Sha256Digest::EMPTY, Height::new(1), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let block2 = CodedBlock::<B, C, H>::new(
-                B::new(Sha256Digest::EMPTY, Height::new(2), 100),
+            let malicious = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(u64::MAX), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let block3 = CodedBlock::<B, C, H>::new(
+            let equal = CodedBlock::<B, C, H>::new(
                 B::new(Sha256Digest::EMPTY, Height::new(3), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let commitment1 = block1.commitment();
-            let commitment2 = block2.commitment();
-            let commitment3 = block3.commitment();
+            let later = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(2), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let processed_commitment = processed.commitment();
+            let malicious_commitment = malicious.commitment();
+            let equal_commitment = equal.commitment();
+            let later_commitment = later.commitment();
 
             // Cache all blocks via `proposed`.
             let peer = &mut peers[0];
-            let round = Round::new(Epoch::zero(), View::new(1));
-            peer.mailbox.proposed(round, block1);
-            peer.mailbox.proposed(round, block2);
-            peer.mailbox.proposed(round, block3);
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(1)), processed.clone());
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(2)), malicious);
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(3)), equal);
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(1)), later.clone());
+            // Re-proposals refresh ownership independently of the commitment's
+            // original context round.
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(5)), processed);
+            peer.mailbox
+                .proposed(Round::new(Epoch::zero(), View::new(4)), later);
             context.sleep(Duration::from_millis(10)).await;
 
             // Verify all blocks are in the cache.
             assert!(
-                peer.mailbox.get(commitment1).await.is_some(),
-                "block1 should be cached"
+                peer.mailbox.get(processed_commitment).await.is_some(),
+                "processed block should be cached"
             );
             assert!(
-                peer.mailbox.get(commitment2).await.is_some(),
-                "block2 should be cached"
+                peer.mailbox.get(malicious_commitment).await.is_some(),
+                "malicious block should be cached"
             );
             assert!(
-                peer.mailbox.get(commitment3).await.is_some(),
-                "block3 should be cached"
+                peer.mailbox.get(equal_commitment).await.is_some(),
+                "equal-round block should be cached"
+            );
+            assert!(
+                peer.mailbox.get(later_commitment).await.is_some(),
+                "later block should be cached"
             );
 
-            // Prune at height 2 (blocks with height <= 2 should be removed).
-            peer.mailbox.prune(commitment2);
+            // The authoritative retirement floor removes every earlier candidate and the exact
+            // processed commitment, even when that commitment was observed above the floor.
+            peer.mailbox.retire(Retirement {
+                round_floor: Round::new(Epoch::zero(), View::new(3)),
+                exact_retirements: vec![processed_commitment],
+            });
             context.sleep(Duration::from_millis(10)).await;
 
-            // Blocks at heights 1 and 2 should be pruned.
             assert!(
-                peer.mailbox.get(commitment1).await.is_none(),
-                "block1 should be pruned"
+                peer.mailbox.get(processed_commitment).await.is_none(),
+                "exact processed block should be pruned above the floor"
             );
             assert!(
-                peer.mailbox.get(commitment2).await.is_none(),
-                "block2 should be pruned"
+                peer.mailbox.get(malicious_commitment).await.is_none(),
+                "earlier malicious block should be pruned"
+            );
+            assert!(
+                peer.mailbox.get(equal_commitment).await.is_none(),
+                "block observed at the retirement floor should be pruned"
+            );
+            assert!(
+                peer.mailbox.get(later_commitment).await.is_some(),
+                "non-target block observed above the floor should remain cached"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_retire_unseen_commitment_applies_floor() {
+        let fixture = Fixture::<C>::default();
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let make_block = |id| {
+                CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                    coding_config,
+                    &STRATEGY,
+                )
+            };
+            let cached_old = make_block(1);
+            let cached_equal = make_block(2);
+            let cached_later = make_block(3);
+            let state_old = make_block(4).commitment();
+            let state_equal = make_block(5).commitment();
+            let state_later = make_block(6).commitment();
+            let unseen = make_block(7).commitment();
+            let cached_old_commitment = cached_old.commitment();
+            let cached_equal_commitment = cached_equal.commitment();
+            let cached_later_commitment = cached_later.commitment();
+            let old_round = Round::new(Epoch::zero(), View::new(2));
+            let floor = Round::new(Epoch::zero(), View::new(3));
+            let later_round = Round::new(Epoch::zero(), View::new(4));
+            let leader = peers[1].public_key.clone();
+            let peer = &mut peers[0];
+
+            peer.mailbox.proposed(old_round, cached_old);
+            peer.mailbox.proposed(floor, cached_equal);
+            peer.mailbox.proposed(later_round, cached_later);
+            peer.mailbox
+                .discovered(state_old, leader.clone(), old_round);
+            peer.mailbox.discovered(state_equal, leader.clone(), floor);
+            peer.mailbox
+                .discovered(state_later, leader.clone(), old_round);
+            peer.mailbox.discovered(state_later, leader, later_round);
+            let mut state_old_sub = peer.mailbox.subscribe(state_old);
+            let mut state_equal_sub = peer.mailbox.subscribe(state_equal);
+            let mut state_later_sub = peer.mailbox.subscribe(state_later);
+            context.sleep(Duration::from_millis(10)).await;
+
+            peer.mailbox.retire(Retirement {
+                round_floor: floor,
+                exact_retirements: vec![unseen],
+            });
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(peer.mailbox.get(cached_old_commitment).await.is_none());
+            assert!(peer.mailbox.get(cached_equal_commitment).await.is_none());
+            assert!(peer.mailbox.get(cached_later_commitment).await.is_some());
+            assert!(matches!(state_old_sub.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(
+                state_equal_sub.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                state_later_sub.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_local_reproposal_refreshes_existing_reconstruction_state() {
+        let fixture = Fixture::<C>::default();
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let live = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let unseen = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(2), 200),
+                coding_config,
+                &STRATEGY,
+            )
+            .commitment();
+            let state_first = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(3), 300),
+                coding_config,
+                &STRATEGY,
+            );
+            let live_commitment = live.commitment();
+            let state_first_commitment = state_first.commitment();
+            let leader = peers[0].public_key.clone();
+            let original_round = Round::new(Epoch::zero(), View::new(1));
+            let floor = Round::new(Epoch::zero(), View::new(3));
+            let reproposal_round = Round::new(Epoch::zero(), View::new(4));
+            let peer = &mut peers[0];
+
+            peer.mailbox
+                .discovered(live_commitment, leader, original_round);
+            peer.mailbox.proposed(reproposal_round, live);
+            peer.mailbox
+                .notarized(state_first_commitment, reproposal_round);
+            peer.mailbox.proposed(floor, state_first);
+            assert!(peer.mailbox.get(live_commitment).await.is_some());
+
+            let mut shard_sub = peer
+                .mailbox
+                .subscribe_assigned_shard_verified(live_commitment);
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                matches!(shard_sub.try_recv(), Ok(())),
+                "late subscription should resolve after a local reproposal"
             );
 
-            // Block at height 3 should still be cached.
+            peer.mailbox.retire(Retirement {
+                round_floor: floor,
+                exact_retirements: vec![unseen],
+            });
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(peer.mailbox.get(live_commitment).await.is_some());
+            assert!(peer.mailbox.get(state_first_commitment).await.is_some());
+            let mut retained_shard_sub = peer
+                .mailbox
+                .subscribe_assigned_shard_verified(live_commitment);
+            context.sleep(Duration::from_millis(10)).await;
             assert!(
-                peer.mailbox.get(commitment3).await.is_some(),
-                "block3 should still be cached"
+                matches!(retained_shard_sub.try_recv(), Ok(())),
+                "retained local proposal should resolve a late subscription"
             );
         });
     }
@@ -2465,10 +2855,10 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
-                // Get peer 2's own-index shard.
-                let peer2_index = peers[2].index.get() as u16;
-                let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                // Get a shard that belongs to neither the sender nor receiver.
+                let unrelated_index = peers[3].index.get() as u16;
+                let unrelated_shard = coded_block.shard(unrelated_index).expect("missing shard");
+                let shard_bytes = unrelated_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
                 let leader = peers[0].public_key.clone();
@@ -2480,8 +2870,8 @@ mod tests {
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Peer 1 (not the leader) sends peer 2 a shard with peer 2's index
-                // (wrong: non-leaders must use their own index).
+                // Peer 1 (not the leader) sends peer 2 a shard for peer 3. It
+                // cannot be either sender-indexed gossip or an assigned shard.
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
@@ -2504,15 +2894,14 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
-                // Get peer 2's own-index shard.
-                let peer2_index = peers[2].index.get() as u16;
-                let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
-                let shard_bytes = peer2_shard.encode();
+                // Get a shard that belongs to neither the sender nor receiver.
+                let unrelated_index = peers[3].index.get() as u16;
+                let unrelated_shard = coded_block.shard(unrelated_index).expect("missing shard");
+                let shard_bytes = unrelated_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Peer 1 sends a shard with peer 2's index before the leader is known (buffered).
-                // This is wrong: non-leaders must send at their own index.
+                // Peer 1 sends peer 3's shard before the leader is known.
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
@@ -2526,8 +2915,8 @@ mod tests {
                 );
 
                 // Now inform peer 2 that peer 0 is the leader.
-                // This drains the buffer: peer 1's shard has peer 2's index but
-                // peer 1 is not the leader, so expected index is peer 1's own index.
+                // This drains the impossible candidate: it belongs to neither
+                // peer 1 nor peer 2.
                 let leader = peers[0].public_key.clone();
                 peers[2].mailbox.discovered(
                     commitment,
@@ -2542,73 +2931,48 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_conflicting_external_proposed_ignored() {
+    fn test_assigned_shard_from_non_leader_accepted() {
         let fixture = Fixture::<C>::default();
         fixture.start(
-            |config, context, oracle, mut peers, _, coding_config| async move {
+            |_config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
-                // Get the shard the leader would send to peer 2 (at peer 2's index).
+                // Get peer 2's assigned shard.
                 let peer2_index = peers[2].index.get() as u16;
                 let peer2_shard = coded_block.shard(peer2_index).expect("missing shard");
                 let shard_bytes = peer2_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
-                let leader_a = peers[0].public_key.clone();
-                let leader_b = peers[1].public_key.clone();
+                let leader = peers[0].public_key.clone();
 
                 // Subscribe before shards arrive so we can verify acceptance.
                 let shard_sub = peers[2]
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment);
 
-                // First leader update should stick.
+                // Discover the proposal under peer 0.
                 peers[2].mailbox.discovered(
                     commitment,
-                    leader_a.clone(),
+                    leader,
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Conflicting update should be ignored.
-                peers[2].mailbox.discovered(
-                    commitment,
-                    leader_b,
-                    Round::new(Epoch::zero(), View::new(1)),
-                );
-
-                // Original leader sends shard; this should still be accepted.
-                peers[0]
-                    .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true);
-                context.sleep(config.link.latency * 2).await;
-
-                // Subscription should resolve from accepted leader shard.
-                select! {
-                    _ = shard_sub => {},
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("subscription did not complete after shard from original leader");
-                    },
-                };
-
-                // The conflicting leader should still be treated as non-leader and blocked.
+                // The assigned shard is commitment-bound, so another participant
+                // may deliver it without being treated as a conflicting proposer.
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
-                context.sleep(config.link.latency * 2).await;
 
-                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
+                select! {
+                    _ = shard_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("subscription did not complete after assigned shard");
+                    },
+                };
 
-                // Original leader should not be blocked.
-                let blocked_peers = oracle.blocked().await.unwrap();
-                let leader_a_blocked = blocked_peers
-                    .iter()
-                    .any(|(a, b)| a == &peers[2].public_key && b == &leader_a);
-                assert!(
-                    !leader_a_blocked,
-                    "original leader should not be blocked after conflicting leader update"
-                );
+                assert!(oracle.blocked().await.unwrap().is_empty());
             },
         );
     }
@@ -2674,6 +3038,105 @@ mod tests {
                 };
             },
         );
+    }
+
+    #[test_traced]
+    fn test_rejected_leader_does_not_refresh_retirement_round() {
+        let fixture = Fixture::<C>::default();
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let block = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let commitment = block.commitment();
+            let unrelated = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(2), 200),
+                coding_config,
+                &STRATEGY,
+            )
+            .commitment();
+            let leader = peers[0].public_key.clone();
+            let non_participant = PrivateKey::from_seed(10_000).public_key();
+            let receiver = &mut peers[2];
+
+            let mut subscription = receiver
+                .mailbox
+                .subscribe_assigned_shard_verified(commitment);
+            receiver.mailbox.discovered(
+                commitment,
+                leader,
+                Round::new(Epoch::zero(), View::new(1)),
+            );
+            receiver.mailbox.discovered(
+                commitment,
+                non_participant,
+                Round::new(Epoch::zero(), View::new(10)),
+            );
+            receiver.mailbox.retire(Retirement {
+                round_floor: Round::new(Epoch::zero(), View::new(5)),
+                exact_retirements: vec![unrelated],
+            });
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
+        });
+    }
+
+    #[test_traced]
+    fn test_cross_epoch_observations_do_not_refresh_retirement_round() {
+        let fixture = Fixture::<C> {
+            additional_scheme_epochs: vec![Epoch::new(1)],
+            ..Default::default()
+        };
+        fixture.start(|_, context, _, mut peers, _, coding_config| async move {
+            let cached = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                coding_config,
+                &STRATEGY,
+            );
+            let incomplete = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(2), 200),
+                coding_config,
+                &STRATEGY,
+            );
+            let incomplete_commitment = incomplete.commitment();
+            let unrelated = CodedBlock::<B, C, H>::new(
+                B::new(Sha256Digest::EMPTY, Height::new(3), 300),
+                coding_config,
+                &STRATEGY,
+            )
+            .commitment();
+            let cached_commitment = cached.commitment();
+            let leader = peers[0].public_key.clone();
+            let receiver = &mut peers[2];
+            let original_round = Round::new(Epoch::zero(), View::new(1));
+
+            receiver.mailbox.proposed(original_round, cached);
+            receiver
+                .mailbox
+                .discovered(incomplete_commitment, leader, original_round);
+            let mut subscription = receiver
+                .mailbox
+                .subscribe_assigned_shard_verified(incomplete_commitment);
+
+            let conflicting_round = Round::new(Epoch::new(1), View::new(10));
+            receiver.mailbox.proposed(conflicting_round, incomplete);
+            receiver
+                .mailbox
+                .notarized(cached_commitment, conflicting_round);
+            receiver
+                .mailbox
+                .notarized(incomplete_commitment, conflicting_round);
+            receiver.mailbox.retire(Retirement {
+                round_floor: Round::new(Epoch::zero(), View::new(5)),
+                exact_retirements: vec![unrelated],
+            });
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(receiver.mailbox.get(cached_commitment).await.is_none());
+            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
+        });
     }
 
     #[test_traced]
@@ -3036,6 +3499,228 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_later_notarization_refreshes_reconstruction_state_round() {
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _, mut peers, _, coding_config| async move {
+                let live = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let finalized = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let live_commitment = live.commitment();
+                let finalized_commitment = finalized.commitment();
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                peers[receiver_idx].mailbox.discovered(
+                    live_commitment,
+                    leader,
+                    Round::new(Epoch::zero(), View::new(1)),
+                );
+                let mut live_sub = peers[receiver_idx].mailbox.subscribe(live_commitment);
+
+                // The same commitment becomes live in a later round while the application
+                // still has an older finalization to acknowledge.
+                peers[receiver_idx]
+                    .mailbox
+                    .notarized(live_commitment, Round::new(Epoch::zero(), View::new(4)));
+                context.sleep(Duration::from_millis(10)).await;
+                peers[receiver_idx].mailbox.retire(Retirement {
+                    round_floor: Round::new(Epoch::zero(), View::new(3)),
+                    exact_retirements: vec![finalized_commitment],
+                });
+                context.sleep(Duration::from_millis(10)).await;
+
+                assert!(
+                    matches!(live_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "later-round reconstruction subscription should remain open"
+                );
+
+                let leader_shard = live
+                    .shard(peers[receiver_idx].index.get() as u16)
+                    .expect("missing leader shard");
+                peers[0].sender.send(
+                    Recipients::One(receiver_pk.clone()),
+                    leader_shard.encode(),
+                    true,
+                );
+                for i in [1usize, 2usize, 4usize] {
+                    let shard = live
+                        .shard(peers[i].index.get() as u16)
+                        .expect("missing gossip shard");
+                    peers[i].sender.send(
+                        Recipients::One(receiver_pk.clone()),
+                        shard.encode(),
+                        true,
+                    );
+                }
+
+                select! {
+                    result = live_sub => {
+                        let reconstructed =
+                            result.expect("later-round reconstruction should remain live");
+                        assert_eq!(reconstructed.commitment(), live_commitment);
+                    },
+                    _ = context.sleep(config.link.latency * 10) => {
+                        panic!("later-round reconstruction did not complete");
+                    },
+                }
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_cached_observations_refresh_reconstruction_state_round() {
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _, mut peers, _, coding_config| async move {
+                let live = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(2), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let finalized = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let live_commitment = live.commitment();
+                let finalized_commitment = finalized.commitment();
+                let leader = peers[0].public_key.clone();
+                let receivers = [3usize, 6usize];
+                let receiver_keys = [
+                    peers[receivers[0]].public_key.clone(),
+                    peers[receivers[1]].public_key.clone(),
+                ];
+                let original_round = Round::new(Epoch::zero(), View::new(1));
+
+                for &receiver_idx in &receivers {
+                    peers[receiver_idx].mailbox.discovered(
+                        live_commitment,
+                        leader.clone(),
+                        original_round,
+                    );
+                }
+
+                // Reconstruct from gossip while leaving assigned-shard verification pending.
+                for sender_idx in [1usize, 2usize, 4usize, 5usize] {
+                    let shard = live
+                        .shard(peers[sender_idx].index.get() as u16)
+                        .expect("missing gossip shard")
+                        .encode();
+                    for receiver in &receiver_keys {
+                        peers[sender_idx].sender.send(
+                            Recipients::One(receiver.clone()),
+                            shard.clone(),
+                            true,
+                        );
+                    }
+                }
+                context.sleep(config.link.latency * 4).await;
+
+                for &receiver_idx in &receivers {
+                    assert!(
+                        peers[receiver_idx]
+                            .mailbox
+                            .get(live_commitment)
+                            .await
+                            .is_some(),
+                        "block should be cached before its round is refreshed"
+                    );
+                }
+
+                let mut notarized_sub = peers[receivers[0]]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(live_commitment);
+                let mut discovered_sub = peers[receivers[1]]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(live_commitment);
+                let later_round = Round::new(Epoch::zero(), View::new(4));
+                peers[receivers[0]]
+                    .mailbox
+                    .notarized(live_commitment, later_round);
+                peers[receivers[1]].mailbox.discovered(
+                    live_commitment,
+                    leader,
+                    later_round,
+                );
+                context.sleep(Duration::from_millis(10)).await;
+
+                let prune_round = Round::new(Epoch::zero(), View::new(3));
+                for &receiver_idx in &receivers {
+                    peers[receiver_idx].mailbox.retire(Retirement {
+                        round_floor: prune_round,
+                        exact_retirements: vec![finalized_commitment],
+                    });
+                }
+                context.sleep(Duration::from_millis(10)).await;
+
+                assert!(
+                    matches!(notarized_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "cached notarization should keep reconstruction state live"
+                );
+                assert!(
+                    matches!(discovered_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "cached discovery should keep reconstruction state live"
+                );
+                for &receiver_idx in &receivers {
+                    assert!(
+                        peers[receiver_idx]
+                            .mailbox
+                            .get(live_commitment)
+                            .await
+                            .is_some(),
+                        "cached observation should keep the reconstructed block live"
+                    );
+                }
+
+                for (&receiver_idx, receiver) in receivers.iter().zip(&receiver_keys) {
+                    let leader_shard = live
+                        .shard(peers[receiver_idx].index.get() as u16)
+                        .expect("missing leader shard");
+                    peers[0].sender.send(
+                        Recipients::One(receiver.clone()),
+                        leader_shard.encode(),
+                        true,
+                    );
+                }
+
+                select! {
+                    result = notarized_sub => {
+                        result.expect("notarized reconstruction state should accept the leader shard");
+                    },
+                    _ = context.sleep(config.link.latency * 10) => {
+                        panic!("notarized reconstruction state did not accept the leader shard");
+                    },
+                }
+                select! {
+                    result = discovered_sub => {
+                        result.expect("discovered reconstruction state should accept the leader shard");
+                    },
+                    _ = context.sleep(config.link.latency * 10) => {
+                        panic!("discovered reconstruction state did not accept the leader shard");
+                    },
+                }
+            },
+        );
+    }
+
+    #[test_traced]
     fn test_local_proposal_prune_clears_older_reconstruction_state() {
         let fixture: Fixture<C> = Fixture {
             num_peers: 10,
@@ -3064,7 +3749,6 @@ mod tests {
                 let round_b = Round::new(Epoch::zero(), View::new(2));
 
                 peers[2].mailbox.discovered(commitment_a, leader, round_a);
-                let block_sub = peers[2].mailbox.subscribe(commitment_a);
 
                 let peer1_index = peers[1].index.get() as u16;
                 let shard_a = block_a.shard(peer1_index).expect("missing shard");
@@ -3089,19 +3773,10 @@ mod tests {
                     peers[2].mailbox.get(commitment_b).await.is_some(),
                     "local proposal should be cached before pruning"
                 );
-                peers[2].mailbox.prune(commitment_b);
-
-                select! {
-                    result = block_sub => {
-                        assert!(
-                            result.is_err(),
-                            "older block subscription should close after local-proposal prune"
-                        );
-                    },
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("older block subscription remained open after local-proposal prune");
-                    },
-                }
+                peers[2].mailbox.retire(Retirement {
+                    round_floor: round_b,
+                    exact_retirements: vec![commitment_b],
+                });
 
                 peers[1]
                     .sender
@@ -3624,6 +4299,81 @@ mod tests {
 
                 // Peer 0 (leader) should be blocked for invalid crypto.
                 assert_blocked(&oracle, &peers[2].public_key, &peers[0].public_key).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_invalid_assigned_shard_from_non_leader_blocks_only_sender() {
+        // A Byzantine participant can race the leader with garbage at the
+        // victim's assigned index, since the assigned index is accepted from
+        // any participant. The sender must be blocked without poisoning the
+        // slot: the leader's genuine shard must still verify afterward.
+        let fixture: Fixture<C> = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                // Create two different blocks — shard from block2 won't verify
+                // against commitment from block1.
+                let inner1 = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
+                let commitment1 = coded_block1.commitment();
+
+                let inner2 = B::new(Sha256Digest::EMPTY, Height::new(2), 200);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
+
+                // Get peer 2's shard from block2, but re-wrap it with
+                // block1's commitment so it fails verification.
+                let peer2_index = peers[2].index.get() as u16;
+                let mut wrong_shard = coded_block2.shard(peer2_index).expect("missing shard");
+                wrong_shard.commitment = commitment1;
+                let wrong_bytes = wrong_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                let mut shard_sub = peers[2]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment1);
+
+                // Inform peer 2 that peer 0 is the leader.
+                peers[2].mailbox.discovered(
+                    commitment1,
+                    leader,
+                    Round::new(Epoch::zero(), View::new(1)),
+                );
+
+                // Non-leader peer 1 sends the invalid shard at peer 2's
+                // assigned index.
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk.clone()), wrong_bytes, true);
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 1 should be blocked for invalid crypto, and the assigned
+                // slot must not be treated as satisfied.
+                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
+                assert!(
+                    matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "subscription should not resolve from invalid shard"
+                );
+
+                // The leader's genuine shard for the same index must still verify.
+                let real_bytes = coded_block1
+                    .shard(peer2_index)
+                    .expect("missing shard")
+                    .encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer2_pk), real_bytes, true);
+                select! {
+                    _ = shard_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("genuine assigned shard did not verify after invalid one");
+                    },
+                };
             },
         );
     }
@@ -4763,11 +5513,20 @@ mod tests {
                 let reconstructed = block_sub.await.expect("block subscription should resolve");
                 assert_eq!(reconstructed.commitment(), commitment);
 
-                // Shard subscription must NOT resolve because the leader
-                // never sent the victim its own shard.
+                let mut late_shard_sub = peers[1]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+                context.sleep(Duration::from_millis(10)).await;
+
+                // Neither an existing nor a late shard subscription may resolve because
+                // the leader never sent the victim its own shard.
                 assert!(
                     matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
                     "shard subscription must not resolve without own shard verification"
+                );
+                assert!(
+                    matches!(late_shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "late shard subscription must not resolve from reconstruction alone"
                 );
             },
         );

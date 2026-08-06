@@ -83,7 +83,6 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
 
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
-    pub fetch_concurrent: NonZeroUsize,
     pub fetch_timeout: Duration,
     pub term_length: TermLength,
 }
