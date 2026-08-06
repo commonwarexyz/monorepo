@@ -63,27 +63,24 @@ pub struct Actor<
     /// view can no longer be required by a valid proposal.
     last_finalized: View,
 
-    /// Nullifications cached in the encoded form expected by [p2p::Producer].
-    /// These response payloads remain available while they cover views above
-    /// finalization so an ask below the floor can still be served.
-    nullification_responses: BTreeMap<View, Bytes>,
+    /// Encoded nullifications retained while they cover an unfinalized view.
+    /// This cache survives floor raises so asks below the floor remain servable.
+    nullifications: BTreeMap<View, Bytes>,
 
-    /// Notarizations awaiting certification, cached in the encoded form received
-    /// by the actor. Possession completes an exact-parent fetch, but these
-    /// payloads are not served until certification succeeds.
-    uncertified_notarizations: BTreeMap<View, Bytes>,
+    /// Encoded notarizations awaiting certification. They settle exact-parent
+    /// fetches but are not served until certification succeeds.
+    pending_notarizations: BTreeMap<View, Bytes>,
 
-    /// Successfully certified notarizations cached in the encoded form expected
-    /// by [p2p::Producer]. These response payloads remain available until
-    /// finalization so exact parents survive later floor raises.
-    notarization_responses: BTreeMap<View, Bytes>,
+    /// Encoded certified notarizations retained until finalization. This cache
+    /// survives floor raises so exact parents remain servable.
+    certified_notarizations: BTreeMap<View, Bytes>,
 
-    /// Views whose certification failed, retained until covering finalization.
+    /// Views whose notarization is permanently uncertifiable, retained until
+    /// finalization.
     ///
-    /// This is the sole record of a failed verdict. [State] prunes at the floor,
-    /// which rises above a failed view while a delayed request for it can still
-    /// arrive, so the tombstone is kept here against the finalization boundary.
-    failed_certifications: BTreeSet<View>,
+    /// [State] prunes these views at the floor, so these tombstones preserve the
+    /// verdict for delayed exact-parent asks.
+    uncertifiable_notarizations: BTreeSet<View>,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
@@ -111,10 +108,10 @@ impl<
 
                 state: State::new(cfg.term_length),
                 last_finalized: View::zero(),
-                nullification_responses: BTreeMap::new(),
-                uncertified_notarizations: BTreeMap::new(),
-                notarization_responses: BTreeMap::new(),
-                failed_certifications: BTreeSet::new(),
+                nullifications: BTreeMap::new(),
+                pending_notarizations: BTreeMap::new(),
+                certified_notarizations: BTreeMap::new(),
+                uncertifiable_notarizations: BTreeSet::new(),
 
                 mailbox_receiver: receiver,
             },
@@ -228,14 +225,13 @@ impl<
 
         let term_length = self.state.term_length();
 
-        // Cache response payloads for as long as a peer can still ask for them.
+        // Retain encoded certificates for as long as a peer can still ask for them.
         // [State] prunes at the floor, which rises sooner than finalization and
         // would hide this evidence from a peer still repairing the view.
         if let Some(nullified) = nullified
             && nullified.term_end(term_length) > self.last_finalized
         {
-            self.nullification_responses
-                .insert(nullified, certificate.encode());
+            self.nullifications.insert(nullified, certificate.encode());
             let covered = nullified..=nullified.term_end(term_length);
             Self::retire(resolver, move |view, ask| {
                 ask.kind == Kind::Nullification && covered.contains(&view)
@@ -243,10 +239,10 @@ impl<
         }
         if let Some(notarized) = notarized
             && notarized > self.last_finalized
-            && !self.failed_certifications.contains(&notarized)
+            && !self.uncertifiable_notarizations.contains(&notarized)
         {
-            if !self.notarization_responses.contains_key(&notarized) {
-                self.uncertified_notarizations
+            if !self.certified_notarizations.contains_key(&notarized) {
+                self.pending_notarizations
                     .insert(notarized, certificate.encode());
             }
             Self::retire(resolver, move |view, ask| {
@@ -260,13 +256,14 @@ impl<
         if let Some(finalized) = finalized {
             self.last_finalized = self.last_finalized.max(finalized);
             let finalized = self.last_finalized;
-            self.nullification_responses
+            self.nullifications
                 .retain(|view, _| view.term_end(term_length) > finalized);
-            self.uncertified_notarizations
+            self.pending_notarizations
                 .retain(|view, _| *view > finalized);
-            self.notarization_responses
+            self.certified_notarizations
                 .retain(|view, _| *view > finalized);
-            self.failed_certifications.retain(|view| *view > finalized);
+            self.uncertifiable_notarizations
+                .retain(|view| *view > finalized);
             Self::retire(resolver, move |view, _| view <= finalized);
         }
 
@@ -282,21 +279,21 @@ impl<
         view: View,
         success: bool,
     ) {
-        // Every verdict clears the uncertified payload. Only successful
+        // Every verdict clears the pending payload. Only successful
         // notarizations above finalization become servable.
-        if let Some(notarization) = self.uncertified_notarizations.remove(&view)
+        if let Some(notarization) = self.pending_notarizations.remove(&view)
             && success
             && view > self.last_finalized
         {
-            self.notarization_responses.insert(view, notarization);
+            self.certified_notarizations.insert(view, notarization);
         }
 
         // No copy of an uncertifiable notarization can certify anywhere, so it
         // is not an answer to an exact-parent request.
         if !success {
-            self.notarization_responses.remove(&view);
+            self.certified_notarizations.remove(&view);
             if view > self.last_finalized {
-                self.failed_certifications.insert(view);
+                self.uncertifiable_notarizations.insert(view);
             }
             Self::retire(resolver, move |asked, ask| {
                 ask.kind == Kind::Notarization && asked == view
@@ -440,9 +437,9 @@ impl<
             // verdict: certification judges the evidence itself, so no other
             // copy of it could pass either.
             Kind::Notarization => {
-                self.uncertified_notarizations.contains_key(&view)
-                    || self.notarization_responses.contains_key(&view)
-                    || self.failed_certifications.contains(&view)
+                self.pending_notarizations.contains_key(&view)
+                    || self.certified_notarizations.contains_key(&view)
+                    || self.uncertifiable_notarizations.contains(&view)
             }
         }
     }
@@ -452,7 +449,7 @@ impl<
     /// A nullification covers the rest of its term, so it may be keyed at an
     /// earlier view than the one being served.
     fn covering_nullification(&self, view: View) -> Option<&Bytes> {
-        self.nullification_responses
+        self.nullifications
             .range(view.covering_range(self.state.term_length()))
             .next_back()
             .map(|(_, nullification)| nullification)
@@ -473,7 +470,7 @@ impl<
             return Some(certificate.encode());
         }
 
-        let notarization = self.notarization_responses.get(&view).cloned();
+        let notarization = self.certified_notarizations.get(&view).cloned();
         let nullification = self.covering_nullification(view).cloned();
         match (notarization, nullification) {
             (Some(notarization), Some(nullification)) => {
@@ -585,7 +582,9 @@ impl<
                 let obsolete = matches!(
                     &parsed,
                     Certificate::Notarization(notarization)
-                        if self.failed_certifications.contains(&notarization.view())
+                        if self
+                            .uncertifiable_notarizations
+                            .contains(&notarization.view())
                 );
                 if !obsolete {
                     // Notify voter as soon as possible.
@@ -1376,10 +1375,10 @@ mod tests {
                 )),
             );
             assert!(resolver.outstanding().is_empty());
-            assert!(actor.nullification_responses.is_empty());
-            assert!(actor.uncertified_notarizations.is_empty());
-            assert!(actor.notarization_responses.is_empty());
-            assert!(actor.failed_certifications.is_empty());
+            assert!(actor.nullifications.is_empty());
+            assert!(actor.pending_notarizations.is_empty());
+            assert!(actor.certified_notarizations.is_empty());
+            assert!(actor.uncertifiable_notarizations.is_empty());
             actor.resolve(
                 &mut resolver,
                 finalized.next(),
@@ -1501,7 +1500,7 @@ mod tests {
                 &mut resolver,
                 Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, view)),
             );
-            assert!(actor.uncertified_notarizations.contains_key(&view));
+            assert!(actor.pending_notarizations.contains_key(&view));
 
             // A covering finalization prunes the payload awaiting its verdict.
             actor.updated(
@@ -1513,12 +1512,12 @@ mod tests {
                     view.next(),
                 )),
             );
-            assert!(actor.uncertified_notarizations.is_empty());
+            assert!(actor.pending_notarizations.is_empty());
 
             // The late verdict finds nothing to promote: a notarization at or
             // below finalization never becomes servable.
             actor.certified(&mut resolver, view, true);
-            assert!(actor.notarization_responses.is_empty());
+            assert!(actor.certified_notarizations.is_empty());
         });
     }
 
@@ -1703,8 +1702,8 @@ mod tests {
                 &mut resolver,
             );
             assert_eq!(receiver.await.unwrap(), Outcome::Complete);
-            assert!(actor.uncertified_notarizations.contains_key(&view));
-            assert!(!actor.notarization_responses.contains_key(&view));
+            assert!(actor.pending_notarizations.contains_key(&view));
+            assert!(!actor.certified_notarizations.contains_key(&view));
         });
     }
 
@@ -1731,8 +1730,8 @@ mod tests {
             // The payload is no longer an answer, and the tombstone keeps a
             // delayed request from recreating the ask. A floor raise above the
             // view must not resurrect it (state prunes its own failed views).
-            assert!(!actor.uncertified_notarizations.contains_key(&view));
-            assert!(!actor.notarization_responses.contains_key(&view));
+            assert!(!actor.pending_notarizations.contains_key(&view));
+            assert!(!actor.certified_notarizations.contains_key(&view));
             let floor = View::new(9);
             actor.updated(
                 &mut resolver,
@@ -1789,8 +1788,8 @@ mod tests {
                 &mut resolver,
             );
             assert_eq!(receiver.await.unwrap(), Outcome::Complete);
-            assert!(!actor.uncertified_notarizations.contains_key(&view));
-            assert!(!actor.notarization_responses.contains_key(&view));
+            assert!(!actor.pending_notarizations.contains_key(&view));
+            assert!(!actor.certified_notarizations.contains_key(&view));
             drop(voter);
             assert!(voter_rx.recv().await.is_none());
 
@@ -1804,7 +1803,7 @@ mod tests {
                     view.next(),
                 )),
             );
-            assert!(actor.failed_certifications.is_empty());
+            assert!(actor.uncertifiable_notarizations.is_empty());
         });
     }
 
@@ -1927,9 +1926,9 @@ mod tests {
             );
             assert_eq!(receiver.await.unwrap(), Outcome::Complete);
 
-            // The duplicate is not re-cached as uncertified: no second verdict
+            // The duplicate is not re-cached as pending: no second verdict
             // would ever clear it.
-            assert!(actor.uncertified_notarizations.is_empty());
+            assert!(actor.pending_notarizations.is_empty());
         });
     }
 
@@ -2055,9 +2054,9 @@ mod tests {
             actor.certified(&mut resolver, floor, true);
 
             let notarization = build_notarization(&schemes, &verifier, EPOCH, failed);
-            assert!(actor.failed_certifications.contains(&failed));
-            assert!(!actor.uncertified_notarizations.contains_key(&failed));
-            assert!(!actor.notarization_responses.contains_key(&failed));
+            assert!(actor.uncertifiable_notarizations.contains(&failed));
+            assert!(!actor.pending_notarizations.contains_key(&failed));
+            assert!(!actor.certified_notarizations.contains_key(&failed));
             assert!(
                 actor
                     .validate(failed, Certificate::Notarization(notarization).encode())
