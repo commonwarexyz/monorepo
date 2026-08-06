@@ -220,6 +220,16 @@ commonware_macros::stability_scope!(BETA {
     #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
     pub struct AtMost<T, const MAX: u32>(T);
 
+    /// Literal construction support for [`AtMost!`].
+    #[doc(hidden)]
+    pub trait __AtMostLiteral<const VALUE: u128>: Sized {
+        /// Primitive type accepted by the literal constructor.
+        type Input: Copy;
+
+        /// Validated `AtMost` value.
+        const OUTPUT: Self;
+    }
+
     impl<T: Copy, const MAX: u32> AtMost<T, MAX> {
         /// Returns the wrapped value.
         pub const fn into_inner(self) -> T {
@@ -252,6 +262,17 @@ commonware_macros::stability_scope!(BETA {
                     fn try_from(value: $ty) -> Result<Self, Self::Error> {
                         Self::new(value).ok_or(value)
                     }
+                }
+
+                impl<const MAX: u32, const VALUE: u128> __AtMostLiteral<VALUE>
+                    for AtMost<$ty, MAX>
+                {
+                    type Input = $ty;
+
+                    const OUTPUT: Self = {
+                        assert!(VALUE <= <$ty>::MAX as u128, "value exceeds numeric type");
+                        Self::new(VALUE as $ty).expect("value exceeds maximum")
+                    };
                 }
             )+
         };
@@ -288,6 +309,19 @@ commonware_macros::stability_scope!(BETA {
                     fn try_from(value: $inner) -> Result<Self, Self::Error> {
                         <$ty>::new(value).and_then(Self::new).ok_or(value)
                     }
+                }
+
+                impl<const MAX: u32, const VALUE: u128> __AtMostLiteral<VALUE>
+                    for AtMost<$ty, MAX>
+                {
+                    type Input = $inner;
+
+                    const OUTPUT: Self = {
+                        assert!(VALUE <= <$inner>::MAX as u128, "value exceeds numeric type");
+                        let value = <$ty>::new(VALUE as $inner)
+                            .expect("value violates wrapped type invariant");
+                        Self::new(value).expect("value exceeds maximum")
+                    };
                 }
             )+
         };
@@ -397,8 +431,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
 /// Creates an [`AtMost`](struct@AtMost) value, panicking if the value exceeds its maximum.
 ///
-/// Typed literals and `NZU*` literals can be used in const contexts. The one-argument primitive
-/// form infers the result type and validates at runtime.
+/// Primitive and `NZU*` literals can be used in const contexts. The one-argument expression form
+/// infers the result type and validates at runtime.
 ///
 /// # Panics
 ///
@@ -480,6 +514,24 @@ macro_rules! AtMost {
     };
     ($ty:ty, $val:expr) => {
         $crate::AtMost::<$ty, _>::new($val).expect("value exceeds maximum")
+    };
+    ($val:literal) => {
+        const {
+            const fn infer_at_most_literal<const VALUE: u128, T, const MAX: u32>(
+                value: $crate::AtMost<T, MAX>,
+                _: <$crate::AtMost<T, MAX> as $crate::__AtMostLiteral<VALUE>>::Input,
+            ) -> $crate::AtMost<T, MAX>
+            where
+                $crate::AtMost<T, MAX>: $crate::__AtMostLiteral<VALUE>,
+            {
+                value
+            }
+
+            infer_at_most_literal::<{ $val as u128 }, _, _>(
+                <_ as $crate::__AtMostLiteral<{ $val as u128 }>>::OUTPUT,
+                $val,
+            )
+        }
     };
     ($val:expr) => {{
         fn infer_at_most<T, const MAX: u32>(
@@ -816,6 +868,13 @@ mod tests {
             NZDuration!(Duration::from_secs(1)).get(),
             Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn test_at_most_const_literal_inference() {
+        const VALUE: AtMost<u32, 21> = AtMost!(1u32);
+
+        assert_eq!(VALUE.get(), 1);
     }
 
     #[test]

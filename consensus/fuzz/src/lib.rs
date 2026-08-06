@@ -65,15 +65,18 @@ const MAX_RAW_BYTES: usize = 32_768;
 /// Number of nodes supported by the fuzz harness.
 pub type Nodes = AtMost<NonZeroU32, 21>;
 
+/// Number of nodes in a subset of the fuzz harness.
+pub type Subset = AtMost<u32, 21>;
+
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Configuration {
     /// Total number of nodes.
     n: Nodes,
     /// Number of faulty (Byzantine) nodes.
-    faults: AtMost<u32, 21>,
+    faults: Subset,
     /// Number of correct (honest) nodes.
-    correct: AtMost<u32, 21>,
+    correct: Subset,
 }
 
 impl Configuration {
@@ -82,7 +85,7 @@ impl Configuration {
     /// # Panics
     ///
     /// Panics if `faults` exceeds `n` or if `faults + correct` does not equal `n`.
-    pub const fn new(n: Nodes, faults: AtMost<u32, 21>, correct: AtMost<u32, 21>) -> Self {
+    pub const fn new(n: Nodes, faults: Subset, correct: Subset) -> Self {
         let node_count = n.get();
         let fault_count = faults.get();
         let correct_count = correct.get();
@@ -100,12 +103,12 @@ impl Configuration {
     }
 
     /// Returns the number of faulty nodes.
-    pub const fn faults(&self) -> AtMost<u32, 21> {
+    pub const fn faults(&self) -> Subset {
         self.faults
     }
 
     /// Returns the number of correct nodes.
-    pub const fn correct(&self) -> AtMost<u32, 21> {
+    pub const fn correct(&self) -> Subset {
         self.correct
     }
 
@@ -117,10 +120,10 @@ impl Configuration {
 
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
 pub const N4F1C3: Configuration =
-    Configuration::new(AtMost!(NZU32!(4)), AtMost!(u32, 1), AtMost!(u32, 3));
+    Configuration::new(AtMost!(NZU32!(4)), AtMost!(1u32), AtMost!(3u32));
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
 pub const N4F3C1: Configuration =
-    Configuration::new(AtMost!(NZU32!(4)), AtMost!(u32, 3), AtMost!(u32, 1));
+    Configuration::new(AtMost!(NZU32!(4)), AtMost!(3u32), AtMost!(1u32));
 
 async fn setup_degraded_network<E: Clock>(
     oracle: &mut Oracle<Ed25519PublicKey, E>,

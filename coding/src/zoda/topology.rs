@@ -13,7 +13,9 @@ const LOG2_PRECISION: usize = SECURITY_BITS.next_power_of_two().trailing_zeros()
 const MAX_ENCODED_ROWS: u32 = 1 << 31;
 const MAX_TOTAL_SHARDS: u32 = 65_536;
 
+/// A non-zero encoded row count supported by row shuffling.
 pub(super) type EncodedRows = AtMost<NonZeroUsize, MAX_ENCODED_ROWS>;
+/// A non-zero shard count addressable by `u16` shard indices.
 type TotalShards = AtMost<NonZeroUsize, MAX_TOTAL_SHARDS>;
 
 /// Contains the sizes of various objects in the protocol.
