@@ -270,7 +270,6 @@ commonware_macros::stability_scope!(BETA {
                     type Input = $ty;
 
                     const OUTPUT: Self = {
-                        assert!(VALUE <= <$ty>::MAX as u128, "value exceeds numeric type");
                         Self::new(VALUE as $ty).expect("value exceeds maximum")
                     };
                 }
@@ -317,7 +316,6 @@ commonware_macros::stability_scope!(BETA {
                     type Input = $inner;
 
                     const OUTPUT: Self = {
-                        assert!(VALUE <= <$inner>::MAX as u128, "value exceeds numeric type");
                         let value = <$ty>::new(VALUE as $inner)
                             .expect("value violates wrapped type invariant");
                         Self::new(value).expect("value exceeds maximum")
@@ -875,6 +873,15 @@ mod tests {
         const VALUE: AtMost<u32, 21> = AtMost!(1u32);
 
         assert_eq!(VALUE.get(), 1);
+    }
+
+    #[test]
+    fn test_at_most_const_negative_literal_inference() {
+        const PRIMITIVE: AtMost<i32, 21> = AtMost!(-1i32);
+        const NON_ZERO: AtMost<core::num::NonZeroI32, 21> = AtMost!(-1i32);
+
+        assert_eq!(PRIMITIVE.get(), -1);
+        assert_eq!(NON_ZERO.get(), -1);
     }
 
     #[test]
