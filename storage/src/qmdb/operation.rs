@@ -51,7 +51,7 @@ pub trait Committable {
     fn is_commit(&self) -> bool;
 }
 
-/// On-disk size of a fixed-encoded commit operation.
+/// Unpadded size of a fixed-encoded commit operation, context byte included.
 pub(crate) const fn commit_fixed_operation_size<V: FixedSize>() -> usize {
     1 + 1 + V::SIZE + u64::SIZE
 }

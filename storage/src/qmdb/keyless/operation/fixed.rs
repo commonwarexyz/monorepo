@@ -161,4 +161,17 @@ mod tests {
             CodecError::Invalid(_, _)
         ));
     }
+
+    #[test]
+    fn commit_nonzero_metadata_bytes_rejected() {
+        // Construct a Commit buffer by hand with option tag = false (None metadata) but a
+        // nonzero byte in the metadata region.
+        let mut buf = vec![0u8; Op::SIZE];
+        buf[0] = COMMIT_CONTEXT;
+        buf[2] = 0x01;
+        assert!(matches!(
+            Op::decode(buf.as_ref()).unwrap_err(),
+            CodecError::Invalid(_, _)
+        ));
+    }
 }
